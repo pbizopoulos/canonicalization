@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Check Python."""
+
 from __future__ import annotations
 
 import os
