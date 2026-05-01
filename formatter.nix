@@ -6,16 +6,17 @@
 }:
 let
   clippy-script = pkgs.writeShellScriptBin "clippy" ''
-      [ -n "$NIX_BUILD_TOP" ] && exit 0
-      export PATH="${
-        pkgs.lib.makeBinPath [
-          pkgs.cargo
-          pkgs.clippy
-          pkgs.rustc
-          pkgs.stdenv.cc
-        ]
-      }:$PATH"
-    find packages -name Cargo.toml -execdir cargo clippy --manifest-path Cargo.toml -- \
+    [ -n "$NIX_BUILD_TOP" ] && exit 0
+    export PATH="${
+      pkgs.lib.makeBinPath [
+        pkgs.cargo
+        pkgs.clippy
+        pkgs.rustc
+        pkgs.stdenv.cc
+      ]
+    }:$PATH"
+    find packages -name Cargo.toml -execdir cargo clippy --fix --allow-dirty --allow-staged \
+      --all-targets --all-features -- \
       -D warnings -D clippy::all -D clippy::pedantic -D clippy::nursery -D clippy::cargo \;
   '';
   formatter = treefmtEval.config.build.wrapper;

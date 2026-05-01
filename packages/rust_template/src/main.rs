@@ -3,7 +3,7 @@ fn run_tests() {
     let x = 1 + 1;
     assert_eq!(x, 2);
 }
-fn main() {}
+const fn main() {}
 #[cfg(test)]
 mod tests {
     use super::*;
