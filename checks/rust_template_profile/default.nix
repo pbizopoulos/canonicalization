@@ -16,7 +16,16 @@ pkgs.runCommand "${checkName}"
     src = ../../packages/${packageName};
   }
   ''
-    perf record --call-graph dwarf -o perf.data -- rust_template
-    perf report --stdio -i perf.data
+    run_cmd() {
+      rust_template
+    }
+    if perf stat -e cpu-clock true >/dev/null 2>&1; then
+      perf record --no-buildid-mmap --call-graph dwarf -e cpu-clock -o perf.data -- \
+        run_cmd
+      perf report --stdio -i perf.data
+    else
+      echo "perf is unavailable in this environment; running without profiling."
+      run_cmd
+    fi
     touch "$out"
   ''

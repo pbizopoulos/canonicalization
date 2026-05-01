@@ -26,8 +26,16 @@ pkgs.runCommand "${checkName}"
     printf 'test\n' > flake.nix
     git add flake.nix
     git commit -m initial
-    perf record --call-graph dwarf -o perf.data -- \
+    run_cmd() {
       check_repository_directory_structure flake.nix
-    perf report --stdio -i perf.data
+    }
+    if perf stat -e cpu-clock true >/dev/null 2>&1; then
+      perf record --no-buildid-mmap --call-graph dwarf -e cpu-clock -o perf.data -- \
+        run_cmd
+      perf report --stdio -i perf.data
+    else
+      echo "perf is unavailable in this environment; running without profiling."
+      run_cmd
+    fi
     touch "$out"
   ''

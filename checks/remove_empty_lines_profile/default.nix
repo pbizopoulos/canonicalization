@@ -19,8 +19,16 @@ pkgs.runCommand "${checkName}"
     temp_dir="$PWD/workspace"
     mkdir -p "$temp_dir"
     printf 'line1\n\nline2\n' > "$temp_dir/test.txt"
-    perf record --call-graph dwarf -o perf.data -- \
+    run_cmd() {
       remove_empty_lines "$temp_dir"
-    perf report --stdio -i perf.data
+    }
+    if perf stat -e cpu-clock true >/dev/null 2>&1; then
+      perf record --no-buildid-mmap --call-graph dwarf -e cpu-clock -o perf.data -- \
+        run_cmd
+      perf report --stdio -i perf.data
+    else
+      echo "perf is unavailable in this environment; running without profiling."
+      run_cmd
+    fi
     touch "$out"
   ''
