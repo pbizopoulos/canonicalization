@@ -39,7 +39,6 @@ let
       mdsh.enable = true;
       nixfmt.enable = true;
       ormolu.enable = true;
-      prettier.enable = true;
       ruff-check = {
         enable = true;
         extendSelect = [
@@ -115,9 +114,6 @@ let
           priority = 0;
         };
         nixfmt.priority = 1;
-        prettier.options = [
-          "--max-diagnostics=none"
-        ];
         remove_empty_lines = {
           command = inputs.self.packages.${pkgs.stdenv.system}.remove_empty_lines;
           includes = [
@@ -153,9 +149,6 @@ let
       global.excludes = [
         "*/prm/**"
         "*/tmp/**"
-        "packages/default/templates/**/*.html"
-        "packages/django_template/templates/*.html"
-        "packages/django_template/templates/auth/*.html"
       ];
     };
   };
