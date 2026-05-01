@@ -153,10 +153,9 @@ let
       global.excludes = [
         "*/prm/**"
         "*/tmp/**"
+        "packages/default/templates/**/*.html"
         "packages/django_template/templates/*.html"
         "packages/django_template/templates/auth/*.html"
-        "packages/fastapi_postgres_template/prm/templates/*.html"
-        "packages/fastapi_postgres_template/prm/templates/auth/*.html"
       ];
     };
   };
