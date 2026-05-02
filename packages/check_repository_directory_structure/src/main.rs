@@ -460,9 +460,9 @@ mod tests {
         );
         assert_eq!(
             package_root(Path::new(
-                "templates/example/packages/django_template/manage.py"
+                "templates/template/packages/django_template/manage.py"
             )),
-            Some(PathBuf::from("templates/example/packages/django_template"))
+            Some(PathBuf::from("templates/template/packages/django_template"))
         );
         assert_eq!(
             package_root(Path::new("hosts/template/configuration.nix")),
