@@ -3,10 +3,10 @@
 }:
 let
   pythonDeps = [
-    pkgs.python313Packages.matplotlib
-    pkgs.python313Packages.pandas
+    pkgs.python3Packages.matplotlib
+    pkgs.python3Packages.pandas
   ];
-  pythonEnv = pkgs.python313.withPackages (_: pythonDeps);
+  pythonEnv = pkgs.python3.withPackages (_: pythonDeps);
   runtimeScript = pkgs.writeShellScript "python_latex_template" ''
     set -euo pipefail
     script_dir="$(cd "$(dirname "$0")" && pwd)"
@@ -16,10 +16,7 @@ let
     ${pkgs.texliveFull}/bin/latexmk -cd -pdf tmp/ms.tex
   '';
 in
-pkgs.python313Packages.buildPythonPackage rec {
-  doInstallCheck = false;
-  dontBuild = true;
-  dontUsePythonImportsCheck = true;
+pkgs.python3Packages.buildPythonPackage rec {
   installPhase = ''
     install -Dm644 ./main.py $out/bin/main.py
     install -Dm644 ./ms.tex $out/bin/ms.tex

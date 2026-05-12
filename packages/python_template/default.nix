@@ -5,9 +5,8 @@ pkgs.python3Packages.buildPythonPackage rec {
   doInstallCheck = pkgs.stdenv.isLinux;
   installCheckPhase = ''
     runHook preInstallCheck
-    HOME="$(mktemp -d)" DEBUG=1 coverage run --source="$src" "$src/main.py"
+    HOME="$(mktemp -d)" DEBUG=1 PYTHONWARNINGS=error coverage run --source="$src" -m pyinstrument "$src/main.py"
     coverage report
-    HOME="$(mktemp -d)" DEBUG=1 PYTHONWARNINGS=error pyinstrument "$src/main.py"
     runHook postInstallCheck
   '';
   installPhase = ''
