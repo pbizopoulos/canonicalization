@@ -17,6 +17,12 @@ let
   '';
 in
 pkgs.python3Packages.buildPythonPackage rec {
+  installCheckPhase = ''
+    runHook preInstallCheck
+    HOME="$(mktemp -d)" DEBUG=1 PYTHONWARNINGS=error coverage run --source="$src" -m pyinstrument "$src/main.py"
+    coverage report
+    runHook postInstallCheck
+  '';
   installPhase = ''
     install -Dm644 ./main.py $out/bin/main.py
     install -Dm644 ./ms.tex $out/bin/ms.tex
@@ -24,6 +30,10 @@ pkgs.python3Packages.buildPythonPackage rec {
     install -Dm755 ${runtimeScript} $out/bin/${pname}
   '';
   meta.mainProgram = pname;
+  nativeInstallCheckInputs = [
+    pkgs.python3Packages.coverage
+    pkgs.python3Packages.pyinstrument
+  ];
   pname = builtins.baseNameOf src;
   propagatedBuildInputs = pythonDeps ++ [
     pkgs.texliveFull
