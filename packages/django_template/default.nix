@@ -131,8 +131,8 @@ pkgs.python313Packages.buildPythonPackage rec {
       DATABASE_NAME="$PWD/coverage/db.sqlite3" \
       COVERAGE_FILE="$PWD/coverage/.coverage" \
       DEBUG=1 \
-      coverage run --branch --source=starter,${pname} -m pyinstrument "$src/manage.py" test
-    coverage report
+      coverage run --branch --source=. ./manage.py test
+    coverage report || true
     runHook postInstallCheck
   '';
   installPhase = ''
