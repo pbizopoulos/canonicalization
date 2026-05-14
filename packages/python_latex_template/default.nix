@@ -7,14 +7,6 @@ let
     pkgs.python3Packages.pandas
   ];
   pythonEnv = pkgs.python3.withPackages (_: pythonDeps);
-  runtimeScript = pkgs.writeShellScript "python_latex_template" ''
-    set -euo pipefail
-    script_dir="$(cd "$(dirname "$0")" && pwd)"
-    rm -rf tmp
-    ${pythonEnv}/bin/python3 "$script_dir/main.py"
-    cp "$script_dir"/ms.{tex,bib} tmp/
-    ${pkgs.texliveFull}/bin/latexmk -cd -pdf tmp/ms.tex
-  '';
 in
 pkgs.python3Packages.buildPythonPackage rec {
   installCheckPhase = ''
@@ -24,10 +16,18 @@ pkgs.python3Packages.buildPythonPackage rec {
     runHook postInstallCheck
   '';
   installPhase = ''
-    install -Dm644 ./main.py $out/bin/main.py
-    install -Dm644 ./ms.tex $out/bin/ms.tex
-    install -Dm644 ./ms.bib $out/bin/ms.bib
-    install -Dm755 ${runtimeScript} $out/bin/${pname}
+    datadir="$out/share/${pname}"
+    install -Dm644 ./main.py ./ms.tex ./ms.bib -t "$datadir"
+    mkdir -p "$out/bin"
+    cat > "$out/bin/${pname}" <<EOF
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p tmp
+    ${pythonEnv}/bin/python3 "$datadir/main.py"
+    cp "$datadir"/ms.{tex,bib} tmp/
+    ${pkgs.texliveFull}/bin/latexmk -cd -pdf tmp/ms.tex
+    EOF
+    chmod +x "$out/bin/${pname}"
   '';
   meta.mainProgram = pname;
   nativeInstallCheckInputs = [
