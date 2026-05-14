@@ -34,7 +34,6 @@ let
   };
 in
 pkgs.python3Packages.buildPythonApplication rec {
-  doInstallCheck = pkgs.stdenv.isLinux;
   format = "wheel";
   installCheckPhase = ''
     runHook preInstallCheck

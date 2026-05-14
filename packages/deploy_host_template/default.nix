@@ -9,7 +9,7 @@ let
   packageRelativePath = "packages/deploy_host_template";
 in
 pkgs.writeShellApplication {
-  name = builtins.baseNameOf ./.;
+  name = baseNameOf ./.;
   runtimeInputs = [
     pkgs.git
     pkgs.jq

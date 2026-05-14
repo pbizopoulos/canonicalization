@@ -34,7 +34,7 @@ pkgs.python3Packages.buildPythonPackage rec {
     pkgs.python3Packages.coverage
     pkgs.python3Packages.pyinstrument
   ];
-  pname = builtins.baseNameOf src;
+  pname = baseNameOf ./.;
   propagatedBuildInputs = pythonDeps;
   pyproject = false;
   src = ./.;

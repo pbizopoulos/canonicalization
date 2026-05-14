@@ -110,7 +110,7 @@ let
       --chdir "$package_root" \
       "${pname}.wsgi:application"
   '';
-  pname = builtins.baseNameOf ./.;
+  pname = baseNameOf ./.;
   pythonDeps = with pkgs.python313Packages; [
     django
     gunicorn
@@ -120,7 +120,6 @@ let
 in
 pkgs.python313Packages.buildPythonPackage rec {
   inherit pname;
-  doInstallCheck = pkgs.stdenv.isLinux;
   installCheckPhase = ''
     runHook preInstallCheck
     mkdir -p "$PWD/coverage"

@@ -2,7 +2,6 @@
   pkgs ? import <nixpkgs> { },
 }:
 pkgs.python3Packages.buildPythonPackage rec {
-  doInstallCheck = pkgs.stdenv.isLinux;
   installCheckPhase = ''
     runHook preInstallCheck
     HOME="$(mktemp -d)" DEBUG=1 PYTHONWARNINGS=error coverage run --source="$src" -m pyinstrument "$src/main.py"
@@ -17,7 +16,7 @@ pkgs.python3Packages.buildPythonPackage rec {
     pkgs.python3Packages.coverage
     pkgs.python3Packages.pyinstrument
   ];
-  pname = builtins.baseNameOf src;
+  pname = baseNameOf ./.;
   pyproject = false;
   src = ./.;
   version = "0.0.0";
