@@ -35,9 +35,7 @@ pkgs.python3Packages.buildPythonPackage rec {
     pkgs.python3Packages.pyinstrument
   ];
   pname = builtins.baseNameOf src;
-  propagatedBuildInputs = pythonDeps ++ [
-    pkgs.texliveFull
-  ];
+  propagatedBuildInputs = pythonDeps;
   pyproject = false;
   src = ./.;
   version = "0.0.0";
