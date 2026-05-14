@@ -6,17 +6,18 @@
   ...
 }:
 let
-  djangoCfg = config.services.django-app;
   hostName = baseNameOf ./.;
   opensshAuthorizedKeyFiles = [
     ./../../prm/developer.pub
   ];
+  serviceName = "django_template";
+  servicePackage = inputs.self.packages.${pkgs.stdenv.system}.django_template;
 in
 {
   age.secrets.secrets-env = {
     file = ../../secrets/secrets.age;
-    group = djangoCfg.name;
-    owner = djangoCfg.name;
+    group = serviceName;
+    owner = serviceName;
   };
   boot = {
     initrd.systemd.enable = true;
@@ -71,7 +72,6 @@ in
   environment.systemPackages = [ ];
   fileSystems."/persistent".neededForBoot = true;
   imports = [
-    (import ../../modules/nixos/django.nix { })
     inputs.agenix.nixosModules.age
     inputs.disko.nixosModules.disko
     inputs.preservation.nixosModules.default
@@ -99,7 +99,7 @@ in
       directories = [
         "/var/lib/acme"
         "/var/lib/postgresql"
-        "/var/lib/${djangoCfg.name}"
+        "/var/lib/${serviceName}"
         {
           directory = "/etc/ssh";
           inInitrd = true;
@@ -120,26 +120,17 @@ in
   programs.bash.promptInit = "";
   security.sudo.wheelNeedsPassword = false;
   services = {
-    django-app = {
-      allowedHosts = [
-        hostName
-        "127.0.0.1"
-        "localhost"
-        "[::1]"
-      ];
-      csrfTrustedOrigins = [
-        "http://${hostName}"
-      ];
+    nginx = {
       enable = true;
-      environmentFile = config.age.secrets.secrets-env.path;
-      extraEnvironment = { };
-      host = "127.0.0.1";
-      name = "django_template";
-      nginx = {
-        defaultVirtualHost = true;
-        serverName = hostName;
+      virtualHosts.${hostName} = {
+        default = true;
+        enableACME = false;
+        forceSSL = false;
+        locations."/" = {
+          proxyPass = "http://127.0.0.1:8000";
+          recommendedProxySettings = true;
+        };
       };
-      package = inputs.self.packages.${pkgs.stdenv.system}.django_template;
     };
     openssh = {
       enable = true;
@@ -154,21 +145,82 @@ in
         local all all peer
       '';
       enable = true;
+      ensureDatabases = [
+        serviceName
+      ];
+      ensureUsers = [
+        {
+          ensureDBOwnership = true;
+          name = serviceName;
+        }
+      ];
     };
   };
   system.stateVersion = "25.11";
-  systemd.suppressedSystemUnits = [
-    "systemd-machine-id-commit.service"
-  ];
+  systemd = {
+    services.${serviceName} = {
+      after = [
+        "network.target"
+        "postgresql.service"
+      ];
+      environment = {
+        ALLOWED_HOSTS = "${hostName},127.0.0.1,localhost,[::1]";
+        APP_NAME = "Django Starter";
+        CSRF_COOKIE_SECURE = "0";
+        CSRF_TRUSTED_ORIGINS = "http://${hostName}";
+        DATABASE_ENGINE = "postgresql";
+        DATABASE_NAME = serviceName;
+        DB_HOST = "/run/postgresql";
+        DB_PORT = "5432";
+        DB_USER = serviceName;
+        DEFAULT_FROM_EMAIL = "starter@example.com";
+        EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend";
+        HOST = "127.0.0.1";
+        PORT = "8000";
+        SECURE_HSTS_SECONDS = "0";
+        SECURE_PROXY_SSL_HEADER = "0";
+        SECURE_SSL_REDIRECT = "0";
+        SESSION_COOKIE_SECURE = "0";
+        STATIC_ROOT = "/var/lib/${serviceName}/staticfiles";
+        SUPPORT_EMAIL = "support@example.com";
+      };
+      serviceConfig = {
+        EnvironmentFile = config.age.secrets.secrets-env.path;
+        ExecStart = "${servicePackage}/bin/${serviceName}";
+        ExecStartPre = [
+          "${servicePackage}/bin/${serviceName}-manage migrate --noinput"
+        ];
+        Group = serviceName;
+        Restart = "always";
+        RestartSec = 5;
+        StateDirectory = serviceName;
+        User = serviceName;
+      };
+      wantedBy = [
+        "multi-user.target"
+      ];
+    };
+    suppressedSystemUnits = [
+      "systemd-machine-id-commit.service"
+    ];
+  };
   users = {
     allowNoPasswordLogin = false;
+    groups.${serviceName} = { };
     mutableUsers = false;
-    users.nixos = {
-      extraGroups = [
-        "wheel"
-      ];
-      isNormalUser = true;
-      openssh.authorizedKeys.keyFiles = opensshAuthorizedKeyFiles;
+    users = {
+      ${serviceName} = {
+        group = serviceName;
+        home = "/var/lib/${serviceName}";
+        isSystemUser = true;
+      };
+      nixos = {
+        extraGroups = [
+          "wheel"
+        ];
+        isNormalUser = true;
+        openssh.authorizedKeys.keyFiles = opensshAuthorizedKeyFiles;
+      };
     };
   };
   virtualisation.vmVariantWithDisko = {

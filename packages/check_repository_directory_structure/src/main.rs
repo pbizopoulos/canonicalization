@@ -247,7 +247,6 @@ fn check_repository_directory_structure(flake_nix_path: String) -> Result<(), Ve
         r"hosts/[^/]+/deploy\.sh",
         r"hosts/[^/]+/hardware-configuration\.nix",
         r"hosts/[^/]+/main\.tf",
-        r"modules/nixos/.*",
         r"packages/[^/]+/\.gitignore",
         r"packages/[^/]+/Main\.hs",
         r"packages/[^/]+/Cargo\.toml",
@@ -465,15 +464,15 @@ mod tests {
             Some(PathBuf::from("templates/template/packages/django_template"))
         );
         assert_eq!(
-            package_root(Path::new("hosts/template/configuration.nix")),
+            package_root(Path::new("hosts/django-template/configuration.nix")),
             None
         );
     }
     #[test]
     fn test_host_root() {
         assert_eq!(
-            host_root(Path::new("hosts/template/configuration.nix")),
-            Some(PathBuf::from("hosts/template"))
+            host_root(Path::new("hosts/django-template/configuration.nix")),
+            Some(PathBuf::from("hosts/django-template"))
         );
         assert_eq!(
             host_root(Path::new("packages/django_template/default.nix")),
