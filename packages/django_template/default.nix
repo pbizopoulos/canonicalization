@@ -123,15 +123,22 @@ pkgs.python313Packages.buildPythonPackage rec {
   installCheckPhase = ''
     runHook preInstallCheck
     mkdir -p "$PWD/coverage"
+    coverage_data_file="$PWD/coverage/.coverage"
     HOME="$(mktemp -d)" \
       SECRET_KEY="django-insecure-template-secret-key" \
       DATABASE_ENGINE="sqlite" \
       EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend" \
       DATABASE_NAME="$PWD/coverage/db.sqlite3" \
-      COVERAGE_FILE="$PWD/coverage/.coverage" \
       DEBUG=1 \
-      coverage run --branch --source=. ./manage.py test
-    coverage report || true
+      coverage run --data-file="$coverage_data_file" --branch --source=. ./manage.py test
+    coverage report --data-file="$coverage_data_file"
+    HOME="$(mktemp -d)" \
+      SECRET_KEY="django-insecure-template-secret-key" \
+      DATABASE_ENGINE="sqlite" \
+      EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend" \
+      DATABASE_NAME="$PWD/coverage/db.sqlite3" \
+      DEBUG=1 \
+      pyinstrument ./manage.py test
     runHook postInstallCheck
   '';
   installPhase = ''
