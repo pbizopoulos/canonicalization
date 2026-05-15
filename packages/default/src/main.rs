@@ -90,12 +90,19 @@ fn run() -> Result<(), String> {
     }
     Ok(())
 }
+#[derive(Debug)]
 struct Config {
     directory: String,
     templates: Vec<String>,
 }
 fn parse_args() -> Result<Config, String> {
-    let mut args = env::args().skip(1);
+    parse_args_from(env::args().skip(1))
+}
+fn parse_args_from<I>(args: I) -> Result<Config, String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut args = args.into_iter();
     let directory = args
         .next()
         .ok_or_else(|| "Usage: default <directory> [--templates rust,python]".to_string())?;
@@ -237,6 +244,84 @@ fn set_permissions_recursive(path: &Path) -> Result<(), String> {
             .map_err(|err| format!("Failed to set permissions on {}: {err}", path.display()))?;
     }
     Ok(())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        let dir = env::temp_dir().join(format!("{prefix}-{ts}"));
+        fs::create_dir_all(&dir).expect("failed to create temp directory");
+        dir
+    }
+    #[test]
+    fn parse_args_from_requires_directory() {
+        let err = parse_args_from(Vec::<String>::new()).expect_err("expected missing directory");
+        assert!(err.contains("Usage: default <directory>"));
+    }
+    #[test]
+    fn parse_args_from_supports_templates_formats() {
+        let long = parse_args_from(vec![
+            "target".to_string(),
+            "--templates".to_string(),
+            "rust,python".to_string(),
+        ])
+        .expect("failed to parse --templates");
+        assert_eq!(long.directory, "target");
+        assert_eq!(long.templates, vec!["rust", "python"]);
+        let equals = parse_args_from(vec![
+            "target".to_string(),
+            "--templates=go,rust".to_string(),
+        ])
+        .expect("failed to parse --templates=<...>");
+        assert_eq!(equals.templates, vec!["go", "rust"]);
+    }
+    #[test]
+    fn parse_args_from_rejects_unknown_flags() {
+        let err = parse_args_from(vec!["target".to_string(), "--unknown".to_string()])
+            .expect_err("expected unrecognized argument");
+        assert_eq!(err, "Unrecognized argument: --unknown");
+    }
+    #[test]
+    fn get_available_templates_reads_template_suffixes() {
+        let root = unique_temp_dir("default-templates");
+        fs::write(root.join("flake.nix"), "{}").expect("failed to write flake.nix");
+        let packages = root.join("packages");
+        fs::create_dir_all(packages.join("rust_template")).expect("failed to create rust_template");
+        fs::create_dir_all(packages.join("python_template"))
+            .expect("failed to create python_template");
+        fs::create_dir_all(packages.join("not-a-template")).expect("failed to create non-template");
+        env::set_var("CANONICALIZATION_ROOT", &root);
+        let templates = get_available_templates().expect("failed to read templates");
+        env::remove_var("CANONICALIZATION_ROOT");
+        assert_eq!(templates.len(), 2);
+        assert_eq!(templates[0].0, "python");
+        assert_eq!(templates[1].0, "rust");
+        fs::remove_dir_all(root).expect("failed to remove temp root");
+    }
+    #[test]
+    fn copy_dir_contents_copies_nested_files() {
+        let root = unique_temp_dir("default-copy");
+        let src = root.join("src");
+        let dest = root.join("dest");
+        fs::create_dir_all(src.join("nested")).expect("failed to create nested src dir");
+        fs::write(src.join("nested/one.txt"), "1").expect("failed to write nested file");
+        fs::write(src.join("two.txt"), "2").expect("failed to write root file");
+        copy_dir_contents(&src, &dest).expect("copy failed");
+        assert_eq!(
+            fs::read_to_string(dest.join("nested/one.txt")).expect("failed to read copied nested"),
+            "1"
+        );
+        assert_eq!(
+            fs::read_to_string(dest.join("two.txt")).expect("failed to read copied file"),
+            "2"
+        );
+        fs::remove_dir_all(root).expect("failed to remove temp root");
+    }
 }
 #[cfg(not(unix))]
 fn set_permissions_recursive(_path: &Path) -> Result<(), String> {

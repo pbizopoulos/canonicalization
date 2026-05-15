@@ -57,6 +57,7 @@ let
         rm -rf "$coverage_dir"
         mkdir -p "$coverage_dir"
         cd "$source_root"
+        cargo test --locked
         cargo llvm-cov clean --workspace
         cargo llvm-cov --locked --no-report
         cargo llvm-cov report --html --output-dir "$coverage_dir/html"

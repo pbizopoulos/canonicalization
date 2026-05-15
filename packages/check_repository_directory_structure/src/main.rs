@@ -378,6 +378,20 @@ fn check_repository_directory_structure(flake_nix_path: String) -> Result<(), Ve
         }
     }
     for package_root in &package_roots {
+        let package_name = package_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if all_rel_paths.contains(&package_root.join("Main.hs")) {
+            allowed_patterns.push(
+                Regex::new(&format!(
+                    "^{}/{}\\.cabal$",
+                    package_root.display(),
+                    package_name
+                ))
+                .unwrap(),
+            );
+        }
         if all_rel_paths.contains(&package_root.join("manage.py")) {
             final_warnings.extend(validate_django_package_layout(
                 working_dir,
@@ -394,10 +408,6 @@ fn check_repository_directory_structure(flake_nix_path: String) -> Result<(), Ve
                 &dir_and_file_names,
             ));
         }
-        let package_name = package_root
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default();
         if all_rel_paths.contains(&package_root.join("Main.hs"))
             && !all_rel_paths.contains(&package_root.join(format!("{package_name}.cabal")))
         {
