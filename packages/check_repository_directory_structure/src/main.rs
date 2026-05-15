@@ -177,11 +177,19 @@ fn check_repository_directory_structure(flake_nix_path: String) -> Result<(), Ve
     }
     let head = repo.head();
     if let Ok(head) = head {
-        let branch_name = head.shorthand().expect("Failed to get branch name");
-        if branch_name != "main" {
-            warnings.push(format!(
-                "{working_dir_display}: should have 'main' as the active branch"
-            ));
+        match head.shorthand() {
+            Some(branch_name) => {
+                if branch_name != "main" {
+                    warnings.push(format!(
+                        "{working_dir_display}: should have 'main' as the active branch"
+                    ));
+                }
+            }
+            None => {
+                warnings.push(format!(
+                    "{working_dir_display}: should have 'main' as the active branch"
+                ));
+            }
         }
         let branches = repo
             .branches(Some(git2::BranchType::Local))
