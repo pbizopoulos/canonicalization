@@ -3,7 +3,8 @@
 }:
 pkgs.stdenv.mkDerivation rec {
   buildPhase = ''
-    cc -o ${pname} main.c -O3 -std=c89 \
+    cc -o ${pname} main.c -std=c89 \
+    -O3 \
     -Waggregate-return \
     -Waggressive-loop-optimizations \
     -Wall \
