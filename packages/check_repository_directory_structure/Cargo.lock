@@ -92,6 +92,7 @@ dependencies = [
  "clap",
  "fd-lock",
  "git2",
+ "idna",
  "regex",
  "walkdir",
 ]

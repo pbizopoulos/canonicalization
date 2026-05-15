@@ -14,8 +14,16 @@ struct CliArgs {
     flake_nix_path: String,
 }
 fn is_valid_domain_name(name: &str) -> bool {
-    let re = Regex::new(r"^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$").unwrap();
-    re.is_match(name)
+    if name != name.to_lowercase() {
+        return false;
+    }
+    if name.starts_with('.') || name.ends_with('.') || name.contains("..") {
+        return false;
+    }
+    let Ok(ascii_name) = idna::domain_to_ascii(name) else {
+        return false;
+    };
+    ascii_name.contains('.') && ascii_name.split('.').all(|label| !label.is_empty())
 }
 fn is_dash_case(name: &str) -> bool {
     let re = Regex::new(r"^[a-z0-9]+([-.][a-z0-9]+)*$").unwrap();
