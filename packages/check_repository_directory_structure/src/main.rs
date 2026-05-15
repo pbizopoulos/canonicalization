@@ -27,8 +27,8 @@ fn should_ignore_untracked_path(path: &str) -> bool {
 fn package_root(rel_path: &Path) -> Option<PathBuf> {
     let components: Vec<_> = rel_path
         .components()
-        .map(|component| component.as_os_str().to_str().unwrap())
-        .collect();
+        .map(|component| component.as_os_str().to_str())
+        .collect::<Option<Vec<_>>>()?;
     match components.as_slice() {
         ["packages", package_name, ..] => Some(PathBuf::from(format!("packages/{package_name}"))),
         _ => None,
@@ -37,8 +37,8 @@ fn package_root(rel_path: &Path) -> Option<PathBuf> {
 fn host_root(rel_path: &Path) -> Option<PathBuf> {
     let components: Vec<_> = rel_path
         .components()
-        .map(|component| component.as_os_str().to_str().unwrap())
-        .collect();
+        .map(|component| component.as_os_str().to_str())
+        .collect::<Option<Vec<_>>>()?;
     match components.as_slice() {
         ["hosts", host_name, ..] => Some(PathBuf::from(format!("hosts/{host_name}"))),
         _ => None,
