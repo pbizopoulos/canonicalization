@@ -18,6 +18,7 @@ let
       python = "py2.py3";
       sha256 = "CURIRHcgQ/m+IhKIVgiHkr4Pkc2+Jpr5krEzilRk3IU=";
     };
+    strictDeps = true;
     version = "1.3.0";
   };
   qprompt = pkgs.python3Packages.buildPythonPackage rec {
@@ -30,6 +31,7 @@ let
         ;
       sha256 = "a375510899d7ccec143e919aef41c853afc61d9a43426c206595362d981cd171";
     };
+    strictDeps = true;
     version = "0.16.3";
   };
 in

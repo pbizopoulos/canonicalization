@@ -20,5 +20,6 @@ pkgs.python3Packages.buildPythonPackage rec {
   pname = baseNameOf ./.;
   pyproject = false;
   src = ./.;
+  strictDeps = true;
   version = "0.0.0";
 }

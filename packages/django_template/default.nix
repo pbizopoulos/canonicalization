@@ -158,5 +158,6 @@ pkgs.python313Packages.buildPythonPackage rec {
   propagatedBuildInputs = pythonDeps;
   pyproject = false;
   src = ./.;
+  strictDeps = true;
   version = "0.0.0";
 }
