@@ -282,7 +282,10 @@ fn check_repository_directory_structure(flake_nix_path: String) -> Result<(), Ve
     let file_dependencies = [
         (
             r"packages/[^/]+/Cargo\.toml",
-            vec![r"packages/[^/]+/Cargo\.lock", r"packages/[^/]+/src/.*"],
+            vec![
+                r"packages/[^/]+/Cargo\.lock",
+                r"packages/[^/]+/src/main\.rs",
+            ],
         ),
         (
             r"packages/[^/]+/Main\.hs",
@@ -392,6 +395,29 @@ fn check_repository_directory_structure(flake_nix_path: String) -> Result<(), Ve
                 package_root,
                 &dir_and_file_names,
             ));
+        }
+        let package_name = package_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        let expected_cabal_name = format!("{package_name}.cabal");
+        for rel_path in &all_rel_paths {
+            let Ok(package_relative_path) = rel_path.strip_prefix(package_root) else {
+                continue;
+            };
+            let Some(file_name) = package_relative_path
+                .file_name()
+                .and_then(|name| name.to_str())
+            else {
+                continue;
+            };
+            if file_name.ends_with(".cabal") && file_name != expected_cabal_name {
+                final_warnings.push(format!(
+                    "{}: cabal file must be named {}",
+                    working_dir.join(rel_path).display(),
+                    expected_cabal_name
+                ));
+            }
         }
     }
     let mut sorted_names: Vec<_> = dir_and_file_names.into_iter().collect();
