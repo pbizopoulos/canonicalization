@@ -20,7 +20,6 @@ let
       -D warnings -D clippy::all -D clippy::pedantic -D clippy::nursery -D clippy::cargo \;
   '';
   formatter = treefmtEval.config.build.wrapper;
-  repoRoot = toString ./.;
   treefmtEval = inputs.treefmt-nix.lib.evalModule pkgs {
     programs = {
       actionlint.enable = true;
@@ -73,7 +72,6 @@ let
           options = [
             "-lc"
             ''
-              cd "${repoRoot}"
               exec ${inputs.self.packages.${pkgs.stdenv.system}.alint}/bin/alint check --fail-on-warning .
             ''
           ];

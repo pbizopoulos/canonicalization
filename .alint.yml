@@ -32,8 +32,10 @@ rules:
         paths: "{path}"
     level: error
   - id: github-workflows-require-workflow-yml
-    kind: file_exists
-    paths: ".github/workflows/workflow.yml"
+    kind: dir_contains
+    select: ".github/workflows"
+    require:
+      - "workflow.yml"
     level: error
   - id: github-root-allow-only-workflows
     kind: dir_only_contains
