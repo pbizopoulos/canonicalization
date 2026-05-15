@@ -8,25 +8,10 @@ let
     export PATH='${
       pkgs.lib.makeBinPath [
         pkgs.cargo
-        pkgs.cargo-llvm-cov
-        pkgs.cargo-mutants
-        pkgs.coreutils
-        pkgs.llvmPackages.clang
-        pkgs.llvmPackages.llvm
-        pkgs.pkg-config
         pkgs.rustc
         pkgs.stdenv.cc
       ]
     }':"$PATH"
-    export LIBCLANG_PATH='${pkgs.llvmPackages.libclang.lib}/lib'
-    export LLVM_COV='${pkgs.lib.getExe' pkgs.llvmPackages.llvm "llvm-cov"}'
-    export LLVM_PROFDATA='${pkgs.lib.getExe' pkgs.llvmPackages.llvm "llvm-profdata"}'
-    export PKG_CONFIG_PATH='${
-      pkgs.lib.makeSearchPathOutput "dev" "lib/pkgconfig" [
-        pkgs.openssl
-        pkgs.zlib
-      ]
-    }'
     resolve_source_root() {
       local candidate
       local current_dir="$PWD"
@@ -67,8 +52,17 @@ pkgs.rustPlatform.buildRustPackage {
     pkgs.zlib
   ];
   cargoHash = "sha256-w4LvRdS5zom3TfCNNBYtq44LIPTJ7YYpemfuyfxqAPs=";
-  doCheck = pkgs.stdenv.isLinux;
-  env.RUSTFLAGS = "-D warnings";
+  doInstallCheck = pkgs.stdenv.isLinux;
+  env = {
+    RUSTDOCFLAGS = "-D warnings";
+    RUSTFLAGS = "-D warnings";
+  };
+  installCheckPhase = ''
+    runHook preInstallCheck
+    test -x "$out/bin/${pname}"
+    NIX_BUILD_TOP=1 "$out/bin/${pname}"
+    runHook postInstallCheck
+  '';
   meta.mainProgram = pname;
   nativeBuildInputs = [
     pkgs.git
