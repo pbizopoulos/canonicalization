@@ -2,7 +2,7 @@ version: 1
 extends:
   - alint://bundled/hygiene/no-tracked-artifacts@v1
 rules:
-  - id: root-files-policy
+  - id: root-core-files-policy
     kind: dir_contains
     select: "."
     require:
@@ -11,7 +11,7 @@ rules:
       - "README"
       - "LICENSE"
     level: error
-  - id: root-only-allowed-directories
+  - id: root-directories-allowlist
     kind: for_each_dir
     select: "*"
     when_iter: >
@@ -31,18 +31,18 @@ rules:
       - kind: dir_absent
         paths: "{path}"
     level: error
-  - id: github-workflow-required
+  - id: github-workflows-require-workflow-yml
     kind: file_exists
     paths: ".github/workflows/workflow.yml"
     level: error
-  - id: github-workflows-only-workflow-yml
+  - id: github-workflows-allow-only-workflow-yml
     kind: dir_only_contains
     select: ".github/workflows"
     allow:
       - "workflow.yml"
     level: error
-  - id: checks-dir-has-default-nix-only
-    kind: for_each_dir
+  - id: checks-directories-default-nix-only
+    kind: every_matching_has
     select: "checks/*"
     require:
       - kind: file_exists
@@ -52,8 +52,8 @@ rules:
         allow:
           - "default.nix"
     level: error
-  - id: hosts-dir-shape
-    kind: for_each_dir
+  - id: hosts-directories-configuration-nix-only
+    kind: every_matching_has
     select: "hosts/*"
     require:
       - kind: file_exists
@@ -63,7 +63,7 @@ rules:
         allow:
           - "configuration.nix"
     level: error
-  - id: secrets-only-allowed-files
+  - id: secrets-files-allowlist
     kind: dir_only_contains
     select: "secrets"
     allow:
@@ -71,14 +71,14 @@ rules:
       - "secrets.env.example"
       - "secrets.nix"
     level: error
-  - id: every-pkg-has-default-nix
+  - id: packages-require-default-nix
     kind: every_matching_has
     select: "packages/*"
     require:
       - kind: file_exists
         paths: "{path}/default.nix"
     level: error
-  - id: django-layout
+  - id: packages-django-layout
     kind: every_matching_has
     select: "packages/*/manage.py"
     require:
@@ -96,7 +96,7 @@ rules:
       - kind: file_exists
         paths: "{dir}/static/**"
     level: error
-  - id: python-package-if-main-py
+  - id: packages-python-shape
     kind: for_each_dir
     select: packages/*
     when_iter: 'iter.has_file("main.py")'
@@ -116,7 +116,7 @@ rules:
           - "ms.tex"
           - "ms.bib"
     level: error
-  - id: c-package-if-main-c
+  - id: packages-c-shape
     kind: for_each_dir
     select: packages/*
     when_iter: 'iter.has_file("main.c")'
@@ -134,7 +134,7 @@ rules:
           - "default.nix"
           - "main.c"
     level: error
-  - id: bash-package-if-main-sh
+  - id: packages-bash-shape
     kind: for_each_dir
     select: packages/*
     when_iter: 'iter.has_file("main.sh")'
@@ -152,7 +152,7 @@ rules:
           - "default.nix"
           - "main.sh"
     level: error
-  - id: haskell-package-if-main-hs
+  - id: packages-haskell-shape
     kind: for_each_dir
     select: packages/*
     when_iter: 'iter.has_file("Main.hs")'
@@ -171,7 +171,7 @@ rules:
           - "Main.hs"
           - "*.cabal"
     level: error
-  - id: rust-package-if-cargo
+  - id: packages-rust-shape
     kind: for_each_dir
     select: packages/*
     when_iter: 'iter.has_file("Cargo.toml")'
@@ -189,7 +189,7 @@ rules:
           - "Cargo.lock"
           - "src"
     level: error
-  - id: terraform-package-if-main-tf
+  - id: packages-terraform-shape
     kind: for_each_dir
     select: packages/*
     when_iter: 'iter.has_file("main.tf")'
@@ -207,7 +207,7 @@ rules:
           - ".terraform"
           - ".terraform.lock.hcl"
     level: error
-  - id: html-package-if-index
+  - id: packages-html-shape
     kind: for_each_dir
     select: packages/*
     when_iter: 'iter.has_file("index.html")'
@@ -231,7 +231,7 @@ rules:
           - "script.js"
           - "style.css"
     level: error
-  - id: latex-package-if-ms-tex
+  - id: packages-latex-shape
     kind: for_each_dir
     select: packages/*
     when_iter: 'iter.has_file("ms.tex")'
@@ -247,7 +247,7 @@ rules:
           - "ms.tex"
           - "ms.bib"
     level: error
-  - id: django-package-root-shape
+  - id: packages-django-root-shape
     kind: for_each_dir
     select: packages/*
     when_iter: 'iter.has_file("manage.py")'
@@ -263,7 +263,7 @@ rules:
           - "django_template"
           - "starter"
     level: error
-  - id: django-starter-shape
+  - id: packages-django-starter-shape
     kind: for_each_dir
     select: packages/*
     when_iter: 'iter.has_file("manage.py")'
@@ -293,7 +293,7 @@ rules:
           - "views.py"
           - "tests"
     level: error
-  - id: django-template-package-shape
+  - id: packages-django-template-shape
     kind: for_each_dir
     select: packages/*
     when_iter: 'iter.has_file("manage.py")'
@@ -306,7 +306,7 @@ rules:
           - "urls.py"
           - "wsgi.py"
     level: error
-  - id: default-only-package-shape
+  - id: packages-default-shape
     kind: for_each_dir
     select: packages/*
     when_iter: >
