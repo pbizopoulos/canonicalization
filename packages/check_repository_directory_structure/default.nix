@@ -97,5 +97,6 @@ pkgs.rustPlatform.buildRustPackage {
       --replace-fail "@wrappedBin@" "$out/bin/.${pname}-wrapped"
   '';
   src = ./.;
+  strictDeps = true;
   version = "0.0.0";
 }
