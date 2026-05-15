@@ -6,13 +6,8 @@ let
 in
 pkgs.writeShellApplication {
   inherit name;
-  derivationArgs = {
-    doInstallCheck = pkgs.stdenv.isLinux;
-    installCheckPhase = ''
-      runHook preInstallCheck
-      "$out/bin/${name}" | grep -F "Hello World"
-      runHook postInstallCheck
-    '';
-  };
+  checkPhase = ''
+    "$target" | grep -F "Hello World"
+  '';
   text = builtins.readFile ./main.sh;
 }
