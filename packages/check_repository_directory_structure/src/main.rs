@@ -316,14 +316,14 @@ fn check_repository_directory_structure(flake_nix_path: String) -> Result<(), Ve
         .iter()
         .map(|p| Regex::new(&format!("^{p}$")).unwrap())
         .collect();
-    let compiled_file_dependencies: Vec<(Regex, Vec<String>)> = file_dependencies
+    let compiled_file_dependencies: Vec<(Regex, Vec<Regex>)> = file_dependencies
         .iter()
         .map(|(trigger, patterns)| {
             (
-                Regex::new(&format!("^({trigger})$")).unwrap(),
+                Regex::new(&format!("^{trigger}$")).unwrap(),
                 patterns
                     .iter()
-                    .map(std::string::ToString::to_string)
+                    .map(|dep| Regex::new(&format!("^{dep}$")).unwrap())
                     .collect(),
             )
         })
@@ -333,11 +333,7 @@ fn check_repository_directory_structure(flake_nix_path: String) -> Result<(), Ve
         let path_str = path.to_str().unwrap();
         for (trigger_re, deps) in &compiled_file_dependencies {
             if trigger_re.is_match(path_str) {
-                for dep in deps {
-                    let full_dep = format!("^{dep}$");
-                    allowed_patterns.push(Regex::new(&full_dep).unwrap());
-                }
-                allowed_patterns.push(trigger_re.clone());
+                allowed_patterns.extend(deps.iter().cloned());
             }
         }
     }
