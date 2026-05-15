@@ -161,6 +161,7 @@ fn check_repository_directory_structure(flake_nix_path: String) -> Result<(), Ve
     };
     let working_dir = repo.workdir().expect("No working directory for repository");
     let working_dir_display = working_dir.display();
+    let branch_warning = format!("{working_dir_display}: should have 'main' as the active branch");
     let mut status_options = StatusOptions::new();
     status_options.include_untracked(true);
     let statuses = match repo.statuses(Some(&mut status_options)) {
@@ -180,15 +181,11 @@ fn check_repository_directory_structure(flake_nix_path: String) -> Result<(), Ve
         match head.shorthand() {
             Some(branch_name) => {
                 if branch_name != "main" {
-                    warnings.push(format!(
-                        "{working_dir_display}: should have 'main' as the active branch"
-                    ));
+                    warnings.push(branch_warning.clone());
                 }
             }
             None => {
-                warnings.push(format!(
-                    "{working_dir_display}: should have 'main' as the active branch"
-                ));
+                warnings.push(branch_warning.clone());
             }
         }
         let branches = repo
