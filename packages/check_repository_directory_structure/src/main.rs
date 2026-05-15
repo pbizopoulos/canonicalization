@@ -9,11 +9,11 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
-struct Args {
+struct CliArgs {
     #[arg(default_value = "flake.nix")]
     flake_nix_path: String,
 }
-fn is_valid_fqdn(name: &str) -> bool {
+fn is_valid_domain_name(name: &str) -> bool {
     let re = Regex::new(r"^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$").unwrap();
     re.is_match(name)
 }
@@ -115,7 +115,7 @@ fn validate_fastapi_package_layout(
 }
 use std::time::{SystemTime, UNIX_EPOCH};
 fn main() {
-    let args = Args::parse();
+    let args = CliArgs::parse();
     let flake_nix_path = args.flake_nix_path;
     let lock_path = std::env::temp_dir().join("check_repository_directory_structure.lock");
     let lock_file = std::fs::OpenOptions::new()
@@ -199,7 +199,7 @@ fn check_repository_directory_structure(flake_nix_path: String) -> Result<(), Ve
     }
     let dir_name_str = working_dir.file_name().unwrap().to_str().unwrap();
     if dir_name_str != dir_name_str.to_lowercase()
-        || (!is_valid_fqdn(dir_name_str) && !is_dash_case(dir_name_str))
+        || (!is_valid_domain_name(dir_name_str) && !is_dash_case(dir_name_str))
     {
         warnings.push(format!(
             "{working_dir_display}: should be lower-case and valid FQDN or in dash-case"
@@ -443,7 +443,7 @@ fn check_repository_directory_structure(flake_nix_path: String) -> Result<(), Ve
 }
 #[allow(dead_code)]
 fn run_tests() {
-    test_is_valid_fqdn_standalone();
+    test_is_valid_domain_name_standalone();
     test_is_dash_case_standalone();
     test_check_repository_directory_structure_standalone();
 }
@@ -551,13 +551,13 @@ fn test_check_repository_directory_structure_standalone() {
     fs::remove_dir_all(&temp_dir).unwrap();
     println!("test check_repository_directory_structure ... ok");
 }
-fn test_is_valid_fqdn_standalone() {
-    assert!(is_valid_fqdn("google.com"));
-    assert!(is_valid_fqdn("a.b.co"));
-    assert!(!is_valid_fqdn("google"));
-    assert!(!is_valid_fqdn("google."));
-    assert!(!is_valid_fqdn(".com"));
-    println!("test is_valid_fqdn ... ok");
+fn test_is_valid_domain_name_standalone() {
+    assert!(is_valid_domain_name("google.com"));
+    assert!(is_valid_domain_name("a.b.co"));
+    assert!(!is_valid_domain_name("google"));
+    assert!(!is_valid_domain_name("google."));
+    assert!(!is_valid_domain_name(".com"));
+    println!("test is_valid_domain_name ... ok");
 }
 fn test_is_dash_case_standalone() {
     assert!(is_dash_case("my-package"));
@@ -611,12 +611,12 @@ mod tests {
             .expect("Failed to commit");
     }
     #[test]
-    fn test_is_valid_fqdn() {
-        assert!(is_valid_fqdn("google.com"));
-        assert!(is_valid_fqdn("a.b.co"));
-        assert!(!is_valid_fqdn("google"));
-        assert!(!is_valid_fqdn("google."));
-        assert!(!is_valid_fqdn(".com"));
+    fn test_is_valid_domain_name() {
+        assert!(is_valid_domain_name("google.com"));
+        assert!(is_valid_domain_name("a.b.co"));
+        assert!(!is_valid_domain_name("google"));
+        assert!(!is_valid_domain_name("google."));
+        assert!(!is_valid_domain_name(".com"));
     }
     #[test]
     fn test_is_dash_case() {
