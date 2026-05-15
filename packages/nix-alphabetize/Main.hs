@@ -76,9 +76,9 @@ main :: IO ()
 main = do
   args <- getArgs
   debug <- lookupEnv "DEBUG"
-  if debug == Just "1"
-    then void $ runTestTT getAllFormattingTests
-    else
+  case debug of
+    Just "1" -> void $ runTestTT getAllFormattingTests
+    _ ->
       mapM_
         ( \filePath -> do
             parseResult <- parseNixFileLoc (Path filePath)
@@ -129,9 +129,7 @@ getBindingName (NamedVar (StaticKey (VarName keyText) :| _) _ _) = keyText
 getBindingName (NamedVar (DynamicKey (Plain (DoubleQuoted [Plain keyText])) :| _) _ _) = keyText
 getBindingName _ = empty
 sortAndCollapseBindings :: [Binding NExprLoc] -> [Binding NExprLoc]
-sortAndCollapseBindings = sortAndCollapseBindingsUnchecked
-sortAndCollapseBindingsUnchecked :: [Binding NExprLoc] -> [Binding NExprLoc]
-sortAndCollapseBindingsUnchecked =
+sortAndCollapseBindings =
   concatMap collapseNestedBindings
     . groupBy ((==) `on` getBindingName)
     . sortBy (comparing getBindingName)
