@@ -1,5 +1,6 @@
-{-# LANGUAGE Trustworthy #-}
-{-# OPTIONS_GHC -Wno-unsafe -Wno-prepositive-qualified-module #-}
+{-# LANGUAGE ImportQualifiedPost #-}
+{-# LANGUAGE Trustworthy         #-}
+{-# OPTIONS_GHC -Wno-unsafe #-}
 module Main (main) where
 import           Control.Monad             (void)
 import           Data.Fix                  (Fix (Fix))
