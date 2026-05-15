@@ -20,6 +20,7 @@ let
       -D warnings -D clippy::all -D clippy::pedantic -D clippy::nursery -D clippy::cargo \;
   '';
   formatter = treefmtEval.config.build.wrapper;
+  repoRoot = toString ./.;
   treefmtEval = inputs.treefmt-nix.lib.evalModule pkgs {
     programs = {
       actionlint.enable = true;
@@ -64,6 +65,20 @@ let
     projectRootFile = "flake.nix";
     settings = {
       formatter = {
+        alint = {
+          command = "${pkgs.bash}/bin/bash";
+          includes = [
+            "*"
+          ];
+          options = [
+            "-lc"
+            ''
+              cd "${repoRoot}"
+              exec ${inputs.self.packages.${pkgs.stdenv.system}.alint}/bin/alint check --fail-on-warning .
+            ''
+          ];
+          priority = 0;
+        };
         bibtex-tidy = {
           command = pkgs.bibtex-tidy;
           includes = [
@@ -81,13 +96,6 @@ let
         biome.options = [
           "--max-diagnostics=none"
         ];
-        check_repository_directory_structure = {
-          command = inputs.self.packages.${pkgs.stdenv.system}.check_repository_directory_structure;
-          includes = [
-            "flake.nix"
-          ];
-          priority = 0;
-        };
         clippy = {
           command = "${clippy-script}/bin/clippy";
           includes = [

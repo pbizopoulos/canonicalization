@@ -1,0 +1,332 @@
+version: 1
+extends:
+  - alint://bundled/hygiene/no-tracked-artifacts@v1
+rules:
+  - id: root-files-policy
+    kind: dir_contains
+    select: "."
+    require:
+      - "flake.nix"
+      - "formatter.nix"
+      - "README"
+      - "LICENSE"
+    level: error
+  - id: root-only-allowed-directories
+    kind: for_each_dir
+    select: "*"
+    when_iter: >
+      not (
+
+        iter.path == ".codex" or
+        iter.path == ".git" or
+        iter.path == ".github" or
+        iter.path == "checks" or
+        iter.path == "hosts" or
+        iter.path == "packages" or
+        iter.path == "prm" or
+        iter.path == "secrets"
+      )
+
+    require:
+      - kind: dir_absent
+        paths: "{path}"
+    level: error
+  - id: github-workflow-required
+    kind: file_exists
+    paths: ".github/workflows/workflow.yml"
+    level: error
+  - id: github-workflows-only-workflow-yml
+    kind: dir_only_contains
+    select: ".github/workflows"
+    allow:
+      - "workflow.yml"
+    level: error
+  - id: checks-dir-has-default-nix-only
+    kind: for_each_dir
+    select: "checks/*"
+    require:
+      - kind: file_exists
+        paths: "{path}/default.nix"
+      - kind: dir_only_contains
+        select: "{path}"
+        allow:
+          - "default.nix"
+    level: error
+  - id: hosts-dir-shape
+    kind: for_each_dir
+    select: "hosts/*"
+    require:
+      - kind: file_exists
+        paths: "{path}/configuration.nix"
+      - kind: dir_only_contains
+        select: "{path}"
+        allow:
+          - "configuration.nix"
+    level: error
+  - id: secrets-only-allowed-files
+    kind: dir_only_contains
+    select: "secrets"
+    allow:
+      - "secrets.age"
+      - "secrets.env.example"
+      - "secrets.nix"
+    level: error
+  - id: every-pkg-has-default-nix
+    kind: every_matching_has
+    select: "packages/*"
+    require:
+      - kind: file_exists
+        paths: "{path}/default.nix"
+    level: error
+  - id: django-layout
+    kind: every_matching_has
+    select: "packages/*/manage.py"
+    require:
+      - kind: file_exists
+        paths: "{dir}/*/__init__.py"
+      - kind: file_exists
+        paths:
+          - "{dir}/*/settings.py"
+          - "{dir}/*/urls.py"
+          - "{dir}/*/wsgi.py"
+      - kind: file_exists
+        paths: "{dir}/*/tests/**"
+      - kind: file_exists
+        paths: "{dir}/templates/**"
+      - kind: file_exists
+        paths: "{dir}/static/**"
+    level: error
+  - id: python-package-if-main-py
+    kind: for_each_dir
+    select: packages/*
+    when_iter: 'iter.has_file("main.py")'
+    require:
+      - kind: for_each_dir
+        select: "{path}/*"
+        when_iter: 'iter.basename != "prm"'
+        require:
+          - kind: dir_absent
+            paths: "{path}"
+      - kind: dir_only_contains
+        select: "{path}"
+        allow:
+          - ".gitignore"
+          - "default.nix"
+          - "main.py"
+          - "ms.tex"
+          - "ms.bib"
+    level: error
+  - id: c-package-if-main-c
+    kind: for_each_dir
+    select: packages/*
+    when_iter: 'iter.has_file("main.c")'
+    require:
+      - kind: for_each_dir
+        select: "{path}/*"
+        when_iter: 'iter.basename != "prm"'
+        require:
+          - kind: dir_absent
+            paths: "{path}"
+      - kind: dir_only_contains
+        select: "{path}"
+        allow:
+          - ".gitignore"
+          - "default.nix"
+          - "main.c"
+    level: error
+  - id: bash-package-if-main-sh
+    kind: for_each_dir
+    select: packages/*
+    when_iter: 'iter.has_file("main.sh")'
+    require:
+      - kind: for_each_dir
+        select: "{path}/*"
+        when_iter: 'iter.basename != "prm"'
+        require:
+          - kind: dir_absent
+            paths: "{path}"
+      - kind: dir_only_contains
+        select: "{path}"
+        allow:
+          - ".gitignore"
+          - "default.nix"
+          - "main.sh"
+    level: error
+  - id: haskell-package-if-main-hs
+    kind: for_each_dir
+    select: packages/*
+    when_iter: 'iter.has_file("Main.hs")'
+    require:
+      - kind: for_each_dir
+        select: "{path}/*"
+        when_iter: 'iter.basename != "prm"'
+        require:
+          - kind: dir_absent
+            paths: "{path}"
+      - kind: dir_only_contains
+        select: "{path}"
+        allow:
+          - ".gitignore"
+          - "default.nix"
+          - "Main.hs"
+          - "*.cabal"
+    level: error
+  - id: rust-package-if-cargo
+    kind: for_each_dir
+    select: packages/*
+    when_iter: 'iter.has_file("Cargo.toml")'
+    require:
+      - kind: file_exists
+        paths:
+          - "{path}/src/main.rs"
+          - "{path}/Cargo.lock"
+      - kind: dir_only_contains
+        select: "{path}"
+        allow:
+          - ".gitignore"
+          - "default.nix"
+          - "Cargo.toml"
+          - "Cargo.lock"
+          - "src"
+    level: error
+  - id: terraform-package-if-main-tf
+    kind: for_each_dir
+    select: packages/*
+    when_iter: 'iter.has_file("main.tf")'
+    require:
+      - kind: file_exists
+        paths:
+          - "{path}/.gitignore"
+          - "{path}/.terraform.lock.hcl"
+      - kind: dir_only_contains
+        select: "{path}"
+        allow:
+          - ".gitignore"
+          - "default.nix"
+          - "main.tf"
+          - ".terraform"
+          - ".terraform.lock.hcl"
+    level: error
+  - id: html-package-if-index
+    kind: for_each_dir
+    select: packages/*
+    when_iter: 'iter.has_file("index.html")'
+    require:
+      - kind: file_exists
+        paths:
+          - "{path}/script.js"
+          - "{path}/style.css"
+      - kind: for_each_dir
+        select: "{path}/*"
+        when_iter: 'iter.basename != "prm"'
+        require:
+          - kind: dir_absent
+            paths: "{path}"
+      - kind: dir_only_contains
+        select: "{path}"
+        allow:
+          - ".gitignore"
+          - "default.nix"
+          - "index.html"
+          - "script.js"
+          - "style.css"
+    level: error
+  - id: latex-package-if-ms-tex
+    kind: for_each_dir
+    select: packages/*
+    when_iter: 'iter.has_file("ms.tex")'
+    require:
+      - kind: file_exists
+        paths: "{path}/ms.bib"
+      - kind: dir_only_contains
+        select: "{path}"
+        allow:
+          - ".gitignore"
+          - "default.nix"
+          - "main.py"
+          - "ms.tex"
+          - "ms.bib"
+    level: error
+  - id: django-package-root-shape
+    kind: for_each_dir
+    select: packages/*
+    when_iter: 'iter.has_file("manage.py")'
+    require:
+      - kind: dir_only_contains
+        select: "{path}"
+        allow:
+          - ".gitignore"
+          - "default.nix"
+          - "manage.py"
+          - "templates"
+          - "static"
+          - "django_template"
+          - "starter"
+    level: error
+  - id: django-starter-shape
+    kind: for_each_dir
+    select: packages/*
+    when_iter: 'iter.has_file("manage.py")'
+    require:
+      - kind: dir_only_contains
+        select: "{path}/starter"
+        allow:
+          - "__init__.py"
+          - "admin.py"
+          - "apps.py"
+          - "auth_backends.py"
+          - "context_processors.py"
+          - "filters.py"
+          - "forms.py"
+          - "managers.py"
+          - "middleware.py"
+          - "models.py"
+          - "permissions.py"
+          - "serializers.py"
+          - "services.py"
+          - "signals.py"
+          - "tasks.py"
+          - "throttle.py"
+          - "urls.py"
+          - "utils.py"
+          - "validators.py"
+          - "views.py"
+          - "tests"
+    level: error
+  - id: django-template-package-shape
+    kind: for_each_dir
+    select: packages/*
+    when_iter: 'iter.has_file("manage.py")'
+    require:
+      - kind: dir_only_contains
+        select: "{path}/django_template"
+        allow:
+          - "__init__.py"
+          - "settings.py"
+          - "urls.py"
+          - "wsgi.py"
+    level: error
+  - id: default-only-package-shape
+    kind: for_each_dir
+    select: packages/*
+    when_iter: >
+      not (
+
+        iter.has_file("main.py") or
+        iter.has_file("main.sh") or
+        iter.has_file("main.c") or
+        iter.has_file("main.tf") or
+        iter.has_file("Cargo.toml") or
+        iter.has_file("Main.hs") or
+        iter.has_file("index.html") or
+        iter.has_file("ms.tex") or
+        iter.has_file("manage.py")
+      )
+
+    require:
+      - kind: dir_only_contains
+        select: "{path}"
+        allow:
+          - ".gitignore"
+          - "default.nix"
+    level: error
