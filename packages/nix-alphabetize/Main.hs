@@ -89,12 +89,11 @@ main = do
         args
 writeFormattedFile :: FilePath -> NExprLoc -> IO ()
 writeFormattedFile filePath expr = do
-  let sortedExpr = sortExpression expr
-      finalText =
+  let finalText =
         renderStrict $
           layoutPretty (LayoutOptions (AvailablePerLine 1 1.0)) $
             prettyNix $
-              stripAnnotation sortedExpr
+              stripAnnotation (sortExpression expr)
   TIO.writeFile filePath finalText
 renderExpressionText :: NExprLoc -> Text
 renderExpressionText =
@@ -140,8 +139,9 @@ collapseNestedBindings bindings@(firstBinding : _) =
     NamedVar (bindingKey :| _) _ bindingPos ->
       let nestedBindings = concatMap nextLevelBindings bindings
           sortedNested = sortAndCollapseBindings nestedBindings
+          sortedBindings = map (fmap sortExpression) bindings
        in case sortedNested of
-            [] -> map (fmap sortExpression) bindings
+            [] -> sortedBindings
             [NamedVar (subKey :| restKeys) valExpr _] ->
               [NamedVar (bindingKey :| subKey : restKeys) valExpr bindingPos]
             newNested ->
