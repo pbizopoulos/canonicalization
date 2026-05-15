@@ -31,9 +31,6 @@ fn package_root(rel_path: &Path) -> Option<PathBuf> {
         .collect();
     match components.as_slice() {
         ["packages", package_name, ..] => Some(PathBuf::from(format!("packages/{package_name}"))),
-        ["templates", template_name, "packages", package_name, ..] => Some(PathBuf::from(format!(
-            "templates/{template_name}/packages/{package_name}"
-        ))),
         _ => None,
     }
 }
@@ -393,6 +390,15 @@ fn check_repository_directory_structure(flake_nix_path: String) -> Result<(), Ve
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or_default();
+        if all_rel_paths.contains(&package_root.join("Main.hs"))
+            && !all_rel_paths.contains(&package_root.join(format!("{package_name}.cabal")))
+        {
+            final_warnings.push(format!(
+                "{}: is missing required {} for Main.hs package",
+                working_dir.join(package_root).display(),
+                format!("{package_name}.cabal")
+            ));
+        }
         let expected_cabal_name = format!("{package_name}.cabal");
         for rel_path in &all_rel_paths {
             let Ok(package_relative_path) = rel_path.strip_prefix(package_root) else {
@@ -643,7 +649,7 @@ mod tests {
             package_root(Path::new(
                 "templates/example/packages/django_template/manage.py"
             )),
-            Some(PathBuf::from("templates/example/packages/django_template"))
+            None
         );
         assert_eq!(
             package_root(Path::new("hosts/template/configuration.nix")),
