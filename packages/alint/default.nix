@@ -5,7 +5,8 @@ pkgs.stdenv.mkDerivation rec {
   doInstallCheck = pkgs.stdenv.isLinux;
   installCheckPhase = ''
     runHook preInstallCheck
-    "$out/bin/${pname}" --help
+    set -o pipefail
+    "$out/bin/${pname}" --help 2>&1 | grep -F "${pname}"
     runHook postInstallCheck
   '';
   installPhase = ''
@@ -17,9 +18,9 @@ pkgs.stdenv.mkDerivation rec {
   pname = baseNameOf ./.;
   sourceRoot = ".";
   src = pkgs.fetchurl {
-    sha256 = "laak8EgSYt57LrFwe9n0SujsLZ4ayWWTYkNbjrl29tg=";
+    sha256 = "0dizR2ebevd8MYCI5ygqxr46RZH2YmttiV0Ux7JBJr8=";
     url = "https://github.com/asamarts/${pname}/releases/download/v${version}/${pname}-v${version}-x86_64-unknown-linux-musl.tar.gz";
   };
   strictDeps = true;
-  version = "0.9.21";
+  version = "0.9.22";
 }
