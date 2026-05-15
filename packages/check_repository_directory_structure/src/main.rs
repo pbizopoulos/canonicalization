@@ -269,14 +269,13 @@ fn check_repository_directory_structure(flake_nix_path: String) -> Result<(), Ve
         r"packages/[^/]+/manage\.py",
         r"packages/[^/]+/main\.(c|py|sh|tf)",
         r"packages/[^/]+/ms\.tex",
-        r"packages/[^/]+/spec\.json",
         r"packages/[^/]+/style\.css",
         r"packages/[^/]+/script\.js",
-        r"packages/[^/]+/[^/]+\.cabal",
-        r"prm(/.*)?",
+        r"prm/[^/]+",
         r"result",
-        r"secrets(/.*)?",
-        r"spec\.json",
+        r"secrets/secrets\.age",
+        r"secrets/secrets\.env\.example",
+        r"secrets/secrets\.nix",
     ];
     let file_dependencies = [
         (
@@ -286,10 +285,7 @@ fn check_repository_directory_structure(flake_nix_path: String) -> Result<(), Ve
                 r"packages/[^/]+/src/main\.rs",
             ],
         ),
-        (
-            r"packages/[^/]+/Main\.hs",
-            vec![r"packages/[^/]+/[^/]+\.cabal"],
-        ),
+        (r"packages/[^/]+/Main\.hs", vec![]),
         (
             r"packages/[^/]+/index\.html",
             vec![r"packages/[^/]+/script\.js", r"packages/[^/]+/style\.css"],
