@@ -105,23 +105,20 @@ isStringExpr expr =
 sortExpression :: NExprLoc -> NExprLoc
 sortExpression (Fix (Compose (AnnUnit exprSpan exprF))) =
   Fix . Compose . AnnUnit exprSpan $ case exprF of
+    NAbs (ParamSet atPattern variadic paramList) body ->
+      NAbs (ParamSet atPattern variadic (sortBy (comparing fst) paramList)) (sortExpression body)
     NAbs params body ->
-      let sortedParams = case params of
-            ParamSet atPattern variadic paramList ->
-              ParamSet atPattern variadic (sortBy (comparing fst) paramList)
-            _ -> params
-       in NAbs sortedParams (sortExpression body)
+      NAbs params (sortExpression body)
     NList items ->
       let sortedItems = map sortExpression items
-       in if any isStringExpr sortedItems
-            then NList sortedItems
-            else NList $ sortBy (comparing renderExpressionText) sortedItems
+       in NList $
+            if any isStringExpr sortedItems
+              then sortedItems
+              else sortBy (comparing renderExpressionText) sortedItems
     NSet rec bindings ->
-      NSet rec $ sortAndCollapseBindings bindings
+      NSet rec (sortAndCollapseBindings bindings)
     NLet bindings body ->
-      NLet
-        (sortAndCollapseBindings bindings)
-        (sortExpression body)
+      NLet (sortAndCollapseBindings bindings) (sortExpression body)
     otherExpr -> fmap sortExpression otherExpr
 getBindingName :: Binding r -> Text
 getBindingName (NamedVar (StaticKey (VarName keyText) :| _) _ _) = keyText
