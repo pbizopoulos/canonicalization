@@ -64,31 +64,6 @@ let
     projectRootFile = "flake.nix";
     settings = {
       formatter = {
-        alint = {
-          command = "${pkgs.bash}/bin/bash";
-          includes = [
-            "*"
-          ];
-          options = [
-            "-lc"
-            ''
-              while IFS= read -r entry; do
-                case "$entry" in
-                  .agents|.codex|.git|.github|.gitignore|.alint.yml|checks|flake.lock|flake.nix|formatter.nix|hosts|LICENSE|packages|prm|README|secrets)
-                    ;;
-                  *)
-                    echo "alint wrapper: unexpected root entry: $entry" >&2
-                    exit 1
-                    ;;
-                esac
-              done < <(find . -mindepth 1 -maxdepth 1 -printf '%f\n')
-              exec ${
-                inputs.self.packages.${pkgs.stdenv.system}.alint
-              }/bin/alint check --fail-on-warning -c ${inputs.self}/.alint.yml .
-            ''
-          ];
-          priority = 0;
-        };
         bibtex-tidy = {
           command = pkgs.bibtex-tidy;
           includes = [
@@ -106,6 +81,13 @@ let
         biome.options = [
           "--max-diagnostics=none"
         ];
+        check_repository_directory_structure = {
+          command = inputs.self.packages.${pkgs.stdenv.system}.check_repository_directory_structure;
+          includes = [
+            "flake.nix"
+          ];
+          priority = 0;
+        };
         clippy = {
           command = "${clippy-script}/bin/clippy";
           includes = [
