@@ -10,10 +10,11 @@ pkgs.rustPlatform.buildRustPackage rec {
   };
   installCheckPhase = ''
     runHook preInstallCheck
+    test -x "$out/bin/${pname}"
     workspace="$PWD/installcheck"
     mkdir -p "$workspace"
     printf 'line1\n\nline2\n' > "$workspace/input.txt"
-    $out/bin/${pname} "$workspace"
+    "$out/bin/${pname}" "$workspace"
     test "$(wc -l < "$workspace/input.txt")" -eq 2
     grep -Fxq "line1" "$workspace/input.txt"
     grep -Fxq "line2" "$workspace/input.txt"

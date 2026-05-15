@@ -14,7 +14,9 @@ pkgs.rustPlatform.buildRustPackage rec {
   };
   installCheckPhase = ''
     runHook preInstallCheck
-    $out/bin/${pname}
+    test -x "$out/bin/${pname}"
+    set -o pipefail
+    "$out/bin/${pname}" --help 2>&1 | grep -F "${pname}"
     runHook postInstallCheck
   '';
   meta.mainProgram = pname;

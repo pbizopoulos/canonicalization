@@ -5,6 +5,7 @@ pkgs.stdenv.mkDerivation rec {
   doInstallCheck = pkgs.stdenv.isLinux;
   installCheckPhase = ''
     runHook preInstallCheck
+    test -x "$out/bin/${pname}"
     set -o pipefail
     "$out/bin/${pname}" --help 2>&1 | grep -F "${pname}"
     runHook postInstallCheck

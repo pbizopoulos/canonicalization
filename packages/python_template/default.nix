@@ -4,6 +4,7 @@
 pkgs.python3Packages.buildPythonPackage rec {
   installCheckPhase = ''
     runHook preInstallCheck
+    test -x "$out/bin/${pname}"
     HOME="$(mktemp -d)" DEBUG=1 PYTHONWARNINGS=error coverage run --source="$src" -m pyinstrument "$src/main.py"
     coverage report
     runHook postInstallCheck

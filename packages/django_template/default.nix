@@ -122,6 +122,7 @@ pkgs.python313Packages.buildPythonPackage rec {
   inherit pname;
   installCheckPhase = ''
     runHook preInstallCheck
+    test -x "$out/bin/${pname}"
     mkdir -p "$PWD/coverage"
     coverage_data_file="$PWD/coverage/.coverage"
     HOME="$(mktemp -d)" \

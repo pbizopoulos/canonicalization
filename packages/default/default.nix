@@ -10,9 +10,10 @@ pkgs.rustPlatform.buildRustPackage rec {
   };
   installCheckPhase = ''
     runHook preInstallCheck
+    test -x "$out/bin/${pname}"
     mkdir -p "$PWD/installcheck-root" "$PWD/installcheck-out"
     CANONICALIZATION_ROOT="$PWD/installcheck-root" \
-      $out/bin/${pname} "$PWD/installcheck-out"
+      "$out/bin/${pname}" "$PWD/installcheck-out"
     test -d "$PWD/installcheck-out/.git"
     runHook postInstallCheck
   '';

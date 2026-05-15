@@ -37,6 +37,7 @@ pkgs.python3Packages.buildPythonApplication rec {
   format = "wheel";
   installCheckPhase = ''
     runHook preInstallCheck
+    test -x "$out/bin/cosmic-ray"
     set -o pipefail
     "$out/bin/cosmic-ray" --help 2>&1 | grep -F "cosmic-ray"
     runHook postInstallCheck
