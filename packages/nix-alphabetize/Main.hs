@@ -1,46 +1,77 @@
 {-# LANGUAGE ImportQualifiedPost #-}
-{-# LANGUAGE Trustworthy         #-}
+{-# LANGUAGE Trustworthy #-}
 {-# OPTIONS_GHC -Wno-unsafe #-}
 module Main (main) where
-import           Control.Monad             (void)
-import           Data.Fix                  (Fix (Fix))
-import           Data.Function             (on)
-import           Data.Functor.Compose      (Compose (Compose))
-import           Data.List                 (groupBy, sortBy)
-import           Data.List.NonEmpty        (NonEmpty ((:|)))
-import           Data.Ord                  (comparing)
-import           Data.Text                 (Text, empty, isPrefixOf, pack,
-                                            stripStart)
-import qualified Data.Text.IO              as TIO
-import           Nix.Expr.Types            (Antiquoted (Plain),
-                                            Binding (NamedVar),
-                                            NExprF (NAbs, NLet, NList, NSet),
-                                            NKeyName (DynamicKey, StaticKey),
-                                            NString (DoubleQuoted),
-                                            Params (ParamSet),
-                                            Recursivity (NonRecursive),
-                                            VarName (VarName))
-import           Nix.Expr.Types.Annotated  (AnnUnit (AnnUnit), NExprLoc,
-                                            SrcSpan (SrcSpan), stripAnnotation)
-import           Nix.Parser                (parseNixFileLoc)
-import           Nix.Pretty                (prettyNix)
-import           Nix.Utils                 (Path (Path))
-import           Prelude                   (Bool, Either (Left, Right),
-                                            Eq ((==)), FilePath, IO,
-                                            Maybe (Just), Show (show), String,
-                                            any, concatMap, fmap, fst, map,
-                                            mapM_, putStrLn, ($), (++), (.),
-                                            (||))
-import           Prettyprinter             (LayoutOptions (LayoutOptions),
-                                            PageWidth (AvailablePerLine),
-                                            layoutPretty)
-import           Prettyprinter.Render.Text (renderStrict)
-import           System.Environment        (getArgs, lookupEnv)
-import           System.IO                 (hClose)
-import           System.IO.Temp            (withSystemTempFile)
-import           Test.HUnit                (Test (TestCase, TestList),
-                                            assertEqual, assertFailure,
-                                            runTestTT)
+import Control.Monad (void)
+import Data.Fix (Fix (Fix))
+import Data.Function (on)
+import Data.Functor.Compose (Compose (Compose))
+import Data.List (groupBy, sortBy)
+import Data.List.NonEmpty (NonEmpty ((:|)))
+import Data.Ord (comparing)
+import Data.Text
+  ( Text,
+    empty,
+    isPrefixOf,
+    pack,
+    stripStart,
+  )
+import Data.Text.IO qualified as TIO
+import Nix.Expr.Types
+  ( Antiquoted (Plain),
+    Binding (NamedVar),
+    NExprF (NAbs, NLet, NList, NSet),
+    NKeyName (DynamicKey, StaticKey),
+    NString (DoubleQuoted),
+    Params (ParamSet),
+    Recursivity (NonRecursive),
+    VarName (VarName),
+  )
+import Nix.Expr.Types.Annotated
+  ( AnnUnit (AnnUnit),
+    NExprLoc,
+    SrcSpan (SrcSpan),
+    stripAnnotation,
+  )
+import Nix.Parser (parseNixFileLoc)
+import Nix.Pretty (prettyNix)
+import Nix.Utils (Path (Path))
+import Prettyprinter
+  ( LayoutOptions (LayoutOptions),
+    PageWidth (AvailablePerLine),
+    layoutPretty,
+  )
+import Prettyprinter.Render.Text (renderStrict)
+import System.Environment (getArgs, lookupEnv)
+import System.IO (hClose)
+import System.IO.Temp (withSystemTempFile)
+import Test.HUnit
+  ( Test (TestCase, TestList),
+    assertEqual,
+    assertFailure,
+    runTestTT,
+  )
+import Prelude
+  ( Bool,
+    Either (Left, Right),
+    Eq ((==)),
+    FilePath,
+    IO,
+    Maybe (Just),
+    Show (show),
+    String,
+    any,
+    concatMap,
+    fmap,
+    fst,
+    map,
+    mapM_,
+    putStrLn,
+    ($),
+    (++),
+    (.),
+    (||),
+  )
 main :: IO ()
 main = do
   args <- getArgs

@@ -32,7 +32,6 @@ let
       clang-format.enable = true;
       deadnix.enable = true;
       dos2unix.enable = true;
-      fourmolu.enable = true;
       hclfmt.enable = true;
       hlint.enable = true;
       jsonfmt.enable = true;
@@ -54,7 +53,6 @@ let
         simplify = true;
       };
       statix.enable = true;
-      stylish-haskell.enable = true;
       taplo.enable = true;
       texfmt.enable = true;
       toml-sort.enable = true;
