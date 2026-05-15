@@ -11,6 +11,27 @@ rules:
       - "README"
       - "LICENSE"
     level: error
+  - id: root-entries-allowlist
+    kind: dir_only_contains
+    select: "."
+    allow:
+      - ".agents"
+      - ".codex"
+      - ".git"
+      - ".github"
+      - ".gitignore"
+      - ".alint.yml"
+      - "checks"
+      - "flake.lock"
+      - "flake.nix"
+      - "formatter.nix"
+      - "hosts"
+      - "LICENSE"
+      - "packages"
+      - "prm"
+      - "README"
+      - "secrets"
+    level: error
   - id: root-directories-allowlist
     kind: for_each_dir
     select: "*"

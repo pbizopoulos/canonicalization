@@ -72,7 +72,19 @@ let
           options = [
             "-lc"
             ''
-              exec ${inputs.self.packages.${pkgs.stdenv.system}.alint}/bin/alint check --fail-on-warning .
+              while IFS= read -r entry; do
+                case "$entry" in
+                  .agents|.codex|.git|.github|.gitignore|.alint.yml|checks|flake.lock|flake.nix|formatter.nix|hosts|LICENSE|packages|prm|README|secrets)
+                    ;;
+                  *)
+                    echo "alint wrapper: unexpected root entry: $entry" >&2
+                    exit 1
+                    ;;
+                esac
+              done < <(find . -mindepth 1 -maxdepth 1 -printf '%f\n')
+              exec ${
+                inputs.self.packages.${pkgs.stdenv.system}.alint
+              }/bin/alint check --fail-on-warning -c ${inputs.self}/.alint.yml .
             ''
           ];
           priority = 0;
