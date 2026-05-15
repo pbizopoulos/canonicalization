@@ -261,7 +261,6 @@ fn check_repository_directory_structure(flake_nix_path: String) -> Result<(), Ve
         r"formatter\.nix",
         r"hosts/[^/]+/configuration\.nix",
         r"hosts/[^/]+/hardware-configuration\.nix",
-        r"modules/nixos/.*",
         r"packages/[^/]+/\.gitignore",
         r"packages/[^/]+/Main\.hs",
         r"packages/[^/]+/Cargo\.toml",
@@ -321,16 +320,15 @@ fn check_repository_directory_structure(flake_nix_path: String) -> Result<(), Ve
             vec![r"packages/[^/]+/prm(/.*)?"],
         ),
     ];
-    let prefix = r"(templates/[^/]+/)?";
     let compiled_names_allowed: Vec<Regex> = names_allowed
         .iter()
-        .map(|p| Regex::new(&format!("^{prefix}{p}$")).unwrap())
+        .map(|p| Regex::new(&format!("^{p}$")).unwrap())
         .collect();
     let compiled_file_dependencies: Vec<(Regex, Vec<String>)> = file_dependencies
         .iter()
         .map(|(trigger, patterns)| {
             (
-                Regex::new(&format!("^{prefix}({trigger})$")).unwrap(),
+                Regex::new(&format!("^({trigger})$")).unwrap(),
                 patterns
                     .iter()
                     .map(std::string::ToString::to_string)
@@ -342,10 +340,9 @@ fn check_repository_directory_structure(flake_nix_path: String) -> Result<(), Ve
     for path in &dir_and_file_names {
         let path_str = path.to_str().unwrap();
         for (trigger_re, deps) in &compiled_file_dependencies {
-            if let Some(caps) = trigger_re.captures(path_str) {
-                let captured_prefix = caps.get(1).map_or("", |m| m.as_str());
+            if trigger_re.is_match(path_str) {
                 for dep in deps {
-                    let full_dep = format!("^{captured_prefix}{dep}$");
+                    let full_dep = format!("^{dep}$");
                     allowed_patterns.push(Regex::new(&full_dep).unwrap());
                 }
                 allowed_patterns.push(trigger_re.clone());
@@ -499,67 +496,20 @@ fn test_check_repository_directory_structure_standalone() {
     let result = check_repository_directory_structure(flake_nix_path.to_str().unwrap().to_string());
     assert!(result.is_err());
     fs::remove_file(temp_dir.join("unallowed.txt")).unwrap();
-    fs::create_dir_all(temp_dir.join("templates/my-template/packages/my-pkg/app/exceptions"))
-        .unwrap();
-    fs::create_dir_all(temp_dir.join("templates/my-template/packages/my-pkg/public/styles"))
-        .unwrap();
-    fs::create_dir_all(temp_dir.join("templates/my-template/packages/my-pkg/tests/e2e")).unwrap();
+    fs::create_dir_all(temp_dir.join("templates/my-template/packages/my-pkg")).unwrap();
     fs::write(
         temp_dir.join("templates/my-template/packages/my-pkg/default.nix"),
         "test",
     )
     .unwrap();
-    fs::write(
-        temp_dir.join("templates/my-template/packages/my-pkg/.env.example"),
-        "test",
-    )
-    .unwrap();
-    fs::write(
-        temp_dir.join("templates/my-template/packages/my-pkg/app/exceptions/handler.ts"),
-        "test",
-    )
-    .unwrap();
-    fs::write(
-        temp_dir.join("templates/my-template/packages/my-pkg/public/styles/app.css"),
-        "test",
-    )
-    .unwrap();
     Command::new("git")
         .args(["add", "templates"])
         .current_dir(&temp_dir)
         .output()
         .unwrap();
-    let result = check_repository_directory_structure(flake_nix_path.to_str().unwrap().to_string());
-    assert!(
-        result.is_ok(),
-        "Expected Ok for templates, but got Err: {:?}",
-        result.err()
-    );
-    fs::write(
-        temp_dir.join("templates/my-template/packages/my-pkg/unallowed.txt"),
-        "test",
-    )
-    .unwrap();
     let result = check_repository_directory_structure(flake_nix_path.to_str().unwrap().to_string());
     assert!(result.is_err());
-    fs::remove_file(temp_dir.join("templates/my-template/packages/my-pkg/unallowed.txt")).unwrap();
-    fs::create_dir_all(temp_dir.join("templates/my-template/packages/my-pkg/tests")).unwrap();
-    fs::write(
-        temp_dir.join("templates/my-template/packages/my-pkg/tests/test.ts"),
-        "test",
-    )
-    .unwrap();
-    Command::new("git")
-        .args(["add", "templates"])
-        .current_dir(&temp_dir)
-        .output()
-        .unwrap();
-    let result = check_repository_directory_structure(flake_nix_path.to_str().unwrap().to_string());
-    assert!(
-        result.is_ok(),
-        "Expected Ok for templates/tests, but got Err: {:?}",
-        result.err()
-    );
+    fs::remove_dir_all(temp_dir.join("templates")).unwrap();
     fs::create_dir_all(temp_dir.join("packages/no-default")).unwrap();
     fs::write(temp_dir.join("packages/no-default/main.py"), "test").unwrap();
     let result = check_repository_directory_structure(flake_nix_path.to_str().unwrap().to_string());
@@ -804,11 +754,8 @@ mod tests {
             .unwrap();
         let result =
             check_repository_directory_structure(flake_nix_path.to_str().unwrap().to_string());
-        assert!(
-            result.is_ok(),
-            "Expected Ok for templates, but got Err: {:?}",
-            result.err()
-        );
+        assert!(result.is_err());
+        fs::remove_dir_all(temp_dir.join("templates")).unwrap();
         fs::create_dir_all(temp_dir.join("packages/no-default")).unwrap();
         fs::write(temp_dir.join("packages/no-default/main.py"), "test").unwrap();
         let result =
