@@ -35,6 +35,12 @@ rules:
     kind: file_exists
     paths: ".github/workflows/workflow.yml"
     level: error
+  - id: github-root-allow-only-workflows
+    kind: dir_only_contains
+    select: ".github"
+    allow:
+      - "workflows"
+    level: error
   - id: github-workflows-allow-only-workflow-yml
     kind: dir_only_contains
     select: ".github/workflows"
@@ -188,6 +194,10 @@ rules:
           - "Cargo.toml"
           - "Cargo.lock"
           - "src"
+      - kind: dir_only_contains
+        select: "{path}/src"
+        allow:
+          - "main.rs"
     level: error
   - id: packages-terraform-shape
     kind: for_each_dir
