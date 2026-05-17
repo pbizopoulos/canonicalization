@@ -853,4 +853,81 @@ mod tests {
         );
         fs::remove_dir_all(&temp_dir).unwrap();
     }
+    #[test]
+    fn test_python_package_layout_matches_repository_conventions() {
+        std::env::remove_var("NIX_BUILD_TOP");
+        let temp_dir = std::env::temp_dir().join("test-repo-structure-python");
+        init_temp_repo(&temp_dir);
+        let package_root = temp_dir.join("packages/python_template");
+        fs::create_dir_all(&package_root).unwrap();
+        for (relative_path, contents) in [
+            (".gitignore", "tmp/\n"),
+            ("default.nix", "{}"),
+            ("main.py", "print('Hello World')\n"),
+        ] {
+            fs::write(package_root.join(relative_path), contents).unwrap();
+        }
+        Command::new("git")
+            .args(["add", "packages"])
+            .current_dir(&temp_dir)
+            .output()
+            .unwrap();
+        let flake_path = temp_dir.join("flake.nix");
+        let result =
+            validate_repository_directory_structure(flake_path.to_str().unwrap().to_string());
+        assert!(
+            result.is_ok(),
+            "Expected Ok for python_template layout, but got Err: {:?}",
+            result.err()
+        );
+        fs::write(package_root.join("extra.py"), "print('extra')\n").unwrap();
+        let result =
+            validate_repository_directory_structure(flake_path.to_str().unwrap().to_string());
+        assert!(
+            result.is_err(),
+            "Expected Err for non-whitelisted Python file, but got Ok",
+        );
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+    #[test]
+    fn test_rust_package_layout_matches_repository_conventions() {
+        std::env::remove_var("NIX_BUILD_TOP");
+        let temp_dir = std::env::temp_dir().join("test-repo-structure-rust");
+        init_temp_repo(&temp_dir);
+        let package_root = temp_dir.join("packages/rust-template");
+        fs::create_dir_all(package_root.join("src")).unwrap();
+        for (relative_path, contents) in [
+            (".gitignore", "target/\n"),
+            ("default.nix", "{}"),
+            (
+                "Cargo.toml",
+                "[package]\nname = \"rust-template\"\nversion = \"0.1.0\"\n",
+            ),
+            ("Cargo.lock", "# lock\n"),
+            ("src/main.rs", "fn main() {}\n"),
+        ] {
+            fs::write(package_root.join(relative_path), contents).unwrap();
+        }
+        Command::new("git")
+            .args(["add", "packages"])
+            .current_dir(&temp_dir)
+            .output()
+            .unwrap();
+        let flake_path = temp_dir.join("flake.nix");
+        let result =
+            validate_repository_directory_structure(flake_path.to_str().unwrap().to_string());
+        assert!(
+            result.is_ok(),
+            "Expected Ok for rust-template layout, but got Err: {:?}",
+            result.err()
+        );
+        fs::write(package_root.join("src/lib.rs"), "pub fn x() {}\n").unwrap();
+        let result =
+            validate_repository_directory_structure(flake_path.to_str().unwrap().to_string());
+        assert!(
+            result.is_err(),
+            "Expected Err for non-whitelisted Rust source file, but got Ok",
+        );
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
 }
