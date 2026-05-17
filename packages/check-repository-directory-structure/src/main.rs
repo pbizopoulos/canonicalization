@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
-struct CliArgs {
+struct Cli {
     #[arg(default_value = "flake.nix")]
-    flake_nix_path: String,
+    flake_path: String,
 }
 fn is_valid_domain_name(name: &str) -> bool {
     if name != name.to_lowercase() {
@@ -123,9 +123,9 @@ fn validate_fastapi_package_layout(
 }
 use std::time::{SystemTime, UNIX_EPOCH};
 fn main() {
-    let args = CliArgs::parse();
-    let flake_nix_path = args.flake_nix_path;
-    let lock_path = std::env::temp_dir().join("check_repository_directory_structure.lock");
+    let args = Cli::parse();
+    let flake_path = args.flake_path;
+    let lock_path = std::env::temp_dir().join("validate_repository_directory_structure.lock");
     let lock_file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -144,7 +144,7 @@ fn main() {
     if now - last_run < 5 {
         std::process::exit(0);
     }
-    match check_repository_directory_structure(flake_nix_path) {
+    match validate_repository_directory_structure(flake_path) {
         #[allow(clippy::ignored_unit_patterns)]
         Ok(()) => {
             std::fs::write(&lock_path, now.to_string()).unwrap();
@@ -156,12 +156,12 @@ fn main() {
         }
     }
 }
-fn check_repository_directory_structure(flake_nix_path: String) -> Result<(), Vec<String>> {
+fn validate_repository_directory_structure(flake_path: String) -> Result<(), Vec<String>> {
     if std::env::var("NIX_BUILD_TOP").is_ok() {
         return Ok(());
     }
     let mut warnings = Vec::new();
-    let dir_path = Path::new(&flake_nix_path)
+    let dir_path = Path::new(&flake_path)
         .canonicalize()
         .expect("Failed to canonicalize path");
     let Ok(repo) = Repository::discover(&dir_path) else {
@@ -505,15 +505,15 @@ fn test_check_repository_directory_structure_standalone() {
         .current_dir(&temp_dir)
         .output()
         .expect("Failed to commit");
-    let flake_nix_path = temp_dir.join("flake.nix");
-    let result = check_repository_directory_structure(flake_nix_path.to_str().unwrap().to_string());
+    let flake_path = temp_dir.join("flake.nix");
+    let result = validate_repository_directory_structure(flake_path.to_str().unwrap().to_string());
     assert!(
         result.is_ok(),
         "Expected Ok, but got Err: {:?}",
         result.err()
     );
     fs::write(temp_dir.join("unallowed.txt"), "test").unwrap();
-    let result = check_repository_directory_structure(flake_nix_path.to_str().unwrap().to_string());
+    let result = validate_repository_directory_structure(flake_path.to_str().unwrap().to_string());
     assert!(result.is_err());
     fs::remove_file(temp_dir.join("unallowed.txt")).unwrap();
     fs::create_dir_all(temp_dir.join("templates/my-template/packages/my-pkg")).unwrap();
@@ -527,12 +527,12 @@ fn test_check_repository_directory_structure_standalone() {
         .current_dir(&temp_dir)
         .output()
         .unwrap();
-    let result = check_repository_directory_structure(flake_nix_path.to_str().unwrap().to_string());
+    let result = validate_repository_directory_structure(flake_path.to_str().unwrap().to_string());
     assert!(result.is_err());
     fs::remove_dir_all(temp_dir.join("templates")).unwrap();
     fs::create_dir_all(temp_dir.join("packages/no-default")).unwrap();
     fs::write(temp_dir.join("packages/no-default/main.py"), "test").unwrap();
-    let result = check_repository_directory_structure(flake_nix_path.to_str().unwrap().to_string());
+    let result = validate_repository_directory_structure(flake_path.to_str().unwrap().to_string());
     assert!(result.is_err());
     fs::remove_dir_all(temp_dir.join("packages/no-default")).unwrap();
     fs::remove_dir(temp_dir.join("packages")).unwrap();
@@ -548,14 +548,14 @@ fn test_check_repository_directory_structure_standalone() {
         .current_dir(&temp_dir)
         .output()
         .unwrap();
-    let result = check_repository_directory_structure(flake_nix_path.to_str().unwrap().to_string());
+    let result = validate_repository_directory_structure(flake_path.to_str().unwrap().to_string());
     assert!(
         result.is_ok(),
         "Expected Ok for hosts/configuration.nix, but got Err: {:?}",
         result.err()
     );
     fs::write(temp_dir.join("hosts/my-host/.gitignore"), "test").unwrap();
-    let result = check_repository_directory_structure(flake_nix_path.to_str().unwrap().to_string());
+    let result = validate_repository_directory_structure(flake_path.to_str().unwrap().to_string());
     assert!(result.is_err());
     fs::remove_file(temp_dir.join("hosts/my-host/.gitignore")).unwrap();
     fs::create_dir_all(temp_dir.join("hosts/only-hardware")).unwrap();
@@ -564,10 +564,10 @@ fn test_check_repository_directory_structure_standalone() {
         "test",
     )
     .unwrap();
-    let result = check_repository_directory_structure(flake_nix_path.to_str().unwrap().to_string());
+    let result = validate_repository_directory_structure(flake_path.to_str().unwrap().to_string());
     assert!(result.is_err());
     fs::remove_dir_all(&temp_dir).unwrap();
-    println!("test check_repository_directory_structure ... ok");
+    println!("test validate_repository_directory_structure ... ok");
 }
 fn test_is_valid_domain_name_standalone() {
     assert!(is_valid_domain_name("google.com"));
@@ -743,9 +743,9 @@ mod tests {
         std::env::remove_var("NIX_BUILD_TOP");
         let temp_dir = std::env::temp_dir().join("test-repo-structure");
         init_temp_repo(&temp_dir);
-        let flake_nix_path = temp_dir.join("flake.nix");
+        let flake_path = temp_dir.join("flake.nix");
         let result =
-            check_repository_directory_structure(flake_nix_path.to_str().unwrap().to_string());
+            validate_repository_directory_structure(flake_path.to_str().unwrap().to_string());
         assert!(
             result.is_ok(),
             "Expected Ok, but got Err: {:?}",
@@ -753,7 +753,7 @@ mod tests {
         );
         fs::write(temp_dir.join("unallowed.txt"), "test").unwrap();
         let result =
-            check_repository_directory_structure(flake_nix_path.to_str().unwrap().to_string());
+            validate_repository_directory_structure(flake_path.to_str().unwrap().to_string());
         assert!(result.is_err());
         fs::remove_file(temp_dir.join("unallowed.txt")).unwrap();
         fs::create_dir_all(temp_dir.join("templates/my-template/packages/my-pkg")).unwrap();
@@ -773,13 +773,13 @@ mod tests {
             .output()
             .unwrap();
         let result =
-            check_repository_directory_structure(flake_nix_path.to_str().unwrap().to_string());
+            validate_repository_directory_structure(flake_path.to_str().unwrap().to_string());
         assert!(result.is_err());
         fs::remove_dir_all(temp_dir.join("templates")).unwrap();
         fs::create_dir_all(temp_dir.join("packages/no-default")).unwrap();
         fs::write(temp_dir.join("packages/no-default/main.py"), "test").unwrap();
         let result =
-            check_repository_directory_structure(flake_nix_path.to_str().unwrap().to_string());
+            validate_repository_directory_structure(flake_path.to_str().unwrap().to_string());
         assert!(result.is_err());
         fs::remove_dir_all(temp_dir.join("packages/no-default")).unwrap();
         fs::remove_dir(temp_dir.join("packages")).unwrap();
@@ -796,7 +796,7 @@ mod tests {
             .output()
             .unwrap();
         let result =
-            check_repository_directory_structure(flake_nix_path.to_str().unwrap().to_string());
+            validate_repository_directory_structure(flake_path.to_str().unwrap().to_string());
         assert!(
             result.is_ok(),
             "Expected Ok for hosts/configuration.nix, but got Err: {:?}",
@@ -804,7 +804,7 @@ mod tests {
         );
         fs::write(temp_dir.join("hosts/my-host/.gitignore"), "test").unwrap();
         let result =
-            check_repository_directory_structure(flake_nix_path.to_str().unwrap().to_string());
+            validate_repository_directory_structure(flake_path.to_str().unwrap().to_string());
         assert!(result.is_err());
         fs::remove_file(temp_dir.join("hosts/my-host/.gitignore")).unwrap();
         fs::create_dir_all(temp_dir.join("hosts/only-hardware")).unwrap();
@@ -814,7 +814,7 @@ mod tests {
         )
         .unwrap();
         let result =
-            check_repository_directory_structure(flake_nix_path.to_str().unwrap().to_string());
+            validate_repository_directory_structure(flake_path.to_str().unwrap().to_string());
         assert!(result.is_err());
         fs::remove_dir_all(&temp_dir).unwrap();
     }
@@ -878,9 +878,9 @@ mod tests {
             .current_dir(&temp_dir)
             .output()
             .unwrap();
-        let flake_nix_path = temp_dir.join("flake.nix");
+        let flake_path = temp_dir.join("flake.nix");
         let result =
-            check_repository_directory_structure(flake_nix_path.to_str().unwrap().to_string());
+            validate_repository_directory_structure(flake_path.to_str().unwrap().to_string());
         assert!(
             result.is_ok(),
             "Expected Ok for the current Django package layout, but got Err: {:?}",
@@ -893,7 +893,7 @@ mod tests {
         )
         .unwrap();
         let result =
-            check_repository_directory_structure(flake_nix_path.to_str().unwrap().to_string());
+            validate_repository_directory_structure(flake_path.to_str().unwrap().to_string());
         assert!(
             result.is_err(),
             "Expected Err with generated cache directories, but got: {:?}",
@@ -901,7 +901,7 @@ mod tests {
         );
         fs::write(package_root.join("starter/admin.py"), "class Admin: ...\n").unwrap();
         let result =
-            check_repository_directory_structure(flake_nix_path.to_str().unwrap().to_string());
+            validate_repository_directory_structure(flake_path.to_str().unwrap().to_string());
         assert!(
             result.is_err(),
             "Expected Err for non-whitelisted Django module, but got Ok",
@@ -937,9 +937,9 @@ mod tests {
             .current_dir(&temp_dir)
             .output()
             .unwrap();
-        let flake_nix_path = temp_dir.join("flake.nix");
+        let flake_path = temp_dir.join("flake.nix");
         let result =
-            check_repository_directory_structure(flake_nix_path.to_str().unwrap().to_string());
+            validate_repository_directory_structure(flake_path.to_str().unwrap().to_string());
         assert!(
             result.is_ok(),
             "Expected Ok for the current FastAPI package layout, but got Err: {:?}",
@@ -947,7 +947,7 @@ mod tests {
         );
         fs::write(package_root.join("admin.py"), "class Admin: ...\n").unwrap();
         let result =
-            check_repository_directory_structure(flake_nix_path.to_str().unwrap().to_string());
+            validate_repository_directory_structure(flake_path.to_str().unwrap().to_string());
         assert!(
             result.is_err(),
             "Expected Err for non-whitelisted FastAPI module, but got Ok",

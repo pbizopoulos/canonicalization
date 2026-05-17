@@ -5,17 +5,17 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.is_empty() {
-        process_path(Path::new("."));
+    let input_paths: Vec<String> = std::env::args().skip(1).collect();
+    if input_paths.is_empty() {
+        process_root_path(Path::new("."));
     } else {
-        for arg in args {
-            process_path(Path::new(&arg));
+        for input_path in input_paths {
+            process_root_path(Path::new(&input_path));
         }
     }
     Ok(())
 }
-fn process_path(root: &Path) {
+fn process_root_path(root: &Path) {
     let walker = WalkBuilder::new(root).require_git(false).build();
     for result in walker {
         match result {
@@ -60,7 +60,7 @@ mod tests {
     use super::*;
     use std::env;
     #[test]
-    fn test_main_and_process_path() -> Result<()> {
+    fn test_main_and_process_root_path() -> Result<()> {
         use tempfile::tempdir;
         let dir = tempdir()?;
         let root = dir.path();
