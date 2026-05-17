@@ -89,38 +89,6 @@ fn validate_django_package_layout(
     }
     warnings
 }
-fn validate_fastapi_package_layout(
-    working_dir: &Path,
-    package_root: &Path,
-    dir_and_file_names: &HashSet<PathBuf>,
-) -> Vec<String> {
-    let allowed_patterns = [
-        r"^\.gitignore$",
-        r"^default\.nix$",
-        r"^main\.py$",
-        r"^prm(/.*)?$",
-    ]
-    .iter()
-    .map(|pattern| Regex::new(pattern).unwrap())
-    .collect::<Vec<_>>();
-    let mut warnings = Vec::new();
-    for path in dir_and_file_names {
-        let Ok(package_relative_path) = path.strip_prefix(package_root) else {
-            continue;
-        };
-        let package_relative_path = package_relative_path.to_str().unwrap();
-        if !allowed_patterns
-            .iter()
-            .any(|pattern| pattern.is_match(package_relative_path))
-        {
-            warnings.push(format!(
-                "{}: is not allowed for a FastAPI template package",
-                working_dir.join(path).display()
-            ));
-        }
-    }
-    warnings
-}
 use std::time::{SystemTime, UNIX_EPOCH};
 fn main() {
     let args = Cli::parse();
@@ -394,15 +362,6 @@ fn validate_repository_directory_structure(flake_path: String) -> Result<(), Vec
         }
         if all_rel_paths.contains(&package_root.join("manage.py")) {
             final_warnings.extend(validate_django_package_layout(
-                working_dir,
-                package_root,
-                &dir_and_file_names,
-            ));
-        }
-        if all_rel_paths.contains(&package_root.join("main.py"))
-            && all_rel_paths.contains(&package_root.join("prm"))
-        {
-            final_warnings.extend(validate_fastapi_package_layout(
                 working_dir,
                 package_root,
                 &dir_and_file_names,
@@ -725,20 +684,6 @@ mod tests {
         assert!(warnings[0].contains("__pycache__/views.cpython-313.pyc"));
     }
     #[test]
-    fn test_validate_fastapi_package_layout_accepts_conventional_layout() {
-        let working_dir = Path::new("/tmp/repo");
-        let package_root = Path::new("packages/fastapi_postgres_template");
-        let dir_and_file_names = HashSet::from([
-            PathBuf::from("packages/fastapi_postgres_template/default.nix"),
-            PathBuf::from("packages/fastapi_postgres_template/main.py"),
-            PathBuf::from("packages/fastapi_postgres_template/prm/templates/auth/login.html"),
-            PathBuf::from("packages/fastapi_postgres_template/prm/static/app.css"),
-        ]);
-        let warnings =
-            validate_fastapi_package_layout(working_dir, package_root, &dir_and_file_names);
-        assert!(warnings.is_empty());
-    }
-    #[test]
     fn test_check_repository_directory_structure() {
         std::env::remove_var("NIX_BUILD_TOP");
         let temp_dir = std::env::temp_dir().join("test-repo-structure");
@@ -905,52 +850,6 @@ mod tests {
         assert!(
             result.is_err(),
             "Expected Err for non-whitelisted Django module, but got Ok",
-        );
-        fs::remove_dir_all(&temp_dir).unwrap();
-    }
-    #[test]
-    fn test_fastapi_package_layout_matches_repository_conventions() {
-        std::env::remove_var("NIX_BUILD_TOP");
-        let temp_dir = std::env::temp_dir().join("test-repo-structure-fastapi");
-        init_temp_repo(&temp_dir);
-        let package_root = temp_dir.join("packages/fastapi_postgres_template");
-        for relative_dir in ["prm/static", "prm/templates/auth", "tmp/coverage/html"] {
-            fs::create_dir_all(package_root.join(relative_dir)).unwrap();
-        }
-        for (relative_path, contents) in [
-            (".gitignore", "tmp/\n"),
-            ("default.nix", "{}"),
-            ("main.py", "app = object()\n"),
-            ("prm/static/app.css", "body {}\n"),
-            ("prm/templates/404.html", "not found\n"),
-            ("prm/templates/auth/login.html", "login\n"),
-            ("prm/templates/auth/register.html", "register\n"),
-            ("prm/templates/base.html", "base\n"),
-            ("prm/templates/dashboard.html", "dashboard\n"),
-            ("prm/templates/home.html", "home\n"),
-            ("tmp/coverage/html/.gitignore", "*\n"),
-        ] {
-            fs::write(package_root.join(relative_path), contents).unwrap();
-        }
-        Command::new("git")
-            .args(["add", "packages"])
-            .current_dir(&temp_dir)
-            .output()
-            .unwrap();
-        let flake_path = temp_dir.join("flake.nix");
-        let result =
-            validate_repository_directory_structure(flake_path.to_str().unwrap().to_string());
-        assert!(
-            result.is_ok(),
-            "Expected Ok for the current FastAPI package layout, but got Err: {:?}",
-            result.err()
-        );
-        fs::write(package_root.join("admin.py"), "class Admin: ...\n").unwrap();
-        let result =
-            validate_repository_directory_structure(flake_path.to_str().unwrap().to_string());
-        assert!(
-            result.is_err(),
-            "Expected Err for non-whitelisted FastAPI module, but got Ok",
         );
         fs::remove_dir_all(&temp_dir).unwrap();
     }
