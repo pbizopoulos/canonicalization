@@ -79,8 +79,8 @@ let
         biome.options = [
           "--max-diagnostics=none"
         ];
-        check_repository_directory_structure = {
-          command = inputs.self.packages.${pkgs.stdenv.system}.check_repository_directory_structure;
+        check-repository-directory-structure = {
+          command = inputs.self.packages.${pkgs.stdenv.system}."check-repository-directory-structure";
           includes = [
             "flake.nix"
           ];
@@ -113,8 +113,8 @@ let
           priority = 0;
         };
         nixfmt.priority = 1;
-        remove_empty_lines = {
-          command = inputs.self.packages.${pkgs.stdenv.system}.remove_empty_lines;
+        remove-empty-lines = {
+          command = inputs.self.packages.${pkgs.stdenv.system}."remove-empty-lines";
           includes = [
             "*"
           ];

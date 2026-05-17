@@ -47,11 +47,7 @@ let
 in
 pkgs.rustPlatform.buildRustPackage {
   inherit pname;
-  buildInputs = [
-    pkgs.openssl
-    pkgs.zlib
-  ];
-  cargoHash = "sha256-w4LvRdS5zom3TfCNNBYtq44LIPTJ7YYpemfuyfxqAPs=";
+  cargoHash = "sha256-5FZKAFwP3QKw6KDiJsshJXkpU9jbUCeQStsTAkIfOjA=";
   doInstallCheck = pkgs.stdenv.isLinux;
   env = {
     RUSTDOCFLAGS = "-D warnings";
@@ -60,14 +56,10 @@ pkgs.rustPlatform.buildRustPackage {
   installCheckPhase = ''
     runHook preInstallCheck
     test -x "$out/bin/${pname}"
-    NIX_BUILD_TOP=1 "$out/bin/${pname}"
+    "$out/bin/${pname}"
     runHook postInstallCheck
   '';
   meta.mainProgram = pname;
-  nativeBuildInputs = [
-    pkgs.git
-    pkgs.pkg-config
-  ];
   postInstall = ''
     mv "$out/bin/${pname}" "$out/bin/.${pname}-wrapped"
     install -m755 ${wrapperScript} "$out/bin/${pname}"

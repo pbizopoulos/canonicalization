@@ -1,3 +1,7 @@
+[[bin]]
+name = "check-repository-directory-structure"
+path = "src/main.rs"
+
 [dependencies]
 clap = {version = "4.5", features = ["derive"]}
 fd-lock = "4.0"
@@ -7,7 +11,7 @@ regex = "1.10"
 walkdir = "2.5"
 
 [package]
-name = "check_repository_directory_structure"
+name = "check-repository-directory-structure"
 version = "0.1.0"
 edition = "2021"
 description = "A CLI tool to check the repository directory structure."

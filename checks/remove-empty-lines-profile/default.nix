@@ -5,7 +5,7 @@
 }:
 let
   checkName = builtins.baseNameOf ./.;
-  packageName = "rust_template";
+  packageName = "remove-empty-lines";
 in
 pkgs.runCommand "${checkName}"
   {
@@ -16,8 +16,11 @@ pkgs.runCommand "${checkName}"
     src = ../../packages/${packageName};
   }
   ''
+    temp_dir="$PWD/workspace"
+    mkdir -p "$temp_dir"
+    printf 'line1\n\nline2\n' > "$temp_dir/test.txt"
     run_cmd() {
-      rust_template
+      remove-empty-lines "$temp_dir"
     }
     if perf stat -e cpu-clock true >/dev/null 2>&1; then
       perf record --no-buildid-mmap --call-graph dwarf -e cpu-clock -o perf.data -- \

@@ -198,7 +198,10 @@ fn get_available_templates() -> Result<Vec<(String, PathBuf)>, String> {
             let path = entry.path();
             if path.is_dir() {
                 if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
-                    if let Some(flag) = name.strip_suffix("_template") {
+                    if let Some(flag) = name
+                        .strip_suffix("_template")
+                        .or_else(|| name.strip_suffix("-template"))
+                    {
                         templates.push((flag.to_string(), path));
                     }
                 }
@@ -291,10 +294,10 @@ mod tests {
         let root = unique_temp_dir("default-templates");
         fs::write(root.join("flake.nix"), "{}").expect("failed to write flake.nix");
         let packages = root.join("packages");
-        fs::create_dir_all(packages.join("rust_template")).expect("failed to create rust_template");
+        fs::create_dir_all(packages.join("rust-template")).expect("failed to create rust-template");
         fs::create_dir_all(packages.join("python_template"))
             .expect("failed to create python_template");
-        fs::create_dir_all(packages.join("not-a-template")).expect("failed to create non-template");
+        fs::create_dir_all(packages.join("not-a-templ")).expect("failed to create non-template");
         env::set_var("CANONICALIZATION_ROOT", &root);
         let templates = get_available_templates().expect("failed to read templates");
         env::remove_var("CANONICALIZATION_ROOT");

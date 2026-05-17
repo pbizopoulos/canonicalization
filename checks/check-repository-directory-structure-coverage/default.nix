@@ -4,7 +4,7 @@
   ...
 }:
 let
-  name = "check_repository_directory_structure";
+  name = "check-repository-directory-structure";
   pkgConfigPath = pkgs.lib.makeSearchPathOutput "dev" "lib/pkgconfig" [
     pkgs.openssl
     pkgs.zlib
@@ -19,10 +19,11 @@ pkgs.runCommand "${name}"
     ];
     nativeBuildInputs = [
       pkgs.cargo
-      pkgs.cargo-mutants
+      pkgs.cargo-llvm-cov
       pkgs.coreutils
       pkgs.llvmPackages.clang
       pkgs.git
+      pkgs.llvmPackages.llvm
       pkgs.pkg-config
       pkgs.rustc
       pkgs.stdenv.cc
@@ -32,14 +33,13 @@ pkgs.runCommand "${name}"
   ''
     export LIBCLANG_PATH='${pkgs.llvmPackages.libclang.lib}/lib'
     export PKG_CONFIG_PATH='${pkgConfigPath}'
+    export LLVM_COV='${pkgs.lib.getExe' pkgs.llvmPackages.llvm "llvm-cov"}'
+    export LLVM_PROFDATA='${pkgs.lib.getExe' pkgs.llvmPackages.llvm "llvm-profdata"}'
     cp -R --no-preserve=mode "$src" "$PWD/workspace"
     install -Dm644 "${cargoDeps}/.cargo/config.toml" "$PWD/workspace/.cargo/config.toml"
     substituteInPlace "$PWD/workspace/.cargo/config.toml" \
       --replace-fail "@vendor@" "${cargoDeps}"
     cd "$PWD/workspace"
-    cargo mutants || mutation_status=$?
-    if [ "''${mutation_status:-0}" != 0 ] && [ "''${mutation_status:-0}" != 2 ]; then
-      exit "$mutation_status"
-    fi
+    cargo llvm-cov
     touch "$out"
   ''

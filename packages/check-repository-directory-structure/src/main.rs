@@ -30,7 +30,7 @@ fn is_dash_case(name: &str) -> bool {
     re.is_match(name)
 }
 fn should_ignore_untracked_path(path: &str) -> bool {
-    path == ".codex"
+    path == ".codex" || path == ".agents"
 }
 fn package_root(rel_path: &Path) -> Option<PathBuf> {
     let components: Vec<_> = rel_path
