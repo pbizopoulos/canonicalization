@@ -13,11 +13,11 @@ fn main() -> ExitCode {
 }
 fn run() -> Result<(), String> {
     let config = parse_args()?;
-    let target_dir = Path::new(&config.directory);
+    let target_dir = Path::new(&config.target_directory);
     let available_templates = get_available_templates()?;
     let templates_to_copy: Vec<PathBuf> = available_templates
         .into_iter()
-        .filter_map(|(name, path)| config.templates.contains(&name).then_some(path))
+        .filter_map(|(name, path)| config.selected_templates.contains(&name).then_some(path))
         .collect();
     if !target_dir.exists() {
         log_progress(format_args!(
@@ -92,28 +92,29 @@ fn run() -> Result<(), String> {
 }
 #[derive(Debug)]
 struct Config {
-    directory: String,
-    templates: Vec<String>,
+    target_directory: String,
+    selected_templates: Vec<String>,
 }
 fn parse_args() -> Result<Config, String> {
-    parse_args_from(env::args().skip(1))
+    parse_args_from(env::args())
 }
 fn parse_args_from<I>(args: I) -> Result<Config, String>
 where
     I: IntoIterator<Item = String>,
 {
     let mut args = args.into_iter();
-    let directory = args
+    let program_name = args.next().unwrap_or_else(|| "default".to_string());
+    let target_directory = args
         .next()
-        .ok_or_else(|| "Usage: default <directory> [--templates rust,python]".to_string())?;
-    let mut templates = Vec::new();
+        .ok_or_else(|| format!("Usage: {program_name} <directory> [--templates rust,python]"))?;
+    let mut selected_templates = Vec::new();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-t" | "--templates" => {
                 let value = args
                     .next()
                     .ok_or_else(|| "Missing value for --templates".to_string())?;
-                templates.extend(
+                selected_templates.extend(
                     value
                         .split(',')
                         .filter(|item| !item.is_empty())
@@ -122,7 +123,7 @@ where
             }
             value if value.starts_with("--templates=") => {
                 let value = &value["--templates=".len()..];
-                templates.extend(
+                selected_templates.extend(
                     value
                         .split(',')
                         .filter(|item| !item.is_empty())
@@ -135,8 +136,8 @@ where
         }
     }
     Ok(Config {
-        directory,
-        templates,
+        target_directory,
+        selected_templates,
     })
 }
 fn run_command(command: &mut Command, label: &str) -> Result<(), String> {
@@ -269,24 +270,30 @@ mod tests {
     #[test]
     fn parse_args_from_supports_templates_formats() {
         let long = parse_args_from(vec![
+            "default".to_string(),
             "target".to_string(),
             "--templates".to_string(),
             "rust,python".to_string(),
         ])
         .expect("failed to parse --templates");
-        assert_eq!(long.directory, "target");
-        assert_eq!(long.templates, vec!["rust", "python"]);
+        assert_eq!(long.target_directory, "target");
+        assert_eq!(long.selected_templates, vec!["rust", "python"]);
         let equals = parse_args_from(vec![
+            "default".to_string(),
             "target".to_string(),
             "--templates=go,rust".to_string(),
         ])
         .expect("failed to parse --templates=<...>");
-        assert_eq!(equals.templates, vec!["go", "rust"]);
+        assert_eq!(equals.selected_templates, vec!["go", "rust"]);
     }
     #[test]
     fn parse_args_from_rejects_unknown_flags() {
-        let err = parse_args_from(vec!["target".to_string(), "--unknown".to_string()])
-            .expect_err("expected unrecognized argument");
+        let err = parse_args_from(vec![
+            "default".to_string(),
+            "target".to_string(),
+            "--unknown".to_string(),
+        ])
+        .expect_err("expected unrecognized argument");
         assert_eq!(err, "Unrecognized argument: --unknown");
     }
     #[test]
