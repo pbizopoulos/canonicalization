@@ -94,10 +94,9 @@ templateSpecs =
       },
     TemplateSpec
       { templateName = "deploy_host_template",
-        matchesTemplate = \packageName content ->
+        matchesTemplate = \_ content ->
           pure
-            ( packageName == "deploy_host_template"
-                && "writeShellApplication" `isInfixOf` content
+            ( "writeShellApplication" `isInfixOf` content
                 && ("opentofu" `isInfixOf` content || "agenix-shell" `isInfixOf` content)
             ),
         allowedDifferenceKeys = defaultAllowedKeys,
@@ -174,7 +173,10 @@ checkPackage packageName = do
       packageContents <- TIO.readFile packageDefault
       inferredTemplate <- inferTemplateName packageName (T.unpack packageContents)
       case inferredTemplate of
-        Nothing -> pure []
+        Nothing ->
+          pure
+            [ "packages/" ++ packageName ++ "/default.nix: could not infer corresponding template"
+            ]
         Just inferredTemplateName -> do
           case templateSpecByName inferredTemplateName of
             Nothing ->
