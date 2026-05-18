@@ -88,7 +88,7 @@ templateSpecs =
       },
     TemplateSpec
       { templateName = "python_template",
-        matchesTemplate = \_ content -> pure ("python3Packages.buildPythonPackage" `isInfixOf` content),
+        matchesTemplate = \_ content -> pure ("buildPythonPackage" `isInfixOf` content),
         allowedDifferenceKeys = Set.fromList ["propagatedBuildInputs", "version"],
         embeddedBaseline = Just pythonTemplateBaseline
       },
@@ -136,7 +136,7 @@ templateSpecs =
   ]
 pythonLatexDetector :: FilePath -> String -> IO Bool
 pythonLatexDetector packageName content
-  | "python3Packages.buildPythonPackage" `isInfixOf` content = do
+  | "buildPythonPackage" `isInfixOf` content = do
       let packageRoot = "packages" </> packageName
       hasMsTex <- doesFileExist (packageRoot </> "ms.tex")
       hasRefsBib <- doesFileExist (packageRoot </> "refs.bib")
