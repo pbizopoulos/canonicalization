@@ -6,14 +6,14 @@ cd ~/github.com/pbizopoulos/canonicalization/
 
 # Domain name is optional.
 # Without a domain, the template deploys over plain HTTP and is reachable by IP/hostname.
-# If you want HTTPS, you must set your own real domain in hosts/django-template/configuration.nix
+# If you want HTTPS, you must set your own real domain in hosts/default/configuration.nix
 # before deployment:
 # - set services.nginx.virtualHosts."<your-domain>".default = true
 # - set services.nginx.virtualHosts."<your-domain>".enableACME = true
 # - set services.nginx.virtualHosts."<your-domain>".forceSSL = true
 # - set services.nginx.virtualHosts."<your-domain>".locations."/" to proxy to your app
-# - set systemd.services.django_template.environment.ALLOWED_HOSTS to include your domain
-# - set systemd.services.django_template.environment.CSRF_TRUSTED_ORIGINS = "https://<your-domain>"
+# - set systemd.services.default.environment.ALLOWED_HOSTS to include your domain
+# - set systemd.services.default.environment.CSRF_TRUSTED_ORIGINS = "https://<your-domain>"
 # - add a matching security.acme configuration and email address
 
 cd secrets/

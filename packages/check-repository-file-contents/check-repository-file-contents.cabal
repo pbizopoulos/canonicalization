@@ -1,0 +1,19 @@
+name:          check-repository-file-contents
+version:       0.0.0
+synopsis:
+  Check package default.nix contents against template defaults.
+cabal-version: >=1.10
+build-type:    Simple
+executable check-repository-file-contents
+  main-is:       Main.hs
+  build-depends:
+      base
+    , containers
+    , data-fix
+    , directory
+    , filepath
+    , hnix
+    , HUnit
+    , prettyprinter
+    , text
+  ghc-options:   -O2 -Weverything -Werror -threaded

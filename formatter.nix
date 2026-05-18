@@ -86,6 +86,13 @@ let
           ];
           priority = 0;
         };
+        check-repository-file-contents = {
+          command = inputs.self.packages.${pkgs.stdenv.system}."check-repository-file-contents";
+          includes = [
+            "flake.nix"
+          ];
+          priority = 0;
+        };
         clippy = {
           command = "${clippy-script}/bin/clippy";
           includes = [

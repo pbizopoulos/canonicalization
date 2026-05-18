@@ -52,43 +52,6 @@ fn host_root(rel_path: &Path) -> Option<PathBuf> {
         _ => None,
     }
 }
-fn validate_django_package_layout(
-    working_dir: &Path,
-    package_root: &Path,
-    dir_and_file_names: &HashSet<PathBuf>,
-) -> Vec<String> {
-    let allowed_patterns = [
-        r"^\.gitignore$",
-        r"^default\.nix$",
-        r"^manage\.py$",
-        r"^[^/]+/__init__\.py$",
-        r"^[^/]+/(apps|auth_backends|context_processors|forms|models|settings|throttle|urls|views|wsgi)\.py$",
-        r"^[^/]+/migrations(/.*)?$",
-        r"^[^/]+/tests(/.*)?$",
-        r"^templates(/.*)?$",
-        r"^static(/.*)?$",
-    ]
-    .iter()
-    .map(|pattern| Regex::new(pattern).unwrap())
-    .collect::<Vec<_>>();
-    let mut warnings = Vec::new();
-    for path in dir_and_file_names {
-        let Ok(package_relative_path) = path.strip_prefix(package_root) else {
-            continue;
-        };
-        let package_relative_path = package_relative_path.to_str().unwrap();
-        if !allowed_patterns
-            .iter()
-            .any(|pattern| pattern.is_match(package_relative_path))
-        {
-            warnings.push(format!(
-                "{}: is not allowed for a Django template package",
-                working_dir.join(path).display()
-            ));
-        }
-    }
-    warnings
-}
 use std::time::{SystemTime, UNIX_EPOCH};
 fn main() {
     let args = Cli::parse();
@@ -228,6 +191,7 @@ fn validate_repository_directory_structure(flake_path: String) -> Result<(), Vec
     let names_allowed = [
         r"\.git(/.*)?",
         r"\.github/workflows/workflow\.yml",
+        r"\.agents(/.*)?",
         r"\.codex(/.*)?",
         r"\.gitignore",
         r"CITATION\.bib",
@@ -359,13 +323,6 @@ fn validate_repository_directory_structure(flake_path: String) -> Result<(), Vec
                 ))
                 .unwrap(),
             );
-        }
-        if all_rel_paths.contains(&package_root.join("manage.py")) {
-            final_warnings.extend(validate_django_package_layout(
-                working_dir,
-                package_root,
-                &dir_and_file_names,
-            ));
         }
         if all_rel_paths.contains(&package_root.join("Main.hs"))
             && !all_rel_paths.contains(&package_root.join(format!("{package_name}.cabal")))
@@ -606,25 +563,20 @@ mod tests {
     #[test]
     fn test_should_ignore_untracked_path() {
         assert!(should_ignore_untracked_path(".codex"));
+        assert!(should_ignore_untracked_path(".agents"));
         assert!(!should_ignore_untracked_path(
-            "packages/django_template/starter/__pycache__",
-        ));
-        assert!(!should_ignore_untracked_path(
-            "packages/django_template/starter/__pycache__/views.cpython-313.pyc",
-        ));
-        assert!(!should_ignore_untracked_path(
-            "packages/django_template/starter/views.py"
+            "packages/rust-template/default.nix"
         ));
     }
     #[test]
     fn test_package_root() {
         assert_eq!(
-            package_root(Path::new("packages/django_template/manage.py")),
-            Some(PathBuf::from("packages/django_template"))
+            package_root(Path::new("packages/rust-template/default.nix")),
+            Some(PathBuf::from("packages/rust-template"))
         );
         assert_eq!(
             package_root(Path::new(
-                "templates/example/packages/django_template/manage.py"
+                "templates/example/packages/rust-template/default.nix"
             )),
             None
         );
@@ -640,48 +592,9 @@ mod tests {
             Some(PathBuf::from("hosts/template"))
         );
         assert_eq!(
-            host_root(Path::new("packages/django_template/default.nix")),
+            host_root(Path::new("packages/rust-template/default.nix")),
             None
         );
-    }
-    #[test]
-    fn test_validate_django_package_layout_accepts_conventional_layout() {
-        let working_dir = Path::new("/tmp/repo");
-        let package_root = Path::new("packages/django_template");
-        let dir_and_file_names = HashSet::from([
-            PathBuf::from("packages/django_template/manage.py"),
-            PathBuf::from("packages/django_template/django_template/__init__.py"),
-            PathBuf::from("packages/django_template/django_template/settings.py"),
-            PathBuf::from("packages/django_template/django_template/urls.py"),
-            PathBuf::from("packages/django_template/django_template/wsgi.py"),
-            PathBuf::from("packages/django_template/starter/__init__.py"),
-            PathBuf::from("packages/django_template/starter/apps.py"),
-            PathBuf::from("packages/django_template/starter/auth_backends.py"),
-            PathBuf::from("packages/django_template/starter/context_processors.py"),
-            PathBuf::from("packages/django_template/starter/forms.py"),
-            PathBuf::from("packages/django_template/starter/tests/test_views.py"),
-            PathBuf::from("packages/django_template/starter/throttle.py"),
-            PathBuf::from("packages/django_template/starter/urls.py"),
-            PathBuf::from("packages/django_template/starter/views.py"),
-            PathBuf::from("packages/django_template/templates/auth/login.html"),
-            PathBuf::from("packages/django_template/static/starter/app.css"),
-        ]);
-        let warnings =
-            validate_django_package_layout(working_dir, package_root, &dir_and_file_names);
-        assert!(warnings.is_empty());
-    }
-    #[test]
-    fn test_validate_django_package_layout_rejects_generated_cache_files() {
-        let working_dir = Path::new("/tmp/repo");
-        let package_root = Path::new("packages/django_template");
-        let dir_and_file_names = HashSet::from([
-            PathBuf::from("packages/django_template/manage.py"),
-            PathBuf::from("packages/django_template/starter/__pycache__/views.cpython-313.pyc"),
-        ]);
-        let warnings =
-            validate_django_package_layout(working_dir, package_root, &dir_and_file_names);
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("__pycache__/views.cpython-313.pyc"));
     }
     #[test]
     fn test_check_repository_directory_structure() {
@@ -761,96 +674,6 @@ mod tests {
         let result =
             validate_repository_directory_structure(flake_path.to_str().unwrap().to_string());
         assert!(result.is_err());
-        fs::remove_dir_all(&temp_dir).unwrap();
-    }
-    #[test]
-    fn test_django_package_layout_matches_repository_conventions() {
-        std::env::remove_var("NIX_BUILD_TOP");
-        let temp_dir = std::env::temp_dir().join("test-repo-structure-django");
-        init_temp_repo(&temp_dir);
-        fs::create_dir_all(temp_dir.join(".codex")).unwrap();
-        let package_root = temp_dir.join("packages/django_template");
-        for relative_dir in [
-            "django_template",
-            "starter/tests",
-            "static/starter",
-            "templates/auth",
-            "tmp/coverage/html",
-        ] {
-            fs::create_dir_all(package_root.join(relative_dir)).unwrap();
-        }
-        for (relative_path, contents) in [
-            (".gitignore", "tmp/\n"),
-            ("default.nix", "{}"),
-            ("manage.py", "print('manage')\n"),
-            ("django_template/__init__.py", ""),
-            ("django_template/settings.py", "SECRET_KEY = 'test'\n"),
-            ("django_template/urls.py", "urlpatterns = []\n"),
-            ("django_template/wsgi.py", "application = None\n"),
-            ("starter/__init__.py", ""),
-            ("starter/apps.py", "class StarterConfig: ...\n"),
-            (
-                "starter/auth_backends.py",
-                "class EmailOrUsernameBackend: ...\n",
-            ),
-            (
-                "starter/context_processors.py",
-                "def current_year(request): return {}\n",
-            ),
-            ("starter/forms.py", "class RegistrationForm: ...\n"),
-            ("starter/tests/__init__.py", ""),
-            (
-                "starter/tests/test_auth_backend.py",
-                "def test_backend(): pass\n",
-            ),
-            ("starter/tests/test_views.py", "def test_views(): pass\n"),
-            ("starter/throttle.py", "LOGIN_RATE_LIMIT = (5, 60)\n"),
-            ("starter/urls.py", "urlpatterns = []\n"),
-            ("starter/views.py", "def home(request): return None\n"),
-            ("static/starter/app.css", "body {}\n"),
-            ("templates/404.html", "not found\n"),
-            ("templates/auth/login.html", "login\n"),
-            ("templates/auth/register.html", "register\n"),
-            ("templates/base.html", "base\n"),
-            ("templates/dashboard.html", "dashboard\n"),
-            ("templates/home.html", "home\n"),
-            ("tmp/coverage/html/.gitignore", "*\n"),
-        ] {
-            fs::write(package_root.join(relative_path), contents).unwrap();
-        }
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(&temp_dir)
-            .output()
-            .unwrap();
-        let flake_path = temp_dir.join("flake.nix");
-        let result =
-            validate_repository_directory_structure(flake_path.to_str().unwrap().to_string());
-        assert!(
-            result.is_ok(),
-            "Expected Ok for the current Django package layout, but got Err: {:?}",
-            result.err()
-        );
-        fs::create_dir_all(package_root.join("starter/__pycache__")).unwrap();
-        fs::write(
-            package_root.join("starter/__pycache__/views.cpython-313.pyc"),
-            "cache",
-        )
-        .unwrap();
-        let result =
-            validate_repository_directory_structure(flake_path.to_str().unwrap().to_string());
-        assert!(
-            result.is_err(),
-            "Expected Err with generated cache directories, but got: {:?}",
-            result.err()
-        );
-        fs::write(package_root.join("starter/admin.py"), "class Admin: ...\n").unwrap();
-        let result =
-            validate_repository_directory_structure(flake_path.to_str().unwrap().to_string());
-        assert!(
-            result.is_err(),
-            "Expected Err for non-whitelisted Django module, but got Ok",
-        );
         fs::remove_dir_all(&temp_dir).unwrap();
     }
     #[test]

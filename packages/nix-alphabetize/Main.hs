@@ -2,7 +2,6 @@
 {-# LANGUAGE Trustworthy #-}
 {-# OPTIONS_GHC -Wno-unsafe #-}
 module Main (main) where
-import Control.Monad (void)
 import Data.Fix (Fix (Fix))
 import Data.Function (on)
 import Data.Functor.Compose (Compose (Compose))
@@ -46,7 +45,8 @@ import System.Environment (getArgs, lookupEnv)
 import System.IO (hClose)
 import System.IO.Temp (withSystemTempFile)
 import Test.HUnit
-  ( Test (TestCase, TestList),
+  ( Counts (errors, failures),
+    Test (TestCase, TestList),
     assertEqual,
     assertFailure,
     runTestTT,
@@ -68,6 +68,7 @@ import Prelude
     mapM_,
     putStrLn,
     ($),
+    (&&),
     (++),
     (.),
     (||),
@@ -77,7 +78,11 @@ main = do
   args <- getArgs
   debug <- lookupEnv "DEBUG"
   case debug of
-    Just "1" -> void $ runTestTT getAllFormattingTests
+    Just "1" -> do
+      counts <- runTestTT getAllFormattingTests
+      if errors counts == 0 && failures counts == 0
+        then putStrLn "test ... ok"
+        else putStrLn "test ... failed"
     _ ->
       mapM_
         ( \filePath -> do

@@ -13,7 +13,6 @@ pkgs.haskellPackages.mkDerivation rec {
   executableToolDepends = [
     pkgs.makeWrapper
   ];
-  license = pkgs.lib.licenses.mit;
   mainProgram = pname;
   pname = baseNameOf ./.;
   postInstall = ''

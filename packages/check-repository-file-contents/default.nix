@@ -4,9 +4,14 @@
 pkgs.haskellPackages.mkDerivation rec {
   executableHaskellDepends = [
     pkgs.haskellPackages.HUnit
-    pkgs.haskellPackages.aeson
     pkgs.haskellPackages.base
-    pkgs.haskellPackages.bytestring
+    pkgs.haskellPackages.containers
+    pkgs.haskellPackages.data-fix
+    pkgs.haskellPackages.directory
+    pkgs.haskellPackages.filepath
+    pkgs.haskellPackages.hnix
+    pkgs.haskellPackages.prettyprinter
+    pkgs.haskellPackages.text
   ];
   executableToolDepends = [
     pkgs.makeWrapper
