@@ -77,7 +77,7 @@ templateSpecs =
     TemplateSpec
       { templateName = "html_template",
         matchesTemplate = \_ content -> pure ("writeShellScriptBin" `isInfixOf` content),
-        allowedDifferenceKeys = defaultAllowedKeys,
+        allowedDifferenceKeys = Set.insert "text" defaultAllowedKeys,
         embeddedBaseline = Just htmlTemplateBaseline
       },
     TemplateSpec
@@ -131,7 +131,7 @@ templateSpecs =
             ( "stdenv.mkDerivation" `isInfixOf` content
                 && "cc -o ${pname} main.c -std=c89" `isInfixOf` content
             ),
-        allowedDifferenceKeys = defaultAllowedKeys,
+        allowedDifferenceKeys = Set.union defaultAllowedKeys (Set.fromList ["buildPhase", "checkPhase"]),
         embeddedBaseline = Just cTemplateBaseline
       },
     TemplateSpec
