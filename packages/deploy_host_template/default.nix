@@ -6,7 +6,7 @@ let
   installationScript = inputs.agenix-shell.lib.installationScript pkgs.stdenv.system {
     secrets.secrets.file = ../../secrets/secrets.age;
   };
-  packageName = builtins.baseNameOf ./.;
+  packageName = baseNameOf ./.;
   repoSrc = ../..;
 in
 pkgs.writeShellApplication {
