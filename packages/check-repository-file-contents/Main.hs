@@ -89,7 +89,7 @@ templateSpecs =
     TemplateSpec
       { templateName = "python_template",
         matchesTemplate = \_ content -> pure ("buildPythonPackage" `isInfixOf` content),
-        allowedDifferenceKeys = Set.fromList ["propagatedBuildInputs", "version"],
+        allowedDifferenceKeys = Set.fromList ["propagatedBuildInputs", "shellHook", "version"],
         embeddedBaseline = Just pythonTemplateBaseline
       },
     TemplateSpec
