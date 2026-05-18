@@ -89,7 +89,7 @@ templateSpecs =
     TemplateSpec
       { templateName = "python_remote_template",
         matchesTemplate = pythonRemoteDetector,
-        allowedDifferenceKeys = Set.fromList ["propagatedBuildInputs", "src", "version"],
+        allowedDifferenceKeys = Set.fromList ["nativeBuildInputs", "propagatedBuildInputs", "src", "version"],
         embeddedBaseline = Just pythonRemoteBaseline
       },
     TemplateSpec
