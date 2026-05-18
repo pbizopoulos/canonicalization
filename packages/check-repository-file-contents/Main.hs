@@ -87,6 +87,18 @@ templateSpecs =
         embeddedBaseline = Just pythonLatexTemplateBaseline
       },
     TemplateSpec
+      { templateName = "python_remote_template",
+        matchesTemplate = pythonRemoteDetector,
+        allowedDifferenceKeys = Set.fromList ["format", "pname", "propagatedBuildInputs", "pythonImportsCheck", "src", "version"],
+        embeddedBaseline = Just pythonRemoteBaseline
+      },
+    TemplateSpec
+      { templateName = "binary_release_template",
+        matchesTemplate = binaryReleaseDetector,
+        allowedDifferenceKeys = Set.fromList ["src", "version"],
+        embeddedBaseline = Just binaryReleaseBaseline
+      },
+    TemplateSpec
       { templateName = "python_template",
         matchesTemplate = \_ content -> pure ("buildPythonPackage" `isInfixOf` content),
         allowedDifferenceKeys = Set.fromList ["propagatedBuildInputs", "shellHook", "version"],
@@ -143,6 +155,21 @@ pythonLatexDetector packageName content
       hasFiguresDir <- doesDirectoryExist (packageRoot </> "figures")
       pure (hasMsTex || hasRefsBib || hasFiguresDir)
   | otherwise = pure False
+pythonRemoteDetector :: FilePath -> String -> IO Bool
+pythonRemoteDetector _ content =
+  pure
+    ( "buildPythonPackage" `isInfixOf` content
+        && not ("src = ./.;" `isInfixOf` content)
+        && ("fetchPypi" `isInfixOf` content || "fetchurl" `isInfixOf` content)
+    )
+binaryReleaseDetector :: FilePath -> String -> IO Bool
+binaryReleaseDetector _ content =
+  pure
+    ( "stdenv.mkDerivation" `isInfixOf` content
+        && "src = pkgs.fetchurl" `isInfixOf` content
+        && "sourceRoot = \".\";" `isInfixOf` content
+        && "install -Dm755 ${pname}-v${version}-x86_64-unknown-linux-musl/${pname}" `isInfixOf` content
+    )
 templateSpecByName :: FilePath -> Maybe TemplateSpec
 templateSpecByName name = listToMaybe [spec | spec <- templateSpecs, templateName spec == name]
 main :: IO ()
@@ -407,6 +434,18 @@ debugTests =
           (Just "python_template")
           inferred,
       TestCase $ do
+        inferred <- inferTemplateName "test" pythonRemoteFixture
+        assertEqual
+          "python remote template inference"
+          (Just "python_remote_template")
+          inferred,
+      TestCase $ do
+        inferred <- inferTemplateName "test" binaryReleaseFixture
+        assertEqual
+          "binary release structural template inference"
+          (Just "binary_release_template")
+          inferred,
+      TestCase $ do
         inferred <- inferTemplateName "test" pythonLatexFixture
         assertEqual
           "python latex template inference"
@@ -484,6 +523,13 @@ pythonLatexFixture =
     ++ "pkgs.python3Packages.buildPythonPackage rec {\n"
     ++ "  installPhase = '' latexmk -cd -pdf tmp/ms.tex '';\n"
     ++ "}\n"
+pythonRemoteFixture :: String
+pythonRemoteFixture =
+  "{ pkgs ? import <nixpkgs> { }, }:\n"
+    ++ "let pyPkgs = pkgs.python3Packages; in\n"
+    ++ "pyPkgs.buildPythonPackage rec {\n"
+    ++ "  src = pyPkgs.fetchPypi { pname = \"x\"; version = \"1.0.0\"; hash = \"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"; };\n"
+    ++ "}\n"
 deployHostFixture :: String
 deployHostFixture =
   "{ pkgs ? import <nixpkgs> { }, }:\n"
@@ -513,6 +559,16 @@ unknownFixture :: String
 unknownFixture =
   "{ pkgs ? import <nixpkgs> { }, }:\n"
     ++ "pkgs.writeText \"x\" \"y\"\n"
+binaryReleaseFixture :: String
+binaryReleaseFixture =
+  "{ pkgs ? import <nixpkgs> { }, }:\n"
+    ++ "pkgs.stdenv.mkDerivation rec {\n"
+    ++ "  sourceRoot = \".\";\n"
+    ++ "  installPhase = ''\n"
+    ++ "    install -Dm755 ${pname}-v${version}-x86_64-unknown-linux-musl/${pname} $out/bin/${pname}\n"
+    ++ "  '';\n"
+    ++ "  src = pkgs.fetchurl { url = \"https://example.invalid/tool.tar.gz\"; sha256 = \"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"; };\n"
+    ++ "}\n"
 haskellTemplateBaseline :: T.Text
 haskellTemplateBaseline =
   T.unlines
@@ -874,6 +930,66 @@ pythonTemplateBaseline =
       "  src = ./.;",
       "  strictDeps = true;",
       "  version = \"0.0.0\";",
+      "}"
+    ]
+pythonRemoteBaseline :: T.Text
+pythonRemoteBaseline =
+  T.unlines
+    [ "{",
+      "  pkgs ? import <nixpkgs> { },",
+      "}:",
+      "let",
+      "  pyPkgs = pkgs.python312Packages;",
+      "in",
+      "pyPkgs.buildPythonPackage rec {",
+      "  format = \"wheel\";",
+      "  pname = baseNameOf ./.;",
+      "  propagatedBuildInputs = [];",
+      "  pythonImportsCheck = [",
+      "    pname",
+      "  ];",
+      "  src = pyPkgs.fetchPypi rec {",
+      "    inherit",
+      "      format",
+      "      pname",
+      "      version",
+      "      ;",
+      "    dist = python;",
+      "    python = \"py3\";",
+      "    sha256 = \"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\";",
+      "  };",
+      "  version = \"0.0.0\";",
+      "}"
+    ]
+binaryReleaseBaseline :: T.Text
+binaryReleaseBaseline =
+  T.unlines
+    [ "{",
+      "  pkgs ? import <nixpkgs> { },",
+      "}:",
+      "pkgs.stdenv.mkDerivation rec {",
+      "  doInstallCheck = pkgs.stdenv.isLinux;",
+      "  installCheckPhase = ''",
+      "    runHook preInstallCheck",
+      "    test -x \"$out/bin/${pname}\"",
+      "    set -o pipefail",
+      "    \"$out/bin/${pname}\" --help 2>&1 | grep -F \"${pname}\"",
+      "    runHook postInstallCheck",
+      "  '';",
+      "  installPhase = ''",
+      "    runHook preInstall",
+      "    install -Dm755 ${pname}-v${version}-x86_64-unknown-linux-musl/${pname} $out/bin/${pname}",
+      "    runHook postInstall",
+      "  '';",
+      "  meta.mainProgram = pname;",
+      "  pname = baseNameOf ./.;",
+      "  sourceRoot = \".\";",
+      "  src = pkgs.fetchurl {",
+      "    sha256 = \"4yOzM6f8Rdsw2YxsqSpIhHCNuRZRf8j3AAcK2T5VZlU=\";",
+      "    url = \"https://github.com/asamarts/${pname}/releases/download/v${version}/${pname}-v${version}-x86_64-unknown-linux-musl.tar.gz\";",
+      "  };",
+      "  strictDeps = true;",
+      "  version = \"0.9.23\";",
       "}"
     ]
 pythonLatexTemplateBaseline :: T.Text
