@@ -430,7 +430,9 @@ checkPackage packageName = do
   cargoIssues <- checkCargoToml packageName
   cabalIssues <- checkCabalFile packageName
   pythonDebugIssues <- checkPythonDebugUnittest packageName projectKind
-  pure (templateIssues ++ cargoIssues ++ cabalIssues ++ pythonDebugIssues)
+  haskellDebugIssues <- checkHaskellDebugTests packageName projectKind
+  rustDebugIssues <- checkRustDebugTests packageName projectKind
+  pure (templateIssues ++ cargoIssues ++ cabalIssues ++ pythonDebugIssues ++ haskellDebugIssues ++ rustDebugIssues)
 detectProjectKindForPackage :: FilePath -> IO ProjectKind
 detectProjectKindForPackage packageName = do
   let pkgRoot = "packages" </> packageName
@@ -507,6 +509,65 @@ checkPythonDebugUnittest packageName projectKind =
                         ++ "/main.py: python AST validator execution failed: "
                         ++ oneLine (T.pack stderrText)
                     ]
+checkHaskellDebugTests :: FilePath -> ProjectKind -> IO [String]
+checkHaskellDebugTests packageName projectKind =
+  if projectKind /= HaskellKind
+    then pure []
+    else do
+      let mainHsPath = "packages" </> packageName </> "Main.hs"
+      mainExists <- doesFileExist mainHsPath
+      if not mainExists
+        then pure []
+        else do
+          content <- TIO.readFile mainHsPath
+          let source = T.unpack content
+              hasDebugEnvGate = "lookupEnv \"DEBUG\"" `isInfixOf` source
+              hasTestRunner = "runTestTT" `isInfixOf` source || "runDebugTests" `isInfixOf` source
+              hasMainDebugBranch = "Just \"1\" ->" `isInfixOf` source
+          pure $
+            catMaybes
+              [ if hasDebugEnvGate
+                  then Nothing
+                  else Just ("packages/" ++ packageName ++ "/Main.hs: missing DEBUG environment check (lookupEnv \"DEBUG\")"),
+                if hasMainDebugBranch
+                  then Nothing
+                  else Just ("packages/" ++ packageName ++ "/Main.hs: main() must branch on DEBUG=1"),
+                if hasTestRunner
+                  then Nothing
+                  else Just ("packages/" ++ packageName ++ "/Main.hs: DEBUG branch must run HUnit tests (runTestTT)")
+              ]
+checkRustDebugTests :: FilePath -> ProjectKind -> IO [String]
+checkRustDebugTests packageName projectKind =
+  if projectKind /= RustKind
+    then pure []
+    else do
+      let mainRsPath = "packages" </> packageName </> "src/main.rs"
+          defaultNixPath = "packages" </> packageName </> "default.nix"
+      mainExists <- doesFileExist mainRsPath
+      defaultNixExists <- doesFileExist defaultNixPath
+      mainSource <-
+        if mainExists
+          then T.unpack <$> TIO.readFile mainRsPath
+          else pure ""
+      defaultNixSource <-
+        if defaultNixExists
+          then T.unpack <$> TIO.readFile defaultNixPath
+          else pure ""
+      let hasRustTestModule = "#[cfg(test)]" `isInfixOf` mainSource && "mod tests" `isInfixOf` mainSource
+          hasRustTestCases = "#[test]" `isInfixOf` mainSource
+          hasDebugGateInNix = "DEBUG" `isInfixOf` defaultNixSource && "cargo test" `isInfixOf` defaultNixSource
+      pure $
+        catMaybes
+          [ if hasRustTestModule
+              then Nothing
+              else Just ("packages/" ++ packageName ++ "/src/main.rs: missing #[cfg(test)] mod tests"),
+            if hasRustTestCases
+              then Nothing
+              else Just ("packages/" ++ packageName ++ "/src/main.rs: missing #[test] test cases"),
+            if hasDebugGateInNix
+              then Nothing
+              else Just ("packages/" ++ packageName ++ "/default.nix: DEBUG mode must run cargo test")
+          ]
 mapPythonValidatorError :: FilePath -> String -> String
 mapPythonValidatorError packageName errorCode =
   let prefix = "packages/" ++ packageName ++ "/main.py: "
