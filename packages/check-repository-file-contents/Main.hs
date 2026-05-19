@@ -63,13 +63,13 @@ data TemplateSpec = TemplateSpec
 templateSpecs :: [TemplateSpec]
 templateSpecs =
   [ TemplateSpec
-      { templateName = "haskell-template",
+      { templateName = "haskell_package_baseline",
         matchesTemplate = \_ content -> pure ("haskellPackages.mkDerivation" `isInfixOf` content),
         allowedDifferenceKeys = defaultAllowedKeys,
         embeddedBaseline = Just haskellTemplateBaseline
       },
     TemplateSpec
-      { templateName = "rust-template",
+      { templateName = "rust_package_baseline",
         matchesTemplate = \_ content -> pure ("rustPlatform.buildRustPackage" `isInfixOf` content),
         allowedDifferenceKeys = defaultAllowedKeys,
         embeddedBaseline = Just rustTemplateBaseline
@@ -576,13 +576,13 @@ debugTests =
         inferred <- inferTemplateName "test" rustFixture
         assertEqual
           "rust template inference"
-          (Just "rust-template")
+          (Just "rust_package_baseline")
           inferred,
       TestCase $ do
         inferred <- inferTemplateName "test" haskellFixture
         assertEqual
           "haskell template inference"
-          (Just "haskell-template")
+          (Just "haskell_package_baseline")
           inferred,
       TestCase $ do
         inferred <- inferTemplateName "test" pythonFixture
@@ -782,10 +782,10 @@ removeEmptyLinesCargoFixture =
       "tempfile = \"3.8\"",
       "",
       "[lints.clippy]",
-      "all = {level = \"deny\", priority = -1}",
-      "pedantic = {level = \"deny\", priority = -1}",
-      "nursery = {level = \"deny\", priority = -1}",
-      "cargo = {level = \"deny\", priority = -1}",
+      "all = { level = \"deny\", priority = -1 }",
+      "pedantic = { level = \"deny\", priority = -1 }",
+      "nursery = { level = \"deny\", priority = -1 }",
+      "cargo = { level = \"deny\", priority = -1 }",
       "",
       "[lints.rust]",
       "unsafe_code = \"forbid\"",
