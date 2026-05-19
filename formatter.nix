@@ -82,7 +82,7 @@ let
         check-repository-structure = {
           command = inputs.self.packages.${pkgs.stdenv.system}."check-repository-structure";
           includes = [
-            "flake.nix"
+            "*.nix"
           ];
           priority = 0;
         };

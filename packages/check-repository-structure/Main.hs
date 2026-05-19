@@ -373,7 +373,7 @@ shouldTraverseDirectory :: FilePath -> Bool
 shouldTraverseDirectory path =
   not
     ( any
-        (`elem` ["tmp", "prm", "target", "CSharpier", "build", "_build", "deps", "node_modules", ".nuxt", ".svelte-kit", "result"])
+        (`elem` ["tmp", "prm", "target", "result", ".agents", ".codex"])
         (splitDirectories path)
     )
 isLeafPath :: [FilePath] -> FilePath -> Bool
@@ -427,7 +427,11 @@ checkPackage packageName = do
                 case embeddedBaseline spec of
                   Just templateContents ->
                     do
-                      issues <- compareWithTemplate packageName packageDefault ("packages" </> inferredTemplateName </> "default.nix") (allowedDifferenceKeys spec) (Just templateContents)
+                      let allowedKeysForPackage =
+                            if packageName == "c_template" && inferredTemplateName == "c_template"
+                              then defaultAllowedKeys
+                              else allowedDifferenceKeys spec
+                      issues <- compareWithTemplate packageName packageDefault ("packages" </> inferredTemplateName </> "default.nix") allowedKeysForPackage (Just templateContents)
                       pure (issues, Just inferredTemplateName)
                   Nothing ->
                     pure
