@@ -10,7 +10,7 @@ import Control.Monad (forM, when)
 import Data.Fix (Fix (Fix))
 import Data.Functor.Compose (Compose (Compose))
 import Data.Kind (Type)
-import Data.List (intercalate, isInfixOf, isPrefixOf, isSuffixOf, sort, sortBy)
+import Data.List (intercalate, isInfixOf, isPrefixOf, isSuffixOf, sort, sortBy, stripPrefix)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, fromMaybe, listToMaybe)
@@ -196,12 +196,10 @@ checkRepositoryStructure = do
       leafPaths = Set.fromList (filter (isLeafPath relPaths) relPaths)
       packageRoots = Set.fromList (mapMaybe packageRoot relPaths)
       hostRoots = Set.fromList (mapMaybe hostRoot relPaths)
-      baseAllowedPatterns :: [String]
-      baseAllowedPatterns =
+      globalAllowedPatterns :: [String]
+      globalAllowedPatterns =
         [ "^\\.git(/.*)?$",
           "^\\.github/workflows/workflow\\.yml$",
-          "^\\.agents(/.*)?$",
-          "^\\.codex(/.*)?$",
           "^\\.gitignore$",
           "^CITATION\\.bib$",
           "^LICENSE$",
@@ -212,53 +210,25 @@ checkRepositoryStructure = do
           "^formatter\\.nix$",
           "^hosts/[^/]+/configuration\\.nix$",
           "^hosts/[^/]+/hardware-configuration\\.nix$",
-          "^packages/[^/]+/\\.gitignore$",
-          "^packages/[^/]+/Main\\.hs$",
-          "^packages/[^/]+/Cargo\\.toml$",
-          "^packages/[^/]+/default\\.nix$",
-          "^packages/[^/]+/index\\.html$",
-          "^packages/[^/]+/manage\\.py$",
-          "^packages/[^/]+/main\\.(c|py|sh|tf)$",
-          "^packages/[^/]+/ms\\.tex$",
-          "^packages/[^/]+/style\\.css$",
-          "^packages/[^/]+/script\\.js$",
           "^prm/[^/]+$",
           "^result$",
           "^secrets/secrets\\.age$",
           "^secrets/secrets\\.env\\.example$",
           "^secrets/secrets\\.nix$"
         ]
-      fileDependencies :: [(String, [String])]
-      fileDependencies =
-        [ ("^packages/[^/]+/Cargo\\.toml$", ["^packages/[^/]+/Cargo\\.lock$", "^packages/[^/]+/src/main\\.rs$"]),
-          ("^packages/[^/]+/index\\.html$", ["^packages/[^/]+/script\\.js$", "^packages/[^/]+/style\\.css$"]),
-          ("^packages/[^/]+/main\\.tf$", ["^packages/[^/]+/\\.gitignore$", "^packages/[^/]+/\\.terraform(/.*)?$", "^packages/[^/]+/\\.terraform\\.lock\\.hcl$", "^packages/[^/]+/prm/.*$"]),
-          ("^packages/[^/]+/ms\\.tex$", ["^packages/[^/]+/ms\\.bib$"]),
-          ( "^packages/[^/]+/manage\\.py$",
-            [ "^packages/[^/]+/[^/]+/__init__\\.py$",
-              "^packages/[^/]+/[^/]+/(apps|auth_backends|context_processors|forms|models|settings|throttle|urls|views|wsgi)\\.py$",
-              "^packages/[^/]+/[^/]+/migrations(/.*)?$",
-              "^packages/[^/]+/[^/]+/tests(/.*)?$",
-              "^packages/[^/]+/templates(/.*)?$",
-              "^packages/[^/]+/static(/.*)?$"
-            ]
-          ),
-          ("^packages/[^/]+/main\\.py$", ["^packages/[^/]+/prm(/.*)?$"])
-        ]
-      dependencyPatterns =
+      packageAllowedPatterns =
         concat
-          [ deps
-          | path <- Set.toList leafPaths,
-            (trigger, deps) <- fileDependencies,
-            pathMatches trigger path
+          [ allowedPatternsForPackage pkgRoot pkgName packageLeafPaths
+          | pkgRoot <- Set.toList packageRoots,
+            let pkgName = takeBaseName pkgRoot,
+            let packageLeafPaths =
+                  catMaybes
+                    [ stripPrefix (pkgRoot ++ "/") path
+                    | path <- Set.toList leafPaths,
+                      (pkgRoot ++ "/") `isPrefixOf` path
+                    ]
           ]
-      cabalPatterns =
-        [ "^" ++ pkgRoot ++ "/" ++ pkgName ++ "\\.cabal$"
-        | pkgRoot <- Set.toList packageRoots,
-          Set.member (pkgRoot </> "Main.hs") (Set.fromList relPaths),
-          let pkgName = takeBaseName pkgRoot
-        ]
-      allowedPatterns = baseAllowedPatterns ++ dependencyPatterns ++ cabalPatterns
+      allowedPatterns = globalAllowedPatterns ++ packageAllowedPatterns
       missingPackageDefaults =
         [ pkgRoot ++ ": is missing required default.nix"
         | pkgRoot <- Set.toList packageRoots,
@@ -291,6 +261,47 @@ checkRepositoryStructure = do
           not (any (`pathMatches` path) allowedPatterns)
         ]
   pure (missingPackageDefaults ++ missingHostConfigs ++ missingCabalForMain ++ badlyNamedCabals ++ disallowedPaths)
+allowedPatternsForPackage :: FilePath -> FilePath -> [FilePath] -> [String]
+allowedPatternsForPackage pkgRoot pkgName packageLeafPaths =
+  let base = ["^" ++ pkgRoot ++ "/default\\.nix$", "^" ++ pkgRoot ++ "/\\.gitignore$"]
+      add patterns = base ++ patterns
+      has path = path `elem` packageLeafPaths
+   in if has "Main.hs"
+        then add ["^" ++ pkgRoot ++ "/Main\\.hs$", "^" ++ pkgRoot ++ "/" ++ pkgName ++ "\\.cabal$"]
+        else
+          if has "Cargo.toml"
+            then add ["^" ++ pkgRoot ++ "/Cargo\\.toml$", "^" ++ pkgRoot ++ "/Cargo\\.lock$", "^" ++ pkgRoot ++ "/src/main\\.rs$"]
+            else
+              if has "index.html"
+                then add ["^" ++ pkgRoot ++ "/index\\.html$", "^" ++ pkgRoot ++ "/script\\.js$", "^" ++ pkgRoot ++ "/style\\.css$"]
+                else
+                  if has "manage.py"
+                    then
+                      add
+                        [ "^" ++ pkgRoot ++ "/manage\\.py$",
+                          "^" ++ pkgRoot ++ "/[^/]+/__init__\\.py$",
+                          "^" ++ pkgRoot ++ "/[^/]+/(apps|auth_backends|context_processors|forms|models|settings|throttle|urls|views|wsgi)\\.py$",
+                          "^" ++ pkgRoot ++ "/[^/]+/migrations(/.*)?$",
+                          "^" ++ pkgRoot ++ "/[^/]+/tests(/.*)?$",
+                          "^" ++ pkgRoot ++ "/templates(/.*)?$",
+                          "^" ++ pkgRoot ++ "/static(/.*)?$"
+                        ]
+                    else
+                      if has "main.py" && has "ms.tex"
+                        then add ["^" ++ pkgRoot ++ "/main\\.py$", "^" ++ pkgRoot ++ "/ms\\.tex$", "^" ++ pkgRoot ++ "/ms\\.bib$", "^" ++ pkgRoot ++ "/refs\\.bib$", "^" ++ pkgRoot ++ "/figures(/.*)?$"]
+                        else
+                          if has "main.py"
+                            then add ["^" ++ pkgRoot ++ "/main\\.py$"]
+                            else
+                              if has "main.c"
+                                then add ["^" ++ pkgRoot ++ "/main\\.c$"]
+                                else
+                                  if has "main.tf"
+                                    then add ["^" ++ pkgRoot ++ "/main\\.tf$", "^" ++ pkgRoot ++ "/\\.terraform(/.*)?$", "^" ++ pkgRoot ++ "/\\.terraform\\.lock\\.hcl$"]
+                                    else
+                                      if has "ms.tex"
+                                        then add ["^" ++ pkgRoot ++ "/ms\\.tex$", "^" ++ pkgRoot ++ "/ms\\.bib$"]
+                                        else base
 collectRepoPaths :: FilePath -> IO [FilePath]
 collectRepoPaths root = do
   children <- listDirectory root
