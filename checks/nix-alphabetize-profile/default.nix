@@ -20,8 +20,8 @@ in
 pkgs.runCommand "${checkName}"
   {
     nativeBuildInputs = [
-      profileGhc
       pkgs.coreutils
+      profileGhc
     ];
     src = ../../packages/${packageName};
   }
