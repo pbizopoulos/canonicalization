@@ -6,6 +6,7 @@
 {-# LANGUAGE Trustworthy #-}
 {-# OPTIONS_GHC -Wno-missing-import-lists -Wno-unsafe #-}
 module Main (main) where
+import Control.Applicative ((<|>))
 import Control.Exception (finally)
 import Control.Monad (forM, when)
 import Data.Fix (Fix (Fix))
@@ -33,12 +34,13 @@ import Nix.Pretty (prettyNix)
 import Nix.Utils (Path (Path))
 import Prettyprinter (defaultLayoutOptions, layoutPretty)
 import Prettyprinter.Render.Text (renderStrict)
-import System.Directory (doesDirectoryExist, doesFileExist, listDirectory, removeFile)
+import System.Directory (doesDirectoryExist, doesFileExist, findExecutable, listDirectory, removeFile)
 import System.Environment (lookupEnv)
-import System.Exit (exitFailure)
+import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitFailure)
 import System.FilePath ((<.>), (</>))
 import System.FilePath.Posix (splitDirectories, takeBaseName, takeDirectory, takeFileName)
 import System.IO (hClose, openTempFile)
+import System.Process (readProcessWithExitCode)
 import Test.HUnit (Counts (errors, failures), Test (TestCase, TestList), assertEqual, runTestTT)
 import Text.Regex.TDFA ((=~))
 import Prelude
@@ -53,6 +55,7 @@ defaultAllowedKeys =
       "nativeBuildInputs",
       "nativeCheckInputs",
       "nativeInstallCheckInputs",
+      "postInstall",
       "propagatedBuildInputs",
       "runtimeInputs"
     ]
@@ -263,7 +266,6 @@ data ProjectKind
   = HaskellKind
   | RustKind
   | HtmlKind
-  | DjangoKind
   | PythonLatexKind
   | PythonKind
   | CKind
@@ -305,13 +307,12 @@ detectMarkers leafFiles =
         [ if has "Main.hs" then Just ("Main.hs", HaskellKind) else Nothing,
           if has "Cargo.toml" then Just ("Cargo.toml", RustKind) else Nothing,
           if has "index.html" then Just ("index.html", HtmlKind) else Nothing,
-          if has "manage.py" then Just ("manage.py", DjangoKind) else Nothing,
           if has "main.py" && has "ms.tex" then Just ("main.py+ms.tex", PythonLatexKind) else Nothing,
           if has "main.py" && not (has "ms.tex") then Just ("main.py", PythonKind) else Nothing,
           if has "main.c" then Just ("main.c", CKind) else Nothing,
           if has "main.tf" then Just ("main.tf", TerraformKind) else Nothing,
           if has "ms.tex" && not (has "main.py") then Just ("ms.tex", LatexKind) else Nothing,
-          if hasAny "Cargo.toml" then Nothing else if not (has "main.c") && not (has "Main.hs") && not (has "main.py") && not (has "index.html") && not (has "main.tf") && not (has "manage.py") && not (has "ms.tex") then Just ("binary-layout", BinaryReleaseKind) else Nothing
+          if hasAny "Cargo.toml" then Nothing else if not (has "main.c") && not (has "Main.hs") && not (has "main.py") && not (has "index.html") && not (has "main.tf") && not (has "ms.tex") then Just ("binary-layout", BinaryReleaseKind) else Nothing
         ]
 detectKind :: [(String, ProjectKind)] -> ProjectKind
 detectKind markers =
@@ -337,16 +338,6 @@ allowedPatternsForKind pkgRoot pkgName kind =
         HaskellKind -> add ["^" ++ pkgRoot ++ "/Main\\.hs$", "^" ++ pkgRoot ++ "/" ++ pkgName ++ "\\.cabal$"]
         RustKind -> add ["^" ++ pkgRoot ++ "/Cargo\\.toml$", "^" ++ pkgRoot ++ "/Cargo\\.lock$", "^" ++ pkgRoot ++ "/src/main\\.rs$"]
         HtmlKind -> add ["^" ++ pkgRoot ++ "/index\\.html$", "^" ++ pkgRoot ++ "/script\\.js$", "^" ++ pkgRoot ++ "/style\\.css$"]
-        DjangoKind ->
-          add
-            [ "^" ++ pkgRoot ++ "/manage\\.py$",
-              "^" ++ pkgRoot ++ "/[^/]+/__init__\\.py$",
-              "^" ++ pkgRoot ++ "/[^/]+/(apps|auth_backends|context_processors|forms|models|settings|throttle|urls|views|wsgi)\\.py$",
-              "^" ++ pkgRoot ++ "/[^/]+/migrations(/.*)?$",
-              "^" ++ pkgRoot ++ "/[^/]+/tests(/.*)?$",
-              "^" ++ pkgRoot ++ "/templates(/.*)?$",
-              "^" ++ pkgRoot ++ "/static(/.*)?$"
-            ]
         PythonLatexKind -> add ["^" ++ pkgRoot ++ "/main\\.py$", "^" ++ pkgRoot ++ "/ms\\.tex$", "^" ++ pkgRoot ++ "/ms\\.bib$", "^" ++ pkgRoot ++ "/refs\\.bib$", "^" ++ pkgRoot ++ "/figures(/.*)?$"]
         PythonKind -> add ["^" ++ pkgRoot ++ "/main\\.py$"]
         CKind -> add ["^" ++ pkgRoot ++ "/main\\.c$"]
@@ -406,6 +397,7 @@ listPackageNames = do
 checkPackage :: FilePath -> IO [String]
 checkPackage packageName = do
   let packageDefault = "packages" </> packageName </> "default.nix"
+  projectKind <- detectProjectKindForPackage packageName
   exists <- doesFileExist packageDefault
   templateIssues <-
     if not exists
@@ -437,7 +429,214 @@ checkPackage packageName = do
                       ]
   cargoIssues <- checkCargoToml packageName
   cabalIssues <- checkCabalFile packageName
-  pure (templateIssues ++ cargoIssues ++ cabalIssues)
+  pythonDebugIssues <- checkPythonDebugUnittest packageName projectKind
+  pure (templateIssues ++ cargoIssues ++ cabalIssues ++ pythonDebugIssues)
+detectProjectKindForPackage :: FilePath -> IO ProjectKind
+detectProjectKindForPackage packageName = do
+  let pkgRoot = "packages" </> packageName
+      has rel = doesFileExist (pkgRoot </> rel)
+  hasMainHs <- has "Main.hs"
+  hasCargoToml <- has "Cargo.toml"
+  hasIndexHtml <- has "index.html"
+  hasMainPy <- has "main.py"
+  hasMsTex <- has "ms.tex"
+  hasMainC <- has "main.c"
+  hasMainTf <- has "main.tf"
+  pure $
+    if hasMainHs
+      then HaskellKind
+      else
+        if hasCargoToml
+          then RustKind
+          else
+            if hasIndexHtml
+              then HtmlKind
+              else
+                if hasMainPy && hasMsTex
+                  then PythonLatexKind
+                  else
+                    if hasMainPy
+                      then PythonKind
+                      else
+                        if hasMainC
+                          then CKind
+                          else
+                            if hasMainTf
+                              then TerraformKind
+                              else
+                                if hasMsTex
+                                  then LatexKind
+                                  else BinaryReleaseKind
+checkPythonDebugUnittest :: FilePath -> ProjectKind -> IO [String]
+checkPythonDebugUnittest packageName projectKind =
+  if projectKind `notElem` [PythonKind, PythonLatexKind]
+    then pure []
+    else do
+      let mainPyPath = "packages" </> packageName </> "main.py"
+      mainPyExists <- doesFileExist mainPyPath
+      if not mainPyExists
+        then pure []
+        else do
+          python3Path <- findExecutable "python3"
+          pythonPath <- findExecutable "python"
+          case python3Path <|> pythonPath of
+            Nothing ->
+              pure
+                [ "packages/"
+                    ++ packageName
+                    ++ "/main.py: python interpreter not found (tried python3, python)"
+                ]
+            Just pythonCommand -> do
+              (exitCode, stdoutText, stderrText) <- readProcessWithExitCode pythonCommand ["-c", pythonDebugUnittestValidator, mainPyPath] ""
+              let rawLines = lines stdoutText
+                  errorCodes = [drop 4 line | line <- rawLines, "ERR " `isPrefixOf` line]
+                  mappedErrors = map (mapPythonValidatorError packageName) errorCodes
+              case exitCode of
+                ExitSuccess ->
+                  if "OK" `elem` rawLines
+                    then pure []
+                    else
+                      pure
+                        [ "packages/" ++ packageName ++ "/main.py: python validator produced unexpected output"
+                        ]
+                ExitFailure 1 -> pure mappedErrors
+                ExitFailure _ ->
+                  pure
+                    [ "packages/"
+                        ++ packageName
+                        ++ "/main.py: python AST validator execution failed: "
+                        ++ oneLine (T.pack stderrText)
+                    ]
+mapPythonValidatorError :: FilePath -> String -> String
+mapPythonValidatorError packageName errorCode =
+  let prefix = "packages/" ++ packageName ++ "/main.py: "
+   in case errorCode of
+        "missing_unittest_import" -> prefix ++ "missing unittest import"
+        "missing_main_function" -> prefix ++ "missing main() function"
+        "missing_debug_gate" -> prefix ++ "main() must include a DEBUG gate"
+        "debug_branch_no_unittest" -> prefix ++ "DEBUG=true branch in main() must run unittest"
+        "run_tests_missing_unittest" -> prefix ++ "run_tests() is called from DEBUG branch but does not run unittest"
+        "parse_error" -> prefix ++ "python source could not be parsed"
+        _ -> prefix ++ "python validator failed with error code: " ++ errorCode
+pythonDebugUnittestValidator :: String
+pythonDebugUnittestValidator =
+  unlines
+    [ "import ast",
+      "import sys",
+      "",
+      "def _is_os_getenv_debug(node):",
+      "    if not isinstance(node, ast.Call):",
+      "        return False",
+      "    func = node.func",
+      "    if not isinstance(func, ast.Attribute):",
+      "        return False",
+      "    if isinstance(func.value, ast.Name) and func.value.id == 'os' and func.attr == 'getenv':",
+      "        if not node.args:",
+      "            return False",
+      "        first = node.args[0]",
+      "        return isinstance(first, ast.Constant) and first.value == 'DEBUG'",
+      "    if isinstance(func.value, ast.Attribute) and func.attr == 'get':",
+      "        base = func.value",
+      "        if isinstance(base.value, ast.Name) and base.value.id == 'os' and base.attr == 'environ':",
+      "            if not node.args:",
+      "                return False",
+      "            first = node.args[0]",
+      "            return isinstance(first, ast.Constant) and first.value == 'DEBUG'",
+      "    return False",
+      "",
+      "def _contains_debug_gate(expr):",
+      "    return any(_is_os_getenv_debug(n) for n in ast.walk(expr))",
+      "",
+      "def _is_unittest_main_call(node):",
+      "    if not isinstance(node, ast.Call):",
+      "        return False",
+      "    func = node.func",
+      "    return isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id == 'unittest' and func.attr == 'main'",
+      "",
+      "def _contains_unittest_runner(statements):",
+      "    for statement in statements:",
+      "        for node in ast.walk(statement):",
+      "            if not isinstance(node, ast.Call):",
+      "                continue",
+      "            func = node.func",
+      "            if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id == 'unittest':",
+      "                if func.attr in {'main', 'TextTestRunner', 'defaultTestLoader'}:",
+      "                    return True",
+      "    return False",
+      "",
+      "def _is_run_tests_call(node):",
+      "    return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'run_tests'",
+      "",
+      "def _branch_runs_unittest(branch_statements, functions):",
+      "    if _contains_unittest_runner(branch_statements):",
+      "        return True, False",
+      "    run_tests_called = False",
+      "    for statement in branch_statements:",
+      "        for node in ast.walk(statement):",
+      "            if _is_run_tests_call(node):",
+      "                run_tests_called = True",
+      "    if run_tests_called and 'run_tests' in functions:",
+      "        if _contains_unittest_runner(functions['run_tests'].body):",
+      "            return True, False",
+      "        return False, True",
+      "    return False, False",
+      "",
+      "def main():",
+      "    path = sys.argv[1]",
+      "    try:",
+      "        source = open(path, encoding='utf-8').read()",
+      "        module = ast.parse(source, filename=path)",
+      "    except Exception:",
+      "        print('ERR parse_error')",
+      "        sys.exit(2)",
+      "",
+      "    has_unittest_import = False",
+      "    functions = {}",
+      "    for node in module.body:",
+      "        if isinstance(node, ast.Import):",
+      "            for alias in node.names:",
+      "                if alias.name == 'unittest':",
+      "                    has_unittest_import = True",
+      "        elif isinstance(node, ast.ImportFrom) and node.module == 'unittest':",
+      "            has_unittest_import = True",
+      "        elif isinstance(node, ast.FunctionDef):",
+      "            functions[node.name] = node",
+      "",
+      "    errors = []",
+      "    if not has_unittest_import:",
+      "        errors.append('missing_unittest_import')",
+      "    if 'main' not in functions:",
+      "        errors.append('missing_main_function')",
+      "    else:",
+      "        main_fn = functions['main']",
+      "        debug_if_nodes = [n for n in ast.walk(main_fn) if isinstance(n, ast.If) and _contains_debug_gate(n.test)]",
+      "        if not debug_if_nodes:",
+      "            errors.append('missing_debug_gate')",
+      "        else:",
+      "            debug_branch_ok = False",
+      "            run_tests_invalid = False",
+      "            for if_node in debug_if_nodes:",
+      "                branch_ok, run_tests_missing = _branch_runs_unittest(if_node.body, functions)",
+      "                if branch_ok:",
+      "                    debug_branch_ok = True",
+      "                    break",
+      "                if run_tests_missing:",
+      "                    run_tests_invalid = True",
+      "            if not debug_branch_ok:",
+      "                if run_tests_invalid:",
+      "                    errors.append('run_tests_missing_unittest')",
+      "                errors.append('debug_branch_no_unittest')",
+      "",
+      "    if errors:",
+      "        for err in errors:",
+      "            print('ERR ' + err)",
+      "        sys.exit(1)",
+      "    print('OK')",
+      "    sys.exit(0)",
+      "",
+      "if __name__ == '__main__':",
+      "    main()"
+    ]
 checkCargoToml :: FilePath -> IO [String]
 checkCargoToml packageName = do
   let cargoPath = "packages" </> packageName </> "Cargo.toml"

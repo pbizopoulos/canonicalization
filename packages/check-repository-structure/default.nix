@@ -11,16 +11,22 @@ pkgs.haskellPackages.mkDerivation rec {
     pkgs.haskellPackages.filepath
     pkgs.haskellPackages.hnix
     pkgs.haskellPackages.prettyprinter
+    pkgs.haskellPackages.process
     pkgs.haskellPackages.regex-tdfa
     pkgs.haskellPackages.text
   ];
   executableToolDepends = [
     pkgs.makeWrapper
+    pkgs.python3
   ];
   mainProgram = pname;
   pname = baseNameOf ./.;
   postInstall = ''
-    wrapProgram $out/bin/${pname} --run "rm -f tmp/${pname}.tix" --set-default HPCTIXFILE tmp/${pname}.tix
+    wrapProgram $out/bin/${pname} --prefix PATH : ${
+      pkgs.lib.makeBinPath [
+        pkgs.python3
+      ]
+    } --run "rm -f tmp/${pname}.tix" --set-default HPCTIXFILE tmp/${pname}.tix
     DEBUG=1 "$out/bin/${pname}"
   '';
   src = ./.;
