@@ -14,6 +14,7 @@ pkgs.haskellPackages.mkDerivation rec {
     pkgs.makeWrapper
   ];
   mainProgram = pname;
+  passthru.haskellExecutableDepends = executableHaskellDepends;
   pname = baseNameOf ./.;
   postInstall = ''
     wrapProgram $out/bin/${pname} --run "rm -f tmp/${pname}.tix" --set-default HPCTIXFILE tmp/${pname}.tix

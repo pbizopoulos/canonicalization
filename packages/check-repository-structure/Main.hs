@@ -71,7 +71,7 @@ templateSpecs =
   [ TemplateSpec
       { templateName = "haskell_package_baseline",
         matchesTemplate = \_ content -> pure ("haskellPackages.mkDerivation" `isInfixOf` content),
-        allowedDifferenceKeys = defaultAllowedKeys,
+        allowedDifferenceKeys = Set.insert "passthru" defaultAllowedKeys,
         embeddedBaseline = Just haskellTemplateBaseline
       },
     TemplateSpec

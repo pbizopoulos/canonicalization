@@ -5,13 +5,8 @@
 let
   checkName = builtins.baseNameOf ./.;
   packageName = "check-repository-structure";
-  debugGhc = pkgs.haskellPackages.ghcWithPackages (ps: [
-    ps.base
-    ps.containers
-    ps.HUnit
-    ps.hnix
-    ps.text
-  ]);
+  packageDrv = import ../../packages/${packageName}/default.nix { inherit pkgs; };
+  debugGhc = pkgs.haskellPackages.ghcWithPackages (_: packageDrv.passthru.haskellExecutableDepends);
 in
 pkgs.runCommand "${checkName}"
   {

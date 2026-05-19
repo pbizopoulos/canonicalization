@@ -5,17 +5,8 @@
 let
   checkName = builtins.baseNameOf ./.;
   packageName = "nix-alphabetize";
-  profileGhc = pkgs.haskellPackages.ghcWithPackages (ps: [
-    ps.HUnit
-    ps.aeson
-    ps.base
-    ps.bytestring
-    ps.data-fix
-    ps.hnix
-    ps.prettyprinter
-    ps.temporary
-    ps.text
-  ]);
+  packageDrv = import ../../packages/${packageName}/default.nix { inherit pkgs; };
+  profileGhc = pkgs.haskellPackages.ghcWithPackages (_: packageDrv.passthru.haskellExecutableDepends);
 in
 pkgs.runCommand "${checkName}"
   {

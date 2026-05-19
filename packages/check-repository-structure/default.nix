@@ -20,6 +20,7 @@ pkgs.haskellPackages.mkDerivation rec {
     pkgs.python3
   ];
   mainProgram = pname;
+  passthru.haskellExecutableDepends = executableHaskellDepends;
   pname = baseNameOf ./.;
   postInstall = ''
     wrapProgram $out/bin/${pname} --prefix PATH : ${
