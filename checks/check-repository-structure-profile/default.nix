@@ -4,7 +4,7 @@
 }:
 let
   checkName = builtins.baseNameOf ./.;
-  packageName = "check-repository-file-contents";
+  packageName = "check-repository-structure";
   profileGhc = pkgs.haskellPackages.ghcWithPackages (ps: [
     ps.base
     ps.containers

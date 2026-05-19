@@ -1,9 +1,9 @@
-name:          check-repository-file-contents
+name:          check-repository-structure
 version:       0.0.0
 synopsis:      Hello World Haskell
 cabal-version: >=1.10
 build-type:    Simple
-executable check-repository-file-contents
+executable check-repository-structure
   main-is:       Main.hs
   build-depends:
       base

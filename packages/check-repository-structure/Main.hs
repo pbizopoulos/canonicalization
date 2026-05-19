@@ -185,7 +185,7 @@ main = do
       issues <- fmap concat (forM packageNames checkPackage)
       let allIssues = structureIssues ++ issues
       if null allIssues
-        then putStrLn "check-repository-file-contents: ok"
+        then putStrLn "check-repository-structure: ok"
         else do
           mapM_ putStrLn allIssues
           exitFailure
