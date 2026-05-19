@@ -135,15 +135,15 @@ templateSpecs =
         embeddedBaseline = Just cTemplateBaseline
       },
     TemplateSpec
-      { templateName = "mkDerivation_template",
+      { templateName = "uncomment_template",
         matchesTemplate = \_ content ->
           pure
             ( "stdenv.mkDerivation" `isInfixOf` content
                 && "autoPatchelfHook" `isInfixOf` content
-                && "pkgs.fetchurl" `isInfixOf` content
+                && "Goldziher" `isInfixOf` content
             ),
         allowedDifferenceKeys = Set.union defaultAllowedKeys (Set.fromList ["pname", "src"]),
-        embeddedBaseline = Just mkDerivationTemplateBaseline
+        embeddedBaseline = Just uncommentTemplateBaseline
       }
   ]
 pythonLatexDetector :: FilePath -> String -> IO Bool
@@ -233,13 +233,12 @@ checkCargoToml packageName = do
     then pure []
     else do
       cargoContents <- TIO.readFile cargoPath
-      rustTemplateCargoContents <- TIO.readFile ("packages" </> "rust-template" </> "Cargo.toml")
       let packageSection = extractTomlSection "package" cargoContents
           lintsRustSection = extractTomlSection "lints.rust" cargoContents
           packageNameValue = lookupTomlString "name" packageSection
           unsafeCodeLint = lookupTomlString "unsafe_code" lintsRustSection
           normalizedCargo = normalizeCargoTomlForTightness packageName cargoContents
-          normalizedTemplateCargo = normalizeCargoTomlForTightness packageName rustTemplateCargoContents
+          normalizedTemplateCargo = normalizeCargoTomlForTightness packageName rustCargoTightnessBaseline
       pure $
         catMaybes
           [ case packageNameValue of
@@ -267,7 +266,7 @@ checkCargoToml packageName = do
                 Just
                   ( "packages/"
                       ++ packageName
-                      ++ "/Cargo.toml: only dependency sections may differ from packages/rust-template/Cargo.toml"
+                      ++ "/Cargo.toml: only dependency sections may differ from the internal Rust Cargo baseline"
                   )
           ]
 normalizeCargoTomlForTightness :: FilePath -> T.Text -> T.Text
@@ -326,9 +325,8 @@ checkCabalFile packageName = do
     then pure []
     else do
       cabalContents <- TIO.readFile cabalPath
-      templateContents <- TIO.readFile ("packages" </> "haskell-template" </> "haskell-template.cabal")
       let normalizedCabal = normalizeCabalForTightness packageName cabalContents
-          normalizedTemplate = normalizeCabalForTightness packageName templateContents
+          normalizedTemplate = normalizeCabalForTightness packageName haskellCabalTightnessBaseline
           cabalName = lookupCabalField "name" cabalContents
       pure $
         catMaybes
@@ -343,7 +341,7 @@ checkCabalFile packageName = do
                       ++ packageName
                       ++ "/"
                       ++ packageName
-                      ++ ".cabal: only build-depends may differ from packages/haskell-template/haskell-template.cabal"
+                      ++ ".cabal: only build-depends may differ from the internal Haskell cabal baseline"
                   )
           ]
 normalizeCabalForTightness :: FilePath -> T.Text -> T.Text
@@ -569,10 +567,10 @@ debugTests :: Test
 debugTests =
   TestList
     [ TestCase $ do
-        inferred <- inferTemplateName "test" mkDerivationFixture
+        inferred <- inferTemplateName "test" uncommentFixture
         assertEqual
           "uncomment template inference"
-          (Just "mkDerivation_template")
+          (Just "uncomment_template")
           inferred,
       TestCase $ do
         inferred <- inferTemplateName "test" rustFixture
@@ -666,18 +664,18 @@ debugTests =
           (Just "forbid")
           (lookupTomlString "unsafe_code" (extractTomlSection "lints.rust" removeEmptyLinesCargoFixture))
     ]
-mkDerivationFixture :: String
-mkDerivationFixture =
-  "{ pkgs ? import <nixpkgs> { }, }:\n"
-    ++ "pkgs.stdenv.mkDerivation rec {\n"
-    ++ "  nativeBuildInputs = [ pkgs.autoPatchelfHook ];\n"
-    ++ "  src = pkgs.fetchurl { url = \"https://example.invalid/foo.tar.gz\"; sha256 = \"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"; };\n"
-    ++ "}\n"
 rustFixture :: String
 rustFixture =
   "{ pkgs ? import <nixpkgs> { }, }:\n"
     ++ "pkgs.rustPlatform.buildRustPackage {\n"
     ++ "  cargoHash = \"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\";\n"
+    ++ "}\n"
+uncommentFixture :: String
+uncommentFixture =
+  "{ pkgs ? import <nixpkgs> { }, }:\n"
+    ++ "pkgs.stdenv.mkDerivation rec {\n"
+    ++ "  nativeBuildInputs = [ pkgs.autoPatchelfHook ];\n"
+    ++ "  src = pkgs.fetchurl { url = \"https://github.com/Goldziher/${pname}/releases/download/v${version}/${pname}-x86_64-unknown-linux-gnu.tar.gz\"; sha256 = \"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"; };\n"
     ++ "}\n"
 haskellFixture :: String
 haskellFixture =
@@ -802,6 +800,55 @@ removeEmptyLinesCargoFixture =
       "readme = \"../../README\"",
       "keywords = [\"cleanup\", \"formatter\"]",
       "categories = [\"development-tools\"]",
+      ""
+    ]
+rustCargoTightnessBaseline :: T.Text
+rustCargoTightnessBaseline =
+  T.unlines
+    [ "[[bin]]",
+      "name = \"rust-template\"",
+      "path = \"src/main.rs\"",
+      "",
+      "[dependencies]",
+      "colored = \"2.1.0\"",
+      "",
+      "[lints.clippy]",
+      "all = {level = \"deny\", priority = -1}",
+      "pedantic = {level = \"deny\", priority = -1}",
+      "nursery = {level = \"deny\", priority = -1}",
+      "cargo = {level = \"deny\", priority = -1}",
+      "",
+      "[lints.rust]",
+      "unsafe_code = \"forbid\"",
+      "",
+      "[package]",
+      "name = \"rust-template\"",
+      "version = \"0.1.0\"",
+      "edition = \"2021\"",
+      "description = \"A Rust template project.\"",
+      "license = \"MIT\"",
+      "repository = \"https://github.com/pbizopoulos/canonicalization\"",
+      "readme = \"../../README\"",
+      "keywords = [\"template\"]",
+      "categories = [\"development-tools\"]",
+      ""
+    ]
+haskellCabalTightnessBaseline :: T.Text
+haskellCabalTightnessBaseline =
+  T.unlines
+    [ "name:          haskell-template",
+      "version:       0.0.0",
+      "synopsis:      Hello World Haskell",
+      "cabal-version: >=1.10",
+      "build-type:    Simple",
+      "executable haskell-template",
+      "  main-is:       Main.hs",
+      "  build-depends:",
+      "      aeson",
+      "    , base",
+      "    , bytestring",
+      "    , HUnit",
+      "  ghc-options:   -O2 -Weverything -Werror -threaded",
       ""
     ]
 haskellTemplateBaseline :: T.Text
@@ -1275,8 +1322,8 @@ pythonLatexTemplateBaseline =
       "  version = \"0.0.0\";",
       "}"
     ]
-mkDerivationTemplateBaseline :: T.Text
-mkDerivationTemplateBaseline =
+uncommentTemplateBaseline :: T.Text
+uncommentTemplateBaseline =
   T.unlines
     [ "{",
       "  pkgs ? import <nixpkgs> { },",
