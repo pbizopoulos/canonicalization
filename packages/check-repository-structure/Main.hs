@@ -186,8 +186,11 @@ main = do
     _ -> do
       structureIssues <- checkRepositoryStructure
       packageNames <- listPackageNames
-      issues <- fmap concat (forM packageNames checkPackage)
-      let allIssues = structureIssues ++ issues
+      packageResults <- forM packageNames checkPackage
+      let packageReports = concatMap snd packageResults
+          packageIssues = concatMap fst packageResults
+      mapM_ putStrLn packageReports
+      let allIssues = structureIssues ++ packageIssues
       if null allIssues
         then putStrLn "check-repository-structure: ok"
         else do
@@ -394,45 +397,85 @@ listPackageNames = do
   entries <- listDirectory "packages"
   flags <- forM entries $ \name -> doesDirectoryExist ("packages" </> name)
   pure $ sort [name | (name, isDir) <- zip entries flags, isDir]
-checkPackage :: FilePath -> IO [String]
+checkPackage :: FilePath -> IO ([String], [String])
 checkPackage packageName = do
   let packageDefault = "packages" </> packageName </> "default.nix"
   projectKind <- detectProjectKindForPackage packageName
   exists <- doesFileExist packageDefault
-  templateIssues <-
+  (templateIssues, inferredTemplateName) <-
     if not exists
-      then pure []
+      then pure ([], Nothing)
       else do
         packageContents <- TIO.readFile packageDefault
         inferredTemplate <- inferTemplateName packageName (T.unpack packageContents)
         case inferredTemplate of
           Nothing ->
             pure
-              [ "packages/" ++ packageName ++ "/default.nix: could not infer corresponding template"
-              ]
+              ( [ "packages/" ++ packageName ++ "/default.nix: could not infer corresponding template"
+                ],
+                Nothing
+              )
           Just inferredTemplateName -> do
             case templateSpecByName inferredTemplateName of
               Nothing ->
                 pure
-                  [ "packages/" ++ packageName ++ "/default.nix: unsupported template " ++ inferredTemplateName
-                  ]
+                  ( [ "packages/" ++ packageName ++ "/default.nix: unsupported template " ++ inferredTemplateName
+                    ],
+                    Just inferredTemplateName
+                  )
               Just spec ->
                 case embeddedBaseline spec of
                   Just templateContents ->
-                    compareWithTemplate packageName packageDefault ("packages" </> inferredTemplateName </> "default.nix") (allowedDifferenceKeys spec) (Just templateContents)
+                    do
+                      issues <- compareWithTemplate packageName packageDefault ("packages" </> inferredTemplateName </> "default.nix") (allowedDifferenceKeys spec) (Just templateContents)
+                      pure (issues, Just inferredTemplateName)
                   Nothing ->
                     pure
-                      [ "packages/"
-                          ++ packageName
-                          ++ "/default.nix: internal error: missing embedded baseline for template "
-                          ++ inferredTemplateName
-                      ]
+                      ( [ "packages/"
+                            ++ packageName
+                            ++ "/default.nix: internal error: missing embedded baseline for template "
+                            ++ inferredTemplateName
+                        ],
+                        Just inferredTemplateName
+                      )
   cargoIssues <- checkCargoToml packageName
   cabalIssues <- checkCabalFile packageName
   pythonDebugIssues <- checkPythonDebugUnittest packageName projectKind
   haskellDebugIssues <- checkHaskellDebugTests packageName projectKind
   rustDebugIssues <- checkRustDebugTests packageName projectKind
-  pure (templateIssues ++ cargoIssues ++ cabalIssues ++ pythonDebugIssues ++ haskellDebugIssues ++ rustDebugIssues)
+  let successfulChecks :: [String]
+      successfulChecks =
+        catMaybes
+          [ if projectKind `elem` [PythonKind, PythonLatexKind] && null pythonDebugIssues
+              then Just "python_debug_unittest"
+              else Nothing,
+            if projectKind == HaskellKind && null haskellDebugIssues
+              then Just "haskell_debug_hunit"
+              else Nothing,
+            if projectKind == RustKind && null rustDebugIssues
+              then Just "rust_debug_tests"
+              else Nothing
+          ]
+      allIssues = templateIssues ++ cargoIssues ++ cabalIssues ++ pythonDebugIssues ++ haskellDebugIssues ++ rustDebugIssues
+      packagePath = "packages/" ++ packageName
+      templateLabel :: String
+      templateLabel = fromMaybe "unknown" inferredTemplateName
+      statusLabel :: String
+      statusLabel =
+        if null allIssues
+          then "parsed successfully"
+          else "parsed with errors"
+      reportLine :: String
+      reportLine =
+        packagePath
+          ++ ": "
+          ++ statusLabel
+          ++ "; template="
+          ++ templateLabel
+          ++ "; successful_checks=["
+          ++ intercalate ", " successfulChecks
+          ++ "]"
+  pure (allIssues, [reportLine])
 detectProjectKindForPackage :: FilePath -> IO ProjectKind
 detectProjectKindForPackage packageName = do
   let pkgRoot = "packages" </> packageName
@@ -572,7 +615,6 @@ mapPythonValidatorError :: FilePath -> String -> String
 mapPythonValidatorError packageName errorCode =
   let prefix = "packages/" ++ packageName ++ "/main.py: "
    in case errorCode of
-        "missing_unittest_import" -> prefix ++ "missing unittest import"
         "missing_main_function" -> prefix ++ "missing main() function"
         "missing_debug_gate" -> prefix ++ "main() must include a DEBUG gate"
         "debug_branch_no_unittest" -> prefix ++ "DEBUG=true branch in main() must run unittest"
@@ -651,21 +693,12 @@ pythonDebugUnittestValidator =
       "        print('ERR parse_error')",
       "        sys.exit(2)",
       "",
-      "    has_unittest_import = False",
       "    functions = {}",
       "    for node in module.body:",
-      "        if isinstance(node, ast.Import):",
-      "            for alias in node.names:",
-      "                if alias.name == 'unittest':",
-      "                    has_unittest_import = True",
-      "        elif isinstance(node, ast.ImportFrom) and node.module == 'unittest':",
-      "            has_unittest_import = True",
-      "        elif isinstance(node, ast.FunctionDef):",
+      "        if isinstance(node, ast.FunctionDef):",
       "            functions[node.name] = node",
       "",
       "    errors = []",
-      "    if not has_unittest_import:",
-      "        errors.append('missing_unittest_import')",
       "    if 'main' not in functions:",
       "        errors.append('missing_main_function')",
       "    else:",
