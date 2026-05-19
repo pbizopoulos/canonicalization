@@ -35,7 +35,7 @@ import Prettyprinter.Render.Text (renderStrict)
 import System.Directory (doesDirectoryExist, doesFileExist, listDirectory, removeFile)
 import System.Environment (lookupEnv)
 import System.Exit (exitFailure)
-import System.FilePath ((</>))
+import System.FilePath ((<.>), (</>))
 import System.IO (hClose, openTempFile)
 import Test.HUnit (Counts (errors, failures), Test (TestCase, TestList), assertEqual, runTestTT)
 import Prelude
@@ -194,33 +194,192 @@ checkPackage :: FilePath -> IO [String]
 checkPackage packageName = do
   let packageDefault = "packages" </> packageName </> "default.nix"
   exists <- doesFileExist packageDefault
-  if not exists
+  templateIssues <-
+    if not exists
+      then pure []
+      else do
+        packageContents <- TIO.readFile packageDefault
+        inferredTemplate <- inferTemplateName packageName (T.unpack packageContents)
+        case inferredTemplate of
+          Nothing ->
+            pure
+              [ "packages/" ++ packageName ++ "/default.nix: could not infer corresponding template"
+              ]
+          Just inferredTemplateName -> do
+            case templateSpecByName inferredTemplateName of
+              Nothing ->
+                pure
+                  [ "packages/" ++ packageName ++ "/default.nix: unsupported template " ++ inferredTemplateName
+                  ]
+              Just spec ->
+                case embeddedBaseline spec of
+                  Just templateContents ->
+                    compareWithTemplate packageName packageDefault ("packages" </> inferredTemplateName </> "default.nix") (allowedDifferenceKeys spec) (Just templateContents)
+                  Nothing ->
+                    pure
+                      [ "packages/"
+                          ++ packageName
+                          ++ "/default.nix: internal error: missing embedded baseline for template "
+                          ++ inferredTemplateName
+                      ]
+  cargoIssues <- checkCargoToml packageName
+  cabalIssues <- checkCabalFile packageName
+  pure (templateIssues ++ cargoIssues ++ cabalIssues)
+checkCargoToml :: FilePath -> IO [String]
+checkCargoToml packageName = do
+  let cargoPath = "packages" </> packageName </> "Cargo.toml"
+  cargoExists <- doesFileExist cargoPath
+  if not cargoExists
     then pure []
     else do
-      packageContents <- TIO.readFile packageDefault
-      inferredTemplate <- inferTemplateName packageName (T.unpack packageContents)
-      case inferredTemplate of
-        Nothing ->
-          pure
-            [ "packages/" ++ packageName ++ "/default.nix: could not infer corresponding template"
-            ]
-        Just inferredTemplateName -> do
-          case templateSpecByName inferredTemplateName of
-            Nothing ->
-              pure
-                [ "packages/" ++ packageName ++ "/default.nix: unsupported template " ++ inferredTemplateName
-                ]
-            Just spec ->
-              case embeddedBaseline spec of
-                Just templateContents ->
-                  compareWithTemplate packageName packageDefault ("packages" </> inferredTemplateName </> "default.nix") (allowedDifferenceKeys spec) (Just templateContents)
-                Nothing ->
-                  pure
-                    [ "packages/"
-                        ++ packageName
-                        ++ "/default.nix: internal error: missing embedded baseline for template "
-                        ++ inferredTemplateName
-                    ]
+      cargoContents <- TIO.readFile cargoPath
+      rustTemplateCargoContents <- TIO.readFile ("packages" </> "rust-template" </> "Cargo.toml")
+      let packageSection = extractTomlSection "package" cargoContents
+          lintsRustSection = extractTomlSection "lints.rust" cargoContents
+          packageNameValue = lookupTomlString "name" packageSection
+          unsafeCodeLint = lookupTomlString "unsafe_code" lintsRustSection
+          normalizedCargo = normalizeCargoTomlForTightness packageName cargoContents
+          normalizedTemplateCargo = normalizeCargoTomlForTightness packageName rustTemplateCargoContents
+      pure $
+        catMaybes
+          [ case packageNameValue of
+              Nothing ->
+                Just ("packages/" ++ packageName ++ "/Cargo.toml: missing [package].name")
+              Just actualName ->
+                if actualName == T.pack packageName
+                  then Nothing
+                  else
+                    Just
+                      ( "packages/"
+                          ++ packageName
+                          ++ "/Cargo.toml: [package].name must match directory name (expected \""
+                          ++ packageName
+                          ++ "\", got \""
+                          ++ T.unpack actualName
+                          ++ "\")"
+                      ),
+            if unsafeCodeLint == Just "forbid"
+              then Nothing
+              else Just ("packages/" ++ packageName ++ "/Cargo.toml: require [lints.rust].unsafe_code = \"forbid\""),
+            if normalizedCargo == normalizedTemplateCargo
+              then Nothing
+              else
+                Just
+                  ( "packages/"
+                      ++ packageName
+                      ++ "/Cargo.toml: only dependency sections may differ from packages/rust-template/Cargo.toml"
+                  )
+          ]
+normalizeCargoTomlForTightness :: FilePath -> T.Text -> T.Text
+normalizeCargoTomlForTightness packageName contents =
+  let step (currentHeader, acc) rawLine =
+        let stripped = T.strip rawLine
+         in if isTomlSectionHeader stripped
+              then
+                if isDependencyHeader stripped
+                  then (Just stripped, acc)
+                  else (Just stripped, acc ++ [stripped])
+              else case currentHeader of
+                Just header | isDependencyHeader header -> (currentHeader, acc)
+                _ | T.null stripped -> (currentHeader, acc)
+                Just "[package]" | isNameLine stripped -> (currentHeader, acc ++ [nameLine])
+                Just "[[bin]]" | isNameLine stripped -> (currentHeader, acc ++ [nameLine])
+                _ -> (currentHeader, acc ++ [stripped])
+      (_, normalizedLines) = foldl' step (Nothing, []) (T.lines contents)
+      nameLine = "name = \"" <> T.pack packageName <> "\""
+   in T.unlines normalizedLines
+isDependencyHeader :: T.Text -> Bool
+isDependencyHeader stripped =
+  stripped == "[dependencies]"
+    || stripped == "[dev-dependencies]"
+    || stripped == "[build-dependencies]"
+    || isTargetDependenciesHeader stripped
+isTargetDependenciesHeader :: T.Text -> Bool
+isTargetDependenciesHeader stripped =
+  T.isPrefixOf "[target." stripped
+    && T.isSuffixOf ".dependencies]" stripped
+isNameLine :: T.Text -> Bool
+isNameLine stripped = "name = \"" `T.isPrefixOf` stripped
+extractTomlSection :: T.Text -> T.Text -> T.Text
+extractTomlSection sectionName contents =
+  let sectionHeader = "[" <> sectionName <> "]"
+      linesOfFile = T.lines contents
+      sectionStart = dropWhile (\line -> T.strip line /= sectionHeader) linesOfFile
+      sectionBody = drop 1 sectionStart
+   in T.unlines (takeWhile (not . isTomlSectionHeader . T.strip) sectionBody)
+isTomlSectionHeader :: T.Text -> Bool
+isTomlSectionHeader line =
+  T.length line >= 3 && T.head line == '[' && T.last line == ']'
+lookupTomlString :: T.Text -> T.Text -> Maybe T.Text
+lookupTomlString key sectionContents =
+  let keyPrefix = key <> " = "
+      maybeLine = listToMaybe [T.strip line | line <- T.lines sectionContents, keyPrefix `T.isPrefixOf` T.strip line]
+   in do
+        line <- maybeLine
+        value <- T.stripPrefix keyPrefix line
+        T.stripPrefix "\"" value >>= T.stripSuffix "\""
+checkCabalFile :: FilePath -> IO [String]
+checkCabalFile packageName = do
+  let cabalPath = "packages" </> packageName </> packageName <.> "cabal"
+  cabalExists <- doesFileExist cabalPath
+  if not cabalExists
+    then pure []
+    else do
+      cabalContents <- TIO.readFile cabalPath
+      templateContents <- TIO.readFile ("packages" </> "haskell-template" </> "haskell-template.cabal")
+      let normalizedCabal = normalizeCabalForTightness packageName cabalContents
+          normalizedTemplate = normalizeCabalForTightness packageName templateContents
+          cabalName = lookupCabalField "name" cabalContents
+      pure $
+        catMaybes
+          [ if cabalName == Just (T.pack packageName)
+              then Nothing
+              else Just ("packages/" ++ packageName ++ "/" ++ packageName ++ ".cabal: name must match directory name"),
+            if normalizedCabal == normalizedTemplate
+              then Nothing
+              else
+                Just
+                  ( "packages/"
+                      ++ packageName
+                      ++ "/"
+                      ++ packageName
+                      ++ ".cabal: only build-depends may differ from packages/haskell-template/haskell-template.cabal"
+                  )
+          ]
+normalizeCabalForTightness :: FilePath -> T.Text -> T.Text
+normalizeCabalForTightness packageName contents =
+  let step (inBuildDepends, acc) rawLine =
+        let stripped = T.strip rawLine
+            normalized = normalizeCabalLine packageName stripped
+         in if inBuildDepends
+              then
+                if T.null stripped
+                  then (True, acc)
+                  else case T.breakOn ":" stripped of
+                    (_, "") -> (True, acc)
+                    _ -> (False, acc ++ [normalized])
+              else
+                if "build-depends:" `T.isPrefixOf` stripped
+                  then (True, acc)
+                  else
+                    if T.null stripped
+                      then (False, acc)
+                      else (False, acc ++ [normalized])
+      (_, normalizedLines) = foldl' step (False, []) (T.lines contents)
+   in T.unlines normalizedLines
+normalizeCabalLine :: FilePath -> T.Text -> T.Text
+normalizeCabalLine packageName stripped
+  | "name:" `T.isPrefixOf` stripped = "name:          " <> T.pack packageName
+  | "executable " `T.isPrefixOf` stripped = "executable " <> T.pack packageName
+  | otherwise = stripped
+lookupCabalField :: T.Text -> T.Text -> Maybe T.Text
+lookupCabalField field contents =
+  let fieldPrefix = field <> ":"
+      maybeLine = listToMaybe [T.strip line | line <- T.lines contents, fieldPrefix `T.isPrefixOf` T.strip line]
+   in do
+        line <- maybeLine
+        value <- T.stripPrefix fieldPrefix line
+        pure (T.strip value)
 compareWithTemplate :: FilePath -> FilePath -> FilePath -> Set.Set T.Text -> Maybe T.Text -> IO [String]
 compareWithTemplate packageName packageDefault templateDefault allowedKeys templateOverrideContents = do
   packageExpr <- parseNixExprFromFile packageDefault
@@ -490,7 +649,22 @@ debugTests =
         assertEqual
           "issueLine formatting"
           "  - missing key: src"
-          (issueLine "missing key" "src")
+          (issueLine "missing key" "src"),
+      TestCase $ do
+        assertEqual
+          "extractTomlSection finds package section"
+          "name = \"check-repository-directory-structure\"\nversion = \"0.1.0\"\nedition = \"2021\"\ndescription = \"A CLI tool to check the repository directory structure.\"\nlicense = \"MIT\"\nrepository = \"https://github.com/pbizopoulos/canonicalization\"\nreadme = \"../../README\"\nkeywords = [\"check\", \"lint\", \"directory-structure\"]\ncategories = [\"development-tools\"]\n\n"
+          (extractTomlSection "package" checkRepositoryDirectoryStructureCargoFixture),
+      TestCase $ do
+        assertEqual
+          "lookupTomlString parses simple key"
+          (Just "remove-empty-lines")
+          (lookupTomlString "name" (extractTomlSection "package" removeEmptyLinesCargoFixture)),
+      TestCase $ do
+        assertEqual
+          "lookupTomlString parses unsafe_code lint"
+          (Just "forbid")
+          (lookupTomlString "unsafe_code" (extractTomlSection "lints.rust" removeEmptyLinesCargoFixture))
     ]
 mkDerivationFixture :: String
 mkDerivationFixture =
@@ -569,6 +743,67 @@ binaryReleaseFixture =
     ++ "  '';\n"
     ++ "  src = pkgs.fetchurl { url = \"https://example.invalid/tool.tar.gz\"; sha256 = \"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"; };\n"
     ++ "}\n"
+checkRepositoryDirectoryStructureCargoFixture :: T.Text
+checkRepositoryDirectoryStructureCargoFixture =
+  T.unlines
+    [ "[[bin]]",
+      "name = \"check-repository-directory-structure\"",
+      "path = \"src/main.rs\"",
+      "",
+      "[dependencies]",
+      "clap = {version = \"4.5\", features = [\"derive\"]}",
+      "fd-lock = \"4.0\"",
+      "git2 = \"0.19\"",
+      "idna = \"1.1\"",
+      "regex = \"1.10\"",
+      "walkdir = \"2.5\"",
+      "",
+      "[package]",
+      "name = \"check-repository-directory-structure\"",
+      "version = \"0.1.0\"",
+      "edition = \"2021\"",
+      "description = \"A CLI tool to check the repository directory structure.\"",
+      "license = \"MIT\"",
+      "repository = \"https://github.com/pbizopoulos/canonicalization\"",
+      "readme = \"../../README\"",
+      "keywords = [\"check\", \"lint\", \"directory-structure\"]",
+      "categories = [\"development-tools\"]",
+      ""
+    ]
+removeEmptyLinesCargoFixture :: T.Text
+removeEmptyLinesCargoFixture =
+  T.unlines
+    [ "[[bin]]",
+      "name = \"remove-empty-lines\"",
+      "path = \"src/main.rs\"",
+      "",
+      "[dependencies]",
+      "ignore = \"0.4\"",
+      "anyhow = \"1.0\"",
+      "content_inspector = \"0.2\"",
+      "tempfile = \"3.8\"",
+      "",
+      "[lints.clippy]",
+      "all = {level = \"deny\", priority = -1}",
+      "pedantic = {level = \"deny\", priority = -1}",
+      "nursery = {level = \"deny\", priority = -1}",
+      "cargo = {level = \"deny\", priority = -1}",
+      "",
+      "[lints.rust]",
+      "unsafe_code = \"forbid\"",
+      "",
+      "[package]",
+      "name = \"remove-empty-lines\"",
+      "version = \"0.1.0\"",
+      "edition = \"2021\"",
+      "description = \"A CLI tool to remove empty lines from files.\"",
+      "license = \"MIT\"",
+      "repository = \"https://github.com/pbizopoulos/canonicalization\"",
+      "readme = \"../../README\"",
+      "keywords = [\"cleanup\", \"formatter\"]",
+      "categories = [\"development-tools\"]",
+      ""
+    ]
 haskellTemplateBaseline :: T.Text
 haskellTemplateBaseline =
   T.unlines

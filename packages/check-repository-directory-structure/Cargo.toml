@@ -10,13 +10,22 @@ idna = "1.1"
 regex = "1.10"
 walkdir = "2.5"
 
+[lints.clippy]
+all = {level = "deny", priority = -1}
+pedantic = {level = "deny", priority = -1}
+nursery = {level = "deny", priority = -1}
+cargo = {level = "deny", priority = -1}
+
+[lints.rust]
+unsafe_code = "forbid"
+
 [package]
 name = "check-repository-directory-structure"
 version = "0.1.0"
 edition = "2021"
-description = "A CLI tool to check the repository directory structure."
+description = "A Rust template project."
 license = "MIT"
 repository = "https://github.com/pbizopoulos/canonicalization"
 readme = "../../README"
-keywords = ["check", "lint", "directory-structure"]
+keywords = ["template"]
 categories = ["development-tools"]

@@ -1,7 +1,6 @@
 name:          check-repository-file-contents
 version:       0.0.0
-synopsis:
-  Check package default.nix contents against template defaults.
+synopsis:      Hello World Haskell
 cabal-version: >=1.10
 build-type:    Simple
 executable check-repository-file-contents
