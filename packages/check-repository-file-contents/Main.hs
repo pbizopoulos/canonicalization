@@ -10,7 +10,7 @@ import Control.Monad (forM, when)
 import Data.Fix (Fix (Fix))
 import Data.Functor.Compose (Compose (Compose))
 import Data.Kind (Type)
-import Data.List (intercalate, isInfixOf, sort, sortBy)
+import Data.List (intercalate, isInfixOf, isPrefixOf, isSuffixOf, sort, sortBy)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, fromMaybe, listToMaybe)
@@ -36,8 +36,10 @@ import System.Directory (doesDirectoryExist, doesFileExist, listDirectory, remov
 import System.Environment (lookupEnv)
 import System.Exit (exitFailure)
 import System.FilePath ((<.>), (</>))
+import System.FilePath.Posix (splitDirectories, takeBaseName, takeDirectory, takeFileName)
 import System.IO (hClose, openTempFile)
 import Test.HUnit (Counts (errors, failures), Test (TestCase, TestList), assertEqual, runTestTT)
+import Text.Regex.TDFA ((=~))
 import Prelude
 defaultAllowedKeys :: Set.Set T.Text
 defaultAllowedKeys =
@@ -149,10 +151,10 @@ templateSpecs =
 pythonLatexDetector :: FilePath -> String -> IO Bool
 pythonLatexDetector packageName content
   | "buildPythonPackage" `isInfixOf` content = do
-      let packageRoot = "packages" </> packageName
-      hasMsTex <- doesFileExist (packageRoot </> "ms.tex")
-      hasRefsBib <- doesFileExist (packageRoot </> "refs.bib")
-      hasFiguresDir <- doesDirectoryExist (packageRoot </> "figures")
+      let packageDir = "packages" </> packageName
+      hasMsTex <- doesFileExist (packageDir </> "ms.tex")
+      hasRefsBib <- doesFileExist (packageDir </> "refs.bib")
+      hasFiguresDir <- doesDirectoryExist (packageDir </> "figures")
       pure (hasMsTex || hasRefsBib || hasFiguresDir)
   | otherwise = pure False
 pythonRemoteDetector :: FilePath -> String -> IO Bool
@@ -178,13 +180,161 @@ main = do
   case debug of
     Just "1" -> runDebugTests
     _ -> do
+      structureIssues <- checkRepositoryStructure
       packageNames <- listPackageNames
       issues <- fmap concat (forM packageNames checkPackage)
-      if null issues
+      let allIssues = structureIssues ++ issues
+      if null allIssues
         then putStrLn "check-repository-file-contents: ok"
         else do
-          mapM_ putStrLn issues
+          mapM_ putStrLn allIssues
           exitFailure
+checkRepositoryStructure :: IO [String]
+checkRepositoryStructure = do
+  allPaths <- collectRepoPaths "."
+  let relPaths = sort [path | path <- allPaths, path /= "."]
+      leafPaths = Set.fromList (filter (isLeafPath relPaths) relPaths)
+      packageRoots = Set.fromList (mapMaybe packageRoot relPaths)
+      hostRoots = Set.fromList (mapMaybe hostRoot relPaths)
+      baseAllowedPatterns :: [String]
+      baseAllowedPatterns =
+        [ "^\\.git(/.*)?$",
+          "^\\.github/workflows/workflow\\.yml$",
+          "^\\.agents(/.*)?$",
+          "^\\.codex(/.*)?$",
+          "^\\.gitignore$",
+          "^CITATION\\.bib$",
+          "^LICENSE$",
+          "^README$",
+          "^checks/[^/]+/default\\.nix$",
+          "^flake\\.lock$",
+          "^flake\\.nix$",
+          "^formatter\\.nix$",
+          "^hosts/[^/]+/configuration\\.nix$",
+          "^hosts/[^/]+/hardware-configuration\\.nix$",
+          "^packages/[^/]+/\\.gitignore$",
+          "^packages/[^/]+/Main\\.hs$",
+          "^packages/[^/]+/Cargo\\.toml$",
+          "^packages/[^/]+/default\\.nix$",
+          "^packages/[^/]+/index\\.html$",
+          "^packages/[^/]+/manage\\.py$",
+          "^packages/[^/]+/main\\.(c|py|sh|tf)$",
+          "^packages/[^/]+/ms\\.tex$",
+          "^packages/[^/]+/style\\.css$",
+          "^packages/[^/]+/script\\.js$",
+          "^prm/[^/]+$",
+          "^result$",
+          "^secrets/secrets\\.age$",
+          "^secrets/secrets\\.env\\.example$",
+          "^secrets/secrets\\.nix$"
+        ]
+      fileDependencies :: [(String, [String])]
+      fileDependencies =
+        [ ("^packages/[^/]+/Cargo\\.toml$", ["^packages/[^/]+/Cargo\\.lock$", "^packages/[^/]+/src/main\\.rs$"]),
+          ("^packages/[^/]+/index\\.html$", ["^packages/[^/]+/script\\.js$", "^packages/[^/]+/style\\.css$"]),
+          ("^packages/[^/]+/main\\.tf$", ["^packages/[^/]+/\\.gitignore$", "^packages/[^/]+/\\.terraform(/.*)?$", "^packages/[^/]+/\\.terraform\\.lock\\.hcl$", "^packages/[^/]+/prm/.*$"]),
+          ("^packages/[^/]+/ms\\.tex$", ["^packages/[^/]+/ms\\.bib$"]),
+          ( "^packages/[^/]+/manage\\.py$",
+            [ "^packages/[^/]+/[^/]+/__init__\\.py$",
+              "^packages/[^/]+/[^/]+/(apps|auth_backends|context_processors|forms|models|settings|throttle|urls|views|wsgi)\\.py$",
+              "^packages/[^/]+/[^/]+/migrations(/.*)?$",
+              "^packages/[^/]+/[^/]+/tests(/.*)?$",
+              "^packages/[^/]+/templates(/.*)?$",
+              "^packages/[^/]+/static(/.*)?$"
+            ]
+          ),
+          ("^packages/[^/]+/main\\.py$", ["^packages/[^/]+/prm(/.*)?$"])
+        ]
+      dependencyPatterns =
+        concat
+          [ deps
+          | path <- Set.toList leafPaths,
+            (trigger, deps) <- fileDependencies,
+            pathMatches trigger path
+          ]
+      cabalPatterns =
+        [ "^" ++ pkgRoot ++ "/" ++ pkgName ++ "\\.cabal$"
+        | pkgRoot <- Set.toList packageRoots,
+          Set.member (pkgRoot </> "Main.hs") (Set.fromList relPaths),
+          let pkgName = takeBaseName pkgRoot
+        ]
+      allowedPatterns = baseAllowedPatterns ++ dependencyPatterns ++ cabalPatterns
+      missingPackageDefaults =
+        [ pkgRoot ++ ": is missing required default.nix"
+        | pkgRoot <- Set.toList packageRoots,
+          (pkgRoot </> "default.nix") `notElem` relPaths
+        ]
+      missingHostConfigs =
+        [ hostDir ++ ": is missing required configuration.nix"
+        | hostDir <- Set.toList hostRoots,
+          (hostDir </> "configuration.nix") `notElem` relPaths
+        ]
+      missingCabalForMain =
+        [ pkgRoot ++ ": is missing required " ++ pkgName ++ ".cabal for Main.hs package"
+        | pkgRoot <- Set.toList packageRoots,
+          Set.member (pkgRoot </> "Main.hs") (Set.fromList relPaths),
+          let pkgName = takeBaseName pkgRoot,
+          (pkgRoot </> pkgName <.> "cabal") `notElem` relPaths
+        ]
+      badlyNamedCabals =
+        [ path ++ ": cabal file must be named " ++ pkgName ++ ".cabal"
+        | path <- relPaths,
+          ".cabal" `isSuffixOf` path,
+          let pkgRoot = takeDirectory path,
+          "packages/" `isPrefixOf` pkgRoot,
+          let pkgName = takeBaseName pkgRoot,
+          takeFileName path /= pkgName <.> "cabal"
+        ]
+      disallowedPaths =
+        [ path ++ ": is not allowed"
+        | path <- Set.toList leafPaths,
+          not (any (`pathMatches` path) allowedPatterns)
+        ]
+  pure (missingPackageDefaults ++ missingHostConfigs ++ missingCabalForMain ++ badlyNamedCabals ++ disallowedPaths)
+collectRepoPaths :: FilePath -> IO [FilePath]
+collectRepoPaths root = do
+  children <- listDirectory root
+  let childPaths = sort [root </> child | child <- children]
+  keptChildren <- fmap catMaybes $
+    forM childPaths $ \childPath -> do
+      isDir <- doesDirectoryExist childPath
+      let relativeChildPath = toRelativePath childPath
+      if isDir
+        then
+          if shouldTraverseDirectory relativeChildPath
+            then Just <$> collectRepoPaths childPath
+            else pure Nothing
+        else pure (Just [relativeChildPath])
+  pure (toRelativePath root : concat keptChildren)
+toRelativePath :: FilePath -> FilePath
+toRelativePath "." = "."
+toRelativePath path =
+  case splitDirectories path of
+    "." : rest -> foldl1 (</>) rest
+    segments -> foldl1 (</>) segments
+shouldTraverseDirectory :: FilePath -> Bool
+shouldTraverseDirectory path =
+  not
+    ( any
+        (`elem` ["tmp", "prm", "target", "CSharpier", "build", "_build", "deps", "node_modules", ".nuxt", ".svelte-kit", "result"])
+        (splitDirectories path)
+    )
+isLeafPath :: [FilePath] -> FilePath -> Bool
+isLeafPath allPaths path =
+  let children = [candidate | candidate <- allPaths, takeDirectory candidate == path]
+   in null children
+pathMatches :: String -> FilePath -> Bool
+pathMatches regex path = path =~ regex
+packageRoot :: FilePath -> Maybe FilePath
+packageRoot path =
+  case splitDirectories path of
+    "packages" : packageName : _ -> Just ("packages" </> packageName)
+    _ -> Nothing
+hostRoot :: FilePath -> Maybe FilePath
+hostRoot path =
+  case splitDirectories path of
+    "hosts" : hostName : _ -> Just ("hosts" </> hostName)
+    _ -> Nothing
 listPackageNames :: IO [FilePath]
 listPackageNames = do
   entries <- listDirectory "packages"
@@ -651,8 +801,8 @@ debugTests =
       TestCase $ do
         assertEqual
           "extractTomlSection finds package section"
-          "name = \"check-repository-directory-structure\"\nversion = \"0.1.0\"\nedition = \"2021\"\ndescription = \"A CLI tool to check the repository directory structure.\"\nlicense = \"MIT\"\nrepository = \"https://github.com/pbizopoulos/canonicalization\"\nreadme = \"../../README\"\nkeywords = [\"check\", \"lint\", \"directory-structure\"]\ncategories = [\"development-tools\"]\n\n"
-          (extractTomlSection "package" checkRepositoryDirectoryStructureCargoFixture),
+          "name = \"example-package\"\nversion = \"0.1.0\"\nedition = \"2021\"\ndescription = \"Example package fixture for TOML parsing.\"\nlicense = \"MIT\"\nrepository = \"https://github.com/pbizopoulos/canonicalization\"\nreadme = \"../../README\"\nkeywords = [\"check\", \"lint\", \"fixture\"]\ncategories = [\"development-tools\"]\n\n"
+          (extractTomlSection "package" exampleCargoFixture),
       TestCase $ do
         assertEqual
           "lookupTomlString parses simple key"
@@ -741,11 +891,11 @@ binaryReleaseFixture =
     ++ "  '';\n"
     ++ "  src = pkgs.fetchurl { url = \"https://example.invalid/tool.tar.gz\"; sha256 = \"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"; };\n"
     ++ "}\n"
-checkRepositoryDirectoryStructureCargoFixture :: T.Text
-checkRepositoryDirectoryStructureCargoFixture =
+exampleCargoFixture :: T.Text
+exampleCargoFixture =
   T.unlines
     [ "[[bin]]",
-      "name = \"check-repository-directory-structure\"",
+      "name = \"example-package\"",
       "path = \"src/main.rs\"",
       "",
       "[dependencies]",
@@ -757,14 +907,14 @@ checkRepositoryDirectoryStructureCargoFixture =
       "walkdir = \"2.5\"",
       "",
       "[package]",
-      "name = \"check-repository-directory-structure\"",
+      "name = \"example-package\"",
       "version = \"0.1.0\"",
       "edition = \"2021\"",
-      "description = \"A CLI tool to check the repository directory structure.\"",
+      "description = \"Example package fixture for TOML parsing.\"",
       "license = \"MIT\"",
       "repository = \"https://github.com/pbizopoulos/canonicalization\"",
       "readme = \"../../README\"",
-      "keywords = [\"check\", \"lint\", \"directory-structure\"]",
+      "keywords = [\"check\", \"lint\", \"fixture\"]",
       "categories = [\"development-tools\"]",
       ""
     ]

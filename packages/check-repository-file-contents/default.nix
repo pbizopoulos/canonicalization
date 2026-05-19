@@ -11,6 +11,7 @@ pkgs.haskellPackages.mkDerivation rec {
     pkgs.haskellPackages.filepath
     pkgs.haskellPackages.hnix
     pkgs.haskellPackages.prettyprinter
+    pkgs.haskellPackages.regex-tdfa
     pkgs.haskellPackages.text
   ];
   executableToolDepends = [

@@ -79,13 +79,6 @@ let
         biome.options = [
           "--max-diagnostics=none"
         ];
-        check-repository-directory-structure = {
-          command = inputs.self.packages.${pkgs.stdenv.system}."check-repository-directory-structure";
-          includes = [
-            "flake.nix"
-          ];
-          priority = 0;
-        };
         check-repository-file-contents = {
           command = inputs.self.packages.${pkgs.stdenv.system}."check-repository-file-contents";
           includes = [

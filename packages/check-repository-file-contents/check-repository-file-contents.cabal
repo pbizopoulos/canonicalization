@@ -14,5 +14,6 @@ executable check-repository-file-contents
     , hnix
     , HUnit
     , prettyprinter
+    , regex-tdfa
     , text
   ghc-options:   -O2 -Weverything -Werror -threaded
