@@ -1,3 +1,4 @@
+{-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -196,6 +197,7 @@ checkRepositoryStructure = do
       leafPaths = Set.fromList (filter (isLeafPath relPaths) relPaths)
       packageRoots = Set.fromList (mapMaybe packageRoot relPaths)
       hostRoots = Set.fromList (mapMaybe hostRoot relPaths)
+      packageInfos = map (buildPackageInfo leafPaths) (Set.toList packageRoots)
       globalAllowedPatterns :: [String]
       globalAllowedPatterns =
         [ "^\\.git(/.*)?$",
@@ -218,15 +220,8 @@ checkRepositoryStructure = do
         ]
       packageAllowedPatterns =
         concat
-          [ allowedPatternsForPackage pkgRoot pkgName packageLeafPaths
-          | pkgRoot <- Set.toList packageRoots,
-            let pkgName = takeBaseName pkgRoot,
-            let packageLeafPaths =
-                  catMaybes
-                    [ stripPrefix (pkgRoot ++ "/") path
-                    | path <- Set.toList leafPaths,
-                      (pkgRoot ++ "/") `isPrefixOf` path
-                    ]
+          [ allowedPatternsForKind (packageRootPath pkgInfo) (packageDirName pkgInfo) (detectedKind pkgInfo)
+          | pkgInfo <- packageInfos
           ]
       allowedPatterns = globalAllowedPatterns ++ packageAllowedPatterns
       missingPackageDefaults =
@@ -255,53 +250,110 @@ checkRepositoryStructure = do
           let pkgName = takeBaseName pkgRoot,
           takeFileName path /= pkgName <.> "cabal"
         ]
+      packageKindIssues =
+        concatMap packageKindProblems packageInfos
       disallowedPaths =
         [ path ++ ": is not allowed"
         | path <- Set.toList leafPaths,
           not (any (`pathMatches` path) allowedPatterns)
         ]
-  pure (missingPackageDefaults ++ missingHostConfigs ++ missingCabalForMain ++ badlyNamedCabals ++ disallowedPaths)
-allowedPatternsForPackage :: FilePath -> FilePath -> [FilePath] -> [String]
-allowedPatternsForPackage pkgRoot pkgName packageLeafPaths =
+  pure (missingPackageDefaults ++ missingHostConfigs ++ missingCabalForMain ++ badlyNamedCabals ++ packageKindIssues ++ disallowedPaths)
+type ProjectKind :: Type
+data ProjectKind
+  = HaskellKind
+  | RustKind
+  | HtmlKind
+  | DjangoKind
+  | PythonLatexKind
+  | PythonKind
+  | CKind
+  | TerraformKind
+  | LatexKind
+  | BinaryReleaseKind
+  | UnknownKind
+  deriving stock (Eq, Ord, Show)
+type PackageInfo :: Type
+data PackageInfo = PackageInfo
+  { packageRootPath :: FilePath,
+    packageDirName :: FilePath,
+    packageLeafFiles :: [FilePath],
+    detectedKind :: ProjectKind,
+    matchedMarkers :: [String]
+  }
+buildPackageInfo :: Set.Set FilePath -> FilePath -> PackageInfo
+buildPackageInfo leafPaths pkgRoot =
+  let pkgName = takeBaseName pkgRoot
+      leafFiles =
+        catMaybes
+          [ stripPrefix (pkgRoot ++ "/") path
+          | path <- Set.toList leafPaths,
+            (pkgRoot ++ "/") `isPrefixOf` path
+          ]
+      markers = detectMarkers leafFiles
+   in PackageInfo
+        { packageRootPath = pkgRoot,
+          packageDirName = pkgName,
+          packageLeafFiles = leafFiles,
+          detectedKind = detectKind markers,
+          matchedMarkers = map fst markers
+        }
+detectMarkers :: [FilePath] -> [(String, ProjectKind)]
+detectMarkers leafFiles =
+  let has path = path `elem` leafFiles
+      hasAny prefix = any (isPrefixOf prefix) leafFiles
+   in catMaybes
+        [ if has "Main.hs" then Just ("Main.hs", HaskellKind) else Nothing,
+          if has "Cargo.toml" then Just ("Cargo.toml", RustKind) else Nothing,
+          if has "index.html" then Just ("index.html", HtmlKind) else Nothing,
+          if has "manage.py" then Just ("manage.py", DjangoKind) else Nothing,
+          if has "main.py" && has "ms.tex" then Just ("main.py+ms.tex", PythonLatexKind) else Nothing,
+          if has "main.py" && not (has "ms.tex") then Just ("main.py", PythonKind) else Nothing,
+          if has "main.c" then Just ("main.c", CKind) else Nothing,
+          if has "main.tf" then Just ("main.tf", TerraformKind) else Nothing,
+          if has "ms.tex" && not (has "main.py") then Just ("ms.tex", LatexKind) else Nothing,
+          if hasAny "Cargo.toml" then Nothing else if not (has "main.c") && not (has "Main.hs") && not (has "main.py") && not (has "index.html") && not (has "main.tf") && not (has "manage.py") && not (has "ms.tex") then Just ("binary-layout", BinaryReleaseKind) else Nothing
+        ]
+detectKind :: [(String, ProjectKind)] -> ProjectKind
+detectKind markers =
+  case [kind | (_, kind) <- markers, kind /= BinaryReleaseKind] of
+    [kind] -> kind
+    [] ->
+      if any ((== BinaryReleaseKind) . snd) markers
+        then BinaryReleaseKind
+        else UnknownKind
+    _ -> UnknownKind
+packageKindProblems :: PackageInfo -> [String]
+packageKindProblems pkgInfo =
+  [ packageRootPath pkgInfo
+      ++ ": has ambiguous project markers: "
+      ++ intercalate ", " (matchedMarkers pkgInfo)
+  | length (matchedMarkers pkgInfo) > 1
+  ]
+allowedPatternsForKind :: FilePath -> FilePath -> ProjectKind -> [String]
+allowedPatternsForKind pkgRoot pkgName kind =
   let base = ["^" ++ pkgRoot ++ "/default\\.nix$", "^" ++ pkgRoot ++ "/\\.gitignore$"]
       add patterns = base ++ patterns
-      has path = path `elem` packageLeafPaths
-   in if has "Main.hs"
-        then add ["^" ++ pkgRoot ++ "/Main\\.hs$", "^" ++ pkgRoot ++ "/" ++ pkgName ++ "\\.cabal$"]
-        else
-          if has "Cargo.toml"
-            then add ["^" ++ pkgRoot ++ "/Cargo\\.toml$", "^" ++ pkgRoot ++ "/Cargo\\.lock$", "^" ++ pkgRoot ++ "/src/main\\.rs$"]
-            else
-              if has "index.html"
-                then add ["^" ++ pkgRoot ++ "/index\\.html$", "^" ++ pkgRoot ++ "/script\\.js$", "^" ++ pkgRoot ++ "/style\\.css$"]
-                else
-                  if has "manage.py"
-                    then
-                      add
-                        [ "^" ++ pkgRoot ++ "/manage\\.py$",
-                          "^" ++ pkgRoot ++ "/[^/]+/__init__\\.py$",
-                          "^" ++ pkgRoot ++ "/[^/]+/(apps|auth_backends|context_processors|forms|models|settings|throttle|urls|views|wsgi)\\.py$",
-                          "^" ++ pkgRoot ++ "/[^/]+/migrations(/.*)?$",
-                          "^" ++ pkgRoot ++ "/[^/]+/tests(/.*)?$",
-                          "^" ++ pkgRoot ++ "/templates(/.*)?$",
-                          "^" ++ pkgRoot ++ "/static(/.*)?$"
-                        ]
-                    else
-                      if has "main.py" && has "ms.tex"
-                        then add ["^" ++ pkgRoot ++ "/main\\.py$", "^" ++ pkgRoot ++ "/ms\\.tex$", "^" ++ pkgRoot ++ "/ms\\.bib$", "^" ++ pkgRoot ++ "/refs\\.bib$", "^" ++ pkgRoot ++ "/figures(/.*)?$"]
-                        else
-                          if has "main.py"
-                            then add ["^" ++ pkgRoot ++ "/main\\.py$"]
-                            else
-                              if has "main.c"
-                                then add ["^" ++ pkgRoot ++ "/main\\.c$"]
-                                else
-                                  if has "main.tf"
-                                    then add ["^" ++ pkgRoot ++ "/main\\.tf$", "^" ++ pkgRoot ++ "/\\.terraform(/.*)?$", "^" ++ pkgRoot ++ "/\\.terraform\\.lock\\.hcl$"]
-                                    else
-                                      if has "ms.tex"
-                                        then add ["^" ++ pkgRoot ++ "/ms\\.tex$", "^" ++ pkgRoot ++ "/ms\\.bib$"]
-                                        else base
+   in case kind of
+        HaskellKind -> add ["^" ++ pkgRoot ++ "/Main\\.hs$", "^" ++ pkgRoot ++ "/" ++ pkgName ++ "\\.cabal$"]
+        RustKind -> add ["^" ++ pkgRoot ++ "/Cargo\\.toml$", "^" ++ pkgRoot ++ "/Cargo\\.lock$", "^" ++ pkgRoot ++ "/src/main\\.rs$"]
+        HtmlKind -> add ["^" ++ pkgRoot ++ "/index\\.html$", "^" ++ pkgRoot ++ "/script\\.js$", "^" ++ pkgRoot ++ "/style\\.css$"]
+        DjangoKind ->
+          add
+            [ "^" ++ pkgRoot ++ "/manage\\.py$",
+              "^" ++ pkgRoot ++ "/[^/]+/__init__\\.py$",
+              "^" ++ pkgRoot ++ "/[^/]+/(apps|auth_backends|context_processors|forms|models|settings|throttle|urls|views|wsgi)\\.py$",
+              "^" ++ pkgRoot ++ "/[^/]+/migrations(/.*)?$",
+              "^" ++ pkgRoot ++ "/[^/]+/tests(/.*)?$",
+              "^" ++ pkgRoot ++ "/templates(/.*)?$",
+              "^" ++ pkgRoot ++ "/static(/.*)?$"
+            ]
+        PythonLatexKind -> add ["^" ++ pkgRoot ++ "/main\\.py$", "^" ++ pkgRoot ++ "/ms\\.tex$", "^" ++ pkgRoot ++ "/ms\\.bib$", "^" ++ pkgRoot ++ "/refs\\.bib$", "^" ++ pkgRoot ++ "/figures(/.*)?$"]
+        PythonKind -> add ["^" ++ pkgRoot ++ "/main\\.py$"]
+        CKind -> add ["^" ++ pkgRoot ++ "/main\\.c$"]
+        TerraformKind -> add ["^" ++ pkgRoot ++ "/main\\.tf$", "^" ++ pkgRoot ++ "/\\.terraform(/.*)?$", "^" ++ pkgRoot ++ "/\\.terraform\\.lock\\.hcl$"]
+        LatexKind -> add ["^" ++ pkgRoot ++ "/ms\\.tex$", "^" ++ pkgRoot ++ "/ms\\.bib$"]
+        BinaryReleaseKind -> base
+        UnknownKind -> base
 collectRepoPaths :: FilePath -> IO [FilePath]
 collectRepoPaths root = do
   children <- listDirectory root
