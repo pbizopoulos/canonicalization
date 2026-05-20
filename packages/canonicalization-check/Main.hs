@@ -962,7 +962,7 @@ checkPackage allStructureIssues currentPackageName = do
                               (formatDiscoveredUnitTestName testName')
                               Skipped
                               []
-                          | testName' <- if null haskellUnitTestNames then ["no named HUnit test labels discovered"] else haskellUnitTestNames
+                          | testName' <- if null haskellUnitTestNames then ["No named HUnit test labels discovered"] else haskellUnitTestNames
                           ]
                     )
                 ]
@@ -1722,98 +1722,98 @@ debugTests =
     [ TestCase $ do
         inferred <- inferTemplateName "test" uncommentFixture
         assertEqual
-          "infers uncomment template"
+          "Infers the uncomment template."
           (Just "uncomment_template")
           inferred,
       TestCase $ do
         inferred <- inferTemplateName "test" rustFixture
         assertEqual
-          "infers rust package template"
+          "Infers the Rust package template."
           (Just "rust_package_baseline")
           inferred,
       TestCase $ do
         inferred <- inferTemplateName "test" haskellFixture
         assertEqual
-          "infers haskell package template"
+          "Infers the Haskell package template."
           (Just "haskell_package_baseline")
           inferred,
       TestCase $ do
         inferred <- inferTemplateName "test" pythonFixture
         assertEqual
-          "infers python template"
+          "Infers the Python template."
           (Just "python_template")
           inferred,
       TestCase $ do
         inferred <- inferTemplateName "test" pythonRemoteFixture
         assertEqual
-          "infers python remote template"
+          "Infers the remote Python template."
           (Just "python_remote_template")
           inferred,
       TestCase $ do
         inferred <- inferTemplateName "test" binaryReleaseFixture
         assertEqual
-          "infers binary release template"
+          "Infers the binary release template."
           (Just "binary_release_template")
           inferred,
       TestCase $ do
         inferred <- inferTemplateName "test" pythonLatexFixture
         assertEqual
-          "infers python template for python-latex fixture"
+          "Infers the Python template for the python-latex fixture."
           (Just "python_template")
           inferred,
       TestCase $ do
         inferred <- inferTemplateName "deploy_host_template" deployHostFixture
         assertEqual
-          "infers deploy host template"
+          "Infers the deploy host template."
           (Just "deploy_host_template")
           inferred,
       TestCase $ do
         inferred <- inferTemplateName "test" cFixture
         assertEqual
-          "infers c template"
+          "Infers the C template."
           (Just "c_template")
           inferred,
       TestCase $ do
         inferred <- inferTemplateName "test" latexFixture
         assertEqual
-          "infers latex template"
+          "Infers the LaTeX template."
           (Just "latex_template")
           inferred,
       TestCase $ do
         inferred <- inferTemplateName "test" htmlFixture
         assertEqual
-          "infers html template"
+          "Infers the HTML template."
           (Just "html_template")
           inferred,
       TestCase $ do
         inferred <- inferTemplateName "test" unknownFixture
         assertEqual
-          "returns Nothing for unknown template"
+          "Returns no template for unknown input."
           Nothing
           inferred,
       TestCase $ do
         assertEqual
-          "oneLine compacts whitespace"
+          "Compacts whitespace with oneLine."
           "a b c"
           (oneLine " a \n  b\t c "),
       TestCase $ do
         assertEqual
-          "issueLine formats issue details"
+          "Formats issue details with issueLine."
           "  - missing key: src"
           (issueLine "missing key" "src"),
       TestCase $ do
         assertEqual
-          "extractTomlSection extracts package section"
+          "Extracts the package section with extractTomlSection."
           "name = \"example-package\"\nversion = \"0.1.0\"\nedition = \"2021\"\ndescription = \"Example package fixture for TOML parsing.\"\nlicense = \"MIT\"\nrepository = \"https://github.com/pbizopoulos/canonicalization\"\nreadme = \"../../README\"\nkeywords = [\"check\", \"lint\", \"fixture\"]\ncategories = [\"development-tools\"]\n\n"
           (extractTomlSection "package" exampleCargoFixture),
       TestCase $ do
         assertEqual
-          "lookupTomlString parses package name"
+          "Parses the package name with lookupTomlString."
           (Just "remove-empty-lines")
           (lookupTomlString "name" (extractTomlSection "package" removeEmptyLinesCargoFixture)),
       TestCase $ do
         assertEqual
-          "lookupTomlString parses lints.rust.unsafe_code"
+          "Parses lints.rust.unsafe_code with lookupTomlString."
           (Just "forbid")
           (lookupTomlString "unsafe_code" (extractTomlSection "lints.rust" removeEmptyLinesCargoFixture))
     ]
