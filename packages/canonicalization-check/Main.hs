@@ -937,7 +937,7 @@ checkPackage allStructureIssues currentPackageName = do
                         "supports DEBUG test execution"
                         rustStatus
                         (if rustStatus == Failed then rustDebugIssues else [])
-                        : [TestCaseResult name Skipped [] | name <- rustUnitTestNames]
+                        : [TestCaseResult (formatDiscoveredUnitTestName name) Skipped [] | name <- rustUnitTestNames]
                     )
                 ]
               else [],
@@ -959,10 +959,10 @@ checkPackage allStructureIssues currentPackageName = do
                         haskellStatus
                         (if haskellStatus == Failed then haskellDebugIssues else [])
                         : [ TestCaseResult
-                              testName'
+                              (formatDiscoveredUnitTestName testName')
                               Skipped
                               []
-                          | testName' <- if null haskellUnitTestNames then ["haskell unit tests"] else haskellUnitTestNames
+                          | testName' <- if null haskellUnitTestNames then ["no named HUnit test labels discovered"] else haskellUnitTestNames
                           ]
                     )
                 ]
@@ -974,7 +974,7 @@ checkPackage allStructureIssues currentPackageName = do
                     "supports DEBUG test execution"
                     pythonStatus
                     (if pythonStatus == Failed then pythonDebugIssues else [])
-                    : [TestCaseResult name Skipped [] | name <- pythonUnitTestNames]
+                    : [TestCaseResult (formatDiscoveredUnitTestName name) Skipped [] | name <- pythonUnitTestNames]
                 )
             | projectKind `elem` [PythonKind, PythonLatexKind]
             ]
@@ -1077,6 +1077,8 @@ discoverPythonUnitTestNames packageName projectKind =
                   Just fnName <- [extractPythonTestName rawLine]
                 ]
           pure (sort (Set.toList (Set.fromList extracted)))
+formatDiscoveredUnitTestName :: String -> String
+formatDiscoveredUnitTestName name = "unit test: " ++ name
 extractPythonTestName :: String -> Maybe String
 extractPythonTestName rawLine =
   let trimmed = dropWhile (== ' ') rawLine
@@ -1133,7 +1135,7 @@ discoverHaskellUnitTestNames packageName projectKind =
                 ]
               labelsFromAssertEqual = extractAssertEqualLabels sourceLines
               fallbackCaseNames =
-                [ "TestCase#" ++ show i
+                [ "unnamed HUnit test case #" ++ show i
                 | i <- [1 .. length [() | line <- sourceLines, "TestCase" `isInfixOf` line]]
                 ]
               discovered =
@@ -1796,7 +1798,7 @@ debugTests =
           (oneLine " a \n  b\t c "),
       TestCase $ do
         assertEqual
-          "issueLine formatting"
+          "issueLine formats issue details"
           "  - missing key: src"
           (issueLine "missing key" "src"),
       TestCase $ do
