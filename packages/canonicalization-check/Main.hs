@@ -188,6 +188,8 @@ data CheckResults = CheckResults
   }
 type CheckStatus :: Type
 data CheckStatus = Passed | Failed | Skipped deriving stock (Eq, Show)
+statusFromIssues :: [a] -> CheckStatus
+statusFromIssues issues = if null issues then Passed else Failed
 type TestResult :: Type
 data TestResult = TestResult
   { testName :: String,
@@ -824,12 +826,12 @@ buildHostCheck allStructureIssues currentHostName =
   let scopedIssues = [issue | issue <- allStructureIssues, ("hosts/" ++ currentHostName) `isPrefixOf` issue]
       configTest =
         TestResult
-          { testName = "configuration_file_layout",
-            testStatus = if null scopedIssues then Passed else Failed,
+          { testName = "configuration.nix",
+            testStatus = statusFromIssues scopedIssues,
             testCases =
               if null scopedIssues
-                then [TestCaseResult "configuration.nix present" Passed []]
-                else [TestCaseResult "configuration.nix present" Failed scopedIssues]
+                then [TestCaseResult "contains configuration.nix" Passed []]
+                else [TestCaseResult "contains configuration.nix" Failed scopedIssues]
           }
    in HostCheck
         { hostName = currentHostName,
@@ -894,8 +896,8 @@ checkPackage allStructureIssues currentPackageName = do
   pythonUnitTestNames <- discoverPythonUnitTestNames currentPackageName projectKind
   haskellUnitTestNames <- discoverHaskellUnitTestNames currentPackageName projectKind
   rustUnitTestNames <- discoverRustUnitTestNames currentPackageName projectKind
-  let cargoStatus = if null cargoIssues then Passed else Failed
-      cabalStatus = if null cabalIssues then Passed else Failed
+  let cargoStatus = statusFromIssues cargoIssues
+      cabalStatus = statusFromIssues cabalIssues
       defaultNixIssues =
         [issue | issue <- scopedStructureIssues, "/default.nix" `isInfixOf` issue]
           ++ templateIssues
@@ -903,22 +905,13 @@ checkPackage allStructureIssues currentPackageName = do
         if exists && null defaultNixIssues
           then Passed
           else Failed
-      pythonStatus =
-        if projectKind `elem` [PythonKind, PythonLatexKind]
-          then if null pythonDebugIssues then Passed else Failed
-          else Skipped
-      haskellStatus =
-        if projectKind == HaskellKind
-          then if null haskellDebugIssues then Passed else Failed
-          else Skipped
-      rustStatus =
-        if projectKind == RustKind
-          then if null rustDebugIssues then Passed else Failed
-          else Skipped
+      pythonStatus = if projectKind `elem` [PythonKind, PythonLatexKind] then statusFromIssues pythonDebugIssues else Skipped
+      haskellStatus = if projectKind == HaskellKind then statusFromIssues haskellDebugIssues else Skipped
+      rustStatus = if projectKind == RustKind then statusFromIssues rustDebugIssues else Skipped
       baseTests =
         [ TestResult
-            "directory_structure"
-            (if null scopedStructureIssues then Passed else Failed)
+            "directory structure"
+            (statusFromIssues scopedStructureIssues)
             [],
           TestResult
             "default.nix"
@@ -933,7 +926,7 @@ checkPackage allStructureIssues currentPackageName = do
                     "Cargo.toml"
                     cargoStatus
                     [ TestCaseResult
-                        "cargo_toml_compliance"
+                        "matches Cargo.toml conventions"
                         cargoStatus
                         (if cargoStatus == Failed then cargoIssues else [])
                     ],
@@ -941,7 +934,7 @@ checkPackage allStructureIssues currentPackageName = do
                     "src/main.rs"
                     rustStatus
                     ( TestCaseResult
-                        "debug_compliance"
+                        "supports DEBUG test execution"
                         rustStatus
                         (if rustStatus == Failed then rustDebugIssues else [])
                         : [TestCaseResult name Skipped [] | name <- rustUnitTestNames]
@@ -954,7 +947,7 @@ checkPackage allStructureIssues currentPackageName = do
                     (currentPackageName ++ ".cabal")
                     cabalStatus
                     [ TestCaseResult
-                        "cabal_compliance"
+                        "matches Cabal conventions"
                         cabalStatus
                         (if cabalStatus == Failed then cabalIssues else [])
                     ],
@@ -962,14 +955,14 @@ checkPackage allStructureIssues currentPackageName = do
                     "Main.hs"
                     haskellStatus
                     ( TestCaseResult
-                        "debug_compliance"
+                        "supports DEBUG test execution"
                         haskellStatus
                         (if haskellStatus == Failed then haskellDebugIssues else [])
                         : [ TestCaseResult
                               testName'
                               Skipped
                               []
-                          | testName' <- if null haskellUnitTestNames then ["haskell_tests"] else haskellUnitTestNames
+                          | testName' <- if null haskellUnitTestNames then ["haskell unit tests"] else haskellUnitTestNames
                           ]
                     )
                 ]
@@ -978,7 +971,7 @@ checkPackage allStructureIssues currentPackageName = do
                 "main.py"
                 pythonStatus
                 ( TestCaseResult
-                    "debug_compliance"
+                    "supports DEBUG test execution"
                     pythonStatus
                     (if pythonStatus == Failed then pythonDebugIssues else [])
                     : [TestCaseResult name Skipped [] | name <- pythonUnitTestNames]
@@ -1014,30 +1007,17 @@ detectProjectKindForPackage packageName = do
   hasMainC <- has "main.c"
   hasMainTf <- has "main.tf"
   pure $
-    if hasMainHs
-      then HaskellKind
-      else
-        if hasCargoToml
-          then RustKind
-          else
-            if hasIndexHtml
-              then HtmlKind
-              else
-                if hasMainPy && hasMsTex
-                  then PythonLatexKind
-                  else
-                    if hasMainPy
-                      then PythonKind
-                      else
-                        if hasMainC
-                          then CKind
-                          else
-                            if hasMainTf
-                              then TerraformKind
-                              else
-                                if hasMsTex
-                                  then LatexKind
-                                  else BinaryReleaseKind
+    case () of
+      _
+        | hasMainHs -> HaskellKind
+        | hasCargoToml -> RustKind
+        | hasIndexHtml -> HtmlKind
+        | hasMainPy && hasMsTex -> PythonLatexKind
+        | hasMainPy -> PythonKind
+        | hasMainC -> CKind
+        | hasMainTf -> TerraformKind
+        | hasMsTex -> LatexKind
+        | otherwise -> BinaryReleaseKind
 checkPythonDebugUnittest :: FilePath -> ProjectKind -> IO [String]
 checkPythonDebugUnittest packageName projectKind =
   if projectKind `notElem` [PythonKind, PythonLatexKind]
@@ -1752,73 +1732,73 @@ debugTests =
     [ TestCase $ do
         inferred <- inferTemplateName "test" uncommentFixture
         assertEqual
-          "uncomment template inference"
+          "infers uncomment template"
           (Just "uncomment_template")
           inferred,
       TestCase $ do
         inferred <- inferTemplateName "test" rustFixture
         assertEqual
-          "rust template inference"
+          "infers rust package template"
           (Just "rust_package_baseline")
           inferred,
       TestCase $ do
         inferred <- inferTemplateName "test" haskellFixture
         assertEqual
-          "haskell template inference"
+          "infers haskell package template"
           (Just "haskell_package_baseline")
           inferred,
       TestCase $ do
         inferred <- inferTemplateName "test" pythonFixture
         assertEqual
-          "python template inference"
+          "infers python template"
           (Just "python_template")
           inferred,
       TestCase $ do
         inferred <- inferTemplateName "test" pythonRemoteFixture
         assertEqual
-          "python remote template inference"
+          "infers python remote template"
           (Just "python_remote_template")
           inferred,
       TestCase $ do
         inferred <- inferTemplateName "test" binaryReleaseFixture
         assertEqual
-          "binary release structural template inference"
+          "infers binary release template"
           (Just "binary_release_template")
           inferred,
       TestCase $ do
         inferred <- inferTemplateName "test" pythonLatexFixture
         assertEqual
-          "python latex template inference"
+          "infers python template for python-latex fixture"
           (Just "python_template")
           inferred,
       TestCase $ do
         inferred <- inferTemplateName "deploy_host_template" deployHostFixture
         assertEqual
-          "deploy host template inference"
+          "infers deploy host template"
           (Just "deploy_host_template")
           inferred,
       TestCase $ do
         inferred <- inferTemplateName "test" cFixture
         assertEqual
-          "c template inference"
+          "infers c template"
           (Just "c_template")
           inferred,
       TestCase $ do
         inferred <- inferTemplateName "test" latexFixture
         assertEqual
-          "latex template inference"
+          "infers latex template"
           (Just "latex_template")
           inferred,
       TestCase $ do
         inferred <- inferTemplateName "test" htmlFixture
         assertEqual
-          "html template inference"
+          "infers html template"
           (Just "html_template")
           inferred,
       TestCase $ do
         inferred <- inferTemplateName "test" unknownFixture
         assertEqual
-          "unknown template inference"
+          "returns Nothing for unknown template"
           Nothing
           inferred,
       TestCase $ do
@@ -1833,17 +1813,17 @@ debugTests =
           (issueLine "missing key" "src"),
       TestCase $ do
         assertEqual
-          "extractTomlSection finds package section"
+          "extractTomlSection extracts package section"
           "name = \"example-package\"\nversion = \"0.1.0\"\nedition = \"2021\"\ndescription = \"Example package fixture for TOML parsing.\"\nlicense = \"MIT\"\nrepository = \"https://github.com/pbizopoulos/canonicalization\"\nreadme = \"../../README\"\nkeywords = [\"check\", \"lint\", \"fixture\"]\ncategories = [\"development-tools\"]\n\n"
           (extractTomlSection "package" exampleCargoFixture),
       TestCase $ do
         assertEqual
-          "lookupTomlString parses simple key"
+          "lookupTomlString parses package name"
           (Just "remove-empty-lines")
           (lookupTomlString "name" (extractTomlSection "package" removeEmptyLinesCargoFixture)),
       TestCase $ do
         assertEqual
-          "lookupTomlString parses unsafe_code lint"
+          "lookupTomlString parses lints.rust.unsafe_code"
           (Just "forbid")
           (lookupTomlString "unsafe_code" (extractTomlSection "lints.rust" removeEmptyLinesCargoFixture))
     ]
