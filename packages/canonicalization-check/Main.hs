@@ -192,11 +192,18 @@ type TestResult :: Type
 data TestResult = TestResult
   { testName :: String,
     testStatus :: CheckStatus,
-    testChildren :: [String]
+    testCases :: [TestCaseResult]
+  }
+type TestCaseResult :: Type
+data TestCaseResult = TestCaseResult
+  { caseName :: String,
+    caseStatus :: CheckStatus,
+    caseDetails :: [String]
   }
 type PackageCheck :: Type
 data PackageCheck = PackageCheck
   { packageNodeName :: String,
+    packageKind :: ProjectKind,
     packageTests :: [TestResult],
     packageErrors :: [String]
   }
@@ -312,12 +319,15 @@ buildCheckTree results =
         }
 packageNode :: PackageCheck -> TreeNode
 packageNode pkg =
-  TreeNode
-    { nodeId = "packages/" ++ packageNodeName pkg,
-      nodeLabel = packageNodeName pkg,
-      nodeStatus = packageNodeStatus pkg,
-      nodeChildren = map (buildTestTreeNode ("packages/" ++ packageNodeName pkg)) (packageTests pkg)
-    }
+  let packageId = "packages/" ++ packageNodeName pkg
+      testNodes = map (buildTestTreeNode packageId) (packageTests pkg)
+      fileIssueNodes = buildPackageFileIssueNodes pkg (Set.fromList (map testName (packageTests pkg)))
+   in TreeNode
+        { nodeId = packageId,
+          nodeLabel = packageNodeName pkg ++ " (" ++ projectKindLabel (packageKind pkg) ++ ")",
+          nodeStatus = packageNodeStatus pkg,
+          nodeChildren = fileIssueNodes ++ testNodes
+        }
 hostNode :: HostCheck -> TreeNode
 hostNode host =
   TreeNode
@@ -356,11 +366,9 @@ runTuiLoop vty state = do
         else runTuiLoop vty (clearPendingZ (state {uiPendingG = True}))
     V.EvKey (V.KChar 'G') [] -> runTuiLoop vty (clearPendingZ (clearPendingG (goBottom viewportHeight state)))
     V.EvKey (V.KChar 'r') [] -> do
-      let waitingState = state {uiNotice = Just "Running nix fmt && nix flake check..."}
+      let waitingState = state {uiNotice = Just "Running canonicalization checks..."}
       drawTuiFrame vty waitingState
-      nixResult <- runNixChecks
-      refreshedResultsRaw <- runCheckAnalysis
-      let refreshedResults = applyNixResult nixResult refreshedResultsRaw
+      refreshedResults <- runCheckAnalysis
       runTuiLoop vty (resetUiForResults refreshedResults waitingState)
     _ -> runTuiLoop vty (clearPendingZ (clearPendingG state))
 drawTuiFrame :: V.Vty -> UiState -> IO ()
@@ -481,45 +489,30 @@ getViewportHeight vty state = do
           Just _ -> 1
       available = screenHeight - noticeLines
   pure (max 1 available)
-runNixChecks :: IO (Maybe String)
-runNixChecks = do
-  (exitCode, stdoutText, stderrText) <- readProcessWithExitCode "bash" ["-lc", "nix fmt && nix flake check"] ""
-  case exitCode of
-    ExitSuccess -> pure Nothing
-    ExitFailure code ->
-      pure
-        ( Just
-            ( "nix pipeline failed (exit "
-                ++ show code
-                ++ "): "
-                ++ oneLine (T.pack (stdoutText ++ " " ++ stderrText))
-            )
-        )
-applyNixResult :: Maybe String -> CheckResults -> CheckResults
-applyNixResult maybeFailure results =
-  case maybeFailure of
-    Nothing -> results
-    Just failureMessage ->
-      results
-        { structureIssues = structureIssues results ++ [failureMessage]
-        }
 buildTestTreeNode :: String -> TestResult -> TreeNode
 buildTestTreeNode parentNodeId testResult =
-  let childNames = testChildren testResult
-      childNodes =
+  let caseNodes =
         [ TreeNode
-            { nodeId = parentNodeId ++ "/" ++ testName testResult ++ "/child/" ++ childName,
-              nodeLabel = childName,
-              nodeStatus = testStatus testResult,
-              nodeChildren = []
+            { nodeId = parentNodeId ++ "/" ++ testName testResult ++ "/case/" ++ caseName caseResult,
+              nodeLabel = caseName caseResult,
+              nodeStatus = caseStatus caseResult,
+              nodeChildren =
+                [ TreeNode
+                    { nodeId = parentNodeId ++ "/" ++ testName testResult ++ "/case/" ++ caseName caseResult ++ "/detail/" ++ show i,
+                      nodeLabel = detail,
+                      nodeStatus = caseStatus caseResult,
+                      nodeChildren = []
+                    }
+                | (i, detail) <- zip [0 :: Int ..] (caseDetails caseResult)
+                ]
             }
-        | childName <- childNames
+        | caseResult <- testCases testResult
         ]
    in TreeNode
         { nodeId = parentNodeId ++ "/" ++ testName testResult,
           nodeLabel = testName testResult,
           nodeStatus = testStatus testResult,
-          nodeChildren = childNodes
+          nodeChildren = caseNodes
         }
 expandAtSelection :: UiState -> UiState
 expandAtSelection state =
@@ -557,7 +550,9 @@ findVisibleIndex targetId nodes =
     i : _ -> i
     [] -> 0
 packageNodeStatus :: PackageCheck -> CheckStatus
-packageNodeStatus pkg = aggregateStatus (map testStatus (packageTests pkg))
+packageNodeStatus pkg
+  | not (null (packageErrors pkg)) = Failed
+  | otherwise = aggregateStatus (map testStatus (packageTests pkg))
 hostNodeStatus :: HostCheck -> CheckStatus
 hostNodeStatus host = aggregateStatus (map testStatus (hostTests host))
 aggregateStatus :: [CheckStatus] -> CheckStatus
@@ -565,6 +560,59 @@ aggregateStatus statuses
   | Failed `elem` statuses = Failed
   | Passed `elem` statuses = Passed
   | otherwise = Skipped
+projectKindLabel :: ProjectKind -> String
+projectKindLabel kind =
+  case kind of
+    HaskellKind -> "haskell"
+    RustKind -> "rust"
+    HtmlKind -> "html"
+    PythonLatexKind -> "python-latex"
+    PythonKind -> "python"
+    CKind -> "c"
+    TerraformKind -> "terraform"
+    LatexKind -> "latex"
+    BinaryReleaseKind -> "binary"
+    UnknownKind -> "unknown"
+buildPackageFileIssueNodes :: PackageCheck -> Set.Set String -> [TreeNode]
+buildPackageFileIssueNodes pkg representedFiles =
+  let grouped = foldl collect Map.empty (filter (not . isDirectoryStructureIssue) (packageErrors pkg))
+      collect acc issue =
+        let (fileLabel, message) = splitIssueByFile (packageNodeName pkg) issue
+         in Map.insertWith (++) fileLabel [message] acc
+   in [ TreeNode
+          { nodeId = "packages/" ++ packageNodeName pkg ++ "/file/" ++ fileLabel,
+            nodeLabel = fileLabel,
+            nodeStatus = Failed,
+            nodeChildren =
+              [ TreeNode
+                  { nodeId = "packages/" ++ packageNodeName pkg ++ "/file/" ++ fileLabel ++ "/issue/" ++ show i,
+                    nodeLabel = msg,
+                    nodeStatus = Failed,
+                    nodeChildren = []
+                  }
+              | (i, msg) <- zip [0 :: Int ..] (reverse messages)
+              ]
+          }
+      | (fileLabel, messages) <- Map.toList grouped,
+        not (Set.member fileLabel representedFiles)
+      ]
+splitIssueByFile :: FilePath -> String -> (String, String)
+splitIssueByFile packageName issue =
+  let prefix = "packages/" ++ packageName ++ "/"
+      fallback :: (String, String)
+      fallback = ("package", issue)
+   in if prefix `isPrefixOf` issue
+        then
+          let rest = drop (length prefix) issue
+           in case breakOnSubstring ":" rest of
+                Nothing -> (if null rest then "package" else rest, issue)
+                Just (filePart, afterColon) ->
+                  let fileLabel = if null filePart then "package" else filePart
+                      detail = dropWhile (== ' ') afterColon
+                   in (fileLabel, if null detail then issue else detail)
+        else fallback
+isDirectoryStructureIssue :: String -> Bool
+isDirectoryStructureIssue issue = ": is not allowed" `isInfixOf` issue
 checkRepositoryStructure :: IO [String]
 checkRepositoryStructure = do
   allPaths <- collectRepoPaths "."
@@ -778,7 +826,10 @@ buildHostCheck allStructureIssues currentHostName =
         TestResult
           { testName = "configuration_file_layout",
             testStatus = if null scopedIssues then Passed else Failed,
-            testChildren = []
+            testCases =
+              if null scopedIssues
+                then [TestCaseResult "configuration.nix present" Passed []]
+                else [TestCaseResult "configuration.nix present" Failed scopedIssues]
           }
    in HostCheck
         { hostName = currentHostName,
@@ -843,9 +894,15 @@ checkPackage allStructureIssues currentPackageName = do
   pythonUnitTestNames <- discoverPythonUnitTestNames currentPackageName projectKind
   haskellUnitTestNames <- discoverHaskellUnitTestNames currentPackageName projectKind
   rustUnitTestNames <- discoverRustUnitTestNames currentPackageName projectKind
-  let templateStatus = if null templateIssues then Passed else Failed
-      cargoStatus = if null cargoIssues then Passed else Failed
+  let cargoStatus = if null cargoIssues then Passed else Failed
       cabalStatus = if null cabalIssues then Passed else Failed
+      defaultNixIssues =
+        [issue | issue <- scopedStructureIssues, "/default.nix" `isInfixOf` issue]
+          ++ templateIssues
+      defaultNixStatus =
+        if exists && null defaultNixIssues
+          then Passed
+          else Failed
       pythonStatus =
         if projectKind `elem` [PythonKind, PythonLatexKind]
           then if null pythonDebugIssues then Passed else Failed
@@ -860,19 +917,72 @@ checkPackage allStructureIssues currentPackageName = do
           else Skipped
       baseTests =
         [ TestResult
-            "repository_structure"
+            "directory_structure"
             (if null scopedStructureIssues then Passed else Failed)
-            scopedStructureIssues,
-          TestResult "template_match_and_tightness" templateStatus []
+            [],
+          TestResult
+            "default.nix"
+            defaultNixStatus
+            []
         ]
       languageSpecificTests =
         concat
-          [ if projectKind == RustKind then [TestResult "cargo_toml_rules" cargoStatus [], TestResult "rust_debug_tests" rustStatus rustUnitTestNames] else [],
-            if projectKind == HaskellKind then [TestResult "cabal_tightness_rules" cabalStatus [], TestResult "haskell_debug_hunit" haskellStatus haskellUnitTestNames] else [],
+          [ if projectKind == RustKind
+              then
+                [ TestResult
+                    "Cargo.toml"
+                    cargoStatus
+                    [ TestCaseResult
+                        "cargo_toml_compliance"
+                        cargoStatus
+                        (if cargoStatus == Failed then cargoIssues else [])
+                    ],
+                  TestResult
+                    "src/main.rs"
+                    rustStatus
+                    ( TestCaseResult
+                        "debug_compliance"
+                        rustStatus
+                        (if rustStatus == Failed then rustDebugIssues else [])
+                        : [TestCaseResult name Skipped [] | name <- rustUnitTestNames]
+                    )
+                ]
+              else [],
+            if projectKind == HaskellKind
+              then
+                [ TestResult
+                    (currentPackageName ++ ".cabal")
+                    cabalStatus
+                    [ TestCaseResult
+                        "cabal_compliance"
+                        cabalStatus
+                        (if cabalStatus == Failed then cabalIssues else [])
+                    ],
+                  TestResult
+                    "Main.hs"
+                    haskellStatus
+                    ( TestCaseResult
+                        "debug_compliance"
+                        haskellStatus
+                        (if haskellStatus == Failed then haskellDebugIssues else [])
+                        : [ TestCaseResult
+                              testName'
+                              Skipped
+                              []
+                          | testName' <- if null haskellUnitTestNames then ["haskell_tests"] else haskellUnitTestNames
+                          ]
+                    )
+                ]
+              else [],
             [ TestResult
-                "python_debug_unittest"
+                "main.py"
                 pythonStatus
-                pythonUnitTestNames
+                ( TestCaseResult
+                    "debug_compliance"
+                    pythonStatus
+                    (if pythonStatus == Failed then pythonDebugIssues else [])
+                    : [TestCaseResult name Skipped [] | name <- pythonUnitTestNames]
+                )
             | projectKind `elem` [PythonKind, PythonLatexKind]
             ]
           ]
@@ -888,6 +998,7 @@ checkPackage allStructureIssues currentPackageName = do
   pure
     PackageCheck
       { packageNodeName = currentPackageName,
+        packageKind = projectKind,
         packageTests = tests,
         packageErrors = allIssues
       }
