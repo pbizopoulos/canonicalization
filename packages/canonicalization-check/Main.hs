@@ -12,7 +12,7 @@ import Control.Monad (forM, unless, when)
 import Data.Fix (Fix (Fix))
 import Data.Functor.Compose (Compose (Compose))
 import Data.Kind (Type)
-import Data.List (intercalate, isInfixOf, isPrefixOf, isSuffixOf, maximumBy, sort, sortBy, stripPrefix)
+import Data.List (find, intercalate, isInfixOf, isPrefixOf, isSuffixOf, maximumBy, sort, sortBy, stripPrefix)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
@@ -181,7 +181,7 @@ binaryReleaseDetector _ content =
         && "install -Dm755 ${pname}-v${version}-x86_64-unknown-linux-musl/${pname}" `isInfixOf` content
     )
 templateSpecByName :: FilePath -> Maybe TemplateSpec
-templateSpecByName name = listToMaybe [spec | spec <- templateSpecs, templateName spec == name]
+templateSpecByName name = find ((== name) . templateName) templateSpecs
 type CheckResults :: Type
 data CheckResults = CheckResults
   { structureIssues :: [String],
@@ -191,7 +191,7 @@ data CheckResults = CheckResults
 type CheckStatus :: Type
 data CheckStatus = Passed | Failed | Skipped deriving stock (Eq, Show)
 statusFromIssues :: [a] -> CheckStatus
-statusFromIssues issues = if null issues then Passed else Failed
+statusFromIssues = \case [] -> Passed; _ -> Failed
 type TestResult :: Type
 data TestResult = TestResult
   { testName :: String,
@@ -220,12 +220,11 @@ data HostCheck = HostCheck
 main :: IO ()
 main = do
   debug <- lookupEnv "DEBUG"
+  args <- getArgs
   case debug of
     Just "1" -> runDebugTests
-    _ -> do
-      args <- getArgs
+    _ ->
       case args of
-        [] -> runCheckMode
         ["tui"] -> runTuiMode
         _ -> runCheckMode
 runCheckAnalysis :: IO CheckResults
@@ -781,12 +780,10 @@ collectRepoPaths root = do
     forM childPaths $ \childPath -> do
       isDir <- doesDirectoryExist childPath
       let relativeChildPath = toRelativePath childPath
-      if isDir
-        then
-          if shouldTraverseDirectory relativeChildPath
-            then Just <$> collectRepoPaths childPath
-            else pure Nothing
-        else pure (Just [relativeChildPath])
+      case (isDir, shouldTraverseDirectory relativeChildPath) of
+        (True, True) -> Just <$> collectRepoPaths childPath
+        (True, False) -> pure Nothing
+        (False, _) -> pure (Just [relativeChildPath])
   pure (toRelativePath root : concat keptChildren)
 toRelativePath :: FilePath -> FilePath
 toRelativePath "." = "."
@@ -829,14 +826,12 @@ listSubdirectories root = do
 buildHostCheck :: [String] -> FilePath -> HostCheck
 buildHostCheck allStructureIssues currentHostName =
   let scopedIssues = [issue | issue <- allStructureIssues, ("hosts/" ++ currentHostName) `isPrefixOf` issue]
+      configStatus = statusFromIssues scopedIssues
       configTest =
         TestResult
           { testName = "configuration.nix",
-            testStatus = statusFromIssues scopedIssues,
-            testCases =
-              if null scopedIssues
-                then [TestCaseResult "contains configuration.nix" Passed []]
-                else [TestCaseResult "contains configuration.nix" Failed scopedIssues]
+            testStatus = configStatus,
+            testCases = [TestCaseResult "contains configuration.nix" configStatus (if configStatus == Failed then scopedIssues else [])]
           }
    in HostCheck
         { hostName = currentHostName,
@@ -1022,16 +1017,20 @@ detectProjectKindForPackage packageName = do
         | hasMsTex = LatexKind
         | otherwise = BinaryReleaseKind
   pure kind
+readTextFileIfExists :: FilePath -> IO (Maybe T.Text)
+readTextFileIfExists path = do
+  exists <- doesFileExist path
+  if exists then Just <$> TIO.readFile path else pure Nothing
 checkPythonDebugUnittest :: FilePath -> ProjectKind -> IO [String]
 checkPythonDebugUnittest packageName projectKind =
   if projectKind `notElem` [PythonKind, PythonLatexKind]
     then pure []
     else do
       let mainPyPath = "packages" </> packageName </> "main.py"
-      mainPyExists <- doesFileExist mainPyPath
-      if not mainPyExists
-        then pure []
-        else do
+      maybeMainPy <- readTextFileIfExists mainPyPath
+      case maybeMainPy of
+        Nothing -> pure []
+        Just _ -> do
           python3Path <- findExecutable "python3"
           pythonPath <- findExecutable "python"
           case python3Path <|> pythonPath of
@@ -1068,11 +1067,10 @@ discoverPythonUnitTestNames packageName projectKind =
     then pure []
     else do
       let mainPyPath = "packages" </> packageName </> "main.py"
-      exists <- doesFileExist mainPyPath
-      if not exists
-        then pure []
-        else do
-          content <- TIO.readFile mainPyPath
+      maybeContent <- readTextFileIfExists mainPyPath
+      case maybeContent of
+        Nothing -> pure []
+        Just content -> do
           let extracted =
                 [ fnName
                 | rawLine <- lines (T.unpack content),
@@ -1122,11 +1120,10 @@ discoverHaskellUnitTestNames packageName projectKind =
     then pure []
     else do
       let mainHsPath = "packages" </> packageName </> "Main.hs"
-      exists <- doesFileExist mainHsPath
-      if not exists
-        then pure []
-        else do
-          content <- TIO.readFile mainHsPath
+      maybeContent <- readTextFileIfExists mainHsPath
+      case maybeContent of
+        Nothing -> pure []
+        Just content -> do
           let sourceLines = lines (T.unpack content)
               labelsFromFormattingHelper = extractMakeFormattingTestLabels sourceLines
               labelsFromTilde =
@@ -1252,12 +1249,10 @@ discoverRustUnitTestNames packageName projectKind =
     then pure []
     else do
       let mainRsPath = "packages" </> packageName </> "src/main.rs"
-      exists <- doesFileExist mainRsPath
-      if not exists
-        then pure []
-        else do
-          content <- TIO.readFile mainRsPath
-          pure (extractRustTests (lines (T.unpack content)))
+      maybeContent <- readTextFileIfExists mainRsPath
+      case maybeContent of
+        Nothing -> pure []
+        Just content -> pure (extractRustTests (lines (T.unpack content)))
 extractRustTests :: [String] -> [String]
 extractRustTests rawLines = sort (Set.toList (Set.fromList (go False rawLines)))
   where
