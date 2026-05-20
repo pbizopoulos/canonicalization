@@ -7,14 +7,13 @@ let
   checkName = builtins.baseNameOf ./.;
   packageName = "remove-empty-lines";
   inherit (inputs.self.packages.${pkgs.stdenv.system}.${packageName}) cargoDeps;
+  rustBaseInputs =
+    inputs.self.packages.${pkgs.stdenv.system}.${packageName}.passthru.rustCheckNativeBuildInputs;
 in
 pkgs.runCommand "${checkName}"
   {
-    nativeBuildInputs = [
-      pkgs.cargo
+    nativeBuildInputs = rustBaseInputs ++ [
       pkgs.cargo-mutants
-      pkgs.rustc
-      pkgs.stdenv.cc
     ];
     src = ../../packages/${packageName};
   }

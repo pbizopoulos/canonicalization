@@ -66,6 +66,11 @@ pkgs.rustPlatform.buildRustPackage {
     runHook postInstallCheck
   '';
   meta.mainProgram = pname;
+  passthru.rustCheckNativeBuildInputs = [
+    pkgs.cargo
+    pkgs.rustc
+    pkgs.stdenv.cc
+  ];
   postInstall = ''
     mv "$out/bin/${pname}" "$out/bin/.${pname}-wrapped"
     install -m755 ${wrapperScript} "$out/bin/${pname}"

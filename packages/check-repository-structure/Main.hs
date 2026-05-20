@@ -77,7 +77,7 @@ templateSpecs =
     TemplateSpec
       { templateName = "rust_package_baseline",
         matchesTemplate = \_ content -> pure ("rustPlatform.buildRustPackage" `isInfixOf` content),
-        allowedDifferenceKeys = defaultAllowedKeys,
+        allowedDifferenceKeys = Set.insert "passthru" defaultAllowedKeys,
         embeddedBaseline = Just rustTemplateBaseline
       },
     TemplateSpec
