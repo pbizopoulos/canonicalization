@@ -3,6 +3,7 @@
 }:
 pkgs.haskellPackages.mkDerivation rec {
   executableHaskellDepends = [
+    pkgs.haskellPackages."vty-crossplatform"
     pkgs.haskellPackages.HUnit
     pkgs.haskellPackages.base
     pkgs.haskellPackages.containers
@@ -14,6 +15,7 @@ pkgs.haskellPackages.mkDerivation rec {
     pkgs.haskellPackages.process
     pkgs.haskellPackages.regex-tdfa
     pkgs.haskellPackages.text
+    pkgs.haskellPackages.vty
   ];
   executableToolDepends = [
     pkgs.makeWrapper

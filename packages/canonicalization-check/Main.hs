@@ -8,7 +8,7 @@
 module Main (main) where
 import Control.Applicative ((<|>))
 import Control.Exception (finally)
-import Control.Monad (forM, when)
+import Control.Monad (forM, unless, when)
 import Data.Fix (Fix (Fix))
 import Data.Functor.Compose (Compose (Compose))
 import Data.Kind (Type)
@@ -19,6 +19,8 @@ import Data.Maybe (catMaybes, fromMaybe, listToMaybe)
 import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
+import Graphics.Vty qualified as V
+import Graphics.Vty.CrossPlatform qualified as VCP
 import Nix.Expr.Types
   ( Antiquoted (Plain),
     Binding (Inherit, NamedVar),
@@ -35,7 +37,7 @@ import Nix.Utils (Path (Path))
 import Prettyprinter (defaultLayoutOptions, layoutPretty)
 import Prettyprinter.Render.Text (renderStrict)
 import System.Directory (doesDirectoryExist, doesFileExist, findExecutable, listDirectory, removeFile)
-import System.Environment (lookupEnv)
+import System.Environment (getArgs, lookupEnv)
 import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitFailure)
 import System.FilePath ((<.>), (</>))
 import System.FilePath.Posix (splitDirectories, takeBaseName, takeDirectory, takeFileName)
@@ -178,24 +180,320 @@ binaryReleaseDetector _ content =
     )
 templateSpecByName :: FilePath -> Maybe TemplateSpec
 templateSpecByName name = listToMaybe [spec | spec <- templateSpecs, templateName spec == name]
+type CheckResults :: Type
+data CheckResults = CheckResults
+  { structureIssues :: [String],
+    packageResults :: [PackageCheck],
+    hostResults :: [HostCheck]
+  }
+type CheckStatus :: Type
+data CheckStatus = Passed | Failed | Skipped deriving stock (Eq, Show)
+type TestResult :: Type
+data TestResult = TestResult
+  { testName :: String,
+    testStatus :: CheckStatus,
+    testChildren :: [String]
+  }
+type PackageCheck :: Type
+data PackageCheck = PackageCheck
+  { packageNodeName :: String,
+    packageTests :: [TestResult],
+    packageErrors :: [String]
+  }
+type HostCheck :: Type
+data HostCheck = HostCheck
+  { hostName :: String,
+    hostTests :: [TestResult],
+    hostErrors :: [String]
+  }
 main :: IO ()
 main = do
   debug <- lookupEnv "DEBUG"
   case debug of
     Just "1" -> runDebugTests
     _ -> do
-      structureIssues <- checkRepositoryStructure
-      packageNames <- listPackageNames
-      packageResults <- forM packageNames checkPackage
-      let packageReports = concatMap snd packageResults
-          packageIssues = concatMap fst packageResults
-      mapM_ putStrLn packageReports
-      let allIssues = structureIssues ++ packageIssues
-      if null allIssues
-        then putStrLn "check-repository-structure: ok"
-        else do
-          mapM_ putStrLn allIssues
-          exitFailure
+      args <- getArgs
+      case args of
+        [] -> runCheckMode
+        ["tui"] -> runTuiMode
+        _ -> runCheckMode
+runCheckAnalysis :: IO CheckResults
+runCheckAnalysis = do
+  foundStructureIssues <- checkRepositoryStructure
+  foundPackageNames <- listPackageNames
+  foundPackageResults <- forM foundPackageNames (checkPackage foundStructureIssues)
+  foundHostNames <- listHostNames
+  let foundHostResults = map (buildHostCheck foundStructureIssues) foundHostNames
+  pure
+    CheckResults
+      { structureIssues = foundStructureIssues,
+        packageResults = foundPackageResults,
+        hostResults = foundHostResults
+      }
+runCheckMode :: IO ()
+runCheckMode = do
+  results <- runCheckAnalysis
+  mapM_ (putStrLn . renderPackageReport) (packageResults results)
+  let allIssues = structureIssues results ++ concatMap packageErrors (packageResults results)
+  if null allIssues
+    then putStrLn "canonicalization-check: ok"
+    else do
+      mapM_ putStrLn allIssues
+      exitFailure
+runTuiMode :: IO ()
+runTuiMode = do
+  results <- runCheckAnalysis
+  latestResults <- runTui results
+  let allIssues = structureIssues latestResults ++ concatMap packageErrors (packageResults latestResults)
+  unless (null allIssues) exitFailure
+renderPackageReport :: PackageCheck -> String
+renderPackageReport pkg =
+  "packages/"
+    ++ packageNodeName pkg
+    ++ ": "
+    ++ (if null (packageErrors pkg) then "parsed successfully" else "parsed with errors")
+    ++ "; successful_checks=["
+    ++ intercalate ", " [testName t | t <- packageTests pkg, testStatus t == Passed]
+    ++ "]"
+type TreeNode :: Type
+data TreeNode = TreeNode
+  { nodeId :: String,
+    nodeLabel :: String,
+    nodeStatus :: CheckStatus,
+    nodeChildren :: [TreeNode]
+  }
+type VisibleNode :: Type
+data VisibleNode = VisibleNode
+  { visibleNode :: TreeNode,
+    visibleDepth :: Int,
+    visibleParentId :: Maybe String
+  }
+type UiState :: Type
+data UiState = UiState
+  { uiTree :: TreeNode,
+    uiExpanded :: Set.Set String,
+    uiSelected :: Int,
+    uiPendingG :: Bool,
+    uiPendingZ :: Bool,
+    uiLatestResults :: CheckResults
+  }
+runTui :: CheckResults -> IO CheckResults
+runTui results = do
+  let tree = buildCheckTree results
+      initialState =
+        UiState
+          { uiTree = tree,
+            uiExpanded = Set.fromList [nodeId tree, "packages", "hosts"],
+            uiSelected = 0,
+            uiPendingG = False,
+            uiPendingZ = False,
+            uiLatestResults = results
+          }
+  vty <- VCP.mkVty V.defaultConfig
+  finalState <- runTuiLoop vty initialState
+  V.shutdown vty
+  pure (uiLatestResults finalState)
+buildCheckTree :: CheckResults -> TreeNode
+buildCheckTree results =
+  let packageNodes = map packageNode (packageResults results)
+      hostNodes = map hostNode (hostResults results)
+      allIssues = structureIssues results ++ concatMap packageErrors (packageResults results)
+      repoStatus = if null allIssues then Passed else Failed
+   in TreeNode
+        { nodeId = "repository",
+          nodeLabel = "repository",
+          nodeStatus = repoStatus,
+          nodeChildren =
+            [ TreeNode
+                { nodeId = "packages",
+                  nodeLabel = "packages",
+                  nodeStatus = aggregateStatus (map nodeStatus packageNodes),
+                  nodeChildren = packageNodes
+                },
+              TreeNode
+                { nodeId = "hosts",
+                  nodeLabel = "hosts",
+                  nodeStatus = aggregateStatus (map nodeStatus hostNodes),
+                  nodeChildren = hostNodes
+                }
+            ]
+        }
+packageNode :: PackageCheck -> TreeNode
+packageNode pkg =
+  TreeNode
+    { nodeId = "packages/" ++ packageNodeName pkg,
+      nodeLabel = packageNodeName pkg,
+      nodeStatus = packageNodeStatus pkg,
+      nodeChildren = map (buildTestTreeNode ("packages/" ++ packageNodeName pkg)) (packageTests pkg)
+    }
+hostNode :: HostCheck -> TreeNode
+hostNode host =
+  TreeNode
+    { nodeId = "hosts/" ++ hostName host,
+      nodeLabel = hostName host,
+      nodeStatus = hostNodeStatus host,
+      nodeChildren = map (buildTestTreeNode ("hosts/" ++ hostName host)) (hostTests host)
+    }
+runTuiLoop :: V.Vty -> UiState -> IO UiState
+runTuiLoop vty state = do
+  drawTuiFrame vty state
+  event <- V.nextEvent vty
+  case event of
+    V.EvKey (V.KChar 'q') [] -> pure state
+    V.EvKey V.KEsc [] -> pure state
+    V.EvKey (V.KChar 'j') [] -> runTuiLoop vty (clearPendingZ (clearPendingG (moveSelection 1 state)))
+    V.EvKey V.KDown [] -> runTuiLoop vty (clearPendingZ (clearPendingG (moveSelection 1 state)))
+    V.EvKey (V.KChar 'k') [] -> runTuiLoop vty (clearPendingZ (clearPendingG (moveSelection (-1) state)))
+    V.EvKey V.KUp [] -> runTuiLoop vty (clearPendingZ (clearPendingG (moveSelection (-1) state)))
+    V.EvKey (V.KChar 'z') [] -> runTuiLoop vty (clearPendingG state {uiPendingZ = True})
+    V.EvKey (V.KChar 'o') [] ->
+      if uiPendingZ state
+        then runTuiLoop vty (clearPendingZ (clearPendingG (expandAtSelection state)))
+        else runTuiLoop vty (clearPendingZ (clearPendingG state))
+    V.EvKey (V.KChar 'c') [] ->
+      if uiPendingZ state
+        then runTuiLoop vty (clearPendingZ (clearPendingG (collapseAtSelection state)))
+        else runTuiLoop vty (clearPendingZ (clearPendingG state))
+    V.EvKey (V.KChar 'g') [] ->
+      if uiPendingG state
+        then runTuiLoop vty (clearPendingZ (clearPendingG (goTop state)))
+        else runTuiLoop vty (clearPendingZ (state {uiPendingG = True}))
+    V.EvKey (V.KChar 'G') [] -> runTuiLoop vty (clearPendingZ (clearPendingG (goBottom state)))
+    V.EvKey (V.KChar 'r') [] -> do
+      refreshedResults <- runCheckAnalysis
+      runTuiLoop vty (resetUiForResults refreshedResults state)
+    _ -> runTuiLoop vty (clearPendingZ (clearPendingG state))
+drawTuiFrame :: V.Vty -> UiState -> IO ()
+drawTuiFrame vty state = do
+  let lineImages = zipWith (renderVisibleNodeImage state) [0 ..] (visibleNodes state)
+      image = V.vertCat lineImages
+  V.update vty (V.picForImage image)
+visibleNodes :: UiState -> [VisibleNode]
+visibleNodes state = flattenVisible Nothing 0 (uiTree state)
+  where
+    flattenVisible parent depth node =
+      let current = VisibleNode node depth parent
+          expanded = Set.member (nodeId node) (uiExpanded state)
+          descendants =
+            if expanded
+              then concatMap (flattenVisible (Just (nodeId node)) (depth + 1)) (nodeChildren node)
+              else []
+       in current : descendants
+renderVisibleNodeImage :: UiState -> Int -> VisibleNode -> V.Image
+renderVisibleNodeImage state index vnode =
+  let node = visibleNode vnode
+      depth = visibleDepth vnode
+      isSelected = index == uiSelected state
+      prefix = replicate (depth * 2) ' '
+      foldMarker :: String
+      foldMarker
+        | null (nodeChildren node) = " "
+        | Set.member (nodeId node) (uiExpanded state) = "▾"
+        | otherwise = "▸"
+      statusLabel :: String
+      statusLabel = case nodeStatus node of
+        Passed -> "OK"
+        Failed -> "FAIL"
+        Skipped -> "SKIP"
+      selectedPrefix :: String
+      selectedPrefix = if isSelected then "> " else "  "
+      beforeStatus = selectedPrefix ++ prefix ++ foldMarker ++ " "
+      statusToken = "[" ++ statusLabel ++ "]"
+      afterStatus = " " ++ nodeLabel node
+      statusAttr = case nodeStatus node of
+        Passed -> V.withForeColor V.defAttr V.green
+        Failed -> V.withForeColor V.defAttr V.red
+        Skipped -> V.withForeColor V.defAttr V.yellow
+   in V.horizCat [V.string V.defAttr beforeStatus, V.string statusAttr statusToken, V.string V.defAttr afterStatus]
+moveSelection :: Int -> UiState -> UiState
+moveSelection delta state =
+  let total = length (visibleNodes state)
+      current = uiSelected state
+      next = max 0 (min (total - 1) (current + delta))
+   in state {uiSelected = next}
+goTop :: UiState -> UiState
+goTop state = state {uiSelected = 0}
+goBottom :: UiState -> UiState
+goBottom state =
+  let total = length (visibleNodes state)
+   in state {uiSelected = max 0 (total - 1)}
+clearPendingG :: UiState -> UiState
+clearPendingG state = state {uiPendingG = False}
+clearPendingZ :: UiState -> UiState
+clearPendingZ state = state {uiPendingZ = False}
+resetUiForResults :: CheckResults -> UiState -> UiState
+resetUiForResults refreshedResults state =
+  let tree = buildCheckTree refreshedResults
+   in state
+        { uiTree = tree,
+          uiExpanded = Set.fromList [nodeId tree, "packages", "hosts"],
+          uiSelected = 0,
+          uiPendingG = False,
+          uiPendingZ = False,
+          uiLatestResults = refreshedResults
+        }
+buildTestTreeNode :: String -> TestResult -> TreeNode
+buildTestTreeNode parentNodeId testResult =
+  let childNames = testChildren testResult
+      childNodes =
+        [ TreeNode
+            { nodeId = parentNodeId ++ "/" ++ testName testResult ++ "/child/" ++ childName,
+              nodeLabel = childName,
+              nodeStatus = testStatus testResult,
+              nodeChildren = []
+            }
+        | childName <- childNames
+        ]
+   in TreeNode
+        { nodeId = parentNodeId ++ "/" ++ testName testResult,
+          nodeLabel = testName testResult,
+          nodeStatus = testStatus testResult,
+          nodeChildren = childNodes
+        }
+expandAtSelection :: UiState -> UiState
+expandAtSelection state =
+  case selectedVisibleNode state of
+    Nothing -> state
+    Just vnode ->
+      let node = visibleNode vnode
+       in if null (nodeChildren node)
+            then state
+            else state {uiExpanded = Set.insert (nodeId node) (uiExpanded state)}
+collapseAtSelection :: UiState -> UiState
+collapseAtSelection state =
+  case selectedVisibleNode state of
+    Nothing -> state
+    Just vnode ->
+      let node = visibleNode vnode
+          expanded = Set.member (nodeId node) (uiExpanded state)
+       in if expanded && not (null (nodeChildren node))
+            then state {uiExpanded = Set.delete (nodeId node) (uiExpanded state)}
+            else case visibleParentId vnode of
+              Nothing -> state
+              Just parentId ->
+                let allVisible = visibleNodes state
+                    parentIndex = findVisibleIndex parentId allVisible
+                    nextExpanded = Set.delete parentId (uiExpanded state)
+                 in state {uiExpanded = nextExpanded, uiSelected = parentIndex}
+selectedVisibleNode :: UiState -> Maybe VisibleNode
+selectedVisibleNode state =
+  let nodes = visibleNodes state
+      idx = uiSelected state
+   in if idx >= 0 && idx < length nodes then Just (nodes !! idx) else Nothing
+findVisibleIndex :: String -> [VisibleNode] -> Int
+findVisibleIndex targetId nodes =
+  case [i | (i, vnode) <- zip [0 ..] nodes, nodeId (visibleNode vnode) == targetId] of
+    i : _ -> i
+    [] -> 0
+packageNodeStatus :: PackageCheck -> CheckStatus
+packageNodeStatus pkg = aggregateStatus (map testStatus (packageTests pkg))
+hostNodeStatus :: HostCheck -> CheckStatus
+hostNodeStatus host = aggregateStatus (map testStatus (hostTests host))
+aggregateStatus :: [CheckStatus] -> CheckStatus
+aggregateStatus statuses
+  | Failed `elem` statuses = Failed
+  | Passed `elem` statuses = Passed
+  | otherwise = Skipped
 checkRepositoryStructure :: IO [String]
 checkRepositoryStructure = do
   allPaths <- collectRepoPaths "."
@@ -390,28 +688,52 @@ packageRoot path =
 hostRoot :: FilePath -> Maybe FilePath
 hostRoot path =
   case splitDirectories path of
-    "hosts" : hostName : _ -> Just ("hosts" </> hostName)
+    "hosts" : hostDirName : _ -> Just ("hosts" </> hostDirName)
     _ -> Nothing
 listPackageNames :: IO [FilePath]
 listPackageNames = do
   entries <- listDirectory "packages"
   flags <- forM entries $ \name -> doesDirectoryExist ("packages" </> name)
   pure $ sort [name | (name, isDir) <- zip entries flags, isDir]
-checkPackage :: FilePath -> IO ([String], [String])
-checkPackage packageName = do
-  let packageDefault = "packages" </> packageName </> "default.nix"
-  projectKind <- detectProjectKindForPackage packageName
+listHostNames :: IO [FilePath]
+listHostNames = do
+  entries <- listDirectory "hosts"
+  flags <- forM entries $ \name -> doesDirectoryExist ("hosts" </> name)
+  pure $ sort [name | (name, isDir) <- zip entries flags, isDir]
+buildHostCheck :: [String] -> FilePath -> HostCheck
+buildHostCheck allStructureIssues currentHostName =
+  let scopedIssues = [issue | issue <- allStructureIssues, ("hosts/" ++ currentHostName) `isPrefixOf` issue]
+      configTest =
+        TestResult
+          { testName = "configuration_file_layout",
+            testStatus = if null scopedIssues then Passed else Failed,
+            testChildren = []
+          }
+   in HostCheck
+        { hostName = currentHostName,
+          hostTests = [configTest],
+          hostErrors = scopedIssues
+        }
+checkPackage :: [String] -> FilePath -> IO PackageCheck
+checkPackage allStructureIssues currentPackageName = do
+  let packageDefault = "packages" </> currentPackageName </> "default.nix"
+      scopedStructureIssues =
+        [ issue
+        | issue <- allStructureIssues,
+          ("packages/" ++ currentPackageName) `isPrefixOf` issue
+        ]
+  projectKind <- detectProjectKindForPackage currentPackageName
   exists <- doesFileExist packageDefault
-  (templateIssues, inferredTemplateName) <-
+  (templateIssues, _) <-
     if not exists
       then pure ([], Nothing)
       else do
         packageContents <- TIO.readFile packageDefault
-        inferredTemplate <- inferTemplateName packageName (T.unpack packageContents)
+        inferredTemplate <- inferTemplateName currentPackageName (T.unpack packageContents)
         case inferredTemplate of
           Nothing ->
             pure
-              ( [ "packages/" ++ packageName ++ "/default.nix: could not infer corresponding template"
+              ( [ "packages/" ++ currentPackageName ++ "/default.nix: could not infer corresponding template"
                 ],
                 Nothing
               )
@@ -419,7 +741,7 @@ checkPackage packageName = do
             case templateSpecByName inferredTemplateName of
               Nothing ->
                 pure
-                  ( [ "packages/" ++ packageName ++ "/default.nix: unsupported template " ++ inferredTemplateName
+                  ( [ "packages/" ++ currentPackageName ++ "/default.nix: unsupported template " ++ inferredTemplateName
                     ],
                     Just inferredTemplateName
                   )
@@ -428,58 +750,76 @@ checkPackage packageName = do
                   Just templateContents ->
                     do
                       let allowedKeysForPackage =
-                            if packageName == "c_template" && inferredTemplateName == "c_template"
+                            if currentPackageName == "c_template" && inferredTemplateName == "c_template"
                               then defaultAllowedKeys
                               else allowedDifferenceKeys spec
-                      issues <- compareWithTemplate packageName packageDefault ("packages" </> inferredTemplateName </> "default.nix") allowedKeysForPackage (Just templateContents)
+                      issues <- compareWithTemplate currentPackageName packageDefault ("packages" </> inferredTemplateName </> "default.nix") allowedKeysForPackage (Just templateContents)
                       pure (issues, Just inferredTemplateName)
                   Nothing ->
                     pure
                       ( [ "packages/"
-                            ++ packageName
+                            ++ currentPackageName
                             ++ "/default.nix: internal error: missing embedded baseline for template "
                             ++ inferredTemplateName
                         ],
                         Just inferredTemplateName
                       )
-  cargoIssues <- checkCargoToml packageName
-  cabalIssues <- checkCabalFile packageName
-  pythonDebugIssues <- checkPythonDebugUnittest packageName projectKind
-  haskellDebugIssues <- checkHaskellDebugTests packageName projectKind
-  rustDebugIssues <- checkRustDebugTests packageName projectKind
-  let successfulChecks :: [String]
-      successfulChecks =
-        catMaybes
-          [ if projectKind `elem` [PythonKind, PythonLatexKind] && null pythonDebugIssues
-              then Just "python_debug_unittest"
-              else Nothing,
-            if projectKind == HaskellKind && null haskellDebugIssues
-              then Just "haskell_debug_hunit"
-              else Nothing,
-            if projectKind == RustKind && null rustDebugIssues
-              then Just "rust_debug_tests"
-              else Nothing
+  cargoIssues <- checkCargoToml currentPackageName
+  cabalIssues <- checkCabalFile currentPackageName
+  pythonDebugIssues <- checkPythonDebugUnittest currentPackageName projectKind
+  haskellDebugIssues <- checkHaskellDebugTests currentPackageName projectKind
+  rustDebugIssues <- checkRustDebugTests currentPackageName projectKind
+  pythonUnitTestNames <- discoverPythonUnitTestNames currentPackageName projectKind
+  haskellUnitTestNames <- discoverHaskellUnitTestNames currentPackageName projectKind
+  rustUnitTestNames <- discoverRustUnitTestNames currentPackageName projectKind
+  let templateStatus = if null templateIssues then Passed else Failed
+      cargoStatus = if null cargoIssues then Passed else Failed
+      cabalStatus = if null cabalIssues then Passed else Failed
+      pythonStatus =
+        if projectKind `elem` [PythonKind, PythonLatexKind]
+          then if null pythonDebugIssues then Passed else Failed
+          else Skipped
+      haskellStatus =
+        if projectKind == HaskellKind
+          then if null haskellDebugIssues then Passed else Failed
+          else Skipped
+      rustStatus =
+        if projectKind == RustKind
+          then if null rustDebugIssues then Passed else Failed
+          else Skipped
+      baseTests =
+        [ TestResult
+            "repository_structure"
+            (if null scopedStructureIssues then Passed else Failed)
+            scopedStructureIssues,
+          TestResult "template_match_and_tightness" templateStatus []
+        ]
+      languageSpecificTests =
+        concat
+          [ if projectKind == RustKind then [TestResult "cargo_toml_rules" cargoStatus [], TestResult "rust_debug_tests" rustStatus rustUnitTestNames] else [],
+            if projectKind == HaskellKind then [TestResult "cabal_tightness_rules" cabalStatus [], TestResult "haskell_debug_hunit" haskellStatus haskellUnitTestNames] else [],
+            [ TestResult
+                "python_debug_unittest"
+                pythonStatus
+                pythonUnitTestNames
+            | projectKind `elem` [PythonKind, PythonLatexKind]
+            ]
           ]
-      allIssues = templateIssues ++ cargoIssues ++ cabalIssues ++ pythonDebugIssues ++ haskellDebugIssues ++ rustDebugIssues
-      packagePath = "packages/" ++ packageName
-      templateLabel :: String
-      templateLabel = fromMaybe "unknown" inferredTemplateName
-      statusLabel :: String
-      statusLabel =
-        if null allIssues
-          then "parsed successfully"
-          else "parsed with errors"
-      reportLine :: String
-      reportLine =
-        packagePath
-          ++ ": "
-          ++ statusLabel
-          ++ "; template="
-          ++ templateLabel
-          ++ "; successful_checks=["
-          ++ intercalate ", " successfulChecks
-          ++ "]"
-  pure (allIssues, [reportLine])
+      tests = baseTests ++ languageSpecificTests
+      allIssues =
+        scopedStructureIssues
+          ++ templateIssues
+          ++ cargoIssues
+          ++ cabalIssues
+          ++ pythonDebugIssues
+          ++ haskellDebugIssues
+          ++ rustDebugIssues
+  pure
+    PackageCheck
+      { packageNodeName = currentPackageName,
+        packageTests = tests,
+        packageErrors = allIssues
+      }
 detectProjectKindForPackage :: FilePath -> IO ProjectKind
 detectProjectKindForPackage packageName = do
   let pkgRoot = "packages" </> packageName
@@ -556,6 +896,33 @@ checkPythonDebugUnittest packageName projectKind =
                         ++ "/main.py: python AST validator execution failed: "
                         ++ oneLine (T.pack stderrText)
                     ]
+discoverPythonUnitTestNames :: FilePath -> ProjectKind -> IO [String]
+discoverPythonUnitTestNames packageName projectKind =
+  if projectKind `notElem` [PythonKind, PythonLatexKind]
+    then pure []
+    else do
+      let mainPyPath = "packages" </> packageName </> "main.py"
+      exists <- doesFileExist mainPyPath
+      if not exists
+        then pure []
+        else do
+          content <- TIO.readFile mainPyPath
+          let extracted =
+                [ fnName
+                | rawLine <- lines (T.unpack content),
+                  Just fnName <- [extractPythonTestName rawLine]
+                ]
+          pure (sort (Set.toList (Set.fromList extracted)))
+extractPythonTestName :: String -> Maybe String
+extractPythonTestName rawLine =
+  let trimmed = dropWhile (== ' ') rawLine
+      defPrefix :: String
+      defPrefix = "def test_"
+   in if defPrefix `isPrefixOf` trimmed
+        then
+          let namePortion = takeWhile (\ch -> ch /= '(' && ch /= ' ' && ch /= ':') (drop 4 trimmed)
+           in if null namePortion then Nothing else Just namePortion
+        else Nothing
 checkHaskellDebugTests :: FilePath -> ProjectKind -> IO [String]
 checkHaskellDebugTests packageName projectKind =
   if projectKind /= HaskellKind
@@ -583,6 +950,31 @@ checkHaskellDebugTests packageName projectKind =
                   then Nothing
                   else Just ("packages/" ++ packageName ++ "/Main.hs: DEBUG branch must run HUnit tests (runTestTT)")
               ]
+discoverHaskellUnitTestNames :: FilePath -> ProjectKind -> IO [String]
+discoverHaskellUnitTestNames packageName projectKind =
+  if projectKind /= HaskellKind
+    then pure []
+    else do
+      let mainHsPath = "packages" </> packageName </> "Main.hs"
+      exists <- doesFileExist mainHsPath
+      if not exists
+        then pure []
+        else do
+          content <- TIO.readFile mainHsPath
+          let labels =
+                [ label
+                | rawLine <- lines (T.unpack content),
+                  "~:" `isInfixOf` rawLine,
+                  Just label <- [extractQuotedLabel rawLine]
+                ]
+          pure (sort (Set.toList (Set.fromList labels)))
+extractQuotedLabel :: String -> Maybe String
+extractQuotedLabel rawLine =
+  case dropWhile (/= '"') rawLine of
+    '"' : rest ->
+      let label = takeWhile (/= '"') rest
+       in if null label then Nothing else Just label
+    _ -> Nothing
 checkRustDebugTests :: FilePath -> ProjectKind -> IO [String]
 checkRustDebugTests packageName projectKind =
   if projectKind /= RustKind
@@ -615,6 +1007,32 @@ checkRustDebugTests packageName projectKind =
               then Nothing
               else Just ("packages/" ++ packageName ++ "/default.nix: DEBUG mode must run cargo test")
           ]
+discoverRustUnitTestNames :: FilePath -> ProjectKind -> IO [String]
+discoverRustUnitTestNames packageName projectKind =
+  if projectKind /= RustKind
+    then pure []
+    else do
+      let mainRsPath = "packages" </> packageName </> "src/main.rs"
+      exists <- doesFileExist mainRsPath
+      if not exists
+        then pure []
+        else do
+          content <- TIO.readFile mainRsPath
+          pure (extractRustTests (lines (T.unpack content)))
+extractRustTests :: [String] -> [String]
+extractRustTests rawLines = sort (Set.toList (Set.fromList (go False rawLines)))
+  where
+    go _ [] = []
+    go awaitingFn (line : rest) =
+      let trimmed = dropWhile (== ' ') line
+       in if "#[test]" `isPrefixOf` trimmed
+            then go True rest
+            else
+              if awaitingFn && "fn " `isPrefixOf` trimmed
+                then
+                  let fnName = takeWhile (\ch -> ch /= '(' && ch /= ' ') (drop 3 trimmed)
+                   in [fnName | not (null fnName)] ++ go False rest
+                else go False rest
 mapPythonValidatorError :: FilePath -> String -> String
 mapPythonValidatorError packageName errorCode =
   let prefix = "packages/" ++ packageName ++ "/main.py: "

@@ -79,8 +79,8 @@ let
         biome.options = [
           "--max-diagnostics=none"
         ];
-        check-repository-structure = {
-          command = inputs.self.packages.${pkgs.stdenv.system}."check-repository-structure";
+        canonicalization-check = {
+          command = inputs.self.packages.${pkgs.stdenv.system}."canonicalization-check";
           includes = [
             "*.nix"
           ];

@@ -4,7 +4,7 @@
 }:
 let
   checkName = builtins.baseNameOf ./.;
-  packageName = "check-repository-structure";
+  packageName = "canonicalization-check";
   packageDrv = import ../../packages/${packageName}/default.nix { inherit pkgs; };
   debugGhc = pkgs.haskellPackages.ghcWithPackages (_: packageDrv.passthru.haskellExecutableDepends);
 in

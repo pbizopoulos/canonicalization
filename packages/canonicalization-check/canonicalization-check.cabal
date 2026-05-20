@@ -1,9 +1,9 @@
-name:          check-repository-structure
+name:          canonicalization-check
 version:       0.0.0
 synopsis:      Hello World Haskell
 cabal-version: >=1.10
 build-type:    Simple
-executable check-repository-structure
+executable canonicalization-check
   main-is:       Main.hs
   build-depends:
       base
@@ -17,4 +17,6 @@ executable check-repository-structure
     , process
     , regex-tdfa
     , text
+    , vty
+    , vty-crossplatform
   ghc-options:   -O2 -Weverything -Werror -threaded
