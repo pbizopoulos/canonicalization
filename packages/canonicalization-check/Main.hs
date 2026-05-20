@@ -655,17 +655,17 @@ checkRepositoryStructure = do
           ]
       allowedPatterns = globalAllowedPatterns ++ packageAllowedPatterns
       missingPackageDefaults =
-        [ pkgRoot ++ ": is missing required default.nix"
+        [ pkgRoot ++ ": missing required file default.nix"
         | pkgRoot <- Set.toList packageRoots,
           (pkgRoot </> "default.nix") `notElem` relPaths
         ]
       missingHostConfigs =
-        [ hostDir ++ ": is missing required configuration.nix"
+        [ hostDir ++ ": missing required file configuration.nix"
         | hostDir <- Set.toList hostRoots,
           (hostDir </> "configuration.nix") `notElem` relPaths
         ]
       missingCabalForMain =
-        [ pkgRoot ++ ": is missing required " ++ pkgName ++ ".cabal for Main.hs package"
+        [ pkgRoot ++ ": missing required file " ++ pkgName ++ ".cabal for Main.hs package"
         | pkgRoot <- Set.toList packageRoots,
           Set.member (pkgRoot </> "Main.hs") (Set.fromList relPaths),
           let pkgName = takeBaseName pkgRoot,
@@ -883,7 +883,7 @@ checkPackage allStructureIssues currentPackageName = do
                     pure
                       ( [ "packages/"
                             ++ currentPackageName
-                            ++ "/default.nix: internal error: missing embedded baseline for template "
+                            ++ "/default.nix: internal error: missing embedded template baseline for "
                             ++ inferredTemplateName
                         ],
                         Just inferredTemplateName
@@ -1038,7 +1038,7 @@ checkPythonDebugUnittest packageName projectKind =
               pure
                 [ "packages/"
                     ++ packageName
-                    ++ "/main.py: python interpreter not found (tried python3, python)"
+                    ++ "/main.py: missing Python interpreter (tried python3, python)"
                 ]
             Just pythonCommand -> do
               (exitCode, stdoutText, stderrText) <- readProcessWithExitCode pythonCommand ["-c", pythonDebugUnittestValidator, mainPyPath] ""
@@ -1051,7 +1051,7 @@ checkPythonDebugUnittest packageName projectKind =
                     then pure []
                     else
                       pure
-                        [ "packages/" ++ packageName ++ "/main.py: python validator produced unexpected output"
+                        [ "packages/" ++ packageName ++ "/main.py: python AST validator produced unexpected output"
                         ]
                 ExitFailure 1 -> pure mappedErrors
                 ExitFailure _ ->
@@ -1114,7 +1114,7 @@ checkHaskellDebugTests packageName projectKind =
                   else Just ("packages/" ++ packageName ++ "/Main.hs: main() must branch on DEBUG=1"),
                 if hasTestRunner
                   then Nothing
-                  else Just ("packages/" ++ packageName ++ "/Main.hs: DEBUG branch must run HUnit tests (runTestTT)")
+                  else Just ("packages/" ++ packageName ++ "/Main.hs: DEBUG=1 branch must run HUnit tests (runTestTT)")
               ]
 discoverHaskellUnitTestNames :: FilePath -> ProjectKind -> IO [String]
 discoverHaskellUnitTestNames packageName projectKind =
@@ -1275,7 +1275,7 @@ mapPythonValidatorError packageName errorCode =
    in case errorCode of
         "missing_main_function" -> prefix ++ "missing main() function"
         "missing_debug_gate" -> prefix ++ "main() must include a DEBUG gate"
-        "debug_branch_no_unittest" -> prefix ++ "DEBUG=true branch in main() must run unittest"
+        "debug_branch_no_unittest" -> prefix ++ "DEBUG branch in main() must run unittest"
         "run_tests_missing_unittest" -> prefix ++ "run_tests() is called from DEBUG branch but does not run unittest"
         "parse_error" -> prefix ++ "python source could not be parsed"
         _ -> prefix ++ "python validator failed with error code: " ++ errorCode
@@ -1423,7 +1423,7 @@ checkCargoToml packageName = do
                       ),
             if unsafeCodeLint == Just "forbid"
               then Nothing
-              else Just ("packages/" ++ packageName ++ "/Cargo.toml: require [lints.rust].unsafe_code = \"forbid\""),
+              else Just ("packages/" ++ packageName ++ "/Cargo.toml: [lints.rust].unsafe_code must be \"forbid\""),
             if normalizedCargo == normalizedTemplateCargo
               then Nothing
               else
