@@ -1078,7 +1078,7 @@ discoverPythonUnitTestNames packageName projectKind =
                 ]
           pure (sort (Set.toList (Set.fromList extracted)))
 formatDiscoveredUnitTestName :: String -> String
-formatDiscoveredUnitTestName name = "unit test: " ++ name
+formatDiscoveredUnitTestName = id
 extractPythonTestName :: String -> Maybe String
 extractPythonTestName rawLine =
   let trimmed = dropWhile (== ' ') rawLine
@@ -1135,7 +1135,7 @@ discoverHaskellUnitTestNames packageName projectKind =
                 ]
               labelsFromAssertEqual = extractAssertEqualLabels sourceLines
               fallbackCaseNames =
-                [ "unnamed HUnit test case #" ++ show i
+                [ "Unnamed HUnit test case #" ++ show i
                 | i <- [1 .. length [() | line <- sourceLines, "TestCase" `isInfixOf` line]]
                 ]
               discovered =

@@ -175,67 +175,67 @@ getAllFormattingTests :: Test
 getAllFormattingTests =
   TestList
     [ makeFormattingTest
-        "list sorting (non-string)"
+        "Sorts non-string lists."
         (pack "[ 3 1 2 ]")
         (pack "[\n  1\n  2\n  3\n]"),
       makeFormattingTest
-        "list preservation (strings)"
+        "Preserves string-list order."
         (pack "[ \"c\" \"a\" \"b\" ]")
         (pack "[\n  \"c\"\n  \"a\"\n  \"b\"\n]"),
       makeFormattingTest
-        "parameter sorting"
+        "Sorts function parameters."
         (pack "{ x = { z, x, y }: x + y + z; }")
         (pack "{\n  x = { x\n    , y\n    , z }:\n    x + y + z;\n}"),
       makeFormattingTest
-        "attribute set sorting"
+        "Sorts attribute sets."
         (pack "{ c = 1; a = 2; b = 3; }")
         (pack "{\n  a = 2;\n  b = 3;\n  c = 1;\n}"),
       makeFormattingTest
-        "nested attribute set sorting"
+        "Sorts nested attribute sets."
         (pack "{ b = { z = 1; x = 2; }; a = 1; }")
         (pack "{\n  a = 1;\n  b = {\n    x = 2;\n    z = 1;\n  };\n}"),
       makeFormattingTest
-        "dotted list collapse"
+        "Collapses dotted list assignments."
         (pack "{ a = { b = [ \"c\" ]; }; }")
         (pack "{\n  a.b = [\n    \"c\"\n  ];\n}"),
       makeFormattingTest
-        "dotted nested collapse"
+        "Collapses dotted nested assignments."
         (pack "{ b = { z = 1; }; a = 1; }")
         (pack "{\n  a = 1;\n  b.z = 1;\n}"),
       makeFormattingTest
-        "dotted attribute preservation"
+        "Preserves dotted attribute assignments."
         (pack "{ b.z = 1; a = 1; }")
         (pack "{\n  a = 1;\n  b.z = 1;\n}"),
       makeFormattingTest
-        "dotted to nested conversion"
+        "Converts dotted assignments to nested sets."
         (pack "{ b.z = 1; b.x = 2; a = 1; }")
         (pack "{\n  a = 1;\n  b = {\n    x = 2;\n    z = 1;\n  };\n}"),
       makeFormattingTest
-        "multi-dotted to nested conversion"
+        "Converts multi-dotted assignments to nested sets."
         (pack "{ b.z.b = 1; b.z.a = 2; }")
         (pack "{\n  b.z = {\n    a = 2;\n    b = 1;\n  };\n}"),
       makeFormattingTest
-        "let expression sorting"
+        "Sorts let expressions."
         (pack "let c = 1; a = 2; b = 3; in a + b + c")
         (pack "let\n  a = 2;\n  b = 3;\n  c = 1;\nin a + b + c"),
       makeFormattingTest
-        "let with nested set sorting"
+        "Sorts let expressions with nested sets."
         (pack "let c = { z = 1; x = 2; }; a = 1; in a + c.x + c.z")
         (pack "let\n  a = 1;\n  c = {\n    x = 2;\n    z = 1;\n  };\nin a + c.x + c.z"),
       makeFormattingTest
-        "deep nested collapse"
+        "Collapses deep nested assignments."
         (pack "{ c = { z = { x = 2; }; }; }")
         (pack "{\n  c.z.x = 2;\n}"),
       makeFormattingTest
-        "string key sorting"
+        "Sorts string-key assignments."
         (pack "{ \"b\".val1 = 1; \"a\".val2 = 2; }")
         (pack "{\n  \"a\".val2 = 2;\n  \"b\".val1 = 1;\n}"),
       makeFormattingTest
-        "multiline string preservation"
+        "Preserves multiline string formatting."
         (pack "{ a = ''\n  line1\n  line2\n''; }")
         (pack "{\n  a = ''\n    line1\n    line2\n    '';\n}"),
       makeFormattingTest
-        "python template installPhase preservation"
+        "Preserves python template installPhase formatting."
         (pack "{ installPhase = ''\nmkdir -p $out/bin\ncp ./main.py $out/bin/${pname}\n''; }")
         (pack "{\n  installPhase = ''\n    mkdir -p $out/bin\n    cp ./main.py $out/bin/${pname}\n    '';\n}")
     ]
