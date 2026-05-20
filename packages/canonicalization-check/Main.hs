@@ -233,28 +233,16 @@ runCheckAnalysis = do
 runCheckMode :: IO ()
 runCheckMode = do
   results <- runCheckAnalysis
-  mapM_ (putStrLn . renderPackageReport) (packageResults results)
   let allIssues = structureIssues results ++ concatMap packageErrors (packageResults results)
-  if null allIssues
-    then putStrLn "canonicalization-check: ok"
-    else do
-      mapM_ putStrLn allIssues
-      exitFailure
+  unless (null allIssues) $ do
+    mapM_ putStrLn allIssues
+    exitFailure
 runTuiMode :: IO ()
 runTuiMode = do
   results <- runCheckAnalysis
   latestResults <- runTui results
   let allIssues = structureIssues latestResults ++ concatMap packageErrors (packageResults latestResults)
   unless (null allIssues) exitFailure
-renderPackageReport :: PackageCheck -> String
-renderPackageReport pkg =
-  "packages/"
-    ++ packageNodeName pkg
-    ++ ": "
-    ++ (if null (packageErrors pkg) then "parsed successfully" else "parsed with errors")
-    ++ "; successful_checks=["
-    ++ intercalate ", " [testName t | t <- packageTests pkg, testStatus t == Passed]
-    ++ "]"
 type TreeNode :: Type
 data TreeNode = TreeNode
   { nodeId :: String,
@@ -272,9 +260,11 @@ type UiState :: Type
 data UiState = UiState
   { uiTree :: TreeNode,
     uiExpanded :: Set.Set String,
+    uiViewportTop :: Int,
     uiSelected :: Int,
     uiPendingG :: Bool,
     uiPendingZ :: Bool,
+    uiNotice :: Maybe String,
     uiLatestResults :: CheckResults
   }
 runTui :: CheckResults -> IO CheckResults
@@ -284,9 +274,11 @@ runTui results = do
         UiState
           { uiTree = tree,
             uiExpanded = Set.fromList [nodeId tree, "packages", "hosts"],
+            uiViewportTop = 0,
             uiSelected = 0,
             uiPendingG = False,
             uiPendingZ = False,
+            uiNotice = Nothing,
             uiLatestResults = results
           }
   vty <- VCP.mkVty V.defaultConfig
@@ -336,15 +328,19 @@ hostNode host =
     }
 runTuiLoop :: V.Vty -> UiState -> IO UiState
 runTuiLoop vty state = do
+  viewportHeight <- getViewportHeight vty state
   drawTuiFrame vty state
   event <- V.nextEvent vty
   case event of
     V.EvKey (V.KChar 'q') [] -> pure state
     V.EvKey V.KEsc [] -> pure state
-    V.EvKey (V.KChar 'j') [] -> runTuiLoop vty (clearPendingZ (clearPendingG (moveSelection 1 state)))
-    V.EvKey V.KDown [] -> runTuiLoop vty (clearPendingZ (clearPendingG (moveSelection 1 state)))
-    V.EvKey (V.KChar 'k') [] -> runTuiLoop vty (clearPendingZ (clearPendingG (moveSelection (-1) state)))
-    V.EvKey V.KUp [] -> runTuiLoop vty (clearPendingZ (clearPendingG (moveSelection (-1) state)))
+    V.EvKey (V.KChar 'j') [] -> runTuiLoop vty (clearPendingZ (clearPendingG (moveSelection viewportHeight 1 state)))
+    V.EvKey V.KDown [] -> runTuiLoop vty (clearPendingZ (clearPendingG (moveSelection viewportHeight 1 state)))
+    V.EvKey (V.KChar 'k') [] -> runTuiLoop vty (clearPendingZ (clearPendingG (moveSelection viewportHeight (-1) state)))
+    V.EvKey V.KUp [] -> runTuiLoop vty (clearPendingZ (clearPendingG (moveSelection viewportHeight (-1) state)))
+    V.EvKey (V.KChar 'H') [] -> runTuiLoop vty (clearPendingZ (clearPendingG (moveToViewportTop state)))
+    V.EvKey (V.KChar 'M') [] -> runTuiLoop vty (clearPendingZ (clearPendingG (moveToViewportMiddle viewportHeight state)))
+    V.EvKey (V.KChar 'L') [] -> runTuiLoop vty (clearPendingZ (clearPendingG (moveToViewportBottom viewportHeight state)))
     V.EvKey (V.KChar 'z') [] -> runTuiLoop vty (clearPendingG state {uiPendingZ = True})
     V.EvKey (V.KChar 'o') [] ->
       if uiPendingZ state
@@ -358,15 +354,29 @@ runTuiLoop vty state = do
       if uiPendingG state
         then runTuiLoop vty (clearPendingZ (clearPendingG (goTop state)))
         else runTuiLoop vty (clearPendingZ (state {uiPendingG = True}))
-    V.EvKey (V.KChar 'G') [] -> runTuiLoop vty (clearPendingZ (clearPendingG (goBottom state)))
+    V.EvKey (V.KChar 'G') [] -> runTuiLoop vty (clearPendingZ (clearPendingG (goBottom viewportHeight state)))
     V.EvKey (V.KChar 'r') [] -> do
-      refreshedResults <- runCheckAnalysis
-      runTuiLoop vty (resetUiForResults refreshedResults state)
+      let waitingState = state {uiNotice = Just "Running nix fmt && nix flake check..."}
+      drawTuiFrame vty waitingState
+      nixResult <- runNixChecks
+      refreshedResultsRaw <- runCheckAnalysis
+      let refreshedResults = applyNixResult nixResult refreshedResultsRaw
+      runTuiLoop vty (resetUiForResults refreshedResults waitingState)
     _ -> runTuiLoop vty (clearPendingZ (clearPendingG state))
 drawTuiFrame :: V.Vty -> UiState -> IO ()
 drawTuiFrame vty state = do
-  let lineImages = zipWith (renderVisibleNodeImage state) [0 ..] (visibleNodes state)
-      image = V.vertCat lineImages
+  viewportHeight <- getViewportHeight vty state
+  let allLineImages = zipWith (renderVisibleNodeImage state) [0 ..] (visibleNodes state)
+      lineImages = take viewportHeight (drop (uiViewportTop state) allLineImages)
+      noticePrefix =
+        case uiNotice state of
+          Nothing -> []
+          Just noticeLine -> [V.string V.defAttr noticeLine]
+      contentImages =
+        if null lineImages
+          then [V.string V.defAttr ""]
+          else lineImages
+      image = V.vertCat (noticePrefix ++ contentImages)
   V.update vty (V.picForImage image)
 visibleNodes :: UiState -> [VisibleNode]
 visibleNodes state = flattenVisible Nothing 0 (uiTree state)
@@ -405,32 +415,93 @@ renderVisibleNodeImage state index vnode =
         Failed -> V.withForeColor V.defAttr V.red
         Skipped -> V.withForeColor V.defAttr V.yellow
    in V.horizCat [V.string V.defAttr beforeStatus, V.string statusAttr statusToken, V.string V.defAttr afterStatus]
-moveSelection :: Int -> UiState -> UiState
-moveSelection delta state =
+moveSelection :: Int -> Int -> UiState -> UiState
+moveSelection viewportHeight delta state =
   let total = length (visibleNodes state)
       current = uiSelected state
       next = max 0 (min (total - 1) (current + delta))
-   in state {uiSelected = next}
+   in ensureSelectionVisible viewportHeight (state {uiSelected = next})
 goTop :: UiState -> UiState
-goTop state = state {uiSelected = 0}
-goBottom :: UiState -> UiState
-goBottom state =
+goTop state = state {uiSelected = 0, uiViewportTop = 0}
+goBottom :: Int -> UiState -> UiState
+goBottom viewportHeight state =
   let total = length (visibleNodes state)
-   in state {uiSelected = max 0 (total - 1)}
+   in ensureSelectionVisible viewportHeight (state {uiSelected = max 0 (total - 1)})
+moveToViewportTop :: UiState -> UiState
+moveToViewportTop state =
+  let total = length (visibleNodes state)
+      target = max 0 (min (total - 1) (uiViewportTop state))
+   in state {uiSelected = target}
+moveToViewportMiddle :: Int -> UiState -> UiState
+moveToViewportMiddle viewportHeight state =
+  let total = length (visibleNodes state)
+      target = max 0 (min (total - 1) (uiViewportTop state + (viewportHeight `div` 2)))
+   in state {uiSelected = target}
+moveToViewportBottom :: Int -> UiState -> UiState
+moveToViewportBottom viewportHeight state =
+  let total = length (visibleNodes state)
+      target = max 0 (min (total - 1) (uiViewportTop state + viewportHeight - 1))
+   in state {uiSelected = target}
+ensureSelectionVisible :: Int -> UiState -> UiState
+ensureSelectionVisible viewportHeight state =
+  let total = length (visibleNodes state)
+      maxTop = max 0 (total - viewportHeight)
+      sel = uiSelected state
+      top0 = uiViewportTop state
+      top1
+        | sel < top0 = sel
+        | sel >= top0 + viewportHeight = sel - viewportHeight + 1
+        | otherwise = top0
+      boundedTop = max 0 (min maxTop top1)
+   in state {uiViewportTop = boundedTop}
 clearPendingG :: UiState -> UiState
-clearPendingG state = state {uiPendingG = False}
+clearPendingG state = state {uiPendingG = False, uiNotice = Nothing}
 clearPendingZ :: UiState -> UiState
-clearPendingZ state = state {uiPendingZ = False}
+clearPendingZ state = state {uiPendingZ = False, uiNotice = Nothing}
 resetUiForResults :: CheckResults -> UiState -> UiState
 resetUiForResults refreshedResults state =
   let tree = buildCheckTree refreshedResults
    in state
         { uiTree = tree,
           uiExpanded = Set.fromList [nodeId tree, "packages", "hosts"],
+          uiViewportTop = 0,
           uiSelected = 0,
           uiPendingG = False,
           uiPendingZ = False,
+          uiNotice = Nothing,
           uiLatestResults = refreshedResults
+        }
+getViewportHeight :: V.Vty -> UiState -> IO Int
+getViewportHeight vty state = do
+  (_, screenHeight) <- V.displayBounds (V.outputIface vty)
+  let noticeLines :: Int
+      noticeLines =
+        case uiNotice state of
+          Nothing -> 0
+          Just _ -> 1
+      available = screenHeight - noticeLines
+  pure (max 1 available)
+runNixChecks :: IO (Maybe String)
+runNixChecks = do
+  (exitCode, stdoutText, stderrText) <- readProcessWithExitCode "bash" ["-lc", "nix fmt && nix flake check"] ""
+  case exitCode of
+    ExitSuccess -> pure Nothing
+    ExitFailure code ->
+      pure
+        ( Just
+            ( "nix pipeline failed (exit "
+                ++ show code
+                ++ "): "
+                ++ oneLine (T.pack (stdoutText ++ " " ++ stderrText))
+            )
+        )
+applyNixResult :: Maybe String -> CheckResults -> CheckResults
+applyNixResult maybeFailure results =
+  case maybeFailure of
+    Nothing -> results
+    Just failureMessage ->
+      results
+        { structureIssues = structureIssues results ++ [failureMessage]
         }
 buildTestTreeNode :: String -> TestResult -> TreeNode
 buildTestTreeNode parentNodeId testResult =
@@ -961,20 +1032,93 @@ discoverHaskellUnitTestNames packageName projectKind =
         then pure []
         else do
           content <- TIO.readFile mainHsPath
-          let labels =
+          let sourceLines = lines (T.unpack content)
+              labelsFromFormattingHelper = extractMakeFormattingTestLabels sourceLines
+              labelsFromTilde =
                 [ label
-                | rawLine <- lines (T.unpack content),
-                  "~:" `isInfixOf` rawLine,
-                  Just label <- [extractQuotedLabel rawLine]
+                | rawLine <- sourceLines,
+                  Just label <- [extractHaskellTestLabel rawLine]
                 ]
-          pure (sort (Set.toList (Set.fromList labels)))
-extractQuotedLabel :: String -> Maybe String
-extractQuotedLabel rawLine =
-  case dropWhile (/= '"') rawLine of
-    '"' : rest ->
-      let label = takeWhile (/= '"') rest
-       in if null label then Nothing else Just label
-    _ -> Nothing
+              labelsFromAssertEqual = extractAssertEqualLabels sourceLines
+              fallbackCaseNames =
+                [ "TestCase#" ++ show i
+                | i <- [1 .. length [() | line <- sourceLines, "TestCase" `isInfixOf` line]]
+                ]
+              discovered =
+                if null labelsFromFormattingHelper && null labelsFromTilde && null labelsFromAssertEqual
+                  then fallbackCaseNames
+                  else labelsFromFormattingHelper ++ labelsFromTilde ++ labelsFromAssertEqual
+          pure (sort (Set.toList (Set.fromList discovered)))
+extractHaskellTestLabel :: String -> Maybe String
+extractHaskellTestLabel rawLine =
+  case breakOnSubstring "~:" rawLine of
+    Nothing -> Nothing
+    Just (beforeTilde, _) -> lastQuotedToken beforeTilde
+breakOnSubstring :: String -> String -> Maybe (String, String)
+breakOnSubstring needle = go ""
+  where
+    go _prefix [] = Nothing
+    go prefix rest
+      | needle `isPrefixOf` rest = Just (prefix, drop (length needle) rest)
+      | otherwise =
+          case rest of
+            ch : tailRest -> go (prefix ++ [ch]) tailRest
+lastQuotedToken :: String -> Maybe String
+lastQuotedToken source =
+  let go [] _currentQuote _currentToken acc = reverse acc
+      go (ch : rest) currentQuote currentToken acc =
+        case currentQuote of
+          Nothing ->
+            if ch == '"' || ch == '\''
+              then go rest (Just ch) "" acc
+              else go rest Nothing currentToken acc
+          Just q ->
+            if ch == q
+              then go rest Nothing "" (if null currentToken then acc else currentToken : acc)
+              else go rest (Just q) (currentToken ++ [ch]) acc
+      tokens = go source Nothing "" []
+   in case tokens of
+        [] -> Nothing
+        token : _ -> Just token
+extractAssertEqualLabels :: [String] -> [String]
+extractAssertEqualLabels = go False
+  where
+    go _ [] = []
+    go awaitingLabel (line : rest)
+      | "assertEqual" `isInfixOf` line = go True rest
+      | awaitingLabel =
+          case firstQuotedToken line of
+            Just label -> label : go False rest
+            Nothing -> go True rest
+      | otherwise = go False rest
+extractMakeFormattingTestLabels :: [String] -> [String]
+extractMakeFormattingTestLabels = go False
+  where
+    go _ [] = []
+    go awaitingLabel (line : rest)
+      | "makeFormattingTest" `isInfixOf` line = go True rest
+      | awaitingLabel =
+          let trimmed = dropWhile (== ' ') line
+           in if null trimmed
+                then go True rest
+                else case firstQuotedToken line of
+                  Just label -> label : go False rest
+                  Nothing -> go False rest
+      | otherwise = go False rest
+firstQuotedToken :: String -> Maybe String
+firstQuotedToken source =
+  let afterDouble = dropWhile (/= '"') source
+      afterSingle = dropWhile (/= '\'') source
+   in case afterDouble of
+        '"' : rest ->
+          let token = takeWhile (/= '"') rest
+           in if null token then Nothing else Just token
+        _ ->
+          case afterSingle of
+            '\'' : rest ->
+              let token = takeWhile (/= '\'') rest
+               in if null token then Nothing else Just token
+            _ -> Nothing
 checkRustDebugTests :: FilePath -> ProjectKind -> IO [String]
 checkRustDebugTests packageName projectKind =
   if projectKind /= RustKind
