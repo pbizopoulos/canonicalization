@@ -12,10 +12,12 @@ import Control.Monad (forM, unless, when)
 import Data.Fix (Fix (Fix))
 import Data.Functor.Compose (Compose (Compose))
 import Data.Kind (Type)
-import Data.List (intercalate, isInfixOf, isPrefixOf, isSuffixOf, sort, sortBy, stripPrefix)
+import Data.List (intercalate, isInfixOf, isPrefixOf, isSuffixOf, maximumBy, sort, sortBy, stripPrefix)
 import Data.List.NonEmpty (NonEmpty ((:|)))
+import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, fromMaybe, listToMaybe)
+import Data.Maybe (catMaybes, fromMaybe, listToMaybe, mapMaybe)
+import Data.Ord (comparing)
 import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
@@ -242,16 +244,20 @@ runCheckAnalysis = do
 runCheckMode :: IO ()
 runCheckMode = do
   results <- runCheckAnalysis
-  let allIssues = structureIssues results ++ concatMap packageErrors (packageResults results)
-  unless (null allIssues) $ do
-    mapM_ putStrLn allIssues
-    exitFailure
+  failOnIssues True results
 runTuiMode :: IO ()
 runTuiMode = do
   results <- runCheckAnalysis
   latestResults <- runTui results
-  let allIssues = structureIssues latestResults ++ concatMap packageErrors (packageResults latestResults)
-  unless (null allIssues) exitFailure
+  failOnIssues False latestResults
+allIssuesFromResults :: CheckResults -> [String]
+allIssuesFromResults results = structureIssues results ++ concatMap packageErrors (packageResults results)
+failOnIssues :: Bool -> CheckResults -> IO ()
+failOnIssues printIssues results = do
+  let allIssues = allIssuesFromResults results
+  unless (null allIssues) $ do
+    when printIssues (mapM_ putStrLn allIssues)
+    exitFailure
 type TreeNode :: Type
 data TreeNode = TreeNode
   { nodeId :: String,
@@ -812,14 +818,13 @@ hostRoot path =
     "hosts" : hostDirName : _ -> Just ("hosts" </> hostDirName)
     _ -> Nothing
 listPackageNames :: IO [FilePath]
-listPackageNames = do
-  entries <- listDirectory "packages"
-  flags <- forM entries $ \name -> doesDirectoryExist ("packages" </> name)
-  pure $ sort [name | (name, isDir) <- zip entries flags, isDir]
+listPackageNames = listSubdirectories "packages"
 listHostNames :: IO [FilePath]
-listHostNames = do
-  entries <- listDirectory "hosts"
-  flags <- forM entries $ \name -> doesDirectoryExist ("hosts" </> name)
+listHostNames = listSubdirectories "hosts"
+listSubdirectories :: FilePath -> IO [FilePath]
+listSubdirectories root = do
+  entries <- listDirectory root
+  flags <- forM entries $ \name -> doesDirectoryExist (root </> name)
   pure $ sort [name | (name, isDir) <- zip entries flags, isDir]
 buildHostCheck :: [String] -> FilePath -> HostCheck
 buildHostCheck allStructureIssues currentHostName =
@@ -1006,18 +1011,17 @@ detectProjectKindForPackage packageName = do
   hasMsTex <- has "ms.tex"
   hasMainC <- has "main.c"
   hasMainTf <- has "main.tf"
-  pure $
-    case () of
-      _
-        | hasMainHs -> HaskellKind
-        | hasCargoToml -> RustKind
-        | hasIndexHtml -> HtmlKind
-        | hasMainPy && hasMsTex -> PythonLatexKind
-        | hasMainPy -> PythonKind
-        | hasMainC -> CKind
-        | hasMainTf -> TerraformKind
-        | hasMsTex -> LatexKind
-        | otherwise -> BinaryReleaseKind
+  let kind
+        | hasMainHs = HaskellKind
+        | hasCargoToml = RustKind
+        | hasIndexHtml = HtmlKind
+        | hasMainPy && hasMsTex = PythonLatexKind
+        | hasMainPy = PythonKind
+        | hasMainC = CKind
+        | hasMainTf = TerraformKind
+        | hasMsTex = LatexKind
+        | otherwise = BinaryReleaseKind
+  pure kind
 checkPythonDebugUnittest :: FilePath -> ProjectKind -> IO [String]
 checkPythonDebugUnittest packageName projectKind =
   if projectKind `notElem` [PythonKind, PythonLatexKind]
@@ -1684,16 +1688,9 @@ oneLine value =
 extractPrimaryBindings :: NExprLoc -> Maybe (Map.Map T.Text T.Text)
 extractPrimaryBindings expr = do
   bindingGroups <- collectSetBindings expr
-  bestGroup <- pickLargest bindingGroups
-  pure $ Map.fromList bestGroup
-pickLargest :: [[(T.Text, T.Text)]] -> Maybe [(T.Text, T.Text)]
-pickLargest [] = Nothing
-pickLargest groups = Just (foldl1 maxByLength groups)
-maxByLength :: [(T.Text, T.Text)] -> [(T.Text, T.Text)] -> [(T.Text, T.Text)]
-maxByLength left right =
-  if length left >= length right
-    then left
-    else right
+  pure $ Map.fromList (maximumByLength bindingGroups)
+maximumByLength :: [[a]] -> [a]
+maximumByLength = maximumBy (comparing length)
 collectSetBindings :: NExprLoc -> Maybe [[(T.Text, T.Text)]]
 collectSetBindings (Fix (Compose (AnnUnit _ exprF))) =
   case exprF of
@@ -1713,13 +1710,9 @@ collectFromBinding (NamedVar _ value _) = fromMaybe [] (collectSetBindings value
 collectFromBinding (Inherit maybeExpr _ _) = maybe [] (fromMaybe [] . collectSetBindings) maybeExpr
 extractBindings :: [Binding NExprLoc] -> [(T.Text, T.Text)]
 extractBindings bindings =
-  [ (T.intercalate "." (mapMaybe keyNameText (toList keyPath)), renderExpr value)
+  [ (T.intercalate "." (mapMaybe keyNameText (NE.toList keyPath)), renderExpr value)
   | NamedVar keyPath value _ <- bindings
   ]
-toList :: NonEmpty a -> [a]
-toList (x :| xs) = x : xs
-mapMaybe :: (a -> Maybe b) -> [a] -> [b]
-mapMaybe f = foldr (\x acc -> maybe acc (: acc) (f x)) []
 runDebugTests :: IO ()
 runDebugTests = do
   counts <- runTestTT debugTests
