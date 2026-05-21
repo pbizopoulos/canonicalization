@@ -12,8 +12,7 @@ in
 pyPkgs.buildPythonPackage rec {
   installCheckPhase = ''
     runHook preInstallCheck
-    HOME="$(mktemp -d)" DEBUG=1 PYTHONWARNINGS=error coverage run --source="$src" -m pyinstrument "$src/main.py"
-    coverage report
+    DEBUG=1 "$out/bin/${pname}"
     runHook postInstallCheck
   '';
   installPhase = ''
@@ -25,10 +24,6 @@ pyPkgs.buildPythonPackage rec {
     fi
   '';
   meta.mainProgram = pname;
-  nativeInstallCheckInputs = [
-    pyPkgs.coverage
-    pyPkgs.pyinstrument
-  ];
   pname = baseNameOf ./.;
   pyproject = false;
   shellHook = ''

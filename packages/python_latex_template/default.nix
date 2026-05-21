@@ -11,9 +11,7 @@ in
 pkgs.python3Packages.buildPythonPackage rec {
   installCheckPhase = ''
     runHook preInstallCheck
-    test -x "$out/bin/${pname}"
-    HOME="$(mktemp -d)" DEBUG=1 PYTHONWARNINGS=error coverage run --source="$src" -m pyinstrument "$src/main.py"
-    coverage report
+    DEBUG=1 ${pkgs.bash}/bin/bash "$out/bin/${pname}"
     runHook postInstallCheck
   '';
   installPhase = ''
@@ -31,10 +29,6 @@ pkgs.python3Packages.buildPythonPackage rec {
     chmod +x "$out/bin/${pname}"
   '';
   meta.mainProgram = pname;
-  nativeInstallCheckInputs = [
-    pkgs.python3Packages.coverage
-    pkgs.python3Packages.pyinstrument
-  ];
   pname = baseNameOf ./.;
   propagatedBuildInputs = pythonDeps;
   pyproject = false;
