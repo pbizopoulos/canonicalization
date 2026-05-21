@@ -79,8 +79,8 @@ let
         biome.options = [
           "--max-diagnostics=none"
         ];
-        canonicalization-check = {
-          command = inputs.self.packages.${pkgs.stdenv.system}."canonicalization-check";
+        canonicalization = {
+          command = inputs.self.packages.${pkgs.stdenv.system}."canonicalization";
           includes = [
             "*.nix"
           ];

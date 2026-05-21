@@ -1,9 +1,9 @@
-name:          canonicalization-check
+name:          canonicalization
 version:       0.0.0
 synopsis:      Hello World Haskell
 cabal-version: >=1.10
 build-type:    Simple
-executable canonicalization-check
+executable canonicalization
   main-is:       Main.hs
   build-depends:
       base

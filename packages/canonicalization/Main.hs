@@ -514,7 +514,7 @@ normalizePythonInstallCheckText contents =
             (anchorLine : rest) -> before ++ (anchorLine : canonicalInstallCheckPhase ++ rest)
 fixEmbeddedCanonicalizationPythonBaseline :: IO [FilePath]
 fixEmbeddedCanonicalizationPythonBaseline = do
-  let path = "packages" </> "canonicalization-check" </> "Main.hs"
+  let path = "packages" </> "canonicalization" </> "Main.hs"
   exists <- doesFileExist path
   if not exists
     then pure []
