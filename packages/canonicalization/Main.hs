@@ -664,7 +664,8 @@ runTui results = do
   pure (uiLatestResults finalState)
 buildCheckTree :: Map.Map FilePath Double -> Set.Set FilePath -> CheckResults -> TreeNode
 buildCheckTree coverageByPackage availableCoveragePackages results =
-  let packageNodes = map (packageNode coverageByPackage availableCoveragePackages) (packageResults results)
+  let packageLayout = buildPackageLabelLayout coverageByPackage availableCoveragePackages (packageResults results)
+      packageNodes = map (packageNode coverageByPackage availableCoveragePackages packageLayout) (packageResults results)
       hostNodes = map hostNode (hostResults results)
       allIssues = structureIssues results ++ concatMap packageErrors (packageResults results)
       repoStatus = if null allIssues then Passed else Failed
@@ -687,21 +688,50 @@ buildCheckTree coverageByPackage availableCoveragePackages results =
                 }
             ]
         }
-packageNode :: Map.Map FilePath Double -> Set.Set FilePath -> PackageCheck -> TreeNode
-packageNode coverageByPackage availableCoveragePackages pkg =
+type PackageLabelLayout :: Type
+data PackageLabelLayout = PackageLabelLayout
+  { packageNameWidth :: Int,
+    packageKindWidth :: Int,
+    packageCoverageWidth :: Int
+  }
+buildPackageLabelLayout :: Map.Map FilePath Double -> Set.Set FilePath -> [PackageCheck] -> PackageLabelLayout
+buildPackageLabelLayout coverageByPackage availableCoveragePackages pkgs =
+  let names = map packageNodeName pkgs
+      kinds = map (projectKindLabel . packageKind) pkgs
+      coverages =
+        map
+          (coverageDisplayForPackage coverageByPackage availableCoveragePackages . packageNodeName)
+          pkgs
+   in PackageLabelLayout
+        { packageNameWidth = maxWidth names,
+          packageKindWidth = maxWidth kinds,
+          packageCoverageWidth = maxWidth coverages
+        }
+  where
+    maxWidth :: [String] -> Int
+    maxWidth values = maximum (0 : map length values)
+coverageDisplayForPackage :: Map.Map FilePath Double -> Set.Set FilePath -> FilePath -> String
+coverageDisplayForPackage coverageByPackage availableCoveragePackages packageName =
+  case Map.lookup packageName coverageByPackage of
+    Just pct -> show pct ++ "%"
+    Nothing ->
+      if Set.member packageName availableCoveragePackages
+        then "N/A"
+        else "-"
+padRight :: Int -> String -> String
+padRight target value = value ++ replicate (max 0 (target - length value)) ' '
+packageNode :: Map.Map FilePath Double -> Set.Set FilePath -> PackageLabelLayout -> PackageCheck -> TreeNode
+packageNode coverageByPackage availableCoveragePackages layout pkg =
   let packageId = "packages/" ++ packageNodeName pkg
       testNodes = map (buildTestTreeNode coverageByPackage packageId (packageNodeName pkg)) (packageTests pkg)
       fileIssueNodes = buildPackageFileIssueNodes pkg (Set.fromList (map testName (packageTests pkg)))
-      coverageSuffix =
-        case Map.lookup (packageNodeName pkg) coverageByPackage of
-          Just pct -> " (" ++ show pct ++ "% coverage)"
-          Nothing ->
-            if Set.member (packageNodeName pkg) availableCoveragePackages
-              then " (N/A coverage)"
-              else ""
+      packageNameCol = padRight (packageNameWidth layout) (packageNodeName pkg)
+      packageKindCol = padRight (packageKindWidth layout) (projectKindLabel (packageKind pkg))
+      coverageCol = padRight (packageCoverageWidth layout) (coverageDisplayForPackage coverageByPackage availableCoveragePackages (packageNodeName pkg))
+      packageLabel = packageNameCol ++ "  " ++ packageKindCol ++ "  " ++ coverageCol
    in TreeNode
         { nodeId = packageId,
-          nodeLabel = packageNodeName pkg ++ " (" ++ projectKindLabel (packageKind pkg) ++ ")" ++ coverageSuffix,
+          nodeLabel = packageLabel,
           nodeStatus = packageNodeStatus pkg,
           nodeChildren = fileIssueNodes ++ testNodes
         }
