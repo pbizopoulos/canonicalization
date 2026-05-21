@@ -12,6 +12,7 @@ in
 pyPkgs.buildPythonPackage rec {
   installCheckPhase = ''
     runHook preInstallCheck
+    HOME="$(mktemp -d)"
     DEBUG=1 "$out/bin/${pname}"
     runHook postInstallCheck
   '';
