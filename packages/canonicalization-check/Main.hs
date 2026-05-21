@@ -937,7 +937,7 @@ checkPackage allStructureIssues currentPackageName = do
                         "supports DEBUG test execution"
                         rustStatus
                         (if rustStatus == Failed then rustDebugIssues else [])
-                        : [TestCaseResult (formatDiscoveredUnitTestName name) Skipped [] | name <- rustUnitTestNames]
+                        : [TestCaseResult name Skipped [] | name <- rustUnitTestNames]
                     )
                 ]
               else [],
@@ -959,7 +959,7 @@ checkPackage allStructureIssues currentPackageName = do
                         haskellStatus
                         (if haskellStatus == Failed then haskellDebugIssues else [])
                         : [ TestCaseResult
-                              (formatDiscoveredUnitTestName testName')
+                              testName'
                               Skipped
                               []
                           | testName' <- if null haskellUnitTestNames then ["No named HUnit test labels discovered"] else haskellUnitTestNames
@@ -974,7 +974,7 @@ checkPackage allStructureIssues currentPackageName = do
                     "supports DEBUG test execution"
                     pythonStatus
                     (if pythonStatus == Failed then pythonDebugIssues else [])
-                    : [TestCaseResult (formatDiscoveredUnitTestName name) Skipped [] | name <- pythonUnitTestNames]
+                    : [TestCaseResult name Skipped [] | name <- pythonUnitTestNames]
                 )
             | projectKind `elem` [PythonKind, PythonLatexKind]
             ]
@@ -1077,8 +1077,6 @@ discoverPythonUnitTestNames packageName projectKind =
                   Just fnName <- [extractPythonTestName rawLine]
                 ]
           pure (sort (Set.toList (Set.fromList extracted)))
-formatDiscoveredUnitTestName :: String -> String
-formatDiscoveredUnitTestName = id
 extractPythonTestName :: String -> Maybe String
 extractPythonTestName rawLine =
   let trimmed = dropWhile (== ' ') rawLine
