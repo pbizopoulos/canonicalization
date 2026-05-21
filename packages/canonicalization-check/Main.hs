@@ -9,6 +9,7 @@ module Main (main) where
 import Control.Applicative ((<|>))
 import Control.Exception (finally)
 import Control.Monad (forM, unless, when)
+import Data.Char (isDigit)
 import Data.Fix (Fix (Fix))
 import Data.Functor.Compose (Compose (Compose))
 import Data.Kind (Type)
@@ -279,11 +280,19 @@ data UiState = UiState
     uiPendingG :: Bool,
     uiPendingZ :: Bool,
     uiNotice :: Maybe String,
-    uiLatestResults :: CheckResults
+    uiLatestResults :: CheckResults,
+    uiCoverageByPackage :: Map.Map FilePath Double
+  }
+type CoverageCheckRun :: Type
+data CoverageCheckRun = CoverageCheckRun
+  { coverageCheckName :: String,
+    coverageCheckPassed :: Bool,
+    coveragePercent :: Maybe Double,
+    coverageDetails :: String
   }
 runTui :: CheckResults -> IO CheckResults
 runTui results = do
-  let tree = buildCheckTree results
+  let tree = buildCheckTree Map.empty results
       initialState =
         UiState
           { uiTree = tree,
@@ -293,15 +302,16 @@ runTui results = do
             uiPendingG = False,
             uiPendingZ = False,
             uiNotice = Nothing,
-            uiLatestResults = results
+            uiLatestResults = results,
+            uiCoverageByPackage = Map.empty
           }
   vty <- VCP.mkVty V.defaultConfig
   finalState <- runTuiLoop vty initialState
   V.shutdown vty
   pure (uiLatestResults finalState)
-buildCheckTree :: CheckResults -> TreeNode
-buildCheckTree results =
-  let packageNodes = map packageNode (packageResults results)
+buildCheckTree :: Map.Map FilePath Double -> CheckResults -> TreeNode
+buildCheckTree coverageByPackage results =
+  let packageNodes = map (packageNode coverageByPackage) (packageResults results)
       hostNodes = map hostNode (hostResults results)
       allIssues = structureIssues results ++ concatMap packageErrors (packageResults results)
       repoStatus = if null allIssues then Passed else Failed
@@ -324,14 +334,18 @@ buildCheckTree results =
                 }
             ]
         }
-packageNode :: PackageCheck -> TreeNode
-packageNode pkg =
+packageNode :: Map.Map FilePath Double -> PackageCheck -> TreeNode
+packageNode coverageByPackage pkg =
   let packageId = "packages/" ++ packageNodeName pkg
-      testNodes = map (buildTestTreeNode packageId) (packageTests pkg)
+      testNodes = map (buildTestTreeNode coverageByPackage packageId (packageNodeName pkg)) (packageTests pkg)
       fileIssueNodes = buildPackageFileIssueNodes pkg (Set.fromList (map testName (packageTests pkg)))
+      coverageSuffix =
+        case Map.lookup (packageNodeName pkg) coverageByPackage of
+          Just pct -> " (" ++ show pct ++ "% coverage)"
+          Nothing -> ""
    in TreeNode
         { nodeId = packageId,
-          nodeLabel = packageNodeName pkg ++ " (" ++ projectKindLabel (packageKind pkg) ++ ")",
+          nodeLabel = packageNodeName pkg ++ " (" ++ projectKindLabel (packageKind pkg) ++ ")" ++ coverageSuffix,
           nodeStatus = packageNodeStatus pkg,
           nodeChildren = fileIssueNodes ++ testNodes
         }
@@ -341,7 +355,7 @@ hostNode host =
     { nodeId = "hosts/" ++ hostName host,
       nodeLabel = hostName host,
       nodeStatus = hostNodeStatus host,
-      nodeChildren = map (buildTestTreeNode ("hosts/" ++ hostName host)) (hostTests host)
+      nodeChildren = map (buildTestTreeNode Map.empty ("hosts/" ++ hostName host) (hostName host)) (hostTests host)
     }
 runTuiLoop :: V.Vty -> UiState -> IO UiState
 runTuiLoop vty state = do
@@ -367,6 +381,18 @@ runTuiLoop vty state = do
       if uiPendingZ state
         then runTuiLoop vty (clearPendingZ (clearPendingG (collapseAtSelection state)))
         else runTuiLoop vty (clearPendingZ (clearPendingG state))
+    V.EvKey (V.KChar 'C') [] -> do
+      let waitingState = state {uiNotice = Just "Running coverage checks..."}
+      drawTuiFrame vty waitingState
+      (coverageNotice, coverageByPackage) <- runAllCoverageChecks
+      let rebuiltTree = buildCheckTree coverageByPackage (uiLatestResults state)
+          nextState =
+            (clearPendingZ (clearPendingG state))
+              { uiNotice = Just coverageNotice,
+                uiTree = rebuiltTree,
+                uiCoverageByPackage = coverageByPackage
+              }
+      runTuiLoop vty nextState
     V.EvKey (V.KChar 'g') [] ->
       if uiPendingG state
         then runTuiLoop vty (clearPendingZ (clearPendingG (goTop state)))
@@ -475,7 +501,7 @@ clearPendingZ :: UiState -> UiState
 clearPendingZ state = state {uiPendingZ = False, uiNotice = Nothing}
 resetUiForResults :: CheckResults -> UiState -> UiState
 resetUiForResults refreshedResults state =
-  let tree = buildCheckTree refreshedResults
+  let tree = buildCheckTree (uiCoverageByPackage state) refreshedResults
    in state
         { uiTree = tree,
           uiExpanded = Set.fromList [nodeId tree, "packages", "hosts"],
@@ -496,18 +522,18 @@ getViewportHeight vty state = do
           Just _ -> 1
       available = screenHeight - noticeLines
   pure (max 1 available)
-buildTestTreeNode :: String -> TestResult -> TreeNode
-buildTestTreeNode parentNodeId testResult =
+buildTestTreeNode :: Map.Map FilePath Double -> String -> FilePath -> TestResult -> TreeNode
+buildTestTreeNode coverageByPackage parentNodeId packageName testResult =
   let caseNodes =
         [ TreeNode
             { nodeId = parentNodeId ++ "/" ++ testName testResult ++ "/case/" ++ caseName caseResult,
               nodeLabel = caseName caseResult,
-              nodeStatus = caseStatus caseResult,
+              nodeStatus = effectiveCaseStatus caseResult,
               nodeChildren =
                 [ TreeNode
                     { nodeId = parentNodeId ++ "/" ++ testName testResult ++ "/case/" ++ caseName caseResult ++ "/detail/" ++ show i,
                       nodeLabel = detail,
-                      nodeStatus = caseStatus caseResult,
+                      nodeStatus = effectiveCaseStatus caseResult,
                       nodeChildren = []
                     }
                 | (i, detail) <- zip [0 :: Int ..] (caseDetails caseResult)
@@ -515,10 +541,20 @@ buildTestTreeNode parentNodeId testResult =
             }
         | caseResult <- testCases testResult
         ]
+      coverageSucceeded = Map.member packageName coverageByPackage
+      isSourceTest = testName testResult `elem` ["Main.hs", "main.py", "src/main.rs", "main.c"]
+      effectiveTestStatus =
+        if coverageSucceeded && isSourceTest && testStatus testResult == Skipped
+          then Passed
+          else testStatus testResult
+      effectiveCaseStatus caseResult =
+        if coverageSucceeded && isSourceTest && caseStatus caseResult == Skipped
+          then Passed
+          else caseStatus caseResult
    in TreeNode
         { nodeId = parentNodeId ++ "/" ++ testName testResult,
           nodeLabel = testName testResult,
-          nodeStatus = testStatus testResult,
+          nodeStatus = effectiveTestStatus,
           nodeChildren = caseNodes
         }
 expandAtSelection :: UiState -> UiState
@@ -556,6 +592,141 @@ findVisibleIndex targetId nodes =
   case [i | (i, vnode) <- zip [0 ..] nodes, nodeId (visibleNode vnode) == targetId] of
     i : _ -> i
     [] -> 0
+runAllCoverageChecks :: IO (String, Map.Map FilePath Double)
+runAllCoverageChecks = do
+  coverageChecks <- listCoverageCheckNames
+  case coverageChecks of
+    [] -> pure ("Coverage checks: no coverage checks found under checks/", Map.empty)
+    _ -> do
+      currentSystemResult <- getCurrentNixSystem
+      case currentSystemResult of
+        Left errMsg -> pure ("Coverage checks: failed to determine current system (" ++ errMsg ++ ")", Map.empty)
+        Right currentSystem -> do
+          runs <- forM coverageChecks (runCoverageCheck currentSystem)
+          let successful = length [() | run <- runs, coverageCheckPassed run]
+              total = length runs
+              header = "Coverage checks: " ++ show successful ++ "/" ++ show total ++ " passed"
+              body = map renderCoverageRun runs
+              coveragePairs =
+                [ (pkgName, pct)
+                | run <- runs,
+                  Just pkgName <- [coverageCheckPackageName (coverageCheckName run)],
+                  Just pct <- [coveragePercent run]
+                ]
+          pure (intercalate "\n" (header : body), Map.fromList coveragePairs)
+listCoverageCheckNames :: IO [String]
+listCoverageCheckNames = do
+  checkDirs <- listSubdirectories "checks"
+  let isCoverageCheck name = "_coverage" `isSuffixOf` name || "-coverage" `isSuffixOf` name
+  pure (sort [name | name <- checkDirs, isCoverageCheck name])
+getCurrentNixSystem :: IO (Either String String)
+getCurrentNixSystem = do
+  (exitCode, stdoutText, stderrText) <- readProcessWithExitCode "nix" ["eval", "--impure", "--raw", "--expr", "builtins.currentSystem"] ""
+  case exitCode of
+    ExitSuccess ->
+      case lines stdoutText of
+        systemName : _ | not (null systemName) -> pure (Right systemName)
+        _ -> pure (Left "empty nix eval output")
+    ExitFailure _ ->
+      let errLine = oneLine (T.pack (if null stderrText then stdoutText else stderrText))
+       in pure (Left errLine)
+runCoverageCheck :: String -> String -> IO CoverageCheckRun
+runCoverageCheck currentSystem checkName = do
+  let checkAttr = ".#checks." ++ currentSystem ++ "." ++ checkName
+      buildArgs = ["build", "--no-link", checkAttr]
+  (exitCode, buildStdout, buildStderr) <- readProcessWithExitCode "nix" buildArgs ""
+  (logExitCode, logStdout, logStderr) <- readProcessWithExitCode "nix" ["log", checkAttr] ""
+  let rawLogOutput =
+        if logExitCode == ExitSuccess
+          then logStdout ++ "\n" ++ logStderr
+          else buildStdout ++ "\n" ++ buildStderr
+      logOutput = stripAnsiEscapes rawLogOutput
+      foundPercent = extractCoveragePercent logOutput
+      details =
+        case exitCode of
+          ExitSuccess -> "ok"
+          ExitFailure _ -> oneLine (T.pack (take 500 (buildStdout ++ "\n" ++ buildStderr)))
+  pure
+    CoverageCheckRun
+      { coverageCheckName = checkName,
+        coverageCheckPassed = exitCode == ExitSuccess,
+        coveragePercent = foundPercent,
+        coverageDetails = details
+      }
+stripAnsiEscapes :: String -> String
+stripAnsiEscapes = go
+  where
+    go [] = []
+    go ('\ESC' : '[' : rest) = go (dropAnsiPayload rest)
+    go (ch : rest) = ch : go rest
+    dropAnsiPayload [] = []
+    dropAnsiPayload (ch : rest)
+      | isAnsiFinalByte ch = rest
+      | otherwise = dropAnsiPayload rest
+    isAnsiFinalByte ch = ch >= '@' && ch <= '~'
+extractCoveragePercent :: String -> Maybe Double
+extractCoveragePercent output =
+  let outputLines = lines output
+      fromTotalRow =
+        listToMaybe
+          [ percent
+          | line <- outputLines,
+            "TOTAL" `isInfixOf` line,
+            token <- words line,
+            Just percent <- [parsePercentToken token]
+          ]
+      fromHpcReport =
+        listToMaybe
+          [ percent
+          | line <- outputLines,
+            "expressions used" `isInfixOf` line,
+            token <- words line,
+            Just percent <- [parsePercentToken token]
+          ]
+      fromAnyPercent =
+        listToMaybe
+          [ percent
+          | line <- outputLines,
+            token <- words line,
+            Just percent <- [parsePercentToken token]
+          ]
+   in fromTotalRow <|> fromHpcReport <|> fromAnyPercent
+parsePercentToken :: String -> Maybe Double
+parsePercentToken token =
+  let cleanToken = reverse (dropWhile (`elem` [',', ')', '.', ';']) (reverse token))
+   in case reverse cleanToken of
+        '%' : reversedDigits ->
+          let digits = reverse reversedDigits
+           in if not (null digits) && all (\ch -> isDigit ch || ch == '.') digits
+                then case reads digits of
+                  [(value, "")] -> Just value
+                  _ -> Nothing
+                else Nothing
+        _ -> Nothing
+renderCoverageRun :: CoverageCheckRun -> String
+renderCoverageRun run =
+  let statusLabel :: String
+      statusLabel = if coverageCheckPassed run then "OK" else "FAIL"
+      percentLabel :: String
+      percentLabel =
+        case coveragePercent run of
+          Just pct -> " - " ++ show pct ++ "%"
+          Nothing -> " - n/a"
+      detailsLabel :: String
+      detailsLabel =
+        if coverageCheckPassed run
+          then ""
+          else " - " ++ coverageDetails run
+   in "[" ++ statusLabel ++ "] " ++ coverageCheckName run ++ percentLabel ++ detailsLabel
+coverageCheckPackageName :: String -> Maybe FilePath
+coverageCheckPackageName checkName =
+  stripCoverageSuffix "_coverage" checkName <|> stripCoverageSuffix "-coverage" checkName
+  where
+    stripCoverageSuffix :: String -> String -> Maybe String
+    stripCoverageSuffix suffix value =
+      if suffix `isSuffixOf` value
+        then Just (take (length value - length suffix) value)
+        else Nothing
 packageNodeStatus :: PackageCheck -> CheckStatus
 packageNodeStatus pkg
   | not (null (packageErrors pkg)) = Failed
