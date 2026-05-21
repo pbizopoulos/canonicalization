@@ -1087,7 +1087,11 @@ checkPackage allStructureIssues currentPackageName = do
           TestResult
             "default.nix"
             defaultNixStatus
-            []
+            [ TestCaseResult
+                "matches template and policy"
+                defaultNixStatus
+                (if defaultNixStatus == Failed then defaultNixIssues else [])
+            ]
         ]
       languageSpecificTests =
         concat
