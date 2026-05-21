@@ -8,7 +8,7 @@
 module Main (main) where
 import Control.Applicative ((<|>))
 import Control.Exception (finally)
-import Control.Monad (forM, forM_, unless, when)
+import Control.Monad (foldM, forM, forM_, unless, when)
 import Data.Char (isDigit)
 import Data.Fix (Fix (Fix))
 import Data.Functor.Compose (Compose (Compose))
@@ -630,7 +630,8 @@ data UiState = UiState
     uiPendingZ :: Bool,
     uiNotice :: Maybe String,
     uiLatestResults :: CheckResults,
-    uiCoverageByPackage :: Map.Map FilePath Double
+    uiCoverageByPackage :: Map.Map FilePath Double,
+    uiCoverageChecksAvailable :: Set.Set FilePath
   }
 type CoverageCheckRun :: Type
 data CoverageCheckRun = CoverageCheckRun
@@ -641,7 +642,9 @@ data CoverageCheckRun = CoverageCheckRun
   }
 runTui :: CheckResults -> IO CheckResults
 runTui results = do
-  let tree = buildCheckTree Map.empty results
+  coverageChecks <- listCoverageCheckNames
+  let availableCoveragePackages = Set.fromList (mapMaybe coverageCheckPackageName coverageChecks)
+      tree = buildCheckTree Map.empty availableCoveragePackages results
       initialState =
         UiState
           { uiTree = tree,
@@ -652,15 +655,16 @@ runTui results = do
             uiPendingZ = False,
             uiNotice = Nothing,
             uiLatestResults = results,
-            uiCoverageByPackage = Map.empty
+            uiCoverageByPackage = Map.empty,
+            uiCoverageChecksAvailable = availableCoveragePackages
           }
   vty <- VCP.mkVty V.defaultConfig
   finalState <- runTuiLoop vty initialState
   V.shutdown vty
   pure (uiLatestResults finalState)
-buildCheckTree :: Map.Map FilePath Double -> CheckResults -> TreeNode
-buildCheckTree coverageByPackage results =
-  let packageNodes = map (packageNode coverageByPackage) (packageResults results)
+buildCheckTree :: Map.Map FilePath Double -> Set.Set FilePath -> CheckResults -> TreeNode
+buildCheckTree coverageByPackage availableCoveragePackages results =
+  let packageNodes = map (packageNode coverageByPackage availableCoveragePackages) (packageResults results)
       hostNodes = map hostNode (hostResults results)
       allIssues = structureIssues results ++ concatMap packageErrors (packageResults results)
       repoStatus = if null allIssues then Passed else Failed
@@ -683,15 +687,18 @@ buildCheckTree coverageByPackage results =
                 }
             ]
         }
-packageNode :: Map.Map FilePath Double -> PackageCheck -> TreeNode
-packageNode coverageByPackage pkg =
+packageNode :: Map.Map FilePath Double -> Set.Set FilePath -> PackageCheck -> TreeNode
+packageNode coverageByPackage availableCoveragePackages pkg =
   let packageId = "packages/" ++ packageNodeName pkg
       testNodes = map (buildTestTreeNode coverageByPackage packageId (packageNodeName pkg)) (packageTests pkg)
       fileIssueNodes = buildPackageFileIssueNodes pkg (Set.fromList (map testName (packageTests pkg)))
       coverageSuffix =
         case Map.lookup (packageNodeName pkg) coverageByPackage of
           Just pct -> " (" ++ show pct ++ "% coverage)"
-          Nothing -> ""
+          Nothing ->
+            if Set.member (packageNodeName pkg) availableCoveragePackages
+              then " (N/A coverage)"
+              else ""
    in TreeNode
         { nodeId = packageId,
           nodeLabel = packageNodeName pkg ++ " (" ++ projectKindLabel (packageKind pkg) ++ ")" ++ coverageSuffix,
@@ -733,13 +740,17 @@ runTuiLoop vty state = do
     V.EvKey (V.KChar 'C') [] -> do
       let waitingState = state {uiNotice = Just "Running coverage checks..."}
       drawTuiFrame vty waitingState
-      (coverageNotice, coverageByPackage) <- runAllCoverageChecks
-      let rebuiltTree = buildCheckTree coverageByPackage (uiLatestResults state)
+      let selectedPackage = selectedPackageNameFromState state
+      (coverageNotice, coverageByPackageDelta) <-
+        runCoverageChecksWithProgress selectedPackage $ \progressLine ->
+          drawTuiFrame vty (waitingState {uiNotice = Just progressLine})
+      let mergedCoverage = Map.union coverageByPackageDelta (uiCoverageByPackage state)
+          rebuiltTree = buildCheckTree mergedCoverage (uiCoverageChecksAvailable state) (uiLatestResults state)
           nextState =
             (clearPendingZ (clearPendingG state))
               { uiNotice = Just coverageNotice,
                 uiTree = rebuiltTree,
-                uiCoverageByPackage = coverageByPackage
+                uiCoverageByPackage = mergedCoverage
               }
       runTuiLoop vty nextState
     V.EvKey (V.KChar 'g') [] ->
@@ -801,16 +812,20 @@ renderVisibleNodeImage state index vnode =
         Passed -> "OK"
         Failed -> "FAIL"
         Skipped -> "SKIP"
-      selectedPrefix :: String
-      selectedPrefix = if isSelected then "> " else "  "
-      beforeStatus = selectedPrefix ++ prefix ++ foldMarker ++ " "
+      beforeStatus = prefix ++ foldMarker ++ " "
       statusToken = "[" ++ statusLabel ++ "]"
       afterStatus = " " ++ nodeLabel node
-      statusAttr = case nodeStatus node of
+      selectedBaseAttr = V.withForeColor (V.withBackColor V.defAttr V.brightWhite) V.black
+      baseAttr = if isSelected then selectedBaseAttr else V.defAttr
+      statusAttr0 = case nodeStatus node of
         Passed -> V.withForeColor V.defAttr V.green
         Failed -> V.withForeColor V.defAttr V.red
         Skipped -> V.withForeColor V.defAttr V.yellow
-   in V.horizCat [V.string V.defAttr beforeStatus, V.string statusAttr statusToken, V.string V.defAttr afterStatus]
+      statusAttr =
+        if isSelected
+          then V.withBackColor statusAttr0 V.brightWhite
+          else statusAttr0
+   in V.horizCat [V.string baseAttr beforeStatus, V.string statusAttr statusToken, V.string baseAttr afterStatus]
 moveSelection :: Int -> Int -> UiState -> UiState
 moveSelection viewportHeight delta state =
   let total = length (visibleNodes state)
@@ -856,7 +871,7 @@ clearPendingZ :: UiState -> UiState
 clearPendingZ state = state {uiPendingZ = False, uiNotice = Nothing}
 resetUiForResults :: CheckResults -> UiState -> UiState
 resetUiForResults refreshedResults state =
-  let tree = buildCheckTree (uiCoverageByPackage state) refreshedResults
+  let tree = buildCheckTree (uiCoverageByPackage state) (uiCoverageChecksAvailable state) refreshedResults
    in state
         { uiTree = tree,
           uiExpanded = Set.fromList [nodeId tree, "packages", "hosts"],
@@ -947,18 +962,47 @@ findVisibleIndex targetId nodes =
   case [i | (i, vnode) <- zip [0 ..] nodes, nodeId (visibleNode vnode) == targetId] of
     i : _ -> i
     [] -> 0
-runAllCoverageChecks :: IO (String, Map.Map FilePath Double)
-runAllCoverageChecks = do
+selectedPackageNameFromState :: UiState -> Maybe FilePath
+selectedPackageNameFromState state =
+  case selectedVisibleNode state of
+    Nothing -> Nothing
+    Just vnode -> packageNameFromNodeId (nodeId (visibleNode vnode))
+packageNameFromNodeId :: String -> Maybe FilePath
+packageNameFromNodeId nid =
+  case splitDirectories nid of
+    "packages" : packageName : _ -> Just packageName
+    _ -> Nothing
+runCoverageChecksWithProgress :: Maybe FilePath -> (String -> IO ()) -> IO (String, Map.Map FilePath Double)
+runCoverageChecksWithProgress selectedPackage reportProgress = do
   coverageChecks <- listCoverageCheckNames
-  case coverageChecks of
-    [] -> pure ("Coverage checks: no coverage checks found under checks/", Map.empty)
+  let selectedChecks =
+        case selectedPackage of
+          Nothing -> coverageChecks
+          Just packageName -> filter (\checkName -> coverageCheckPackageName checkName == Just packageName) coverageChecks
+      noChecksMessage =
+        case selectedPackage of
+          Nothing -> "Coverage checks: no coverage checks found under checks/"
+          Just packageName -> "Coverage checks: no coverage check found for selected package " ++ packageName
+  case selectedChecks of
+    [] -> pure (noChecksMessage, Map.empty)
     _ -> do
       currentSystemResult <- getCurrentNixSystem
       case currentSystemResult of
         Left errMsg -> pure ("Coverage checks: failed to determine current system (" ++ errMsg ++ ")", Map.empty)
         Right currentSystem -> do
-          runs <- forM coverageChecks (runCoverageCheck currentSystem)
-          let successful = length [() | run <- runs, coverageCheckPassed run]
+          (runsReversed, _passedCount) <-
+            foldM
+              ( \(runsAcc, passedCount) (completedCount, checkName) -> do
+                  let totalCount = length selectedChecks
+                  reportProgress (renderCoverageProgress completedCount totalCount passedCount checkName)
+                  run <- runCoverageCheck currentSystem checkName
+                  let nextPassedCount = if coverageCheckPassed run then passedCount + 1 else passedCount
+                  pure (run : runsAcc, nextPassedCount)
+              )
+              ([], 0 :: Int)
+              (zip [0 :: Int ..] selectedChecks)
+          let runs = reverse runsReversed
+              successful = length [() | run <- runs, coverageCheckPassed run]
               total = length runs
               header = "Coverage checks: " ++ show successful ++ "/" ++ show total ++ " passed"
               body = map renderCoverageRun runs
@@ -969,6 +1013,16 @@ runAllCoverageChecks = do
                   Just pct <- [coveragePercent run]
                 ]
           pure (intercalate "\n" (header : body), Map.fromList coveragePairs)
+renderCoverageProgress :: Int -> Int -> Int -> String -> String
+renderCoverageProgress completedCount totalCount passedCount currentCheckName =
+  let barWidth :: Int
+      barWidth = 20
+      filled =
+        if totalCount <= 0
+          then 0
+          else (completedCount * barWidth) `div` totalCount
+      bar = "[" ++ replicate filled '#' ++ replicate (barWidth - filled) '-' ++ "]"
+   in "Coverage: " ++ bar ++ " " ++ show completedCount ++ "/" ++ show totalCount ++ " (" ++ show passedCount ++ " passed) running " ++ currentCheckName
 listCoverageCheckNames :: IO [String]
 listCoverageCheckNames = do
   checkDirs <- listSubdirectories "checks"
