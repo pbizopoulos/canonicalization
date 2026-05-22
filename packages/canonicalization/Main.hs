@@ -572,6 +572,7 @@ data UiState = UiState
     uiSelected :: Int,
     uiPendingG :: Bool,
     uiPendingZ :: Bool,
+    uiPendingFixConfirm :: Bool,
     uiNotice :: Maybe String,
     uiLatestResults :: CheckResults,
     uiCoverageByPackage :: Map.Map FilePath Double,
@@ -597,6 +598,7 @@ runTui results = do
             uiSelected = 0,
             uiPendingG = False,
             uiPendingZ = False,
+            uiPendingFixConfirm = False,
             uiNotice = Nothing,
             uiLatestResults = results,
             uiCoverageByPackage = Map.empty,
@@ -694,7 +696,23 @@ runTuiLoop vty state = do
   event <- V.nextEvent vty
   case event of
     V.EvKey (V.KChar 'q') [] -> pure state
-    V.EvKey V.KEsc [] -> pure state
+    V.EvKey V.KEsc [] ->
+      if uiPendingFixConfirm state
+        then runTuiLoop vty (clearPendingFixConfirm state)
+        else pure state
+    V.EvKey (V.KChar 'y') [] ->
+      if uiPendingFixConfirm state
+        then do
+          let waitingState = state {uiPendingFixConfirm = False, uiNotice = Just "Applying automatic fixes..."}
+          drawTuiFrame vty waitingState
+          applyAutomaticFixes
+          refreshedResults <- runCheckAnalysis
+          runTuiLoop vty (resetUiForResults refreshedResults waitingState)
+        else runTuiLoop vty (clearPendingZ (clearPendingG state))
+    V.EvKey (V.KChar 'n') [] ->
+      if uiPendingFixConfirm state
+        then runTuiLoop vty (clearPendingFixConfirm state)
+        else runTuiLoop vty (clearPendingZ (clearPendingG state))
     V.EvKey (V.KChar 'j') [] -> runTuiLoop vty (clearPendingZ (clearPendingG (moveSelection viewportHeight 1 state)))
     V.EvKey V.KDown [] -> runTuiLoop vty (clearPendingZ (clearPendingG (moveSelection viewportHeight 1 state)))
     V.EvKey (V.KChar 'k') [] -> runTuiLoop vty (clearPendingZ (clearPendingG (moveSelection viewportHeight (-1) state)))
@@ -737,27 +755,26 @@ runTuiLoop vty state = do
       drawTuiFrame vty waitingState
       refreshedResults <- runCheckAnalysis
       runTuiLoop vty (resetUiForResults refreshedResults waitingState)
-    V.EvKey (V.KChar 'f') [] -> do
-      let waitingState = state {uiNotice = Just "Applying automatic fixes..."}
-      drawTuiFrame vty waitingState
-      applyAutomaticFixes
-      refreshedResults <- runCheckAnalysis
-      runTuiLoop vty (resetUiForResults refreshedResults waitingState)
+    V.EvKey (V.KChar 'f') [] ->
+      runTuiLoop
+        vty
+        ( state
+            { uiPendingFixConfirm = True,
+              uiNotice = Just "Apply automatic fixes? [y/N]"
+            }
+        )
     _ -> runTuiLoop vty (clearPendingZ (clearPendingG state))
 drawTuiFrame :: V.Vty -> UiState -> IO ()
 drawTuiFrame vty state = do
   viewportHeight <- getViewportHeight vty state
   let allLineImages = zipWith (renderVisibleNodeImage state) [0 ..] (visibleNodes state)
       lineImages = take viewportHeight (drop (uiViewportTop state) allLineImages)
-      noticePrefix =
-        case uiNotice state of
-          Nothing -> []
-          Just noticeLine -> [V.string V.defAttr noticeLine]
       contentImages =
         if null lineImages
           then [V.string V.defAttr ""]
           else lineImages
-      image = V.vertCat (noticePrefix ++ contentImages)
+      footerLine = V.string V.defAttr (fromMaybe "" (uiNotice state))
+      image = V.vertCat (contentImages ++ [footerLine])
   V.update vty (V.picForImage image)
 visibleNodes :: UiState -> [VisibleNode]
 visibleNodes state = flattenVisible Nothing 0 (uiTree state)
@@ -840,9 +857,11 @@ ensureSelectionVisible viewportHeight state =
       boundedTop = max 0 (min maxTop top1)
    in state {uiViewportTop = boundedTop}
 clearPendingG :: UiState -> UiState
-clearPendingG state = state {uiPendingG = False, uiNotice = Nothing}
+clearPendingG state = state {uiPendingG = False, uiPendingFixConfirm = False, uiNotice = Nothing}
 clearPendingZ :: UiState -> UiState
-clearPendingZ state = state {uiPendingZ = False, uiNotice = Nothing}
+clearPendingZ state = state {uiPendingZ = False, uiPendingFixConfirm = False, uiNotice = Nothing}
+clearPendingFixConfirm :: UiState -> UiState
+clearPendingFixConfirm state = state {uiPendingFixConfirm = False, uiNotice = Nothing}
 resetUiForResults :: CheckResults -> UiState -> UiState
 resetUiForResults refreshedResults state =
   let tree = buildCheckTree (uiCoverageByPackage state) (uiCoverageChecksAvailable state) refreshedResults
@@ -853,18 +872,14 @@ resetUiForResults refreshedResults state =
           uiSelected = 0,
           uiPendingG = False,
           uiPendingZ = False,
+          uiPendingFixConfirm = False,
           uiNotice = Nothing,
           uiLatestResults = refreshedResults
         }
 getViewportHeight :: V.Vty -> UiState -> IO Int
-getViewportHeight vty state = do
+getViewportHeight vty _state = do
   (_, screenHeight) <- V.displayBounds (V.outputIface vty)
-  let noticeLines :: Int
-      noticeLines =
-        case uiNotice state of
-          Nothing -> 0
-          Just _ -> 1
-      available = screenHeight - noticeLines
+  let available = screenHeight - 1
   pure (max 1 available)
 buildTestTreeNode :: Map.Map FilePath Double -> String -> FilePath -> TestResult -> TreeNode
 buildTestTreeNode coverageByPackage parentNodeId packageName testResult =
