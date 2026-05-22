@@ -228,13 +228,16 @@ main = do
 runCli :: [String] -> IO ()
 runCli args =
   case args of
+    ["check-repository"] -> runInGitRepository "." runCheckMode
     ["check-repository", repoDir] -> runInGitRepository repoDir runCheckMode
+    ["fix-repository"] -> runInGitRepository "." runFixMode
     ["fix-repository", repoDir] -> runInGitRepository repoDir runFixMode
+    ["tui"] -> runInGitRepository "." runTuiMode
     ["tui", repoDir] -> runInGitRepository repoDir runTuiMode
     _ -> do
-      putStrLn "Usage: canonicalization check-repository <git-directory>"
-      putStrLn "       canonicalization fix-repository <git-directory>"
-      putStrLn "       canonicalization tui <git-directory>"
+      putStrLn "Usage: canonicalization check-repository [git-directory]"
+      putStrLn "       canonicalization fix-repository [git-directory]"
+      putStrLn "       canonicalization tui [git-directory]"
       exitFailure
 runInGitRepository :: FilePath -> IO () -> IO ()
 runInGitRepository repoDir action = do
