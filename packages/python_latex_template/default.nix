@@ -11,7 +11,8 @@ in
 pkgs.python3Packages.buildPythonPackage rec {
   installCheckPhase = ''
     runHook preInstallCheck
-    DEBUG=1 ${pkgs.bash}/bin/bash "$out/bin/${pname}"
+    HOME="$(mktemp -d)"
+    DEBUG=1 "$out/bin/${pname}"
     runHook postInstallCheck
   '';
   installPhase = ''

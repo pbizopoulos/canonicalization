@@ -106,7 +106,7 @@ templateSpecs =
     TemplateSpec
       { templateName = "binary_release_template",
         matchesTemplate = binaryReleaseDetector,
-        allowedDifferenceKeys = Set.fromList ["src", "version"],
+        allowedDifferenceKeys = Set.fromList ["installCheckPhase", "src", "version"],
         embeddedBaseline = Just binaryReleaseBaseline
       },
     TemplateSpec
@@ -247,9 +247,8 @@ applyAutomaticFixes = do
             Nothing -> []
     pure (createdCoverage ++ fixedPython ++ coveragePathToStage)
   fixedTemplateFiles <- fixPythonTemplateFilesIfPresent
-  fixedEmbeddedBaseline <- fixEmbeddedCanonicalizationPythonBaseline
   removeTemporaryDefaultNixFiles
-  let changedPaths = nub (concat changedPathGroups ++ fixedTemplateFiles ++ fixedEmbeddedBaseline)
+  let changedPaths = nub (concat changedPathGroups ++ fixedTemplateFiles)
   stageChangedPaths changedPaths
 coverageCheckPathForKind :: FilePath -> ProjectKind -> Maybe FilePath
 coverageCheckPathForKind packageName kind =
@@ -508,61 +507,6 @@ normalizePythonInstallCheckText contents =
       ]
     insertCanonicalInstallCheckPhase linesText =
       let anchor line = "buildPythonPackage rec {" `T.isInfixOf` line
-          (before, after) = break anchor linesText
-       in case after of
-            [] -> canonicalInstallCheckPhase ++ linesText
-            (anchorLine : rest) -> before ++ (anchorLine : canonicalInstallCheckPhase ++ rest)
-fixEmbeddedCanonicalizationPythonBaseline :: IO [FilePath]
-fixEmbeddedCanonicalizationPythonBaseline = do
-  let path = "packages" </> "canonicalization" </> "Main.hs"
-  exists <- doesFileExist path
-  if not exists
-    then pure []
-    else do
-      contents <- TIO.readFile path
-      let fixed = normalizeEmbeddedPythonBaselineText contents
-      if fixed /= contents
-        then TIO.writeFile path fixed >> pure [path]
-        else pure []
-normalizeEmbeddedPythonBaselineText :: T.Text -> T.Text
-normalizeEmbeddedPythonBaselineText contents =
-  T.unlines (insertCanonicalInstallCheckPhase (removeInstallCheckPhase (removeAttrBlock "nativeInstallCheckInputs" (T.lines contents))))
-  where
-    removeAttrBlock key = go False
-      where
-        startsBlock line =
-          let stripped = T.stripStart line
-           in ("\"  " <> key <> " = [\",") `T.isPrefixOf` stripped
-        endsBlock line = "\"  ];\"," == T.strip line
-        go _ [] = []
-        go False (line : rest)
-          | startsBlock line = go True rest
-          | otherwise = line : go False rest
-        go True (line : rest)
-          | endsBlock line = go False rest
-          | otherwise = go True rest
-    removeInstallCheckPhase = go False
-      where
-        startsBlock line = "\"  installCheckPhase = ''\"," `T.isPrefixOf` T.stripStart line
-        endsBlock line = "\"  '';\"," == T.strip line
-        go _ [] = []
-        go False (line : rest)
-          | startsBlock line = go True rest
-          | otherwise = line : go False rest
-        go True (line : rest)
-          | endsBlock line = go False rest
-          | otherwise = go True rest
-    canonicalInstallCheckPhase :: [T.Text]
-    canonicalInstallCheckPhase =
-      [ "      \"  installCheckPhase = ''\",",
-        "      \"    runHook preInstallCheck\",",
-        "      \"    HOME=\\\"$(mktemp -d)\\\"\",",
-        "      \"    DEBUG=1 \\\"$out/bin/${pname}\\\"\",",
-        "      \"    runHook postInstallCheck\",",
-        "      \"  '';\","
-      ]
-    insertCanonicalInstallCheckPhase linesText =
-      let anchor line = "\"pyPkgs.buildPythonPackage rec {\"," `T.isInfixOf` line
           (before, after) = break anchor linesText
        in case after of
             [] -> canonicalInstallCheckPhase ++ linesText
@@ -3051,7 +2995,8 @@ pythonLatexTemplateBaseline =
       "pkgs.python3Packages.buildPythonPackage rec {",
       "  installCheckPhase = ''",
       "    runHook preInstallCheck",
-      "    DEBUG=1 ${pkgs.bash}/bin/bash \"$out/bin/${pname}\"",
+      "    HOME=\"$(mktemp -d)\"",
+      "    DEBUG=1 \"$out/bin/${pname}\"",
       "    runHook postInstallCheck",
       "  '';",
       "  installPhase = ''",
@@ -3070,7 +3015,7 @@ pythonLatexTemplateBaseline =
       "  '';",
       "  meta.mainProgram = pname;",
       "  pname = baseNameOf ./.;",
-      "  propagatedBuildInputs = [];",
+      "  propagatedBuildInputs = pythonDeps;",
       "  pyproject = false;",
       "  src = ./.;",
       "  strictDeps = true;",
