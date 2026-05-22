@@ -98,10 +98,10 @@ templateSpecs =
         embeddedBaseline = Just pythonLatexTemplateBaseline
       },
     TemplateSpec
-      { templateName = "python_remote_template",
-        matchesTemplate = pythonRemoteDetector,
+      { templateName = "python_pypi_template",
+        matchesTemplate = pythonPypiDetector,
         allowedDifferenceKeys = Set.fromList ["nativeBuildInputs", "propagatedBuildInputs", "src", "version"],
-        embeddedBaseline = Just pythonRemoteBaseline
+        embeddedBaseline = Just pythonPypiBaseline
       },
     TemplateSpec
       { templateName = "binary_release_template",
@@ -166,8 +166,8 @@ pythonLatexDetector packageName content
       hasFiguresDir <- doesDirectoryExist (packageDir </> "figures")
       pure (hasMsTex || hasRefsBib || hasFiguresDir)
   | otherwise = pure False
-pythonRemoteDetector :: FilePath -> String -> IO Bool
-pythonRemoteDetector _ content =
+pythonPypiDetector :: FilePath -> String -> IO Bool
+pythonPypiDetector _ content =
   pure
     ( "buildPythonPackage" `isInfixOf` content
         && not ("src = ./.;" `isInfixOf` content)
@@ -259,7 +259,10 @@ coverageCheckPathForKind packageName kind =
     PythonLatexKind -> Just checkPath
     _ -> Nothing
   where
-    checkPath = "checks" </> (packageName ++ "_coverage") </> "default.nix"
+    checkPath = "checks" </> (packageName ++ coverageSuffixForPackage packageName) </> "default.nix"
+coverageSuffixForPackage :: FilePath -> String
+coverageSuffixForPackage packageName =
+  if '_' `elem` packageName then "_coverage" else "-coverage"
 stageChangedPaths :: [FilePath] -> IO ()
 stageChangedPaths paths =
   unless (null paths) $ do
@@ -271,7 +274,7 @@ stageChangedPaths paths =
         exitFailure
 ensureCoverageCheckForPackage :: FilePath -> ProjectKind -> IO [FilePath]
 ensureCoverageCheckForPackage packageName kind = do
-  let checkDir = "checks" </> (packageName ++ "_coverage")
+  let checkDir = "checks" </> (packageName ++ coverageSuffixForPackage packageName)
       checkFile = checkDir </> "default.nix"
   exists <- doesFileExist checkFile
   if exists
@@ -573,6 +576,7 @@ data UiState = UiState
     uiPendingG :: Bool,
     uiPendingZ :: Bool,
     uiPendingFixConfirm :: Bool,
+    uiShowHelp :: Bool,
     uiNotice :: Maybe String,
     uiLatestResults :: CheckResults,
     uiCoverageByPackage :: Map.Map FilePath Double,
@@ -599,6 +603,7 @@ runTui results = do
             uiPendingG = False,
             uiPendingZ = False,
             uiPendingFixConfirm = False,
+            uiShowHelp = False,
             uiNotice = Nothing,
             uiLatestResults = results,
             uiCoverageByPackage = Map.empty,
@@ -695,6 +700,19 @@ runTuiLoop vty state = do
   drawTuiFrame vty state
   event <- V.nextEvent vty
   case event of
+    V.EvKey (V.KChar '?') [] ->
+      runTuiLoop
+        vty
+        ( state
+            { uiShowHelp = not (uiShowHelp state),
+              uiNotice =
+                Just
+                  ( if uiShowHelp state
+                      then ""
+                      else "Help: ? toggles shortcuts"
+                  )
+            }
+        )
     V.EvKey (V.KChar 'q') [] -> pure state
     V.EvKey V.KEsc [] ->
       if uiPendingFixConfirm state
@@ -767,15 +785,34 @@ runTuiLoop vty state = do
 drawTuiFrame :: V.Vty -> UiState -> IO ()
 drawTuiFrame vty state = do
   viewportHeight <- getViewportHeight vty state
-  let allLineImages = zipWith (renderVisibleNodeImage state) [0 ..] (visibleNodes state)
-      lineImages = take viewportHeight (drop (uiViewportTop state) allLineImages)
+  let allLineImages =
+        if uiShowHelp state
+          then map (V.string V.defAttr) helpLines
+          else zipWith (renderVisibleNodeImage state) [0 ..] (visibleNodes state)
+      lineImages =
+        if uiShowHelp state
+          then take viewportHeight allLineImages
+          else take viewportHeight (drop (uiViewportTop state) allLineImages)
       contentImages =
         if null lineImages
           then [V.string V.defAttr ""]
           else lineImages
-      footerLine = V.string V.defAttr (fromMaybe "" (uiNotice state))
+      footerText =
+        if uiShowHelp state
+          then "Press ? to close help"
+          else fromMaybe "" (uiNotice state)
+      footerLine = V.string V.defAttr footerText
       image = V.vertCat (contentImages ++ [footerLine])
   V.update vty (V.picForImage image)
+helpLines :: [String]
+helpLines =
+  [ "Shortcuts",
+    "",
+    "Navigation: j/k or Up/Down, gg top, G bottom, H/M/L viewport top/middle/bottom",
+    "Folding: zo expand, zc collapse",
+    "Actions: r run checks, f apply fixes (with confirmation), C run coverage",
+    "Other: ? toggle help, q or Esc quit"
+  ]
 visibleNodes :: UiState -> [VisibleNode]
 visibleNodes state = flattenVisible Nothing 0 (uiTree state)
   where
@@ -857,11 +894,11 @@ ensureSelectionVisible viewportHeight state =
       boundedTop = max 0 (min maxTop top1)
    in state {uiViewportTop = boundedTop}
 clearPendingG :: UiState -> UiState
-clearPendingG state = state {uiPendingG = False, uiPendingFixConfirm = False, uiNotice = Nothing}
+clearPendingG state = state {uiPendingG = False, uiPendingFixConfirm = False, uiShowHelp = False, uiNotice = Nothing}
 clearPendingZ :: UiState -> UiState
-clearPendingZ state = state {uiPendingZ = False, uiPendingFixConfirm = False, uiNotice = Nothing}
+clearPendingZ state = state {uiPendingZ = False, uiPendingFixConfirm = False, uiShowHelp = False, uiNotice = Nothing}
 clearPendingFixConfirm :: UiState -> UiState
-clearPendingFixConfirm state = state {uiPendingFixConfirm = False, uiNotice = Nothing}
+clearPendingFixConfirm state = state {uiPendingFixConfirm = False, uiShowHelp = False, uiNotice = Nothing}
 resetUiForResults :: CheckResults -> UiState -> UiState
 resetUiForResults refreshedResults state =
   let tree = buildCheckTree (uiCoverageByPackage state) (uiCoverageChecksAvailable state) refreshedResults
@@ -873,6 +910,7 @@ resetUiForResults refreshedResults state =
           uiPendingG = False,
           uiPendingZ = False,
           uiPendingFixConfirm = False,
+          uiShowHelp = False,
           uiNotice = Nothing,
           uiLatestResults = refreshedResults
         }
@@ -1144,10 +1182,11 @@ projectKindLabel kind =
     HtmlKind -> "html"
     PythonLatexKind -> "python-latex"
     PythonKind -> "python"
+    PythonPypiKind -> "python-pypi"
     CKind -> "c"
     TerraformKind -> "terraform"
     LatexKind -> "latex"
-    BinaryReleaseKind -> "binary"
+    BinaryReleaseKind -> "binary-release"
     UnknownKind -> "unknown"
 buildPackageFileIssueNodes :: PackageCheck -> Set.Set String -> [TreeNode]
 buildPackageFileIssueNodes pkg representedFiles =
@@ -1264,6 +1303,7 @@ data ProjectKind
   | HtmlKind
   | PythonLatexKind
   | PythonKind
+  | PythonPypiKind
   | CKind
   | TerraformKind
   | LatexKind
@@ -1336,6 +1376,7 @@ allowedPatternsForKind pkgRoot pkgName kind =
         HtmlKind -> add ["^" ++ pkgRoot ++ "/index\\.html$", "^" ++ pkgRoot ++ "/script\\.js$", "^" ++ pkgRoot ++ "/style\\.css$"]
         PythonLatexKind -> add ["^" ++ pkgRoot ++ "/main\\.py$", "^" ++ pkgRoot ++ "/ms\\.tex$", "^" ++ pkgRoot ++ "/ms\\.bib$", "^" ++ pkgRoot ++ "/refs\\.bib$", "^" ++ pkgRoot ++ "/figures(/.*)?$"]
         PythonKind -> add ["^" ++ pkgRoot ++ "/main\\.py$"]
+        PythonPypiKind -> base
         CKind -> add ["^" ++ pkgRoot ++ "/main\\.c$"]
         TerraformKind -> add ["^" ++ pkgRoot ++ "/main\\.tf$", "^" ++ pkgRoot ++ "/\\.terraform(/.*)?$", "^" ++ pkgRoot ++ "/\\.terraform\\.lock\\.hcl$"]
         LatexKind -> add ["^" ++ pkgRoot ++ "/ms\\.tex$", "^" ++ pkgRoot ++ "/ms\\.bib$"]
@@ -1579,12 +1620,22 @@ detectProjectKindForPackage packageName = do
   hasMsTex <- has "ms.tex"
   hasMainC <- has "main.c"
   hasMainTf <- has "main.tf"
+  defaultNixSource <- readTextFileIfExists (pkgRoot </> "default.nix")
+  let isPythonPypiPackage =
+        case defaultNixSource of
+          Nothing -> False
+          Just source ->
+            let content = T.unpack source
+             in "buildPythonPackage" `isInfixOf` content
+                  && not ("src = ./.;" `isInfixOf` content)
+                  && ("fetchPypi" `isInfixOf` content || "fetchurl" `isInfixOf` content)
   let kind
         | hasMainHs = HaskellKind
         | hasCargoToml = RustKind
         | hasIndexHtml = HtmlKind
         | hasMainPy && hasMsTex = PythonLatexKind
         | hasMainPy = PythonKind
+        | isPythonPypiPackage = PythonPypiKind
         | hasMainC = CKind
         | hasMainTf = TerraformKind
         | hasMsTex = LatexKind
@@ -1752,10 +1803,18 @@ extractAssertEqualLabels = go False
     go awaitingLabel (line : rest)
       | "assertEqual" `isInfixOf` line = go True rest
       | awaitingLabel =
-          case firstQuotedToken line of
-            Just label -> label : go False rest
-            Nothing -> go True rest
+          let trimmed = dropWhile (== ' ') line
+           in if null trimmed
+                then go True rest
+                else
+                  if startsWithQuote trimmed && not ("++" `isInfixOf` trimmed)
+                    then case firstQuotedToken trimmed of
+                      Just label -> label : go False rest
+                      Nothing -> go False rest
+                    else go False rest
       | otherwise = go False rest
+    startsWithQuote [] = False
+    startsWithQuote (ch : _) = ch == '"' || ch == '\''
 extractMakeFormattingTestLabels :: [String] -> [String]
 extractMakeFormattingTestLabels = go False
   where
@@ -2315,10 +2374,10 @@ debugTests =
           (Just "python_template")
           inferred,
       TestCase $ do
-        inferred <- inferTemplateName "test" pythonRemoteFixture
+        inferred <- inferTemplateName "test" pythonPypiFixture
         assertEqual
-          "Infers the remote Python template."
-          (Just "python_remote_template")
+          "Infers the PyPI Python template."
+          (Just "python_pypi_template")
           inferred,
       TestCase $ do
         inferred <- inferTemplateName "test" binaryReleaseFixture
@@ -2419,8 +2478,8 @@ pythonLatexFixture =
     ++ "pkgs.python3Packages.buildPythonPackage rec {\n"
     ++ "  installPhase = '' latexmk -cd -pdf tmp/ms.tex '';\n"
     ++ "}\n"
-pythonRemoteFixture :: String
-pythonRemoteFixture =
+pythonPypiFixture :: String
+pythonPypiFixture =
   "{ pkgs ? import <nixpkgs> { }, }:\n"
     ++ "let pyPkgs = pkgs.python3Packages; in\n"
     ++ "pyPkgs.buildPythonPackage rec {\n"
@@ -2934,8 +2993,8 @@ pythonTemplateBaseline =
       "  version = \"0.0.0\";",
       "}"
     ]
-pythonRemoteBaseline :: T.Text
-pythonRemoteBaseline =
+pythonPypiBaseline :: T.Text
+pythonPypiBaseline =
   T.unlines
     [ "{",
       "  pkgs ? import <nixpkgs> { },",
