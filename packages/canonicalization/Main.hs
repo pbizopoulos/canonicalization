@@ -3004,7 +3004,7 @@ pythonLatexTemplateBaseline =
       "    install -Dm644 ./main.py ./ms.tex ./ms.bib -t \"$datadir\"",
       "    mkdir -p \"$out/bin\"",
       "    cat > \"$out/bin/${pname}\" <<EOF",
-      "    #!/usr/bin/env bash",
+      "    #!${pkgs.bash}/bin/bash",
       "    set -euo pipefail",
       "    mkdir -p tmp",
       "    ${pythonEnv}/bin/python3 \"$datadir/main.py\"",
