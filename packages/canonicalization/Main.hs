@@ -732,22 +732,15 @@ runTuiLoop vty state = do
         then runTuiLoop vty (clearPendingFixConfirm state)
         else runTuiLoop vty (clearPendingZ (clearPendingG state))
     V.EvKey (V.KChar 'j') [] -> runTuiLoop vty (clearPendingZ (clearPendingG (moveSelection viewportHeight 1 state)))
-    V.EvKey V.KDown [] -> runTuiLoop vty (clearPendingZ (clearPendingG (moveSelection viewportHeight 1 state)))
     V.EvKey (V.KChar 'k') [] -> runTuiLoop vty (clearPendingZ (clearPendingG (moveSelection viewportHeight (-1) state)))
-    V.EvKey V.KUp [] -> runTuiLoop vty (clearPendingZ (clearPendingG (moveSelection viewportHeight (-1) state)))
     V.EvKey (V.KChar 'H') [] -> runTuiLoop vty (clearPendingZ (clearPendingG (moveToViewportTop state)))
     V.EvKey (V.KChar 'M') [] -> runTuiLoop vty (clearPendingZ (clearPendingG (moveToViewportMiddle viewportHeight state)))
     V.EvKey (V.KChar 'L') [] -> runTuiLoop vty (clearPendingZ (clearPendingG (moveToViewportBottom viewportHeight state)))
-    V.EvKey (V.KChar 'z') [] -> runTuiLoop vty (clearPendingG state {uiPendingZ = True})
-    V.EvKey (V.KChar 'o') [] ->
-      if uiPendingZ state
-        then runTuiLoop vty (clearPendingZ (clearPendingG (expandAtSelection state)))
-        else runTuiLoop vty (clearPendingZ (clearPendingG state))
-    V.EvKey (V.KChar 'c') [] ->
-      if uiPendingZ state
-        then runTuiLoop vty (clearPendingZ (clearPendingG (collapseAtSelection state)))
-        else runTuiLoop vty (clearPendingZ (clearPendingG state))
-    V.EvKey (V.KChar 'C') [] -> do
+    V.EvKey (V.KChar 'h') [] ->
+      runTuiLoop vty (clearPendingZ (clearPendingG (collapseAtSelection state)))
+    V.EvKey (V.KChar 'l') [] ->
+      runTuiLoop vty (clearPendingZ (clearPendingG (expandAtSelection state)))
+    V.EvKey (V.KChar 'c') [] -> do
       let waitingState = state {uiNotice = Just "Running coverage checks..."}
       drawTuiFrame vty waitingState
       let selectedPackage = selectedPackageNameFromState state
@@ -808,9 +801,9 @@ helpLines :: [String]
 helpLines =
   [ "Shortcuts",
     "",
-    "Navigation: j/k or Up/Down, gg top, G bottom, H/M/L viewport top/middle/bottom",
-    "Folding: zo expand, zc collapse",
-    "Actions: r run checks, f apply fixes (with confirmation), C run coverage",
+    "Navigation: j/k, gg top, G bottom, H/M/L viewport top/middle/bottom",
+    "Folding: l expand, h collapse",
+    "Actions: r run checks, f apply fixes (with confirmation), c run coverage",
     "Other: ? toggle help, q or Esc quit"
   ]
 visibleNodes :: UiState -> [VisibleNode]
