@@ -5,6 +5,11 @@
   ...
 }:
 let
+  canonicalization-script = pkgs.writeShellScriptBin "canonicalization-check-repository" ''
+    ${
+      inputs.self.packages.${pkgs.stdenv.system}."canonicalization"
+    }/bin/canonicalization check-repository .
+  '';
   clippy-script = pkgs.writeShellScriptBin "clippy" ''
     [ -n "$NIX_BUILD_TOP" ] && exit 0
     export PATH="${
@@ -80,7 +85,7 @@ let
           "--max-diagnostics=none"
         ];
         canonicalization = {
-          command = inputs.self.packages.${pkgs.stdenv.system}."canonicalization";
+          command = "${canonicalization-script}/bin/canonicalization-check-repository";
           includes = [
             "*.nix"
           ];

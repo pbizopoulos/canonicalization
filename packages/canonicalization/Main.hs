@@ -39,7 +39,7 @@ import Nix.Pretty (prettyNix)
 import Nix.Utils (Path (Path))
 import Prettyprinter (defaultLayoutOptions, layoutPretty)
 import Prettyprinter.Render.Text (renderStrict)
-import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, findExecutable, listDirectory, removeFile)
+import System.Directory (canonicalizePath, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, findExecutable, listDirectory, removeFile, setCurrentDirectory)
 import System.Environment (getArgs, lookupEnv)
 import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitFailure)
 import System.FilePath ((<.>), (</>))
@@ -224,11 +224,41 @@ main = do
   args <- getArgs
   case debug of
     Just "1" -> runDebugTests
-    _ ->
-      case args of
-        ["fix"] -> runFixMode
-        ["tui"] -> runTuiMode
-        _ -> runCheckMode
+    _ -> runCli args
+runCli :: [String] -> IO ()
+runCli args =
+  case args of
+    ["check-repository", repoDir] -> runInGitRepository repoDir runCheckMode
+    ["fix-repository", repoDir] -> runInGitRepository repoDir runFixMode
+    ["tui", repoDir] -> runInGitRepository repoDir runTuiMode
+    _ -> do
+      putStrLn "Usage: canonicalization check-repository <git-directory>"
+      putStrLn "       canonicalization fix-repository <git-directory>"
+      putStrLn "       canonicalization tui <git-directory>"
+      exitFailure
+runInGitRepository :: FilePath -> IO () -> IO ()
+runInGitRepository repoDir action = do
+  isDir <- doesDirectoryExist repoDir
+  unless isDir $ do
+    putStrLn ("not a directory: " ++ repoDir)
+    exitFailure
+  (insideExit, insideStdout, _insideStderr) <- readProcessWithExitCode "git" ["-C", repoDir, "rev-parse", "--is-inside-work-tree"] ""
+  unless (insideExit == ExitSuccess && trimString insideStdout == "true") $ do
+    putStrLn ("not a git directory: " ++ repoDir)
+    exitFailure
+  (topExit, topStdout, _topStderr) <- readProcessWithExitCode "git" ["-C", repoDir, "rev-parse", "--show-toplevel"] ""
+  unless (topExit == ExitSuccess) $ do
+    putStrLn ("not a git directory: " ++ repoDir)
+    exitFailure
+  canonicalInput <- canonicalizePath repoDir
+  canonicalTop <- canonicalizePath (trimString topStdout)
+  unless (canonicalInput == canonicalTop) $ do
+    putStrLn ("not a git repository root directory: " ++ repoDir)
+    exitFailure
+  setCurrentDirectory canonicalInput
+  action
+trimString :: String -> String
+trimString = T.unpack . T.strip . T.pack
 runFixMode :: IO ()
 runFixMode = do
   applyAutomaticFixes
