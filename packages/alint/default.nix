@@ -19,9 +19,9 @@ pkgs.stdenv.mkDerivation rec {
   pname = baseNameOf ./.;
   sourceRoot = ".";
   src = pkgs.fetchurl {
-    sha256 = "4yOzM6f8Rdsw2YxsqSpIhHCNuRZRf8j3AAcK2T5VZlU=";
+    sha256 = "3yPgFR7bH5vHPcNc7XBiKmWg5TyYR9f9J0eDY73ulRk=";
     url = "https://github.com/asamarts/${pname}/releases/download/v${version}/${pname}-v${version}-x86_64-unknown-linux-musl.tar.gz";
   };
   strictDeps = true;
-  version = "0.9.23";
+  version = "0.10.2";
 }

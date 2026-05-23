@@ -62,7 +62,8 @@ defaultAllowedKeys =
       "nativeInstallCheckInputs",
       "postInstall",
       "propagatedBuildInputs",
-      "runtimeInputs"
+      "runtimeInputs",
+      "version"
     ]
 type TemplateSpec :: Type
 data TemplateSpec = TemplateSpec
