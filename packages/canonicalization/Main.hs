@@ -2,16 +2,20 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RoleAnnotations #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneKindSignatures #-}
 {-# LANGUAGE Trustworthy #-}
 {-# OPTIONS_GHC -Wno-missing-import-lists -Wno-unsafe #-}
 module Main (main) where
 import Control.Applicative ((<|>))
-import Control.Exception (finally)
+import Control.Concurrent (forkIO, killThread, newEmptyMVar, putMVar, threadDelay, tryTakeMVar)
+import Control.Exception (SomeException, displayException, finally, try)
 import Control.Monad (foldM, forM, forM_, unless, when)
 import Data.Char (isDigit)
 import Data.Fix (Fix (Fix))
 import Data.Functor.Compose (Compose (Compose))
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Kind (Type)
 import Data.List (find, intercalate, isInfixOf, isPrefixOf, isSuffixOf, maximumBy, nub, sort, sortBy, stripPrefix)
 import Data.List.NonEmpty (NonEmpty ((:|)))
@@ -191,7 +195,7 @@ data CheckResults = CheckResults
     hostResults :: [HostCheck]
   }
 type CheckStatus :: Type
-data CheckStatus = Passed | Failed | Skipped deriving stock (Eq, Show)
+data CheckStatus = Passed | Failed | Skipped | Incompatible deriving stock (Eq, Show)
 statusFromIssues :: [a] -> CheckStatus
 statusFromIssues = \case [] -> Passed; _ -> Failed
 type TestResult :: Type
@@ -576,8 +580,12 @@ runCheckMode = do
   failOnIssues True results
 type GitmoduleRepo :: Type
 data GitmoduleRepo = GitmoduleRepo
-  { gitmoduleRepoName :: String,
-    gitmoduleRepoPath :: FilePath
+  { gitmoduleRepoHost :: String,
+    gitmoduleRepoUser :: String,
+    gitmoduleRepoName :: String,
+    gitmoduleRepoPathEntry :: FilePath,
+    gitmoduleRepoPath :: FilePath,
+    gitmoduleRepoCompatible :: Bool
   }
 runTuiMode :: IO ()
 runTuiMode = do
@@ -613,6 +621,8 @@ data VisibleNode = VisibleNode
 type UiState :: Type
 data UiState = UiState
   { uiRepos :: [GitmoduleRepo],
+    uiHasFlakeByRepo :: Map.Map FilePath Bool,
+    uiStructureByRepo :: Map.Map FilePath RepoStructure,
     uiResultsByRepo :: Map.Map FilePath CheckResults,
     uiTree :: TreeNode,
     uiExpanded :: Set.Set String,
@@ -620,11 +630,16 @@ data UiState = UiState
     uiSelected :: Int,
     uiPendingG :: Bool,
     uiPendingZ :: Bool,
-    uiPendingFixConfirm :: Maybe GitmoduleRepo,
+    uiPendingFixConfirm :: Maybe [GitmoduleRepo],
     uiShowHelp :: Bool,
     uiNotice :: Maybe String,
     uiCoverageByRepoPackage :: Map.Map FilePath (Map.Map FilePath Double),
     uiCoverageChecksAvailableByRepo :: Map.Map FilePath (Set.Set FilePath)
+  }
+type RepoStructure :: Type
+data RepoStructure = RepoStructure
+  { repoPackages :: [FilePath],
+    repoHosts :: [FilePath]
   }
 type CoverageCheckRun :: Type
 data CoverageCheckRun = CoverageCheckRun
@@ -633,30 +648,45 @@ data CoverageCheckRun = CoverageCheckRun
     coveragePercent :: Maybe Double,
     coverageDetails :: String
   }
+type CancellableActionResult :: Type -> Type
+data CancellableActionResult a
+  = ActionCompleted a
+  | ActionCancelled
+  | ActionFailed String
+type role CancellableActionResult representational
 runTui :: [GitmoduleRepo] -> IO (Map.Map FilePath CheckResults, UiState)
 runTui repos = do
-  resultsPairs <- forM repos $ \repo -> do
-    results <- runCheckAnalysisInRepo (gitmoduleRepoPath repo)
-    pure (gitmoduleRepoPath repo, results)
-  coveragePairs <- forM repos $ \repo -> do
-    checks <- listCoverageCheckNamesInRepo (gitmoduleRepoPath repo)
-    pure (gitmoduleRepoPath repo, Set.fromList (mapMaybe coverageCheckPackageName checks))
-  let resultsByRepo = Map.fromList resultsPairs
-      coverageByRepo = Map.fromList coveragePairs
-      repoTree = buildAllReposTree repos resultsByRepo Map.empty coverageByRepo
+  flakePairs <- forM repos $ \repo -> do
+    hasFlake <- if gitmoduleRepoCompatible repo then doesFileExist (gitmoduleRepoPath repo </> "flake.nix") else pure False
+    pure (gitmoduleRepoPath repo, hasFlake)
+  let resultsByRepo :: Map.Map FilePath CheckResults
+      resultsByRepo = Map.empty
+      coverageByRepo :: Map.Map FilePath (Set.Set FilePath)
+      coverageByRepo = Map.empty
+      hasFlakeByRepo = Map.fromList flakePairs
+      repoTree = buildAllReposTree repos hasFlakeByRepo Map.empty resultsByRepo Map.empty coverageByRepo
+      initialExpanded =
+        Set.fromList
+          ( nodeId repoTree
+              : [ "host/" ++ hostKey
+                | hostKey <- nub (sort [gitmoduleRepoHost repo | repo <- repos, gitmoduleRepoCompatible repo])
+                ]
+          )
       initialState =
         UiState
           { uiRepos = repos,
+            uiHasFlakeByRepo = hasFlakeByRepo,
+            uiStructureByRepo = Map.empty,
             uiResultsByRepo = resultsByRepo,
             uiTree = repoTree,
-            uiExpanded = Set.fromList [nodeId repoTree],
+            uiExpanded = initialExpanded,
             uiViewportTop = 0,
             uiSelected = 0,
             uiPendingG = False,
             uiPendingZ = False,
             uiPendingFixConfirm = Nothing,
             uiShowHelp = False,
-            uiNotice = Just ("Loaded " ++ show (length repos) ++ " repositories"),
+            uiNotice = Just ("Loaded " ++ show (length repos) ++ " repositories from $HOME/.gitmodules"),
             uiCoverageByRepoPackage = Map.empty,
             uiCoverageChecksAvailableByRepo = coverageByRepo
           }
@@ -664,34 +694,118 @@ runTui repos = do
   finalState <- runTuiLoop vty initialState
   V.shutdown vty
   pure (uiResultsByRepo finalState, finalState)
+runCancellableAction ::
+  forall a.
+  V.Vty ->
+  UiState ->
+  IO String ->
+  IO a ->
+  IO (CancellableActionResult a)
+runCancellableAction vty state currentNotice action = do
+  resultVar <- newEmptyMVar
+  workerTid <- forkIO $ do
+    outcome <- (try action :: IO (Either SomeException a))
+    putMVar resultVar outcome
+  let loop :: IO (CancellableActionResult a)
+      loop = do
+        mResult <- tryTakeMVar resultVar
+        case mResult of
+          Just (Right value) -> pure (ActionCompleted value)
+          Just (Left err) -> pure (ActionFailed (displayException err))
+          Nothing -> do
+            notice <- currentNotice
+            drawTuiFrame vty (state {uiNotice = Just (notice ++ " (Ctrl-C to cancel)")})
+            mEvent <- V.nextEventNonblocking vty
+            case mEvent of
+              Just (V.EvKey (V.KChar 'c') [V.MCtrl]) -> do
+                killThread workerTid
+                pure ActionCancelled
+              _ -> do
+                threadDelay 50000
+                loop
+  loop
 buildAllReposTree ::
   [GitmoduleRepo] ->
+  Map.Map FilePath Bool ->
+  Map.Map FilePath RepoStructure ->
   Map.Map FilePath CheckResults ->
   Map.Map FilePath (Map.Map FilePath Double) ->
   Map.Map FilePath (Set.Set FilePath) ->
   TreeNode
-buildAllReposTree repos resultsByRepo coverageByRepo coverageAvailableByRepo =
-  let repoNodes = map (buildRepoNode resultsByRepo coverageByRepo coverageAvailableByRepo) repos
+buildAllReposTree repos hasFlakeByRepo _structureByRepo resultsByRepo coverageByRepo coverageAvailableByRepo =
+  let compatibleRepos = [repo | repo <- repos, gitmoduleRepoCompatible repo]
+      hostKeys = nub (sort [gitmoduleRepoHost repo | repo <- compatibleRepos])
+      hostNodes =
+        [ let hostRepos = [repo | repo <- compatibleRepos, gitmoduleRepoHost repo == hostKey]
+              userKeys = nub (sort [gitmoduleRepoUser repo | repo <- hostRepos])
+              userNodes =
+                [ let userRepos = [repo | repo <- hostRepos, gitmoduleRepoUser repo == userKey]
+                      repoNodes = map (buildRepoNode hasFlakeByRepo resultsByRepo coverageByRepo coverageAvailableByRepo) userRepos
+                   in TreeNode
+                        { nodeId = "user/" ++ hostKey ++ "/" ++ userKey,
+                          nodeLabel = userKey,
+                          nodeStatus = aggregateStatus (map nodeStatus repoNodes),
+                          nodeChildren = repoNodes
+                        }
+                | userKey <- userKeys
+                ]
+           in TreeNode
+                { nodeId = "host/" ++ hostKey,
+                  nodeLabel = hostKey,
+                  nodeStatus = aggregateStatus (map nodeStatus userNodes),
+                  nodeChildren = userNodes
+                }
+        | hostKey <- hostKeys
+        ]
+      incompatibleNodes =
+        [ TreeNode
+            { nodeId = "incompatible/" ++ show i,
+              nodeLabel = gitmoduleRepoPathEntry repo ++ "  (expected <host>/<username>/<repo>)",
+              nodeStatus = Incompatible,
+              nodeChildren = []
+            }
+        | (i, repo) <- zip [0 :: Int ..] [r | r <- repos, not (gitmoduleRepoCompatible r)]
+        ]
+      rootNodes = hostNodes ++ incompatibleNodes
    in TreeNode
-        { nodeId = "repositories",
-          nodeLabel = "repositories",
-          nodeStatus = aggregateStatus (map nodeStatus repoNodes),
-          nodeChildren = repoNodes
+        { nodeId = "home",
+          nodeLabel = "home",
+          nodeStatus = aggregateStatus (map nodeStatus rootNodes),
+          nodeChildren = rootNodes
         }
 buildRepoNode ::
+  Map.Map FilePath Bool ->
   Map.Map FilePath CheckResults ->
   Map.Map FilePath (Map.Map FilePath Double) ->
   Map.Map FilePath (Set.Set FilePath) ->
   GitmoduleRepo ->
   TreeNode
-buildRepoNode resultsByRepo coverageByRepo coverageAvailableByRepo repo =
+buildRepoNode hasFlakeByRepo resultsByRepo coverageByRepo coverageAvailableByRepo repo =
   let repoPath = gitmoduleRepoPath repo
-      repoId = "repo/" ++ gitmoduleRepoName repo
-      results = Map.findWithDefault (CheckResults [] [] []) repoPath resultsByRepo
-      coverageByPackage = Map.findWithDefault Map.empty repoPath coverageByRepo
-      availableCoveragePackages = Map.findWithDefault Set.empty repoPath coverageAvailableByRepo
-      repoTree = buildCheckTree repoId coverageByPackage availableCoveragePackages results
-   in repoTree {nodeLabel = gitmoduleRepoName repo ++ "  " ++ repoPath}
+      repoId = "repo/" ++ gitmoduleRepoHost repo ++ "/" ++ gitmoduleRepoUser repo ++ "/" ++ gitmoduleRepoName repo
+      hasFlake = Map.findWithDefault False repoPath hasFlakeByRepo
+   in case Map.lookup repoPath resultsByRepo of
+        Nothing ->
+          case hasFlake of
+            False ->
+              TreeNode
+                { nodeId = repoId,
+                  nodeLabel = gitmoduleRepoName repo ++ "  (missing flake.nix)",
+                  nodeStatus = Incompatible,
+                  nodeChildren = []
+                }
+            True ->
+              TreeNode
+                { nodeId = repoId,
+                  nodeLabel = gitmoduleRepoName repo,
+                  nodeStatus = Skipped,
+                  nodeChildren = []
+                }
+        Just results ->
+          let coverageByPackage = Map.findWithDefault Map.empty repoPath coverageByRepo
+              availableCoveragePackages = Map.findWithDefault Set.empty repoPath coverageAvailableByRepo
+              repoTree = buildCheckTree repoId coverageByPackage availableCoveragePackages results
+           in repoTree {nodeLabel = gitmoduleRepoName repo}
 buildCheckTree :: String -> Map.Map FilePath Double -> Set.Set FilePath -> CheckResults -> TreeNode
 buildCheckTree rootNodeId coverageByPackage availableCoveragePackages results =
   let packageLayout = buildPackageLabelLayout coverageByPackage availableCoveragePackages (packageResults results)
@@ -795,16 +909,110 @@ runTuiLoop vty state = do
     V.EvKey (V.KChar 'q') [] -> pure state
     V.EvKey V.KEsc [] ->
       if isJust (uiPendingFixConfirm state) then runTuiLoop vty (clearPendingFixConfirm state) else pure state
-    V.EvKey V.KEnter [] -> runTuiLoop vty state
+    V.EvKey V.KEnter [] ->
+      case selectedRepoFromState state of
+        Nothing -> runTuiLoop vty state
+        Just repo ->
+          let repoPath = gitmoduleRepoPath repo
+           in if Map.member repoPath (uiResultsByRepo state)
+                then runTuiLoop vty state
+                else do
+                  outcome <-
+                    runCancellableAction
+                      vty
+                      state
+                      (pure ("Loading checks for " ++ gitmoduleRepoName repo ++ "..."))
+                      $ do
+                        refreshedResults <- runCheckAnalysisInRepo repoPath
+                        refreshedStructure <- loadRepoStructure repoPath
+                        coverageChecks <- listCoverageCheckNamesInRepo repoPath
+                        pure (refreshedResults, refreshedStructure, coverageChecks)
+                  case outcome of
+                    ActionCancelled ->
+                      runTuiLoop vty (state {uiNotice = Just "Cancelled"})
+                    ActionFailed err ->
+                      runTuiLoop vty (state {uiNotice = Just ("Error: " ++ err)})
+                    ActionCompleted (refreshedResults, refreshedStructure, coverageChecks) -> do
+                      let availableCoveragePackages = Set.fromList (mapMaybe coverageCheckPackageName coverageChecks)
+                          nextState =
+                            state
+                              { uiStructureByRepo = Map.insert repoPath refreshedStructure (uiStructureByRepo state),
+                                uiCoverageChecksAvailableByRepo = Map.insert repoPath availableCoveragePackages (uiCoverageChecksAvailableByRepo state)
+                              }
+                      runTuiLoop vty (resetUiForRepoResults repo refreshedResults nextState)
     V.EvKey (V.KChar 'b') [] -> runTuiLoop vty state
     V.EvKey (V.KChar 'y') [] ->
       case uiPendingFixConfirm state of
-        Just repo -> do
-          let waitingState = state {uiPendingFixConfirm = Nothing, uiNotice = Just ("Applying automatic fixes in " ++ gitmoduleRepoName repo ++ "...")}
-          drawTuiFrame vty waitingState
-          applyAutomaticFixesInRepo (gitmoduleRepoPath repo)
-          refreshedResults <- runCheckAnalysisInRepo (gitmoduleRepoPath repo)
-          runTuiLoop vty (resetUiForRepoResults repo refreshedResults waitingState)
+        Just reposToFix -> do
+          let readyState = state {uiPendingFixConfirm = Nothing}
+          progressRef <- newIORef "Applying automatic fixes..."
+          outcome <-
+            runCancellableAction
+              vty
+              readyState
+              (readIORef progressRef)
+              $ do
+                forM
+                  (zip [1 :: Int ..] reposToFix)
+                  ( \(i, repo) -> do
+                      let repoPath = gitmoduleRepoPath repo
+                      writeIORef progressRef ("Applying fixes in " ++ gitmoduleRepoName repo ++ " (" ++ show i ++ "/" ++ show (length reposToFix) ++ ")")
+                      safeFix <- applyAutomaticFixesInRepoSafe repoPath
+                      case safeFix of
+                        Left errMsg -> pure (repo, Left errMsg)
+                        Right () -> do
+                          safeResults <- runCheckAnalysisInRepoSafe repoPath
+                          case safeResults of
+                            Left errMsg -> pure (repo, Left errMsg)
+                            Right refreshedResults -> do
+                              safeStructure <- loadRepoStructureSafe repoPath
+                              safeCoverageChecks <- listCoverageCheckNamesInRepoSafe repoPath
+                              case (safeStructure, safeCoverageChecks) of
+                                (Right refreshedStructure, Right coverageChecks) ->
+                                  pure (repo, Right (refreshedResults, refreshedStructure, coverageChecks))
+                                (Left errMsg, _) -> pure (repo, Left errMsg)
+                                (_, Left errMsg) -> pure (repo, Left errMsg)
+                  )
+          case outcome of
+            ActionCancelled ->
+              runTuiLoop vty (readyState {uiNotice = Just "Cancelled"})
+            ActionFailed err ->
+              runTuiLoop vty (readyState {uiNotice = Just ("Error: " ++ err)})
+            ActionCompleted repoRuns -> do
+              let (failedRuns, successfulRuns) =
+                    foldl
+                      ( \(failAcc, succAcc) (repo, runResult) ->
+                          case runResult of
+                            Left errMsg -> ((gitmoduleRepoName repo ++ ": " ++ errMsg) : failAcc, succAcc)
+                            Right ok -> (failAcc, (repo, ok) : succAcc)
+                      )
+                      ([], [])
+                      repoRuns
+                  nextState0 =
+                    foldl
+                      ( \acc (repo, (refreshedResults, refreshedStructure, coverageChecks)) ->
+                          let repoPath = gitmoduleRepoPath repo
+                              availableCoveragePackages = Set.fromList (mapMaybe coverageCheckPackageName coverageChecks)
+                           in acc
+                                { uiResultsByRepo = Map.insert repoPath refreshedResults (uiResultsByRepo acc),
+                                  uiStructureByRepo = Map.insert repoPath refreshedStructure (uiStructureByRepo acc),
+                                  uiCoverageChecksAvailableByRepo = Map.insert repoPath availableCoveragePackages (uiCoverageChecksAvailableByRepo acc),
+                                  uiCoverageByRepoPackage =
+                                    if Map.member repoPath (uiCoverageByRepoPackage acc)
+                                      then Map.insert repoPath Map.empty (uiCoverageByRepoPackage acc)
+                                      else uiCoverageByRepoPackage acc
+                                }
+                      )
+                      readyState
+                      successfulRuns
+                  summaryNotice =
+                    "Fixes finished: " ++ show (length successfulRuns) ++ " ok, " ++ show (length failedRuns) ++ " skipped/failed"
+                  nextState =
+                    rebuildTree
+                      (clearPendingZ (clearPendingG nextState0))
+                        { uiNotice = Just summaryNotice
+                        }
+              runTuiLoop vty nextState
         Nothing -> runTuiLoop vty (clearPendingZ (clearPendingG state))
     V.EvKey (V.KChar 'n') [] ->
       if isJust (uiPendingFixConfirm state)
@@ -820,50 +1028,179 @@ runTuiLoop vty state = do
     V.EvKey (V.KChar 'l') [] ->
       runTuiLoop vty (clearPendingZ (clearPendingG (expandAtSelection state)))
     V.EvKey (V.KChar 'c') [] ->
-      case selectedRepoFromState state of
-        Nothing -> runTuiLoop vty (state {uiNotice = Just "Select a repository node first"})
-        Just repo -> do
-          let waitingState = state {uiNotice = Just ("Running coverage checks in " ++ gitmoduleRepoName repo ++ "...")}
-          drawTuiFrame vty waitingState
-          let selectedPackage = selectedPackageNameFromState state
-          (coverageNotice, coverageByPackageDelta) <-
-            runCoverageChecksWithProgressInRepo (gitmoduleRepoPath repo) selectedPackage $ \progressLine ->
-              drawTuiFrame vty (waitingState {uiNotice = Just (gitmoduleRepoName repo ++ ": " ++ progressLine)})
-          let repoPath = gitmoduleRepoPath repo
-              previousCoverage = Map.findWithDefault Map.empty repoPath (uiCoverageByRepoPackage state)
-              mergedCoverage = Map.union coverageByPackageDelta previousCoverage
-              updatedCoverageByRepo = Map.insert repoPath mergedCoverage (uiCoverageByRepoPackage state)
-              nextState =
-                rebuildTree
-                  (clearPendingZ (clearPendingG state))
-                    { uiNotice = Just coverageNotice,
-                      uiCoverageByRepoPackage = updatedCoverageByRepo
-                    }
-          runTuiLoop vty nextState
+      case selectedReposFromState state of
+        [] -> runTuiLoop vty (state {uiNotice = Just "Select home/host/user/repository node first"})
+        allSelectedRepos -> do
+          let targetRepos = filter (\repo -> Map.findWithDefault False (gitmoduleRepoPath repo) (uiHasFlakeByRepo state)) allSelectedRepos
+          if null targetRepos
+            then runTuiLoop vty (state {uiNotice = Just "Coverage unavailable: no compatible selected repositories with flake.nix"})
+            else do
+              let selectedPackage =
+                    if length targetRepos == 1
+                      then selectedPackageNameFromState state
+                      else Nothing
+              progressRef <- newIORef "Running coverage checks..."
+              coverageOutcome <-
+                runCancellableAction
+                  vty
+                  state
+                  (readIORef progressRef)
+                  $ do
+                    forM
+                      (zip [1 :: Int ..] targetRepos)
+                      ( \(i, repo) -> do
+                          let repoPath = gitmoduleRepoPath repo
+                          writeIORef progressRef ("Preparing coverage for " ++ gitmoduleRepoName repo ++ " (" ++ show i ++ "/" ++ show (length targetRepos) ++ ")")
+                          preloaded <-
+                            if Map.member repoPath (uiResultsByRepo state)
+                              then pure Nothing
+                              else do
+                                safeResults <- runCheckAnalysisInRepoSafe repoPath
+                                case safeResults of
+                                  Left _ -> pure Nothing
+                                  Right refreshedResults -> do
+                                    safeStructure <- loadRepoStructureSafe repoPath
+                                    case safeStructure of
+                                      Left _ -> pure Nothing
+                                      Right refreshedStructure -> pure (Just (refreshedResults, refreshedStructure))
+                          safeCoverageChecks <- listCoverageCheckNamesInRepoSafe repoPath
+                          case safeCoverageChecks of
+                            Left errMsg -> pure (repo, preloaded, Left errMsg)
+                            Right coverageChecks -> do
+                              safeCoverageRun <-
+                                runCoverageChecksWithProgressInRepoSafe repoPath selectedPackage (\progressLine -> writeIORef progressRef (gitmoduleRepoName repo ++ ": " ++ progressLine))
+                              case safeCoverageRun of
+                                Left errMsg -> pure (repo, preloaded, Left errMsg)
+                                Right (coverageNotice, coverageByPackageDelta) ->
+                                  pure (repo, preloaded, Right (coverageChecks, coverageNotice, coverageByPackageDelta))
+                      )
+              case coverageOutcome of
+                ActionCancelled ->
+                  runTuiLoop vty (state {uiNotice = Just "Cancelled"})
+                ActionFailed err ->
+                  runTuiLoop vty (state {uiNotice = Just ("Error: " ++ err)})
+                ActionCompleted repoRuns -> do
+                  let nextState0 =
+                        foldl
+                          ( \acc (repo, preloaded, runResult) ->
+                              let repoPath = gitmoduleRepoPath repo
+                                  acc1 =
+                                    case preloaded of
+                                      Nothing -> acc
+                                      Just (refreshedResults, refreshedStructure) ->
+                                        acc
+                                          { uiResultsByRepo = Map.insert repoPath refreshedResults (uiResultsByRepo acc),
+                                            uiStructureByRepo = Map.insert repoPath refreshedStructure (uiStructureByRepo acc)
+                                          }
+                               in case runResult of
+                                    Left _ -> acc1
+                                    Right (coverageChecks, _coverageNotice, coverageByPackageDelta) ->
+                                      let availableCoveragePackages = Set.fromList (mapMaybe coverageCheckPackageName coverageChecks)
+                                          previousCoverage = Map.findWithDefault Map.empty repoPath (uiCoverageByRepoPackage acc1)
+                                          mergedCoverage = Map.union coverageByPackageDelta previousCoverage
+                                       in acc1
+                                            { uiCoverageByRepoPackage = Map.insert repoPath mergedCoverage (uiCoverageByRepoPackage acc1),
+                                              uiCoverageChecksAvailableByRepo = Map.insert repoPath availableCoveragePackages (uiCoverageChecksAvailableByRepo acc1)
+                                            }
+                          )
+                          state
+                          repoRuns
+                      failedCount = length [() | (_, _, Left _) <- repoRuns]
+                      summaryNotice =
+                        "Coverage finished: " ++ show (length repoRuns - failedCount) ++ " ok, " ++ show failedCount ++ " skipped/failed"
+                      nextState =
+                        rebuildTree
+                          (clearPendingZ (clearPendingG nextState0))
+                            { uiNotice = Just summaryNotice
+                            }
+                  runTuiLoop vty nextState
     V.EvKey (V.KChar 'g') [] ->
       if uiPendingG state
         then runTuiLoop vty (clearPendingZ (clearPendingG (goTop state)))
         else runTuiLoop vty (clearPendingZ (state {uiPendingG = True}))
     V.EvKey (V.KChar 'G') [] -> runTuiLoop vty (clearPendingZ (clearPendingG (goBottom viewportHeight state)))
     V.EvKey (V.KChar 'r') [] ->
-      case selectedRepoFromState state of
-        Nothing -> runTuiLoop vty (state {uiNotice = Just "Select a repository node first"})
-        Just repo -> do
-          let waitingState = state {uiNotice = Just ("Running canonicalization checks in " ++ gitmoduleRepoName repo ++ "...")}
-          drawTuiFrame vty waitingState
-          refreshedResults <- runCheckAnalysisInRepo (gitmoduleRepoPath repo)
-          runTuiLoop vty (resetUiForRepoResults repo refreshedResults waitingState)
+      case selectedReposFromState state of
+        [] -> runTuiLoop vty (state {uiNotice = Just "Select home/host/user/repository node first"})
+        targetRepos -> do
+          progressRef <- newIORef "Running canonicalization checks..."
+          outcome <-
+            runCancellableAction
+              vty
+              state
+              (readIORef progressRef)
+              $ do
+                forM
+                  (zip [1 :: Int ..] targetRepos)
+                  ( \(i, repo) -> do
+                      let repoPath = gitmoduleRepoPath repo
+                      writeIORef progressRef ("Running checks in " ++ gitmoduleRepoName repo ++ " (" ++ show i ++ "/" ++ show (length targetRepos) ++ ")")
+                      safeResults <- runCheckAnalysisInRepoSafe repoPath
+                      case safeResults of
+                        Left errMsg -> pure (repo, Left errMsg)
+                        Right refreshedResults -> do
+                          safeStructure <- loadRepoStructureSafe repoPath
+                          safeCoverageChecks <- listCoverageCheckNamesInRepoSafe repoPath
+                          case (safeStructure, safeCoverageChecks) of
+                            (Right refreshedStructure, Right coverageChecks) ->
+                              pure (repo, Right (refreshedResults, refreshedStructure, coverageChecks))
+                            (Left errMsg, _) -> pure (repo, Left errMsg)
+                            (_, Left errMsg) -> pure (repo, Left errMsg)
+                  )
+          case outcome of
+            ActionCancelled ->
+              runTuiLoop vty (state {uiNotice = Just "Cancelled"})
+            ActionFailed err ->
+              runTuiLoop vty (state {uiNotice = Just ("Error: " ++ err)})
+            ActionCompleted repoRuns -> do
+              let (failedRuns, successfulRuns) =
+                    foldl
+                      ( \(failAcc, succAcc) (repo, runResult) ->
+                          case runResult of
+                            Left errMsg -> ((gitmoduleRepoName repo ++ ": " ++ errMsg) : failAcc, succAcc)
+                            Right ok -> (failAcc, (repo, ok) : succAcc)
+                      )
+                      ([], [])
+                      repoRuns
+                  nextState0 =
+                    foldl
+                      ( \acc (repo, (refreshedResults, refreshedStructure, coverageChecks)) ->
+                          let repoPath = gitmoduleRepoPath repo
+                              availableCoveragePackages = Set.fromList (mapMaybe coverageCheckPackageName coverageChecks)
+                           in acc
+                                { uiResultsByRepo = Map.insert repoPath refreshedResults (uiResultsByRepo acc),
+                                  uiStructureByRepo = Map.insert repoPath refreshedStructure (uiStructureByRepo acc),
+                                  uiCoverageChecksAvailableByRepo = Map.insert repoPath availableCoveragePackages (uiCoverageChecksAvailableByRepo acc),
+                                  uiCoverageByRepoPackage =
+                                    if Map.member repoPath (uiCoverageByRepoPackage acc)
+                                      then Map.insert repoPath Map.empty (uiCoverageByRepoPackage acc)
+                                      else uiCoverageByRepoPackage acc
+                                }
+                      )
+                      state
+                      successfulRuns
+                  summaryNotice = "Checks finished: " ++ show (length successfulRuns) ++ " ok, " ++ show (length failedRuns) ++ " skipped/failed"
+                  nextState =
+                    rebuildTree
+                      (clearPendingZ (clearPendingG nextState0))
+                        { uiNotice = Just summaryNotice
+                        }
+              runTuiLoop vty nextState
     V.EvKey (V.KChar 'f') [] ->
-      case selectedRepoFromState state of
-        Nothing -> runTuiLoop vty (state {uiNotice = Just "Select a repository node first"})
-        Just repo ->
-          runTuiLoop
-            vty
-            ( state
-                { uiPendingFixConfirm = Just repo,
-                  uiNotice = Just ("Apply automatic fixes in " ++ gitmoduleRepoName repo ++ "? [y/N]")
-                }
-            )
+      case selectedReposFromState state of
+        [] -> runTuiLoop vty (state {uiNotice = Just "Select home/host/user/repository node first"})
+        reposToFix ->
+          let prompt =
+                case reposToFix of
+                  [repo] -> "Apply automatic fixes in " ++ gitmoduleRepoName repo ++ "? [y/N]"
+                  _ -> "Apply automatic fixes in " ++ show (length reposToFix) ++ " repositories? [y/N]"
+           in runTuiLoop
+                vty
+                ( state
+                    { uiPendingFixConfirm = Just reposToFix,
+                      uiNotice = Just prompt
+                    }
+                )
     _ -> runTuiLoop vty (clearPendingZ (clearPendingG state))
 drawTuiFrame :: V.Vty -> UiState -> IO ()
 drawTuiFrame vty state = do
@@ -892,9 +1229,9 @@ helpLines =
   [ "Shortcuts",
     "",
     "Navigation: j/k, gg top, G bottom, H/M/L viewport top/middle/bottom",
-    "Repositories: all repositories are loaded at startup",
+    "Repositories: startup parses only $HOME/.gitmodules into home/host/username/repo nodes; Enter loads checks",
     "Folding: l expand, h collapse",
-    "Actions: r run checks (selected repo), f apply fixes (selected repo), c run coverage (selected repo)",
+    "Actions: r run checks (selected node subtree), f apply fixes (selected node subtree), c run coverage (selected node subtree, requires flake.nix)",
     "Other: ? toggle help, q quit"
   ]
 visibleNodes :: UiState -> [VisibleNode]
@@ -924,6 +1261,7 @@ renderVisibleNodeImage state index vnode =
         Passed -> "OK"
         Failed -> "FAIL"
         Skipped -> "SKIP"
+        Incompatible -> "INCOMPAT"
       beforeStatus = prefix ++ foldMarker ++ " "
       statusToken = "[" ++ statusLabel ++ "]"
       afterStatus = " " ++ nodeLabel node
@@ -933,6 +1271,7 @@ renderVisibleNodeImage state index vnode =
         Passed -> V.withForeColor V.defAttr V.green
         Failed -> V.withForeColor V.defAttr V.red
         Skipped -> V.withForeColor V.defAttr V.yellow
+        Incompatible -> V.withForeColor V.defAttr V.magenta
       statusAttr =
         if isSelected
           then V.withBackColor statusAttr0 V.brightWhite
@@ -986,7 +1325,7 @@ clearPendingFixConfirm state = state {uiPendingFixConfirm = Nothing, uiShowHelp 
 rebuildTree :: UiState -> UiState
 rebuildTree state =
   state
-    { uiTree = buildAllReposTree (uiRepos state) (uiResultsByRepo state) (uiCoverageByRepoPackage state) (uiCoverageChecksAvailableByRepo state)
+    { uiTree = buildAllReposTree (uiRepos state) (uiHasFlakeByRepo state) (uiStructureByRepo state) (uiResultsByRepo state) (uiCoverageByRepoPackage state) (uiCoverageChecksAvailableByRepo state)
     }
 resetUiForRepoResults :: GitmoduleRepo -> CheckResults -> UiState -> UiState
 resetUiForRepoResults repo refreshedResults state =
@@ -1092,18 +1431,49 @@ selectedPackageNameFromState state =
 packageNameFromNodeId :: String -> Maybe FilePath
 packageNameFromNodeId nid =
   case splitDirectories nid of
-    "repo" : _repoName : "packages" : packageName : _ -> Just packageName
+    "repo" : _host : _user : _repoName : "packages" : packageName : _ -> Just packageName
     _ -> Nothing
 selectedRepoFromState :: UiState -> Maybe GitmoduleRepo
 selectedRepoFromState state =
   case selectedVisibleNode state of
     Nothing -> Nothing
     Just vnode -> repoFromNodeId (nodeId (visibleNode vnode)) (uiRepos state)
+selectedReposFromState :: UiState -> [GitmoduleRepo]
+selectedReposFromState state =
+  case selectedVisibleNode state of
+    Nothing -> []
+    Just vnode -> reposFromNodeId (nodeId (visibleNode vnode)) (uiRepos state)
 repoFromNodeId :: String -> [GitmoduleRepo] -> Maybe GitmoduleRepo
 repoFromNodeId nid repos =
   case splitDirectories nid of
-    "repo" : repoName : _ -> find (\repo -> gitmoduleRepoName repo == repoName) repos
+    "repo" : host : user : repoName : _ ->
+      find
+        ( \repo ->
+            gitmoduleRepoHost repo == host
+              && gitmoduleRepoUser repo == user
+              && gitmoduleRepoName repo == repoName
+        )
+        repos
     _ -> Nothing
+reposFromNodeId :: String -> [GitmoduleRepo] -> [GitmoduleRepo]
+reposFromNodeId nid repos =
+  case splitDirectories nid of
+    "home" : _ -> [repo | repo <- repos, gitmoduleRepoCompatible repo]
+    "host" : host : _ -> [repo | repo <- repos, gitmoduleRepoCompatible repo && gitmoduleRepoHost repo == host]
+    "user" : host : user : _ ->
+      [ repo
+      | repo <- repos,
+        gitmoduleRepoCompatible repo && gitmoduleRepoHost repo == host && gitmoduleRepoUser repo == user
+      ]
+    "repo" : host : user : repoName : _ ->
+      [ repo
+      | repo <- repos,
+        gitmoduleRepoCompatible repo
+          && gitmoduleRepoHost repo == host
+          && gitmoduleRepoUser repo == user
+          && gitmoduleRepoName repo == repoName
+      ]
+    _ -> []
 mergeCheckResults :: [CheckResults] -> CheckResults
 mergeCheckResults repoResults =
   CheckResults
@@ -1113,13 +1483,57 @@ mergeCheckResults repoResults =
     }
 runCheckAnalysisInRepo :: FilePath -> IO CheckResults
 runCheckAnalysisInRepo repoDir = runInGitRepository repoDir runCheckAnalysis
+runCheckAnalysisInRepoSafe :: FilePath -> IO (Either String CheckResults)
+runCheckAnalysisInRepoSafe repoDir = do
+  result <- try (runCheckAnalysisInRepo repoDir)
+  pure $
+    case result of
+      Left (err :: SomeException) -> Left (displayException err)
+      Right value -> Right value
 listCoverageCheckNamesInRepo :: FilePath -> IO [String]
 listCoverageCheckNamesInRepo repoDir = runInGitRepository repoDir listCoverageCheckNames
+listCoverageCheckNamesInRepoSafe :: FilePath -> IO (Either String [String])
+listCoverageCheckNamesInRepoSafe repoDir = do
+  result <- try (listCoverageCheckNamesInRepo repoDir)
+  pure $
+    case result of
+      Left (err :: SomeException) -> Left (displayException err)
+      Right value -> Right value
 applyAutomaticFixesInRepo :: FilePath -> IO ()
 applyAutomaticFixesInRepo repoDir = runInGitRepository repoDir applyAutomaticFixes
+applyAutomaticFixesInRepoSafe :: FilePath -> IO (Either String ())
+applyAutomaticFixesInRepoSafe repoDir = do
+  result <- try (applyAutomaticFixesInRepo repoDir)
+  pure $
+    case result of
+      Left (err :: SomeException) -> Left (displayException err)
+      Right value -> Right value
 runCoverageChecksWithProgressInRepo :: FilePath -> Maybe FilePath -> (String -> IO ()) -> IO (String, Map.Map FilePath Double)
 runCoverageChecksWithProgressInRepo repoDir selectedPackage reportProgress =
   runInGitRepository repoDir (runCoverageChecksWithProgress selectedPackage reportProgress)
+runCoverageChecksWithProgressInRepoSafe :: FilePath -> Maybe FilePath -> (String -> IO ()) -> IO (Either String (String, Map.Map FilePath Double))
+runCoverageChecksWithProgressInRepoSafe repoDir selectedPackage reportProgress = do
+  result <- try (runCoverageChecksWithProgressInRepo repoDir selectedPackage reportProgress)
+  pure $
+    case result of
+      Left (err :: SomeException) -> Left (displayException err)
+      Right value -> Right value
+loadRepoStructure :: FilePath -> IO RepoStructure
+loadRepoStructure repoDir = runInGitRepository repoDir $ do
+  packages <- listPackageNames
+  hosts <- listHostNames
+  pure
+    RepoStructure
+      { repoPackages = packages,
+        repoHosts = hosts
+      }
+loadRepoStructureSafe :: FilePath -> IO (Either String RepoStructure)
+loadRepoStructureSafe repoDir = do
+  result <- try (loadRepoStructure repoDir)
+  pure $
+    case result of
+      Left (err :: SomeException) -> Left (displayException err)
+      Right value -> Right value
 loadHomeGitmoduleRepos :: IO [GitmoduleRepo]
 loadHomeGitmoduleRepos = do
   home <- getHomeDirectory
@@ -1130,15 +1544,30 @@ loadHomeGitmoduleRepos = do
     exitFailure
   contents <- T.unpack <$> TIO.readFile gitmodulesPath
   let paths = parseGitmodulePaths contents
-  fmap catMaybes $
-    forM paths $ \pathEntry -> do
-      let repoPath = home </> pathEntry
-          repoName = takeFileName pathEntry
-      isValid <- isGitRepositoryRoot repoPath
-      pure $
-        if isValid
-          then Just (GitmoduleRepo repoName repoPath)
-          else Nothing
+  pure (map (buildGitmoduleRepo home) paths)
+buildGitmoduleRepo :: FilePath -> FilePath -> GitmoduleRepo
+buildGitmoduleRepo home pathEntry =
+  let repoPath = home </> pathEntry
+      parts = filter (`notElem` [".", ""]) (splitDirectories pathEntry)
+   in case parts of
+        [hostKey, userKey, repoKey] ->
+          GitmoduleRepo
+            { gitmoduleRepoHost = hostKey,
+              gitmoduleRepoUser = userKey,
+              gitmoduleRepoName = repoKey,
+              gitmoduleRepoPathEntry = pathEntry,
+              gitmoduleRepoPath = repoPath,
+              gitmoduleRepoCompatible = True
+            }
+        _ ->
+          GitmoduleRepo
+            { gitmoduleRepoHost = "",
+              gitmoduleRepoUser = "",
+              gitmoduleRepoName = takeFileName pathEntry,
+              gitmoduleRepoPathEntry = pathEntry,
+              gitmoduleRepoPath = repoPath,
+              gitmoduleRepoCompatible = False
+            }
 parseGitmodulePaths :: String -> [FilePath]
 parseGitmodulePaths content =
   nub
@@ -1150,23 +1579,6 @@ parseGitmodulePaths content =
       let value = drop 1 (dropWhile (/= '=') stripped),
       not (null (trimString value))
     ]
-isGitRepositoryRoot :: FilePath -> IO Bool
-isGitRepositoryRoot repoDir = do
-  isDir <- doesDirectoryExist repoDir
-  if not isDir
-    then pure False
-    else do
-      (insideExit, insideStdout, _insideStderr) <- readProcessWithExitCode "git" ["-C", repoDir, "rev-parse", "--is-inside-work-tree"] ""
-      if not (insideExit == ExitSuccess && trimString insideStdout == "true")
-        then pure False
-        else do
-          (topExit, topStdout, _topStderr) <- readProcessWithExitCode "git" ["-C", repoDir, "rev-parse", "--show-toplevel"] ""
-          if topExit /= ExitSuccess
-            then pure False
-            else do
-              canonicalInput <- canonicalizePath repoDir
-              canonicalTop <- canonicalizePath (trimString topStdout)
-              pure (canonicalInput == canonicalTop)
 runCoverageChecksWithProgress :: Maybe FilePath -> (String -> IO ()) -> IO (String, Map.Map FilePath Double)
 runCoverageChecksWithProgress selectedPackage reportProgress = do
   coverageChecks <- listCoverageCheckNames
@@ -1339,6 +1751,7 @@ hostNodeStatus :: HostCheck -> CheckStatus
 hostNodeStatus host = aggregateStatus (map testStatus (hostTests host))
 aggregateStatus :: [CheckStatus] -> CheckStatus
 aggregateStatus statuses
+  | Incompatible `elem` statuses = Incompatible
   | Failed `elem` statuses = Failed
   | Passed `elem` statuses = Passed
   | otherwise = Skipped
@@ -1598,9 +2011,13 @@ listHostNames :: IO [FilePath]
 listHostNames = listSubdirectories "hosts"
 listSubdirectories :: FilePath -> IO [FilePath]
 listSubdirectories root = do
-  entries <- listDirectory root
-  flags <- forM entries $ \name -> doesDirectoryExist (root </> name)
-  pure $ sort [name | (name, isDir) <- zip entries flags, isDir]
+  rootExists <- doesDirectoryExist root
+  if not rootExists
+    then pure []
+    else do
+      entries <- listDirectory root
+      flags <- forM entries $ \name -> doesDirectoryExist (root </> name)
+      pure $ sort [name | (name, isDir) <- zip entries flags, isDir]
 buildHostCheck :: [String] -> FilePath -> HostCheck
 buildHostCheck allStructureIssues currentHostName =
   let scopedIssues = [issue | issue <- allStructureIssues, ("hosts/" ++ currentHostName) `isPrefixOf` issue]
