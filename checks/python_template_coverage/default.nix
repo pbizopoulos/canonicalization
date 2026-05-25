@@ -13,6 +13,7 @@ pkgs.runCommand "${checkName}"
       pkgs.coreutils
       pkgs.python312
       pyPkgs.coverage
+      pyPkgs.hypothesis
     ];
     src = ../../packages/${packageName};
   }

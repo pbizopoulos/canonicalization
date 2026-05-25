@@ -10,6 +10,8 @@ from pathlib import Path
 from unittest import mock
 
 import matplotlib as mpl
+from hypothesis import given
+from hypothesis import strategies as st
 
 mpl.use("Agg")
 import matplotlib.pyplot as plt
@@ -147,6 +149,34 @@ class ArtifactTests(unittest.TestCase):
             called_workspace = create_mock.call_args.args[0]
             if called_workspace != fake_cwd.resolve() / "tmp":
                 msg = "main() should generate artifacts in <cwd>/tmp"
+                raise AssertionError(msg)
+
+
+class PropertyTests(unittest.TestCase):
+    """Property-based tests for table generation invariants."""
+
+    @given(  # type: ignore[untyped-decorator]
+        st.text(
+            alphabet=st.characters(min_codepoint=97, max_codepoint=122),
+            min_size=1,
+            max_size=32,
+        ),
+    )
+    def test_create_table_has_required_structure(self, generated_text: str) -> None:
+        """create_table() should always emit required deterministic markers."""
+        _ = generated_text
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_path = Path(tmpdir) / "table.tex"
+            create_table(table_path)
+            table = table_path.read_text(encoding="utf-8")
+            if "\\begin{tabular}{lr}" not in table:
+                msg = "missing LaTeX tabular header"
+                raise AssertionError(msg)
+            if "\\end{tabular}" not in table:
+                msg = "missing LaTeX tabular footer"
+                raise AssertionError(msg)
+            if "mean & 7.50 \\\\" not in table:
+                msg = "missing deterministic mean row"
                 raise AssertionError(msg)
 
 

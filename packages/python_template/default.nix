@@ -26,6 +26,9 @@ pyPkgs.buildPythonPackage rec {
   '';
   meta.mainProgram = pname;
   pname = baseNameOf ./.;
+  propagatedBuildInputs = [
+    pkgs.python312Packages.hypothesis
+  ];
   pyproject = false;
   shellHook = ''
     source ${pkgs.lib.getExe installationScript}

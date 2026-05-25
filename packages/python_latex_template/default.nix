@@ -31,7 +31,9 @@ pkgs.python3Packages.buildPythonPackage rec {
   '';
   meta.mainProgram = pname;
   pname = baseNameOf ./.;
-  propagatedBuildInputs = pythonDeps;
+  propagatedBuildInputs = pythonDeps ++ [
+    pkgs.python3Packages.hypothesis
+  ];
   pyproject = false;
   src = ./.;
   strictDeps = true;

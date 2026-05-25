@@ -9,6 +9,9 @@ import os
 import unittest
 from unittest import mock
 
+from hypothesis import given
+from hypothesis import strategies as st
+
 
 def render_message() -> str:
     """Return the default program message."""
@@ -50,6 +53,26 @@ class MainTests(unittest.TestCase):
         if run_tests_mock.call_count != 1:
             msg = "main() should call run_tests() exactly once when DEBUG=1"
             raise AssertionError(msg)
+
+
+class PropertyTests(unittest.TestCase):
+    """Property-based tests for stable program behavior."""
+
+    @given(st.integers())  # type: ignore[untyped-decorator]
+    def test_render_message_is_constant(self, generated_number: int) -> None:
+        """render_message() should stay constant for all generated inputs."""
+        _ = generated_number
+        if render_message() != "Hello World":
+            msg = "render_message() must return 'Hello World'"
+            raise AssertionError(msg)
+
+    @given(st.text())  # type: ignore[untyped-decorator]
+    def test_render_message_returns_string(self, generated_text: str) -> None:
+        """render_message() should always return a string."""
+        _ = generated_text
+        if not isinstance(render_message(), str):
+            msg = "render_message() must return a string"
+            raise TypeError(msg)
 
 
 def run_tests() -> None:

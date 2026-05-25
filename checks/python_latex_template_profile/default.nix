@@ -9,7 +9,14 @@ let
     pkgs.python3Packages.matplotlib
     pkgs.python3Packages.pandas
   ];
-  pythonEnv = pkgs.python3.withPackages (_: pythonDeps ++ [ pkgs.python3Packages.pyinstrument ]);
+  pythonEnv = pkgs.python3.withPackages (
+    _:
+    pythonDeps
+    ++ [
+      pkgs.python3Packages.hypothesis
+      pkgs.python3Packages.pyinstrument
+    ]
+  );
 in
 pkgs.runCommand "${checkName}"
   {

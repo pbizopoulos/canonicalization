@@ -12,6 +12,7 @@ pkgs.runCommand "${checkName}"
     nativeBuildInputs = [
       pkgs.coreutils
       pkgs.python312
+      pyPkgs.hypothesis
       pyPkgs.pyinstrument
     ];
     src = ../../packages/${packageName};
