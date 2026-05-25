@@ -55,26 +55,6 @@ class MainTests(unittest.TestCase):
             raise AssertionError(msg)
 
 
-class PropertyTests(unittest.TestCase):
-    """Property-based tests for stable program behavior."""
-
-    @given(st.integers())  # type: ignore[untyped-decorator]
-    def test_render_message_is_constant(self, generated_number: int) -> None:
-        """render_message() should stay constant for all generated inputs."""
-        _ = generated_number
-        if render_message() != "Hello World":
-            msg = "render_message() must return 'Hello World'"
-            raise AssertionError(msg)
-
-    @given(st.text())  # type: ignore[untyped-decorator]
-    def test_render_message_returns_string(self, generated_text: str) -> None:
-        """render_message() should always return a string."""
-        _ = generated_text
-        if not isinstance(render_message(), str):
-            msg = "render_message() must return a string"
-            raise TypeError(msg)
-
-
 def run_tests() -> None:
     """Run this module's unittest suite."""
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(MainTests)
@@ -89,6 +69,75 @@ def main() -> None:
         run_tests()
     else:
         print(render_message())  # noqa: T201
+
+
+class PropertyTests(unittest.TestCase):
+    """Property-based tests for stable program behavior."""
+
+    @given(  # type: ignore[untyped-decorator]
+        st.text(
+            alphabet=st.characters(
+                blacklist_categories=("Cs",),
+                blacklist_characters="\x00",
+            ),
+        ),
+    )
+    def test_render_message_is_stable_for_any_input(self, generated_text: str) -> None:
+        """render_message() should not depend on unrelated external inputs."""
+        with mock.patch.dict(os.environ, {"UNRELATED_INPUT": generated_text}):
+            rendered = render_message()
+        if render_message() != "Hello World":
+            msg = "render_message() must return 'Hello World'"
+            raise AssertionError(msg)
+        if rendered != "Hello World":
+            msg = "render_message() changed with unrelated input"
+            raise AssertionError(msg)
+
+    @given(  # type: ignore[untyped-decorator]
+        st.text(
+            alphabet=st.characters(
+                blacklist_categories=("Cs",),
+                blacklist_characters="\x00",
+            ),
+        ).filter(
+            lambda value: value != "1",
+        ),
+    )
+    def test_main_prints_message_when_debug_is_not_one(self, debug_value: str) -> None:
+        """main() should always print the message unless DEBUG is exactly '1'."""
+        output = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, {"DEBUG": debug_value}),
+            mock.patch("main.run_tests") as run_tests_mock,
+            contextlib.redirect_stdout(output),
+        ):
+            main()
+        if run_tests_mock.call_count != 0:
+            msg = "main() should not call run_tests() when DEBUG is not '1'"
+            raise AssertionError(msg)
+        if output.getvalue().strip() != "Hello World":
+            msg = "main() should print 'Hello World' when DEBUG is not '1'"
+            raise AssertionError(msg)
+
+    @given(st.just("1"))  # type: ignore[untyped-decorator]
+    def test_main_calls_tests_only_when_debug_is_one(self, debug_value: str) -> None:
+        """main() should dispatch to tests when DEBUG is exactly '1'."""
+        with (
+            mock.patch.dict(os.environ, {"DEBUG": debug_value}),
+            mock.patch("main.run_tests") as run_tests_mock,
+        ):
+            main()
+        if run_tests_mock.call_count != 1:
+            msg = "main() should call run_tests() exactly once when DEBUG is '1'"
+            raise AssertionError(msg)
+
+    @given(st.text())  # type: ignore[untyped-decorator]
+    def test_render_message_returns_string(self, generated_text: str) -> None:
+        """render_message() should always return a string."""
+        _ = generated_text
+        if not isinstance(render_message(), str):
+            msg = "render_message() must return a string"
+            raise TypeError(msg)
 
 
 if __name__ == "__main__":

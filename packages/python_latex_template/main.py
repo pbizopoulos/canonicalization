@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 import matplotlib as mpl
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 mpl.use("Agg")
@@ -157,16 +157,18 @@ class PropertyTests(unittest.TestCase):
 
     @given(  # type: ignore[untyped-decorator]
         st.text(
-            alphabet=st.characters(min_codepoint=97, max_codepoint=122),
-            min_size=1,
-            max_size=32,
+            alphabet=st.characters(min_codepoint=32, max_codepoint=126),
+            max_size=256,
         ),
     )
-    def test_create_table_has_required_structure(self, generated_text: str) -> None:
-        """create_table() should always emit required deterministic markers."""
-        _ = generated_text
+    def test_create_table_overwrites_any_existing_content(
+        self,
+        prior_content: str,
+    ) -> None:
+        """create_table() should replace existing content deterministically."""
         with tempfile.TemporaryDirectory() as tmpdir:
             table_path = Path(tmpdir) / "table.tex"
+            table_path.write_text(prior_content, encoding="utf-8")
             create_table(table_path)
             table = table_path.read_text(encoding="utf-8")
             if "\\begin{tabular}{lr}" not in table:
@@ -177,6 +179,41 @@ class PropertyTests(unittest.TestCase):
                 raise AssertionError(msg)
             if "mean & 7.50 \\\\" not in table:
                 msg = "missing deterministic mean row"
+                raise AssertionError(msg)
+            if "median & 6.50 \\\\" not in table:
+                msg = "missing deterministic median row"
+                raise AssertionError(msg)
+            if "max & 16.00 \\\\" not in table:
+                msg = "missing deterministic max row"
+                raise AssertionError(msg)
+
+    @given(  # type: ignore[untyped-decorator]
+        st.lists(
+            st.text(
+                alphabet="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-",
+                min_size=1,
+                max_size=8,
+            ),
+            min_size=1,
+            max_size=5,
+        ),
+    )
+    @settings(deadline=None, max_examples=25)  # type: ignore[untyped-decorator]
+    def test_workspace_artifacts_created_for_nested_paths(
+        self,
+        path_segments: list[str],
+    ) -> None:
+        """create_workspace_artifacts() should work for nested workspace paths."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir).joinpath(*path_segments)
+            create_workspace_artifacts(workspace)
+            figure_path = workspace / "figure.png"
+            table_path = workspace / "table.tex"
+            if not figure_path.exists() or figure_path.stat().st_size <= 0:
+                msg = "create_workspace_artifacts() must produce a non-empty figure.png"
+                raise AssertionError(msg)
+            if not table_path.exists():
+                msg = "create_workspace_artifacts() must produce table.tex"
                 raise AssertionError(msg)
 
 
