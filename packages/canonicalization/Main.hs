@@ -631,6 +631,16 @@ checkPackage allStructureIssues currentPackageName = do
   rustUnitTestNames <- discoverRustUnitTestNames currentPackageName projectKind
   let cargoStatus = statusFromIssues cargoIssues
       cabalStatus = statusFromIssues cabalIssues
+      mkCase label status issues =
+        TestCaseResult
+          label
+          status
+          (if status == Failed then issues else [])
+      mkTest name status label issues =
+        TestResult
+          name
+          status
+          [mkCase label status issues]
       defaultNixIssues =
         [issue | issue <- scopedStructureIssues, "/default.nix" `isInfixOf` issue]
           ++ templateIssues
@@ -646,55 +656,34 @@ checkPackage allStructureIssues currentPackageName = do
             "directory structure"
             (statusFromIssues scopedStructureIssues)
             [],
-          TestResult
-            "default.nix"
-            defaultNixStatus
-            [ TestCaseResult
-                "matches template and policy"
-                defaultNixStatus
-                (if defaultNixStatus == Failed then defaultNixIssues else [])
-            ]
+          mkTest "default.nix" defaultNixStatus "matches template and policy" defaultNixIssues
         ]
       languageSpecificTests =
         concat
           [ if projectKind == RustKind
               then
-                [ TestResult
-                    "Cargo.toml"
-                    cargoStatus
-                    [ TestCaseResult
-                        "matches Cargo.toml conventions"
-                        cargoStatus
-                        (if cargoStatus == Failed then cargoIssues else [])
-                    ],
+                [ mkTest "Cargo.toml" cargoStatus "matches Cargo.toml conventions" cargoIssues,
                   TestResult
                     "src/main.rs"
                     rustStatus
-                    ( TestCaseResult
+                    ( mkCase
                         "supports DEBUG test execution"
                         rustStatus
-                        (if rustStatus == Failed then rustDebugIssues else [])
+                        rustDebugIssues
                         : [TestCaseResult name Skipped [] | name <- rustUnitTestNames]
                     )
                 ]
               else [],
             if projectKind == HaskellKind
               then
-                [ TestResult
-                    (currentPackageName ++ ".cabal")
-                    cabalStatus
-                    [ TestCaseResult
-                        "matches Cabal conventions"
-                        cabalStatus
-                        (if cabalStatus == Failed then cabalIssues else [])
-                    ],
+                [ mkTest (currentPackageName ++ ".cabal") cabalStatus "matches Cabal conventions" cabalIssues,
                   TestResult
                     "Main.hs"
                     haskellStatus
-                    ( TestCaseResult
+                    ( mkCase
                         "supports DEBUG test execution"
                         haskellStatus
-                        (if haskellStatus == Failed then haskellDebugIssues else [])
+                        haskellDebugIssues
                         : [ TestCaseResult
                               testName'
                               Skipped
@@ -707,10 +696,10 @@ checkPackage allStructureIssues currentPackageName = do
             [ TestResult
                 "main.py"
                 pythonStatus
-                ( TestCaseResult
+                ( mkCase
                     "supports DEBUG test execution"
                     pythonStatus
-                    (if pythonStatus == Failed then pythonDebugIssues else [])
+                    pythonDebugIssues
                     : [TestCaseResult name Skipped [] | name <- pythonUnitTestNames]
                 )
             | projectKind `elem` [PythonKind, PythonLatexKind]
