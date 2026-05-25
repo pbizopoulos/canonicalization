@@ -4,7 +4,7 @@
 }:
 let
   checkName = builtins.baseNameOf ./.;
-  packageName = "nix-alphabetize";
+  packageName = pkgs.lib.removeSuffix "-profile" checkName;
   packageDrv = import ../../packages/${packageName}/default.nix { inherit pkgs; };
   profileGhc = pkgs.haskellPackages.ghcWithPackages (_: packageDrv.passthru.haskellExecutableDepends);
 in

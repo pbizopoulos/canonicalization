@@ -4,7 +4,7 @@
 }:
 let
   checkName = builtins.baseNameOf ./.;
-  packageName = "python_template";
+  packageName = pkgs.lib.removeSuffix "_coverage" checkName;
   pyPkgs = pkgs.python312Packages;
 in
 pkgs.runCommand "${checkName}"

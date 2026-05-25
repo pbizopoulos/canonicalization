@@ -5,7 +5,7 @@
 }:
 let
   checkName = builtins.baseNameOf ./.;
-  packageName = "remove-empty-lines";
+  packageName = pkgs.lib.removeSuffix "-mutation-testing" checkName;
   inherit (inputs.self.packages.${pkgs.stdenv.system}.${packageName}) cargoDeps;
   rustBaseInputs =
     inputs.self.packages.${pkgs.stdenv.system}.${packageName}.passthru.rustCheckNativeBuildInputs;

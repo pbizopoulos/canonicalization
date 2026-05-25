@@ -4,10 +4,12 @@
 pkgs.haskellPackages.mkDerivation rec {
   executableHaskellDepends = [
     pkgs.haskellPackages.HUnit
+    pkgs.haskellPackages.QuickCheck
     pkgs.haskellPackages.aeson
     pkgs.haskellPackages.base
     pkgs.haskellPackages.bytestring
     pkgs.haskellPackages.hnix
+    pkgs.haskellPackages.prettyprinter
     pkgs.haskellPackages.temporary
   ];
   executableToolDepends = [

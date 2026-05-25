@@ -4,6 +4,7 @@
 pkgs.haskellPackages.mkDerivation rec {
   executableHaskellDepends = [
     pkgs.haskellPackages.HUnit
+    pkgs.haskellPackages.QuickCheck
     pkgs.haskellPackages.base
     pkgs.haskellPackages.containers
     pkgs.haskellPackages.data-fix

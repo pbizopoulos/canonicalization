@@ -4,7 +4,7 @@
 }:
 let
   checkName = builtins.baseNameOf ./.;
-  packageName = "python_latex_template";
+  packageName = pkgs.lib.removeSuffix "_coverage" checkName;
   pythonDeps = [
     pkgs.python3Packages.matplotlib
     pkgs.python3Packages.pandas

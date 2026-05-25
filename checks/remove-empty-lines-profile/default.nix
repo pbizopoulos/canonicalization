@@ -5,7 +5,7 @@
 }:
 let
   checkName = builtins.baseNameOf ./.;
-  packageName = "remove-empty-lines";
+  packageName = pkgs.lib.removeSuffix "-profile" checkName;
 in
 pkgs.runCommand "${checkName}"
   {

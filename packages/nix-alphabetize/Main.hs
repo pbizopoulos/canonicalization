@@ -5,7 +5,7 @@ module Main (main) where
 import Data.Fix (Fix (Fix))
 import Data.Function (on)
 import Data.Functor.Compose (Compose (Compose))
-import Data.List (groupBy, sortBy)
+import Data.List (groupBy, sort, sortBy)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.Ord (comparing)
 import Data.Text
@@ -14,6 +14,7 @@ import Data.Text
     isPrefixOf,
     pack,
     stripStart,
+    unpack,
   )
 import Data.Text.IO qualified as TIO
 import Nix.Expr.Types
@@ -42,6 +43,7 @@ import Prettyprinter
   )
 import Prettyprinter.Render.Text (renderStrict)
 import System.Environment (getArgs, lookupEnv)
+import System.Exit (exitFailure)
 import System.IO (hClose)
 import System.IO.Temp (withSystemTempFile)
 import Test.HUnit
@@ -51,22 +53,33 @@ import Test.HUnit
     assertFailure,
     runTestTT,
   )
+import Test.QuickCheck qualified as QC
 import Prelude
-  ( Bool,
+  ( Bool (False, True),
     Either (Left, Right),
     Eq ((==)),
     FilePath,
     IO,
+    Int,
     Maybe (Just),
     Show (show),
     String,
+    all,
     any,
     concatMap,
+    elem,
     fmap,
     fst,
     map,
     mapM_,
+    notElem,
+    otherwise,
+    pure,
     putStrLn,
+    reverse,
+    sequence,
+    unwords,
+    zip,
     ($),
     (&&),
     (++),
@@ -77,12 +90,12 @@ main :: IO ()
 main = do
   args <- getArgs
   debug <- lookupEnv "DEBUG"
+  propertyOnly <- lookupEnv "PROPERTY_TESTS"
   case debug of
-    Just "1" -> do
-      counts <- runTestTT getAllFormattingTests
-      if errors counts == 0 && failures counts == 0
-        then putStrLn "test ... ok"
-        else putStrLn "test ... failed"
+    Just "1" ->
+      case propertyOnly of
+        Just "1" -> runPropertyTests
+        _ -> runDebugTests
     _ ->
       mapM_
         ( \filePath -> do
@@ -171,6 +184,154 @@ makeFormattingTest testName input expectedOutput = TestCase $ do
         assertEqual testName expectedOutput formatted
       Left parseError ->
         assertFailure $ "Parse error in test '" ++ testName ++ "': " ++ show parseError
+formatText :: Text -> IO Text
+formatText input =
+  withSystemTempFile "property.nix" $ \tmpFile tmpHandle -> do
+    hClose tmpHandle
+    TIO.writeFile tmpFile input
+    parseResult <- parseNixFileLoc (Path tmpFile)
+    case parseResult of
+      Right expr -> do
+        writeFormattedFile tmpFile expr
+        TIO.readFile tmpFile
+      Left parseError ->
+        assertFailure ("Property fixture failed to parse: " ++ show parseError)
+runDebugTests :: IO ()
+runDebugTests = do
+  counts <- runTestTT getAllFormattingTests
+  propertySuccess <- quickCheckFormattingProperties
+  if errors counts == 0 && failures counts == 0 && propertySuccess
+    then putStrLn "test ... ok"
+    else exitFailure
+runPropertyTests :: IO ()
+runPropertyTests = do
+  propertySuccess <- quickCheckFormattingProperties
+  if propertySuccess
+    then putStrLn "property tests ... ok"
+    else exitFailure
+quickCheckFormattingProperties :: IO Bool
+quickCheckFormattingProperties = do
+  sortedListResult <- QC.quickCheckResult (QC.withMaxSuccess 100 prop_nonStringListsAreSorted)
+  stringOrderResult <- QC.quickCheckResult (QC.withMaxSuccess 100 prop_stringListsPreserveOrder)
+  attrSetResult <- QC.quickCheckResult (QC.withMaxSuccess 100 prop_attrSetsCanonicalizeByKeyOrder)
+  dottedCollapseResult <- QC.quickCheckResult (QC.withMaxSuccess 100 prop_dottedAssignmentsCollapseToCanonicalNestedSets)
+  pure (all isQuickCheckSuccess [sortedListResult, stringOrderResult, attrSetResult, dottedCollapseResult])
+isQuickCheckSuccess :: QC.Result -> Bool
+isQuickCheckSuccess QC.Success {} = True
+isQuickCheckSuccess _ = False
+prop_nonStringListsAreSorted :: QC.Property
+prop_nonStringListsAreSorted =
+  QC.forAll digitListGen $ \values ->
+    QC.ioProperty $ do
+      formatted <- formatText (renderNumberListInput values)
+      sortedFormatted <- formatText (renderNumberListInput (sort values))
+      pure (formatted == sortedFormatted)
+prop_stringListsPreserveOrder :: QC.Property
+prop_stringListsPreserveOrder =
+  QC.forAll simpleStringListGen $ \values ->
+    QC.ioProperty $ do
+      formatted <- formatText (renderStringListInput values)
+      pure (extractQuotedStrings formatted == values)
+prop_attrSetsCanonicalizeByKeyOrder :: QC.Property
+prop_attrSetsCanonicalizeByKeyOrder =
+  QC.forAll attrBindingListGen $ \bindings ->
+    QC.ioProperty $ do
+      formatted <- formatText (renderAttrSetInput bindings)
+      sortedFormatted <- formatText (renderAttrSetInput (sortBindings bindings))
+      pure (formatted == sortedFormatted)
+prop_dottedAssignmentsCollapseToCanonicalNestedSets :: QC.Property
+prop_dottedAssignmentsCollapseToCanonicalNestedSets =
+  QC.forAll nestedBindingSetGen $ \(rootKey, bindings) ->
+    QC.ioProperty $ do
+      dottedFormatted <- formatText (renderDottedAttrSetInput rootKey bindings)
+      nestedFormatted <- formatText (renderNestedAttrSetInput rootKey bindings)
+      pure (dottedFormatted == nestedFormatted)
+digitListGen :: QC.Gen [Int]
+digitListGen = QC.listOf1 (QC.chooseInt (0, 9))
+simpleStringGen :: QC.Gen String
+simpleStringGen =
+  QC.listOf1 (QC.elements (['a' .. 'z'] ++ ['0' .. '9']))
+simpleStringListGen :: QC.Gen [String]
+simpleStringListGen =
+  fmap dedupePreservingOrder (QC.listOf1 simpleStringGen)
+attrBindingListGen :: QC.Gen [(String, Int)]
+attrBindingListGen = do
+  keys <- fmap dedupePreservingOrder (QC.listOf1 attrKeyGen)
+  values <- sequence [QC.chooseInt (0, 9) | _ <- keys]
+  pure (zip keys values)
+nestedBindingSetGen :: QC.Gen (String, [(String, Int)])
+nestedBindingSetGen = do
+  rootKey <- attrKeyGen
+  bindings <- attrBindingListGen
+  pure (rootKey, bindings)
+attrKeyGen :: QC.Gen String
+attrKeyGen =
+  QC.suchThat
+    ( do
+        firstCharacter <- QC.elements ['a' .. 'z']
+        restCharacters <- QC.listOf (QC.elements (['a' .. 'z'] ++ ['0' .. '9']))
+        pure (firstCharacter : restCharacters)
+    )
+    (`notElem` nixReservedKeywords)
+nixReservedKeywords :: [String]
+nixReservedKeywords =
+  [ "assert",
+    "else",
+    "if",
+    "in",
+    "inherit",
+    "let",
+    "or",
+    "rec",
+    "then",
+    "with"
+  ]
+dedupePreservingOrder :: [String] -> [String]
+dedupePreservingOrder = go []
+  where
+    go :: [String] -> [String] -> [String]
+    go _seen [] = []
+    go seen (value : rest)
+      | value `elem` seen = go seen rest
+      | otherwise = value : go (seen ++ [value]) rest
+renderNumberListInput :: [Int] -> Text
+renderNumberListInput values =
+  pack ("[ " ++ unwords (map show values) ++ " ]")
+renderStringListInput :: [String] -> Text
+renderStringListInput values =
+  pack ("[ " ++ unwords (map show values) ++ " ]")
+renderAttrSetInput :: [(String, Int)] -> Text
+renderAttrSetInput bindings =
+  pack ("{ " ++ unwords (map renderBinding bindings) ++ " }")
+  where
+    renderBinding :: (String, Int) -> String
+    renderBinding (name, value) = name ++ " = " ++ show value ++ ";"
+renderDottedAttrSetInput :: String -> [(String, Int)] -> Text
+renderDottedAttrSetInput rootKey bindings =
+  pack ("{ " ++ unwords (map renderBinding bindings) ++ " }")
+  where
+    renderBinding :: (String, Int) -> String
+    renderBinding (name, value) = rootKey ++ "." ++ name ++ " = " ++ show value ++ ";"
+renderNestedAttrSetInput :: String -> [(String, Int)] -> Text
+renderNestedAttrSetInput rootKey bindings =
+  pack ("{ " ++ rootKey ++ " = { " ++ unwords (map renderBinding bindings) ++ " }; }")
+  where
+    renderBinding :: (String, Int) -> String
+    renderBinding (name, value) = name ++ " = " ++ show value ++ ";"
+sortBindings :: [(String, Int)] -> [(String, Int)]
+sortBindings = sortBy (comparing fst)
+extractQuotedStrings :: Text -> [String]
+extractQuotedStrings = go [] [] False . unpack
+  where
+    go :: [String] -> String -> Bool -> String -> [String]
+    go collected _currentToken _insideQuotes [] = reverse collected
+    go collected currentToken insideQuotes (character : rest)
+      | character == '"' =
+          if insideQuotes
+            then go (reverse currentToken : collected) [] False rest
+            else go collected [] True rest
+      | insideQuotes = go collected (character : currentToken) True rest
+      | otherwise = go collected currentToken False rest
 getAllFormattingTests :: Test
 getAllFormattingTests =
   TestList

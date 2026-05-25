@@ -11,6 +11,7 @@ executable nix-alphabetize
     , hnix
     , HUnit
     , prettyprinter
+    , QuickCheck
     , temporary
     , text
   ghc-options:   -O2 -Weverything -Werror -threaded

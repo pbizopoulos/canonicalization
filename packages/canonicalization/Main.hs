@@ -46,6 +46,7 @@ import System.FilePath.Posix (splitDirectories, takeBaseName, takeDirectory, tak
 import System.IO (hClose, openTempFile)
 import System.Process (readProcessWithExitCode)
 import Test.HUnit (Counts (errors, failures), Test (TestCase, TestList), assertEqual, runTestTT)
+import Test.QuickCheck qualified as QC
 import Text.Regex.TDFA ((=~))
 import Prelude
 defaultAllowedKeys :: Set.Set T.Text
@@ -209,9 +210,13 @@ data PackageCheck = PackageCheck
 main :: IO ()
 main = do
   debug <- lookupEnv "DEBUG"
+  propertyOnly <- lookupEnv "PROPERTY_TESTS"
   args <- getArgs
   case debug of
-    Just "1" -> runDebugTests
+    Just "1" ->
+      case propertyOnly of
+        Just "1" -> runPropertyTests
+        _ -> runDebugTests
     _ -> runCli args
 runCli :: [String] -> IO ()
 runCli args =
@@ -1434,9 +1439,84 @@ extractBindings bindings =
 runDebugTests :: IO ()
 runDebugTests = do
   counts <- runTestTT debugTests
-  if errors counts == 0 && failures counts == 0
+  propertySuccess <- quickCheckDebugProperties
+  if errors counts == 0 && failures counts == 0 && propertySuccess
     then putStrLn "test ... ok"
     else exitFailure
+runPropertyTests :: IO ()
+runPropertyTests = do
+  propertySuccess <- quickCheckDebugProperties
+  if propertySuccess
+    then putStrLn "property tests ... ok"
+    else exitFailure
+quickCheckDebugProperties :: IO Bool
+quickCheckDebugProperties = do
+  trimResult <- QC.quickCheckResult (QC.withMaxSuccess 100 prop_trimStringIdempotent)
+  gitmoduleParseResult <- QC.quickCheckResult (QC.withMaxSuccess 100 prop_parseGitmodulePathsPreservesFirstOccurrences)
+  gitmoduleRepoAcceptanceResult <- QC.quickCheckResult (QC.withMaxSuccess 100 prop_buildGitmoduleRepoAcceptsGoStylePaths)
+  gitmoduleRepoRejectionResult <- QC.quickCheckResult (QC.withMaxSuccess 100 prop_buildGitmoduleRepoRejectsMalformedPaths)
+  pure (all isQuickCheckSuccess [trimResult, gitmoduleParseResult, gitmoduleRepoAcceptanceResult, gitmoduleRepoRejectionResult])
+isQuickCheckSuccess :: QC.Result -> Bool
+isQuickCheckSuccess QC.Success {} = True
+isQuickCheckSuccess _ = False
+prop_trimStringIdempotent :: String -> Bool
+prop_trimStringIdempotent source =
+  trimString (trimString source) == trimString source
+prop_parseGitmodulePathsPreservesFirstOccurrences :: QC.Property
+prop_parseGitmodulePathsPreservesFirstOccurrences =
+  QC.forAll gitmodulePathEntriesGen $ \paths ->
+    let rendered =
+          concatMap
+            ( \pathEntry ->
+                "[submodule \"example\"]\n"
+                  ++ "  path =  "
+                  ++ pathEntry
+                  ++ "  \n"
+                  ++ "  url = https://example.test/repo.git\n"
+            )
+            paths
+            ++ "ignore = this-line\n"
+     in parseGitmodulePaths rendered == nub paths
+prop_buildGitmoduleRepoAcceptsGoStylePaths :: QC.Property
+prop_buildGitmoduleRepoAcceptsGoStylePaths =
+  QC.forAll goStylePathGen $ \pathEntry ->
+    let repo = buildGitmoduleRepo "/home/test" pathEntry
+        parts = splitDirectories pathEntry
+     in case parts of
+          [hostKey, userKey, repoKey] ->
+            gitmoduleRepoCompatible repo
+              && gitmoduleRepoPathEntry repo == pathEntry
+              && gitmoduleRepoPath repo == "/home/test" </> pathEntry
+              && gitmoduleRepoHost repo == hostKey
+              && gitmoduleRepoUser repo == userKey
+              && gitmoduleRepoName repo == repoKey
+          _ -> False
+prop_buildGitmoduleRepoRejectsMalformedPaths :: QC.Property
+prop_buildGitmoduleRepoRejectsMalformedPaths =
+  QC.forAll malformedPathGen $ \pathEntry ->
+    let repo = buildGitmoduleRepo "/home/test" pathEntry
+     in not (gitmoduleRepoCompatible repo) && gitmoduleRepoPathEntry repo == pathEntry
+gitmodulePathEntriesGen :: QC.Gen [FilePath]
+gitmodulePathEntriesGen = QC.listOf goStylePathGen
+goStylePathGen :: QC.Gen FilePath
+goStylePathGen = do
+  hostKey <- hostSegmentGen
+  userKey <- pathSegmentGen "-"
+  repoKey <- pathSegmentGen "-_"
+  pure (intercalate "/" [hostKey, userKey, repoKey])
+hostSegmentGen :: QC.Gen String
+hostSegmentGen = do
+  firstCharacter <- QC.elements (['a' .. 'z'] ++ ['0' .. '9'])
+  restCharacters <- QC.listOf (QC.elements (['a' .. 'z'] ++ ['0' .. '9'] ++ "."))
+  pure (firstCharacter : restCharacters)
+malformedPathGen :: QC.Gen FilePath
+malformedPathGen = do
+  segmentCount <- QC.elements [0, 1, 2, 4, 5]
+  segments <- QC.vectorOf segmentCount (pathSegmentGen "-_.")
+  pure (intercalate "/" segments)
+pathSegmentGen :: [Char] -> QC.Gen String
+pathSegmentGen extraCharacters =
+  QC.listOf1 (QC.elements (['a' .. 'z'] ++ ['0' .. '9'] ++ extraCharacters))
 debugTests :: Test
 debugTests =
   TestList
