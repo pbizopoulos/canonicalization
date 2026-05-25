@@ -17,6 +17,4 @@ executable canonicalization
     , process
     , regex-tdfa
     , text
-    , vty
-    , vty-crossplatform
   ghc-options:   -O2 -Weverything -Werror -threaded
