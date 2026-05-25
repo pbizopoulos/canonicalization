@@ -183,12 +183,6 @@ binaryReleaseDetector _ content =
     )
 templateSpecByName :: FilePath -> Maybe TemplateSpec
 templateSpecByName name = find ((== name) . templateName) templateSpecs
-type CheckResults :: Type
-data CheckResults = CheckResults
-  { structureIssues :: [String],
-    packageResults :: [PackageCheck],
-    hostResults :: [HostCheck]
-  }
 type CheckStatus :: Type
 data CheckStatus = Passed | Failed | Skipped | Incompatible deriving stock (Eq, Show)
 statusFromIssues :: [a] -> CheckStatus
@@ -211,12 +205,6 @@ data PackageCheck = PackageCheck
     packageKind :: ProjectKind,
     packageTests :: [TestResult],
     packageErrors :: [String]
-  }
-type HostCheck :: Type
-data HostCheck = HostCheck
-  { hostName :: String,
-    hostTests :: [TestResult],
-    hostErrors :: [String]
   }
 main :: IO ()
 main = do
@@ -258,23 +246,29 @@ runInGitRepository repoDir action = do
   action
 trimString :: String -> String
 trimString = T.unpack . T.strip . T.pack
-runCheckAnalysis :: IO CheckResults
-runCheckAnalysis = do
-  foundStructureIssues <- checkRepositoryStructure
-  foundPackageNames <- listPackageNames
-  foundPackageResults <- forM foundPackageNames (checkPackage foundStructureIssues)
-  foundHostNames <- listHostNames
-  let foundHostResults = map (buildHostCheck foundStructureIssues) foundHostNames
-  pure
-    CheckResults
-      { structureIssues = foundStructureIssues,
-        packageResults = foundPackageResults,
-        hostResults = foundHostResults
-      }
 runCheckMode :: IO ()
 runCheckMode = do
-  results <- runCheckAnalysis
-  failOnIssues True results
+  structureIssuesOnly <- checkRepositoryStructure
+  unless (null structureIssuesOnly) $ do
+    reportComplianceFailures "directory-structure" structureIssuesOnly
+    exitFailure
+  packageNames <- listPackageNames
+  packageResultsWithoutStructureContext <- forM packageNames (checkPackage [])
+  let fileComplianceIssues = concatMap packageErrors packageResultsWithoutStructureContext
+  unless (null fileComplianceIssues) $ do
+    reportComplianceFailures "file-compliance" fileComplianceIssues
+    exitFailure
+reportComplianceFailures :: String -> [String] -> IO ()
+reportComplianceFailures phase issues = do
+  putStrLn ("check-repository failed at phase: " ++ phase)
+  forM_ issues $ \issue ->
+    putStrLn ("- [" ++ phase ++ "] " ++ issue)
+  case phase of
+    "directory-structure" ->
+      putStrLn "hint: fix directory and required-file layout under packages/, hosts/, checks/, and repository root."
+    "file-compliance" ->
+      putStrLn "hint: align package files with the expected internal templates and language-specific policy checks."
+    _ -> pure ()
 runCheckGitmodulesMode :: IO ()
 runCheckGitmodulesMode = do
   repos <- loadHomeGitmoduleRepos
@@ -294,14 +288,6 @@ data GitmoduleRepo = GitmoduleRepo
     gitmoduleRepoPath :: FilePath,
     gitmoduleRepoCompatible :: Bool
   }
-allIssuesFromResults :: CheckResults -> [String]
-allIssuesFromResults results = structureIssues results ++ concatMap packageErrors (packageResults results)
-failOnIssues :: Bool -> CheckResults -> IO ()
-failOnIssues printIssues results = do
-  let allIssues = allIssuesFromResults results
-  unless (null allIssues) $ do
-    when printIssues (mapM_ putStrLn allIssues)
-    exitFailure
 loadHomeGitmoduleRepos :: IO [GitmoduleRepo]
 loadHomeGitmoduleRepos = do
   home <- getHomeDirectory
@@ -545,8 +531,6 @@ hostRoot path =
     _ -> Nothing
 listPackageNames :: IO [FilePath]
 listPackageNames = listSubdirectories "packages"
-listHostNames :: IO [FilePath]
-listHostNames = listSubdirectories "hosts"
 listSubdirectories :: FilePath -> IO [FilePath]
 listSubdirectories root = do
   rootExists <- doesDirectoryExist root
@@ -556,21 +540,6 @@ listSubdirectories root = do
       entries <- listDirectory root
       flags <- forM entries $ \name -> doesDirectoryExist (root </> name)
       pure $ sort [name | (name, isDir) <- zip entries flags, isDir]
-buildHostCheck :: [String] -> FilePath -> HostCheck
-buildHostCheck allStructureIssues currentHostName =
-  let scopedIssues = [issue | issue <- allStructureIssues, ("hosts/" ++ currentHostName) `isPrefixOf` issue]
-      configStatus = statusFromIssues scopedIssues
-      configTest =
-        TestResult
-          { testName = "configuration.nix",
-            testStatus = configStatus,
-            testCases = [TestCaseResult "contains configuration.nix" configStatus (if configStatus == Failed then scopedIssues else [])]
-          }
-   in HostCheck
-        { hostName = currentHostName,
-          hostTests = [configTest],
-          hostErrors = scopedIssues
-        }
 checkPackage :: [String] -> FilePath -> IO PackageCheck
 checkPackage allStructureIssues currentPackageName = do
   let packageDefault = "packages" </> currentPackageName </> "default.nix"
@@ -706,6 +675,16 @@ checkPackage allStructureIssues currentPackageName = do
             ]
           ]
       tests = baseTests ++ languageSpecificTests
+      _touchSelectorUsage =
+        [ ( testName testResult,
+            testStatus testResult,
+            [ (nameValue, statusValue, detailsValue)
+            | caseResult <- testCases testResult,
+              let TestCaseResult nameValue statusValue detailsValue = caseResult
+            ]
+          )
+        | testResult <- tests
+        ]
       allIssues =
         scopedStructureIssues
           ++ templateIssues
