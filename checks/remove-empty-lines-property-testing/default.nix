@@ -21,6 +21,6 @@ pkgs.runCommand "${checkName}"
     substituteInPlace "$PWD/workspace/.cargo/config.toml" \
       --replace-fail "@vendor@" "${cargoDeps}"
     cd "$PWD/workspace"
-    cargo test --locked quickcheck_
+    cargo test --locked
     touch "$out"
   ''
