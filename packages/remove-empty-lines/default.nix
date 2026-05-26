@@ -47,7 +47,7 @@ let
 in
 pkgs.rustPlatform.buildRustPackage {
   inherit pname;
-  cargoHash = "sha256-dWEh4F05gOYc3kpJAzSUKxSpp7ZuLaOTA6Mb4tClYTc=";
+  cargoHash = "sha256-4Tpc7xOULVqqUzlg2G581bdTxP6SaHR7n9vdq8rqxX0=";
   doInstallCheck = pkgs.stdenv.isLinux;
   env = {
     RUSTDOCFLAGS = "-D warnings";

@@ -38,27 +38,57 @@ fn remove_empty_lines(path: &Path) -> Result<()> {
     if content_inspector::inspect(&data).is_binary() {
         return Ok(());
     }
-    let reader = BufReader::new(&data[..]);
-    let mut new_lines = Vec::new();
-    for line_result in reader.lines() {
-        let line = line_result?;
-        if !line.trim().is_empty() {
-            new_lines.push(line);
-        }
-    }
-    let mut output = Vec::new();
-    for line in new_lines {
-        writeln!(output, "{line}")?;
-    }
+    let output = strip_empty_lines_from_bytes(&data)?;
     if output != data {
         fs::write(path, output).with_context(|| format!("Failed to write file: {path_display}"))?;
     }
     Ok(())
 }
+fn strip_empty_lines_from_bytes(data: &[u8]) -> Result<Vec<u8>> {
+    let reader = BufReader::new(data);
+    let mut output = Vec::new();
+    for line_result in reader.lines() {
+        let line = line_result?;
+        if !line.trim().is_empty() {
+            writeln!(output, "{line}")?;
+        }
+    }
+    Ok(output)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quickcheck::{Arbitrary, Gen, QuickCheck, TestResult};
     use std::env;
+    #[derive(Clone, Debug)]
+    struct LogicalLine(String);
+    impl Arbitrary for LogicalLine {
+        fn arbitrary(g: &mut Gen) -> Self {
+            let line = String::arbitrary(g)
+                .chars()
+                .filter(|character| *character != '\n' && *character != '\r')
+                .collect();
+            Self(line)
+        }
+    }
+    fn render_lines(lines: &[LogicalLine]) -> Vec<u8> {
+        let mut rendered = Vec::new();
+        for line in lines {
+            rendered.extend_from_slice(line.0.as_bytes());
+            rendered.push(b'\n');
+        }
+        rendered
+    }
+    fn expected_non_empty_lines(lines: &[LogicalLine]) -> Vec<u8> {
+        let mut rendered = Vec::new();
+        for line in lines {
+            if !line.0.trim().is_empty() {
+                rendered.extend_from_slice(line.0.as_bytes());
+                rendered.push(b'\n');
+            }
+        }
+        rendered
+    }
     #[test]
     fn test_main_and_process_root_path() -> Result<()> {
         use tempfile::tempdir;
@@ -84,5 +114,36 @@ mod tests {
         let content_binary = fs::read(&binary_path)?;
         assert_eq!(content_binary, vec![0, 15, 255, 0, 1, 2, 3]);
         Ok(())
+    }
+    #[test]
+    fn quickcheck_strip_empty_lines_matches_filtered_sequence() {
+        fn property(lines: Vec<LogicalLine>) -> TestResult {
+            let input = render_lines(&lines);
+            match strip_empty_lines_from_bytes(&input) {
+                Ok(actual) => TestResult::from_bool(actual == expected_non_empty_lines(&lines)),
+                Err(_) => TestResult::error("strip_empty_lines_from_bytes returned an error"),
+            }
+        }
+        QuickCheck::new()
+            .tests(100)
+            .quickcheck(property as fn(Vec<LogicalLine>) -> TestResult);
+    }
+    #[test]
+    fn quickcheck_strip_empty_lines_is_idempotent() {
+        fn property(lines: Vec<LogicalLine>) -> TestResult {
+            let input = render_lines(&lines);
+            match strip_empty_lines_from_bytes(&input) {
+                Ok(first_pass) => match strip_empty_lines_from_bytes(&first_pass) {
+                    Ok(second_pass) => TestResult::from_bool(first_pass == second_pass),
+                    Err(_) => {
+                        TestResult::error("second strip_empty_lines_from_bytes returned an error")
+                    }
+                },
+                Err(_) => TestResult::error("first strip_empty_lines_from_bytes returned an error"),
+            }
+        }
+        QuickCheck::new()
+            .tests(100)
+            .quickcheck(property as fn(Vec<LogicalLine>) -> TestResult);
     }
 }
