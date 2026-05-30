@@ -184,28 +184,28 @@ binaryReleaseDetector _ content =
     )
 templateSpecByName :: FilePath -> Maybe TemplateSpec
 templateSpecByName name = find ((== name) . templateName) templateSpecs
-type CheckStatus :: Type
-data CheckStatus = Passed | Failed | Skipped | Incompatible deriving stock (Eq, Show)
-statusFromIssues :: [a] -> CheckStatus
-statusFromIssues = \case [] -> Passed; _ -> Failed
-type TestResult :: Type
-data TestResult = TestResult
-  { testName :: String,
-    testStatus :: CheckStatus,
-    testCases :: [TestCaseResult]
+type CheckOutcome :: Type
+data CheckOutcome = CheckPassed | CheckFailed | CheckSkipped | CheckIncompatible deriving stock (Eq, Show)
+outcomeFromIssues :: [a] -> CheckOutcome
+outcomeFromIssues = \case [] -> CheckPassed; _ -> CheckFailed
+type PackageTest :: Type
+data PackageTest = PackageTest
+  { packageTestName :: String,
+    packageTestOutcome :: CheckOutcome,
+    packageTestCases :: [PackageTestCase]
   }
-type TestCaseResult :: Type
-data TestCaseResult
-  = TestCaseResult
-  { testCaseName :: String,
-    testCaseStatus :: CheckStatus,
-    testCaseIssues :: [String]
+type PackageTestCase :: Type
+data PackageTestCase
+  = PackageTestCase
+  { packageTestCaseName :: String,
+    packageTestCaseOutcome :: CheckOutcome,
+    packageTestCaseIssues :: [String]
   }
 type PackageCheck :: Type
 data PackageCheck = PackageCheck
   { packageCheckName :: String,
     packageCheckKind :: PackageKind,
-    packageCheckTests :: [TestResult],
+    packageCheckTests :: [PackageTest],
     packageCheckIssues :: [String]
   }
 main :: IO ()
@@ -277,56 +277,56 @@ reportComplianceFailures phase issues = do
     _ -> pure ()
 runCheckGitModulesMode :: IO ()
 runCheckGitModulesMode = do
-  repositories <- loadHomeGitModuleRepos
-  let invalidPathEntries = [gitModuleRepoPathEntry repository | repository <- repositories, not (gitModuleRepoCompatible repository)]
+  repositories <- loadHomeGitModuleRepositories
+  let invalidPathEntries = [gitModuleRepositoryPathEntry repository | repository <- repositories, not (gitModuleRepositoryCompatible repository)]
   if null invalidPathEntries
     then putStrLn "all .gitmodules path entries comply with go-style naming (<host>/<owner>/<repo>)"
     else do
       forM_ invalidPathEntries $ \entry ->
         putStrLn (entry ++ ": must be exactly <host>/<owner>/<repo>")
       exitFailure
-type GitModuleRepo :: Type
-data GitModuleRepo = GitModuleRepo
-  { gitModuleRepoHost :: String,
-    gitModuleRepoUser :: String,
-    gitModuleRepoName :: String,
-    gitModuleRepoPathEntry :: FilePath,
-    gitModuleRepoPath :: FilePath,
-    gitModuleRepoCompatible :: Bool
+type GitModuleRepository :: Type
+data GitModuleRepository = GitModuleRepository
+  { gitModuleRepositoryHost :: String,
+    gitModuleRepositoryOwner :: String,
+    gitModuleRepositoryName :: String,
+    gitModuleRepositoryPathEntry :: FilePath,
+    gitModuleRepositoryPath :: FilePath,
+    gitModuleRepositoryCompatible :: Bool
   }
-loadHomeGitModuleRepos :: IO [GitModuleRepo]
-loadHomeGitModuleRepos = do
-  home <- getHomeDirectory
-  let gitmodulesPath = home </> ".gitmodules"
-  fileExists <- doesFileExist gitmodulesPath
+loadHomeGitModuleRepositories :: IO [GitModuleRepository]
+loadHomeGitModuleRepositories = do
+  homeDirectory <- getHomeDirectory
+  let gitmodulesFilePath = homeDirectory </> ".gitmodules"
+  fileExists <- doesFileExist gitmodulesFilePath
   unless fileExists $ do
-    putStrLn ("missing file: " ++ gitmodulesPath)
+    putStrLn ("missing file: " ++ gitmodulesFilePath)
     exitFailure
-  contents <- T.unpack <$> TIO.readFile gitmodulesPath
-  let paths = parseGitModulePaths contents
-  pure (map (buildGitModuleRepo home) paths)
-buildGitModuleRepo :: FilePath -> FilePath -> GitModuleRepo
-buildGitModuleRepo home pathEntry =
-  let repositoryPath = home </> pathEntry
-      parts = filter (`notElem` [".", ""]) (splitDirectories pathEntry)
-   in case parts of
-        [hostKey, userKey, repoKey] ->
-          GitModuleRepo
-            { gitModuleRepoHost = hostKey,
-              gitModuleRepoUser = userKey,
-              gitModuleRepoName = repoKey,
-              gitModuleRepoPathEntry = pathEntry,
-              gitModuleRepoPath = repositoryPath,
-              gitModuleRepoCompatible = True
+  gitmodulesContents <- T.unpack <$> TIO.readFile gitmodulesFilePath
+  let gitModulePathEntries = parseGitModulePaths gitmodulesContents
+  pure (map (buildGitModuleRepository homeDirectory) gitModulePathEntries)
+buildGitModuleRepository :: FilePath -> FilePath -> GitModuleRepository
+buildGitModuleRepository homeDirectory gitModulePathEntry =
+  let repositoryPath = homeDirectory </> gitModulePathEntry
+      pathSegments = filter (`notElem` [".", ""]) (splitDirectories gitModulePathEntry)
+   in case pathSegments of
+        [hostKey, ownerKey, repositoryKey] ->
+          GitModuleRepository
+            { gitModuleRepositoryHost = hostKey,
+              gitModuleRepositoryOwner = ownerKey,
+              gitModuleRepositoryName = repositoryKey,
+              gitModuleRepositoryPathEntry = gitModulePathEntry,
+              gitModuleRepositoryPath = repositoryPath,
+              gitModuleRepositoryCompatible = True
             }
         _ ->
-          GitModuleRepo
-            { gitModuleRepoHost = "",
-              gitModuleRepoUser = "",
-              gitModuleRepoName = takeFileName pathEntry,
-              gitModuleRepoPathEntry = pathEntry,
-              gitModuleRepoPath = repositoryPath,
-              gitModuleRepoCompatible = False
+          GitModuleRepository
+            { gitModuleRepositoryHost = "",
+              gitModuleRepositoryOwner = "",
+              gitModuleRepositoryName = takeFileName gitModulePathEntry,
+              gitModuleRepositoryPathEntry = gitModulePathEntry,
+              gitModuleRepositoryPath = repositoryPath,
+              gitModuleRepositoryCompatible = False
             }
 parseGitModulePaths :: String -> [FilePath]
 parseGitModulePaths content =
@@ -604,94 +604,94 @@ checkPackage repositoryStructureIssues packageName = do
   pythonUnitTestNames <- discoverPythonUnitTestNames packageName packageKind
   haskellUnitTestNames <- discoverHaskellUnitTestNames packageName packageKind
   rustUnitTestNames <- discoverRustUnitTestNames packageName packageKind
-  let cargoStatus = statusFromIssues cargoIssues
-      cabalStatus = statusFromIssues cabalIssues
-      makeTestCaseResult label status issues =
-        TestCaseResult
+  let cargoOutcome = outcomeFromIssues cargoIssues
+      cabalOutcome = outcomeFromIssues cabalIssues
+      makePackageTestCase label outcome issues =
+        PackageTestCase
           label
-          status
-          (if status == Failed then issues else [])
-      makeTestResult name status label issues =
-        TestResult
+          outcome
+          (if outcome == CheckFailed then issues else [])
+      makePackageTest name outcome label issues =
+        PackageTest
           name
-          status
-          [makeTestCaseResult label status issues]
+          outcome
+          [makePackageTestCase label outcome issues]
       defaultNixIssues =
         [issue | issue <- scopedStructureIssues, "/default.nix" `isInfixOf` issue]
           ++ templateIssues
-      defaultNixStatus =
+      defaultNixOutcome =
         if packageDefaultExists && null defaultNixIssues
-          then Passed
-          else Failed
-      pythonStatus = if packageKind `elem` [PythonPackage, PythonLaTeXPackage] then statusFromIssues pythonDebugIssues else Skipped
-      haskellStatus = if packageKind == HaskellPackage then statusFromIssues haskellDebugIssues else Skipped
-      rustStatus = if packageKind == RustPackage then statusFromIssues rustDebugIssues else Skipped
-      baseTests =
-        [ TestResult
+          then CheckPassed
+          else CheckFailed
+      pythonOutcome = if packageKind `elem` [PythonPackage, PythonLaTeXPackage] then outcomeFromIssues pythonDebugIssues else CheckSkipped
+      haskellOutcome = if packageKind == HaskellPackage then outcomeFromIssues haskellDebugIssues else CheckSkipped
+      rustOutcome = if packageKind == RustPackage then outcomeFromIssues rustDebugIssues else CheckSkipped
+      basePackageTests =
+        [ PackageTest
             "directory structure"
-            (statusFromIssues scopedStructureIssues)
+            (outcomeFromIssues scopedStructureIssues)
             [],
-          makeTestResult "default.nix" defaultNixStatus "matches template and policy" defaultNixIssues
+          makePackageTest "default.nix" defaultNixOutcome "matches template and policy" defaultNixIssues
         ]
-      languageSpecificTests =
+      languageSpecificPackageTests =
         concat
           [ if packageKind == RustPackage
               then
-                [ makeTestResult "Cargo.toml" cargoStatus "matches Cargo.toml conventions" cargoIssues,
-                  TestResult
+                [ makePackageTest "Cargo.toml" cargoOutcome "matches Cargo.toml conventions" cargoIssues,
+                  PackageTest
                     "src/main.rs"
-                    rustStatus
-                    ( makeTestCaseResult
+                    rustOutcome
+                    ( makePackageTestCase
                         "supports DEBUG test execution"
-                        rustStatus
+                        rustOutcome
                         rustDebugIssues
-                        : [TestCaseResult name Skipped [] | name <- rustUnitTestNames]
+                        : [PackageTestCase name CheckSkipped [] | name <- rustUnitTestNames]
                     )
                 ]
               else [],
             if packageKind == HaskellPackage
               then
-                [ makeTestResult (packageName ++ ".cabal") cabalStatus "matches Cabal conventions" cabalIssues,
-                  TestResult
+                [ makePackageTest (packageName ++ ".cabal") cabalOutcome "matches Cabal conventions" cabalIssues,
+                  PackageTest
                     "Main.hs"
-                    haskellStatus
-                    ( makeTestCaseResult
+                    haskellOutcome
+                    ( makePackageTestCase
                         "supports DEBUG test execution"
-                        haskellStatus
+                        haskellOutcome
                         haskellDebugIssues
-                        : [ TestCaseResult
-                              testName'
-                              Skipped
+                        : [ PackageTestCase
+                              discoveredHaskellTestName
+                              CheckSkipped
                               []
-                          | testName' <- if null haskellUnitTestNames then ["No named HUnit test labels discovered"] else haskellUnitTestNames
+                          | discoveredHaskellTestName <- if null haskellUnitTestNames then ["No named HUnit test labels discovered"] else haskellUnitTestNames
                           ]
                     )
                 ]
               else [],
-            [ TestResult
+            [ PackageTest
                 "main.py"
-                pythonStatus
-                ( makeTestCaseResult
+                pythonOutcome
+                ( makePackageTestCase
                     "supports DEBUG test execution"
-                    pythonStatus
+                    pythonOutcome
                     pythonDebugIssues
-                    : [TestCaseResult name Skipped [] | name <- pythonUnitTestNames]
+                    : [PackageTestCase name CheckSkipped [] | name <- pythonUnitTestNames]
                 )
             | packageKind `elem` [PythonPackage, PythonLaTeXPackage]
             ]
           ]
-      tests = baseTests ++ languageSpecificTests
+      packageTests = basePackageTests ++ languageSpecificPackageTests
       _forcePackageCheckSelectorUse =
-        [ ( testName testResult,
-            testStatus testResult,
-            [ (nameValue, statusValue, detailsValue)
-            | caseResult <- testCases testResult,
-              let nameValue = testCaseName caseResult,
-              let statusValue = testCaseStatus caseResult,
-              let detailsValue = testCaseIssues caseResult
+        [ ( packageTestName packageTest,
+            packageTestOutcome packageTest,
+            [ (nameValue, outcomeValue, issuesValue)
+            | packageTestCase <- packageTestCases packageTest,
+              let nameValue = packageTestCaseName packageTestCase,
+              let outcomeValue = packageTestCaseOutcome packageTestCase,
+              let issuesValue = packageTestCaseIssues packageTestCase
             ]
           )
-        | testResult <- tests
+        | packageTest <- packageTests
         ]
       packageIssues =
         scopedStructureIssues
@@ -705,7 +705,7 @@ checkPackage repositoryStructureIssues packageName = do
     PackageCheck
       { packageCheckName = packageName,
         packageCheckKind = packageKind,
-        packageCheckTests = tests,
+        packageCheckTests = packageTests,
         packageCheckIssues = packageIssues
       }
 detectPackageKindForPackage :: FilePath -> IO PackageKind
@@ -1163,7 +1163,7 @@ checkCargoToml packageName = do
                   )
           ]
 normalizeCargoTomlForTightness :: FilePath -> T.Text -> T.Text
-normalizeCargoTomlForTightness packageName contents =
+normalizeCargoTomlForTightness packageName gitmodulesContents =
   let step (currentHeader, acc) sourceLine =
         let stripped = T.strip sourceLine
          in if isTomlSectionHeader stripped
@@ -1177,7 +1177,7 @@ normalizeCargoTomlForTightness packageName contents =
                 Just "[package]" | isNameLine stripped -> (currentHeader, acc ++ [nameLine])
                 Just "[[bin]]" | isNameLine stripped -> (currentHeader, acc ++ [nameLine])
                 _ -> (currentHeader, acc ++ [stripped])
-      (_, normalizedLines) = foldl' step (Nothing, []) (T.lines contents)
+      (_, normalizedLines) = foldl' step (Nothing, []) (T.lines gitmodulesContents)
       nameLine = "name = \"" <> T.pack packageName <> "\""
    in T.unlines normalizedLines
 isDependencyHeader :: T.Text -> Bool
@@ -1193,9 +1193,9 @@ isTargetDependenciesHeader stripped =
 isNameLine :: T.Text -> Bool
 isNameLine stripped = "name = \"" `T.isPrefixOf` stripped
 extractTomlSection :: T.Text -> T.Text -> T.Text
-extractTomlSection sectionName contents =
+extractTomlSection sectionName gitmodulesContents =
   let sectionHeader = "[" <> sectionName <> "]"
-      linesOfFile = T.lines contents
+      linesOfFile = T.lines gitmodulesContents
       sectionStart = dropWhile (\line -> T.strip line /= sectionHeader) linesOfFile
       sectionBody = drop 1 sectionStart
    in T.unlines (takeWhile (not . isTomlSectionHeader . T.strip) sectionBody)
@@ -1238,7 +1238,7 @@ checkCabalFile packageName = do
                   )
           ]
 normalizeCabalForTightness :: FilePath -> T.Text -> T.Text
-normalizeCabalForTightness packageName contents =
+normalizeCabalForTightness packageName gitmodulesContents =
   let step (inBuildDepends, acc) sourceLine =
         let stripped = T.strip sourceLine
             normalized = normalizeCabalLine packageName stripped
@@ -1256,7 +1256,7 @@ normalizeCabalForTightness packageName contents =
                     if T.null stripped
                       then (False, acc)
                       else (False, acc ++ [normalized])
-      (_, normalizedLines) = foldl' step (False, []) (T.lines contents)
+      (_, normalizedLines) = foldl' step (False, []) (T.lines gitmodulesContents)
    in T.unlines normalizedLines
 normalizeCabalLine :: FilePath -> T.Text -> T.Text
 normalizeCabalLine packageName stripped
@@ -1264,9 +1264,9 @@ normalizeCabalLine packageName stripped
   | "executable " `T.isPrefixOf` stripped = "executable " <> T.pack packageName
   | otherwise = stripped
 lookupCabalField :: T.Text -> T.Text -> Maybe T.Text
-lookupCabalField field contents =
+lookupCabalField field gitmodulesContents =
   let fieldPrefix = field <> ":"
-      matchingFieldLine = listToMaybe [T.strip line | line <- T.lines contents, fieldPrefix `T.isPrefixOf` T.strip line]
+      matchingFieldLine = listToMaybe [T.strip line | line <- T.lines gitmodulesContents, fieldPrefix `T.isPrefixOf` T.strip line]
    in do
         line <- matchingFieldLine
         value <- T.stripPrefix fieldPrefix line
@@ -1276,7 +1276,7 @@ compareWithTemplate packageName packageDefaultPath templateDefault allowedKeys t
   parsedPackageExpr <- parseNixExprFromFile packageDefaultPath
   parsedTemplateExpr <-
     case templateOverrideContents of
-      Just contents -> parseNixExprFromText contents
+      Just gitmodulesContents -> parseNixExprFromText gitmodulesContents
       Nothing -> parseNixExprFromFile templateDefault
   case (parsedPackageExpr, parsedTemplateExpr) of
     (Left parseError, _) ->
@@ -1293,9 +1293,9 @@ compareWithTemplate packageName packageDefaultPath templateDefault allowedKeys t
               normalizedPackage
               normalizedTemplate
 parseNixExprFromText :: T.Text -> IO (Either String NExprLoc)
-parseNixExprFromText contents = do
+parseNixExprFromText gitmodulesContents = do
   (temporaryPath, handle) <- openTempFile "/tmp" "check-repository-template-override.nix"
-  TIO.hPutStr handle contents
+  TIO.hPutStr handle gitmodulesContents
   hClose handle
   parseNixExprFromFile temporaryPath
     `finally` removeFileIfExists temporaryPath
@@ -1441,9 +1441,9 @@ extractBindings bindings =
   ]
 runDebugTests :: IO ()
 runDebugTests = do
-  counts <- runTestTT debugTests
+  hunitCounts <- runTestTT debugTests
   propertySuccess <- quickCheckDebugProperties
-  if errors counts == 0 && failures counts == 0 && propertySuccess
+  if errors hunitCounts == 0 && failures hunitCounts == 0 && propertySuccess
     then putStrLn "test ... ok"
     else exitFailure
 runPropertyTests :: IO ()
@@ -1456,9 +1456,9 @@ quickCheckDebugProperties :: IO Bool
 quickCheckDebugProperties = do
   trimResult <- QC.quickCheckResult (QC.withMaxSuccess 100 prop_trimStringIdempotent)
   gitModuleParseResult <- QC.quickCheckResult (QC.withMaxSuccess 100 prop_parseGitModulePathsPreservesFirstOccurrences)
-  gitModuleRepoAcceptanceResult <- QC.quickCheckResult (QC.withMaxSuccess 100 prop_buildGitModuleRepoAcceptsGoStylePaths)
-  gitModuleRepoRejectionResult <- QC.quickCheckResult (QC.withMaxSuccess 100 prop_buildGitModuleRepoRejectsMalformedPaths)
-  pure (all isQuickCheckSuccess [trimResult, gitModuleParseResult, gitModuleRepoAcceptanceResult, gitModuleRepoRejectionResult])
+  gitModuleRepositoryAcceptanceResult <- QC.quickCheckResult (QC.withMaxSuccess 100 prop_buildGitModuleRepositoryAcceptsGoStylePaths)
+  gitModuleRepositoryRejectionResult <- QC.quickCheckResult (QC.withMaxSuccess 100 prop_buildGitModuleRepositoryRejectsMalformedPaths)
+  pure (all isQuickCheckSuccess [trimResult, gitModuleParseResult, gitModuleRepositoryAcceptanceResult, gitModuleRepositoryRejectionResult])
 isQuickCheckSuccess :: QC.Result -> Bool
 isQuickCheckSuccess QC.Success {} = True
 isQuickCheckSuccess _ = False
@@ -1467,46 +1467,46 @@ prop_trimStringIdempotent source =
   trimString (trimString source) == trimString source
 prop_parseGitModulePathsPreservesFirstOccurrences :: QC.Property
 prop_parseGitModulePathsPreservesFirstOccurrences =
-  QC.forAll gitModulePathEntriesGen $ \paths ->
+  QC.forAll gitModulePathEntriesGen $ \gitModulePathEntries ->
     let rendered =
           concatMap
-            ( \pathEntry ->
+            ( \gitModulePathEntry ->
                 "[submodule \"example\"]\n"
                   ++ "  path =  "
-                  ++ pathEntry
+                  ++ gitModulePathEntry
                   ++ "  \n"
                   ++ "  url = https://example.test/repo.git\n"
             )
-            paths
+            gitModulePathEntries
             ++ "ignore = this-line\n"
-     in parseGitModulePaths rendered == nub paths
-prop_buildGitModuleRepoAcceptsGoStylePaths :: QC.Property
-prop_buildGitModuleRepoAcceptsGoStylePaths =
-  QC.forAll goStylePathGen $ \pathEntry ->
-    let repo = buildGitModuleRepo "/home/test" pathEntry
-        parts = splitDirectories pathEntry
-     in case parts of
-          [hostKey, userKey, repoKey] ->
-            gitModuleRepoCompatible repo
-              && gitModuleRepoPathEntry repo == pathEntry
-              && gitModuleRepoPath repo == "/home/test" </> pathEntry
-              && gitModuleRepoHost repo == hostKey
-              && gitModuleRepoUser repo == userKey
-              && gitModuleRepoName repo == repoKey
+     in parseGitModulePaths rendered == nub gitModulePathEntries
+prop_buildGitModuleRepositoryAcceptsGoStylePaths :: QC.Property
+prop_buildGitModuleRepositoryAcceptsGoStylePaths =
+  QC.forAll goStylePathGen $ \gitModulePathEntry ->
+    let repository = buildGitModuleRepository "/home/test" gitModulePathEntry
+        pathSegments = splitDirectories gitModulePathEntry
+     in case pathSegments of
+          [hostKey, ownerKey, repositoryKey] ->
+            gitModuleRepositoryCompatible repository
+              && gitModuleRepositoryPathEntry repository == gitModulePathEntry
+              && gitModuleRepositoryPath repository == "/home/test" </> gitModulePathEntry
+              && gitModuleRepositoryHost repository == hostKey
+              && gitModuleRepositoryOwner repository == ownerKey
+              && gitModuleRepositoryName repository == repositoryKey
           _ -> False
-prop_buildGitModuleRepoRejectsMalformedPaths :: QC.Property
-prop_buildGitModuleRepoRejectsMalformedPaths =
-  QC.forAll malformedPathGen $ \pathEntry ->
-    let repo = buildGitModuleRepo "/home/test" pathEntry
-     in not (gitModuleRepoCompatible repo) && gitModuleRepoPathEntry repo == pathEntry
+prop_buildGitModuleRepositoryRejectsMalformedPaths :: QC.Property
+prop_buildGitModuleRepositoryRejectsMalformedPaths =
+  QC.forAll malformedPathGen $ \gitModulePathEntry ->
+    let repository = buildGitModuleRepository "/home/test" gitModulePathEntry
+     in not (gitModuleRepositoryCompatible repository) && gitModuleRepositoryPathEntry repository == gitModulePathEntry
 gitModulePathEntriesGen :: QC.Gen [FilePath]
 gitModulePathEntriesGen = QC.listOf goStylePathGen
 goStylePathGen :: QC.Gen FilePath
 goStylePathGen = do
   hostKey <- hostSegmentGen
-  userKey <- pathSegmentGen "-"
-  repoKey <- pathSegmentGen "-_"
-  pure (intercalate "/" [hostKey, userKey, repoKey])
+  ownerKey <- pathSegmentGen "-"
+  repositoryKey <- pathSegmentGen "-_"
+  pure (intercalate "/" [hostKey, ownerKey, repositoryKey])
 hostSegmentGen :: QC.Gen String
 hostSegmentGen = do
   firstCharacter <- QC.elements (['a' .. 'z'] ++ ['0' .. '9'])
@@ -1624,12 +1624,12 @@ debugTests =
         assertEqual
           "Marks canonical go-style .gitmodules path as compatible."
           True
-          (gitModuleRepoCompatible (buildGitModuleRepo "/home/user" "github.com/pbizopoulos/canonicalization")),
+          (gitModuleRepositoryCompatible (buildGitModuleRepository "/home/user" "github.com/pbizopoulos/canonicalization")),
       TestCase $ do
         assertEqual
           "Rejects non go-style .gitmodules path with extra segments."
           False
-          (gitModuleRepoCompatible (buildGitModuleRepo "/home/user" "github.com/pbizopoulos/canonicalization/subdir"))
+          (gitModuleRepositoryCompatible (buildGitModuleRepository "/home/user" "github.com/pbizopoulos/canonicalization/subdir"))
     ]
 rustFixture :: String
 rustFixture =
