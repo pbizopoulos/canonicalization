@@ -65,125 +65,125 @@ defaultAllowedNixDifferenceKeys =
       "runtimeInputs",
       "version"
     ]
-type TemplateSpec :: Type
-data TemplateSpec = TemplateSpec
-  { templateName :: FilePath,
-    templateMatches :: FilePath -> String -> IO Bool,
-    templateAllowedNixDifferenceKeys :: Set.Set T.Text,
-    templateBaselineNixSource :: Maybe T.Text
+type DefaultNixTemplateSpec :: Type
+data DefaultNixTemplateSpec = DefaultNixTemplateSpec
+  { defaultNixTemplateName :: FilePath,
+    defaultNixTemplateMatches :: FilePath -> String -> IO Bool,
+    defaultNixTemplateAllowedDifferenceKeys :: Set.Set T.Text,
+    defaultNixTemplateBaselineSource :: Maybe T.Text
   }
-templateSpecs :: [TemplateSpec]
-templateSpecs =
-  [ TemplateSpec
-      { templateName = "haskell_package_baseline",
-        templateMatches = \_ nixSource -> pure ("haskellPackages.mkDerivation" `isInfixOf` nixSource),
-        templateAllowedNixDifferenceKeys = Set.insert "passthru" defaultAllowedNixDifferenceKeys,
-        templateBaselineNixSource = Just haskellTemplateBaselineNixSource
+defaultNixTemplateSpecs :: [DefaultNixTemplateSpec]
+defaultNixTemplateSpecs =
+  [ DefaultNixTemplateSpec
+      { defaultNixTemplateName = "haskell_package_baseline",
+        defaultNixTemplateMatches = \_ nixSource -> pure ("haskellPackages.mkDerivation" `isInfixOf` nixSource),
+        defaultNixTemplateAllowedDifferenceKeys = Set.insert "passthru" defaultAllowedNixDifferenceKeys,
+        defaultNixTemplateBaselineSource = Just haskellTemplateBaselineNixSource
       },
-    TemplateSpec
-      { templateName = "rust_package_baseline",
-        templateMatches = \_ nixSource -> pure ("rustPlatform.buildRustPackage" `isInfixOf` nixSource),
-        templateAllowedNixDifferenceKeys = Set.insert "passthru" defaultAllowedNixDifferenceKeys,
-        templateBaselineNixSource = Just rustTemplateBaselineNixSource
+    DefaultNixTemplateSpec
+      { defaultNixTemplateName = "rust_package_baseline",
+        defaultNixTemplateMatches = \_ nixSource -> pure ("rustPlatform.buildRustPackage" `isInfixOf` nixSource),
+        defaultNixTemplateAllowedDifferenceKeys = Set.insert "passthru" defaultAllowedNixDifferenceKeys,
+        defaultNixTemplateBaselineSource = Just rustTemplateBaselineNixSource
       },
-    TemplateSpec
-      { templateName = "html_template",
-        templateMatches = \_ nixSource -> pure ("writeShellScriptBin" `isInfixOf` nixSource),
-        templateAllowedNixDifferenceKeys = Set.insert "text" defaultAllowedNixDifferenceKeys,
-        templateBaselineNixSource = Just htmlTemplateBaselineNixSource
+    DefaultNixTemplateSpec
+      { defaultNixTemplateName = "html_template",
+        defaultNixTemplateMatches = \_ nixSource -> pure ("writeShellScriptBin" `isInfixOf` nixSource),
+        defaultNixTemplateAllowedDifferenceKeys = Set.insert "text" defaultAllowedNixDifferenceKeys,
+        defaultNixTemplateBaselineSource = Just htmlTemplateBaselineNixSource
       },
-    TemplateSpec
-      { templateName = "python_latex_template",
-        templateMatches = pythonLatexDetector,
-        templateAllowedNixDifferenceKeys = Set.fromList ["propagatedBuildInputs", "version"],
-        templateBaselineNixSource = Just pythonLatexTemplateBaselineNixSource
+    DefaultNixTemplateSpec
+      { defaultNixTemplateName = "python_latex_template",
+        defaultNixTemplateMatches = matchesPythonLatexTemplate,
+        defaultNixTemplateAllowedDifferenceKeys = Set.fromList ["propagatedBuildInputs", "version"],
+        defaultNixTemplateBaselineSource = Just pythonLatexTemplateBaselineNixSource
       },
-    TemplateSpec
-      { templateName = "python_pypi_template",
-        templateMatches = pythonPypiDetector,
-        templateAllowedNixDifferenceKeys = Set.fromList ["nativeBuildInputs", "propagatedBuildInputs", "src", "version"],
-        templateBaselineNixSource = Just pythonPypiTemplateBaselineNixSource
+    DefaultNixTemplateSpec
+      { defaultNixTemplateName = "python_pypi_template",
+        defaultNixTemplateMatches = matchesPythonPypiTemplate,
+        defaultNixTemplateAllowedDifferenceKeys = Set.fromList ["nativeBuildInputs", "propagatedBuildInputs", "src", "version"],
+        defaultNixTemplateBaselineSource = Just pythonPypiTemplateBaselineNixSource
       },
-    TemplateSpec
-      { templateName = "binary_release_template",
-        templateMatches = binaryReleaseDetector,
-        templateAllowedNixDifferenceKeys = Set.fromList ["installCheckPhase", "src", "version"],
-        templateBaselineNixSource = Just binaryReleaseTemplateBaselineNixSource
+    DefaultNixTemplateSpec
+      { defaultNixTemplateName = "binary_release_template",
+        defaultNixTemplateMatches = matchesBinaryReleaseTemplate,
+        defaultNixTemplateAllowedDifferenceKeys = Set.fromList ["installCheckPhase", "src", "version"],
+        defaultNixTemplateBaselineSource = Just binaryReleaseTemplateBaselineNixSource
       },
-    TemplateSpec
-      { templateName = "python_template",
-        templateMatches = \_ nixSource -> pure ("buildPythonPackage" `isInfixOf` nixSource),
-        templateAllowedNixDifferenceKeys = Set.fromList ["propagatedBuildInputs", "shellHook", "version"],
-        templateBaselineNixSource = Just pythonTemplateBaselineNixSource
+    DefaultNixTemplateSpec
+      { defaultNixTemplateName = "python_template",
+        defaultNixTemplateMatches = \_ nixSource -> pure ("buildPythonPackage" `isInfixOf` nixSource),
+        defaultNixTemplateAllowedDifferenceKeys = Set.fromList ["propagatedBuildInputs", "shellHook", "version"],
+        defaultNixTemplateBaselineSource = Just pythonTemplateBaselineNixSource
       },
-    TemplateSpec
-      { templateName = "deploy_host_template",
-        templateMatches = \_ nixSource ->
+    DefaultNixTemplateSpec
+      { defaultNixTemplateName = "deploy_host_template",
+        defaultNixTemplateMatches = \_ nixSource ->
           pure
             ( "writeShellApplication" `isInfixOf` nixSource
                 && ("opentofu" `isInfixOf` nixSource || "agenix-shell" `isInfixOf` nixSource)
             ),
-        templateAllowedNixDifferenceKeys = defaultAllowedNixDifferenceKeys,
-        templateBaselineNixSource = Just deployHostTemplateBaselineNixSource
+        defaultNixTemplateAllowedDifferenceKeys = defaultAllowedNixDifferenceKeys,
+        defaultNixTemplateBaselineSource = Just deployHostTemplateBaselineNixSource
       },
-    TemplateSpec
-      { templateName = "latex_template",
-        templateMatches = \_ nixSource ->
+    DefaultNixTemplateSpec
+      { defaultNixTemplateName = "latex_template",
+        defaultNixTemplateMatches = \_ nixSource ->
           pure
             ( "stdenv.mkDerivation" `isInfixOf` nixSource
                 && "latexmk -pdf ms.tex" `isInfixOf` nixSource
             ),
-        templateAllowedNixDifferenceKeys = defaultAllowedNixDifferenceKeys,
-        templateBaselineNixSource = Just latexTemplateBaselineNixSource
+        defaultNixTemplateAllowedDifferenceKeys = defaultAllowedNixDifferenceKeys,
+        defaultNixTemplateBaselineSource = Just latexTemplateBaselineNixSource
       },
-    TemplateSpec
-      { templateName = "c_template",
-        templateMatches = \_ nixSource ->
+    DefaultNixTemplateSpec
+      { defaultNixTemplateName = "c_template",
+        defaultNixTemplateMatches = \_ nixSource ->
           pure
             ( "stdenv.mkDerivation" `isInfixOf` nixSource
                 && "cc -o ${pname} main.c -std=c89" `isInfixOf` nixSource
             ),
-        templateAllowedNixDifferenceKeys = Set.union defaultAllowedNixDifferenceKeys (Set.fromList ["buildPhase", "checkPhase"]),
-        templateBaselineNixSource = Just cTemplateBaselineNixSource
+        defaultNixTemplateAllowedDifferenceKeys = Set.union defaultAllowedNixDifferenceKeys (Set.fromList ["buildPhase", "checkPhase"]),
+        defaultNixTemplateBaselineSource = Just cTemplateBaselineNixSource
       },
-    TemplateSpec
-      { templateName = "uncomment_template",
-        templateMatches = \_ nixSource ->
+    DefaultNixTemplateSpec
+      { defaultNixTemplateName = "uncomment_template",
+        defaultNixTemplateMatches = \_ nixSource ->
           pure
             ( "stdenv.mkDerivation" `isInfixOf` nixSource
                 && "autoPatchelfHook" `isInfixOf` nixSource
                 && "Goldziher" `isInfixOf` nixSource
             ),
-        templateAllowedNixDifferenceKeys = Set.union defaultAllowedNixDifferenceKeys (Set.fromList ["pname", "src"]),
-        templateBaselineNixSource = Just uncommentTemplateBaselineNixSource
+        defaultNixTemplateAllowedDifferenceKeys = Set.union defaultAllowedNixDifferenceKeys (Set.fromList ["pname", "src"]),
+        defaultNixTemplateBaselineSource = Just uncommentTemplateBaselineNixSource
       }
   ]
-pythonLatexDetector :: FilePath -> String -> IO Bool
-pythonLatexDetector packageName nixSource
+matchesPythonLatexTemplate :: FilePath -> String -> IO Bool
+matchesPythonLatexTemplate packageName nixSource
   | "buildPythonPackage" `isInfixOf` nixSource = do
       let packageDirectory = "packages" </> packageName
       hasManuscriptTexFile <- doesFileExist (packageDirectory </> "ms.tex")
-      hasRefsBib <- doesFileExist (packageDirectory </> "refs.bib")
-      hasFiguresDir <- doesDirectoryExist (packageDirectory </> "figures")
-      pure (hasManuscriptTexFile || hasRefsBib || hasFiguresDir)
+      hasRefsBibFile <- doesFileExist (packageDirectory </> "refs.bib")
+      hasFiguresDirectory <- doesDirectoryExist (packageDirectory </> "figures")
+      pure (hasManuscriptTexFile || hasRefsBibFile || hasFiguresDirectory)
   | otherwise = pure False
-pythonPypiDetector :: FilePath -> String -> IO Bool
-pythonPypiDetector _ nixSource =
+matchesPythonPypiTemplate :: FilePath -> String -> IO Bool
+matchesPythonPypiTemplate _ nixSource =
   pure
     ( "buildPythonPackage" `isInfixOf` nixSource
         && not ("src = ./.;" `isInfixOf` nixSource)
         && ("fetchPypi" `isInfixOf` nixSource || "fetchurl" `isInfixOf` nixSource)
     )
-binaryReleaseDetector :: FilePath -> String -> IO Bool
-binaryReleaseDetector _ nixSource =
+matchesBinaryReleaseTemplate :: FilePath -> String -> IO Bool
+matchesBinaryReleaseTemplate _ nixSource =
   pure
     ( "stdenv.mkDerivation" `isInfixOf` nixSource
         && "src = pkgs.fetchurl" `isInfixOf` nixSource
         && "sourceRoot = \".\";" `isInfixOf` nixSource
         && "install -Dm755 ${pname}-v${version}-x86_64-unknown-linux-musl/${pname}" `isInfixOf` nixSource
     )
-templateSpecByName :: FilePath -> Maybe TemplateSpec
-templateSpecByName templateNameToFind = find ((== templateNameToFind) . templateName) templateSpecs
+defaultNixTemplateSpecByName :: FilePath -> Maybe DefaultNixTemplateSpec
+defaultNixTemplateSpecByName defaultNixTemplateNameToFind = find ((== defaultNixTemplateNameToFind) . defaultNixTemplateName) defaultNixTemplateSpecs
 type CheckOutcome :: Type
 data CheckOutcome = CheckPassed | CheckFailed | CheckSkipped | CheckIncompatible deriving stock (Eq, Show)
 checkOutcomeFromIssues :: [a] -> CheckOutcome
@@ -254,22 +254,22 @@ trimString :: String -> String
 trimString = T.unpack . T.strip . T.pack
 runCheckRepositoryMode :: IO ()
 runCheckRepositoryMode = do
-  structureIssues <- checkRepositoryStructure
-  unless (null structureIssues) $ do
-    reportComplianceFailures "directory-structure" structureIssues
+  repositoryStructureIssues <- checkRepositoryStructure
+  unless (null repositoryStructureIssues) $ do
+    reportCheckRepositoryFailures "directory-structure" repositoryStructureIssues
     exitFailure
   packageNames <- listPackageNames
   packageChecks <- forM packageNames (checkPackage [])
-  let fileIssues = concatMap packageCheckIssues packageChecks
-  unless (null fileIssues) $ do
-    reportComplianceFailures "file-compliance" fileIssues
+  let fileComplianceIssues = concatMap packageCheckIssues packageChecks
+  unless (null fileComplianceIssues) $ do
+    reportCheckRepositoryFailures "file-compliance" fileComplianceIssues
     exitFailure
-reportComplianceFailures :: String -> [String] -> IO ()
-reportComplianceFailures compliancePhase complianceIssues = do
-  putStrLn ("check-repository failed at phase: " ++ compliancePhase)
-  forM_ complianceIssues $ \issue ->
-    putStrLn ("- [" ++ compliancePhase ++ "] " ++ issue)
-  case compliancePhase of
+reportCheckRepositoryFailures :: String -> [String] -> IO ()
+reportCheckRepositoryFailures checkPhaseName checkPhaseIssues = do
+  putStrLn ("check-repository failed at phase: " ++ checkPhaseName)
+  forM_ checkPhaseIssues $ \issue ->
+    putStrLn ("- [" ++ checkPhaseName ++ "] " ++ issue)
+  case checkPhaseName of
     "directory-structure" ->
       putStrLn "hint: fix directory and required-file layout under packages/, hosts/, checks/, and repository root."
     "file-compliance" ->
@@ -425,41 +425,41 @@ type PackageInfo :: Type
 data PackageInfo = PackageInfo
   { packageRootPath :: FilePath,
     packageRootDirectoryName :: FilePath,
-    packageLeafFiles :: [FilePath],
+    packageLeafPaths :: [FilePath],
     detectedPackageKind :: PackageKind,
     matchedPackageMarkers :: [String]
   }
 buildPackageInfo :: Set.Set FilePath -> FilePath -> PackageInfo
 buildPackageInfo leafPaths packageRootDirectory =
   let packageDirectoryName = takeBaseName packageRootDirectory
-      leafFiles =
+      packageRelativeLeafPaths =
         catMaybes
           [ stripPrefix (packageRootDirectory ++ "/") path
           | path <- Set.toList leafPaths,
             (packageRootDirectory ++ "/") `isPrefixOf` path
           ]
-      markers = detectPackageMarkers leafFiles
+      markers = detectPackageMarkers packageRelativeLeafPaths
    in PackageInfo
         { packageRootPath = packageRootDirectory,
           packageRootDirectoryName = packageDirectoryName,
-          packageLeafFiles = leafFiles,
+          packageLeafPaths = packageRelativeLeafPaths,
           detectedPackageKind = detectPackageKindFromMarkers markers,
           matchedPackageMarkers = map fst markers
         }
 detectPackageMarkers :: [FilePath] -> [(String, PackageKind)]
-detectPackageMarkers leafFiles =
-  let hasLeafFile leafFile = leafFile `elem` leafFiles
-      hasLeafFileWithPrefix pathPrefix = any (isPrefixOf pathPrefix) leafFiles
+detectPackageMarkers packageRelativeLeafPaths =
+  let hasLeafPath leafPath = leafPath `elem` packageRelativeLeafPaths
+      hasLeafPathWithPrefix pathPrefix = any (isPrefixOf pathPrefix) packageRelativeLeafPaths
    in catMaybes
-        [ if hasLeafFile "Main.hs" then Just ("Main.hs", HaskellPackage) else Nothing,
-          if hasLeafFile "Cargo.toml" then Just ("Cargo.toml", RustPackage) else Nothing,
-          if hasLeafFile "index.html" then Just ("index.html", HtmlPackage) else Nothing,
-          if hasLeafFile "main.py" && hasLeafFile "ms.tex" then Just ("main.py+ms.tex", PythonLatexPackage) else Nothing,
-          if hasLeafFile "main.py" && not (hasLeafFile "ms.tex") then Just ("main.py", PythonPackage) else Nothing,
-          if hasLeafFile "main.c" then Just ("main.c", CPackage) else Nothing,
-          if hasLeafFile "main.tf" then Just ("main.tf", TerraformPackage) else Nothing,
-          if hasLeafFile "ms.tex" && not (hasLeafFile "main.py") then Just ("ms.tex", LatexPackage) else Nothing,
-          if hasLeafFileWithPrefix "Cargo.toml" then Nothing else if not (hasLeafFile "main.c") && not (hasLeafFile "Main.hs") && not (hasLeafFile "main.py") && not (hasLeafFile "index.html") && not (hasLeafFile "main.tf") && not (hasLeafFile "ms.tex") then Just ("binary-layout", BinaryReleasePackage) else Nothing
+        [ if hasLeafPath "Main.hs" then Just ("Main.hs", HaskellPackage) else Nothing,
+          if hasLeafPath "Cargo.toml" then Just ("Cargo.toml", RustPackage) else Nothing,
+          if hasLeafPath "index.html" then Just ("index.html", HtmlPackage) else Nothing,
+          if hasLeafPath "main.py" && hasLeafPath "ms.tex" then Just ("main.py+ms.tex", PythonLatexPackage) else Nothing,
+          if hasLeafPath "main.py" && not (hasLeafPath "ms.tex") then Just ("main.py", PythonPackage) else Nothing,
+          if hasLeafPath "main.c" then Just ("main.c", CPackage) else Nothing,
+          if hasLeafPath "main.tf" then Just ("main.tf", TerraformPackage) else Nothing,
+          if hasLeafPath "ms.tex" && not (hasLeafPath "main.py") then Just ("ms.tex", LatexPackage) else Nothing,
+          if hasLeafPathWithPrefix "Cargo.toml" then Nothing else if not (hasLeafPath "main.c") && not (hasLeafPath "Main.hs") && not (hasLeafPath "main.py") && not (hasLeafPath "index.html") && not (hasLeafPath "main.tf") && not (hasLeafPath "ms.tex") then Just ("binary-layout", BinaryReleasePackage) else Nothing
         ]
 detectPackageKindFromMarkers :: [(String, PackageKind)] -> PackageKind
 detectPackageKindFromMarkers markers =
@@ -556,45 +556,45 @@ checkPackage repositoryStructureIssues packageName = do
         ]
   packageKind <- detectPackageKindForPackage packageName
   packageDefaultNixExists <- doesFileExist packageDefaultNixPath
-  (templateIssues, _) <-
+  (defaultNixTemplateIssues, _) <-
     if not packageDefaultNixExists
       then pure ([], Nothing)
       else do
         packageDefaultNixSource <- TIO.readFile packageDefaultNixPath
-        inferredTemplate <- inferTemplateName packageName (T.unpack packageDefaultNixSource)
-        case inferredTemplate of
+        inferredDefaultNixTemplateName <- inferDefaultNixTemplateName packageName (T.unpack packageDefaultNixSource)
+        case inferredDefaultNixTemplateName of
           Nothing ->
             pure
               ( [ "packages/" ++ packageName ++ "/default.nix: could not infer corresponding template"
                 ],
                 Nothing
               )
-          Just inferredTemplateName -> do
-            case templateSpecByName inferredTemplateName of
+          Just matchedDefaultNixTemplateName -> do
+            case defaultNixTemplateSpecByName matchedDefaultNixTemplateName of
               Nothing ->
                 pure
-                  ( [ "packages/" ++ packageName ++ "/default.nix: unsupported template " ++ inferredTemplateName
+                  ( [ "packages/" ++ packageName ++ "/default.nix: unsupported template " ++ matchedDefaultNixTemplateName
                     ],
-                    Just inferredTemplateName
+                    Just matchedDefaultNixTemplateName
                   )
-              Just templateSpec ->
-                case templateBaselineNixSource templateSpec of
-                  Just templateNixSource ->
+              Just defaultNixTemplateSpec ->
+                case defaultNixTemplateBaselineSource defaultNixTemplateSpec of
+                  Just defaultNixTemplateSource ->
                     do
                       let allowedNixDifferenceKeysForPackage =
-                            if packageName == "c_template" && inferredTemplateName == "c_template"
+                            if packageName == "c_template" && matchedDefaultNixTemplateName == "c_template"
                               then defaultAllowedNixDifferenceKeys
-                              else templateAllowedNixDifferenceKeys templateSpec
-                      templateComparisonIssues <- comparePackageDefaultNixWithTemplate packageName packageDefaultNixPath ("packages" </> inferredTemplateName </> "default.nix") allowedNixDifferenceKeysForPackage (Just templateNixSource)
-                      pure (templateComparisonIssues, Just inferredTemplateName)
+                              else defaultNixTemplateAllowedDifferenceKeys defaultNixTemplateSpec
+                      defaultNixTemplateComparisonIssues <- comparePackageDefaultNixWithTemplate packageName packageDefaultNixPath ("packages" </> matchedDefaultNixTemplateName </> "default.nix") allowedNixDifferenceKeysForPackage (Just defaultNixTemplateSource)
+                      pure (defaultNixTemplateComparisonIssues, Just matchedDefaultNixTemplateName)
                   Nothing ->
                     pure
                       ( [ "packages/"
                             ++ packageName
                             ++ "/default.nix: internal error: missing embedded template baseline for "
-                            ++ inferredTemplateName
+                            ++ matchedDefaultNixTemplateName
                         ],
-                        Just inferredTemplateName
+                        Just matchedDefaultNixTemplateName
                       )
   cargoIssues <- checkCargoToml packageName
   cabalIssues <- checkCabalFile packageName
@@ -618,7 +618,7 @@ checkPackage repositoryStructureIssues packageName = do
           [makePackageTestCase testCaseName outcome issues]
       defaultNixIssues =
         [issue | issue <- scopedStructureIssues, "/default.nix" `isInfixOf` issue]
-          ++ templateIssues
+          ++ defaultNixTemplateIssues
       defaultNixOutcome =
         if packageDefaultNixExists && null defaultNixIssues
           then CheckPassed
@@ -692,7 +692,7 @@ checkPackage repositoryStructureIssues packageName = do
         ]
       packageIssues =
         scopedStructureIssues
-          ++ templateIssues
+          ++ defaultNixTemplateIssues
           ++ cargoIssues
           ++ cabalIssues
           ++ pythonDebugIssues
@@ -761,10 +761,10 @@ checkPythonDebugTests packageName packageKind =
                     ++ "/main.py: missing Python interpreter (tried python3, python)"
                 ]
             Just pythonCommand -> do
-              (exitCode, stdoutText, stderrText) <- readProcessWithExitCode pythonCommand ["-c", pythonDebugTestValidatorSource, mainPythonPath] ""
+              (exitCode, stdoutText, stderrText) <- readProcessWithExitCode pythonCommand ["-c", pythonDebugTestValidatorPythonSource, mainPythonPath] ""
               let validatorOutputLines = lines stdoutText
                   errorCodes = [drop 4 validatorOutputLine | validatorOutputLine <- validatorOutputLines, "ERR " `isPrefixOf` validatorOutputLine]
-                  mappedErrors = map (formatPythonValidatorError packageName) errorCodes
+                  validatorErrorMessages = map (formatPythonValidatorError packageName) errorCodes
               case exitCode of
                 ExitSuccess ->
                   if "OK" `elem` validatorOutputLines
@@ -773,7 +773,7 @@ checkPythonDebugTests packageName packageKind =
                       pure
                         [ "packages/" ++ packageName ++ "/main.py: python AST validator produced unexpected output"
                         ]
-                ExitFailure 1 -> pure mappedErrors
+                ExitFailure 1 -> pure validatorErrorMessages
                 ExitFailure _ ->
                   pure
                     [ "packages/"
@@ -813,8 +813,8 @@ checkHaskellDebugTests packageName packageKind =
     then pure []
     else do
       let mainHaskellPath = "packages" </> packageName </> "Main.hs"
-      mainFileExists <- doesFileExist mainHaskellPath
-      if not mainFileExists
+      mainHaskellFileExists <- doesFileExist mainHaskellPath
+      if not mainHaskellFileExists
         then pure []
         else do
           mainHaskellSourceText <- TIO.readFile mainHaskellPath
@@ -946,10 +946,10 @@ checkRustDebugTests packageName packageKind =
     else do
       let mainRustPath = "packages" </> packageName </> "src/main.rs"
           packageDefaultNixPath = "packages" </> packageName </> "default.nix"
-      mainFileExists <- doesFileExist mainRustPath
+      mainRustFileExists <- doesFileExist mainRustPath
       packageDefaultNixFileExists <- doesFileExist packageDefaultNixPath
       mainRustSource <-
-        if mainFileExists
+        if mainRustFileExists
           then T.unpack <$> TIO.readFile mainRustPath
           else pure ""
       packageDefaultNixSource <-
@@ -1005,8 +1005,8 @@ formatPythonValidatorError packageName errorCode =
         "run_tests_missing_unittest" -> messagePrefix ++ "run_tests() is called from DEBUG branch but does not run unittest"
         "parse_error" -> messagePrefix ++ "python source could not be parsed"
         _ -> messagePrefix ++ "python validator failed with error code: " ++ errorCode
-pythonDebugTestValidatorSource :: String
-pythonDebugTestValidatorSource =
+pythonDebugTestValidatorPythonSource :: String
+pythonDebugTestValidatorPythonSource =
   unlines
     [ "import ast",
       "import sys",
@@ -1124,11 +1124,11 @@ checkCargoToml packageName = do
     else do
       cargoTomlContents <- TIO.readFile cargoTomlPath
       let packageSection = extractTomlSection "package" cargoTomlContents
-          lintsRustSection = extractTomlSection "lints.rust" cargoTomlContents
+          rustLintsSection = extractTomlSection "lints.rust" cargoTomlContents
           cargoPackageName = lookupTomlString "name" packageSection
-          unsafeCodeLint = lookupTomlString "unsafe_code" lintsRustSection
+          unsafeCodeLint = lookupTomlString "unsafe_code" rustLintsSection
           normalizedCargoToml = normalizeCargoTomlForBaselineComparison packageName cargoTomlContents
-          normalizedTemplateCargoToml = normalizeCargoTomlForBaselineComparison packageName rustCargoTomlBaseline
+          normalizedBaselineCargoToml = normalizeCargoTomlForBaselineComparison packageName rustCargoTomlBaseline
       pure $
         catMaybes
           [ case cargoPackageName of
@@ -1150,7 +1150,7 @@ checkCargoToml packageName = do
             if unsafeCodeLint == Just "forbid"
               then Nothing
               else Just ("packages/" ++ packageName ++ "/Cargo.toml: [lints.rust].unsafe_code must be \"forbid\""),
-            if normalizedCargoToml == normalizedTemplateCargoToml
+            if normalizedCargoToml == normalizedBaselineCargoToml
               then Nothing
               else
                 Just
@@ -1216,14 +1216,14 @@ checkCabalFile packageName = do
     else do
       cabalContents <- TIO.readFile cabalFilePath
       let normalizedCabal = normalizeCabalForBaselineComparison packageName cabalContents
-          normalizedTemplateCabal = normalizeCabalForBaselineComparison packageName haskellCabalBaseline
+          normalizedBaselineCabal = normalizeCabalForBaselineComparison packageName haskellCabalBaseline
           cabalPackageName = lookupCabalField "name" cabalContents
       pure $
         catMaybes
           [ if cabalPackageName == Just (T.pack packageName)
               then Nothing
               else Just ("packages/" ++ packageName ++ "/" ++ packageName ++ ".cabal: name must match directory name"),
-            if normalizedCabal == normalizedTemplateCabal
+            if normalizedCabal == normalizedBaselineCabal
               then Nothing
               else
                 Just
@@ -1269,26 +1269,26 @@ lookupCabalField cabalField cabalContents =
         fieldValue <- T.stripPrefix fieldPrefix matchingLine
         pure (T.strip fieldValue)
 comparePackageDefaultNixWithTemplate :: FilePath -> FilePath -> FilePath -> Set.Set T.Text -> Maybe T.Text -> IO [String]
-comparePackageDefaultNixWithTemplate packageName packageDefaultNixPath templateDefaultNixPath allowedNixDifferenceKeys templateOverrideNixSource = do
-  packageNixParseResult <- parseNixExprFromFile packageDefaultNixPath
-  templateNixParseResult <-
-    case templateOverrideNixSource of
-      Just overrideNixSource -> parseNixExprFromText overrideNixSource
+comparePackageDefaultNixWithTemplate packageName packageDefaultNixPath templateDefaultNixPath allowedNixDifferenceKeys templateDefaultNixSourceOverride = do
+  packageDefaultNixParseResult <- parseNixExprFromFile packageDefaultNixPath
+  templateDefaultNixParseResult <-
+    case templateDefaultNixSourceOverride of
+      Just templateDefaultNixSource -> parseNixExprFromText templateDefaultNixSource
       Nothing -> parseNixExprFromFile templateDefaultNixPath
-  case (packageNixParseResult, templateNixParseResult) of
+  case (packageDefaultNixParseResult, templateDefaultNixParseResult) of
     (Left parseError, _) ->
       pure ["packages/" ++ packageName ++ "/default.nix: parse error: " ++ show parseError]
     (_, Left parseError) ->
       pure [templateDefaultNixPath ++ ": parse error: " ++ show parseError]
-    (Right packageNixExpr, Right templateNixExpr) ->
-      let normalizedPackageNixExpr = normalizeNixExpr allowedNixDifferenceKeys packageNixExpr
-          normalizedTemplateNixExpr = normalizeNixExpr allowedNixDifferenceKeys templateNixExpr
+    (Right packageDefaultNixExpr, Right templateDefaultNixExpr) ->
+      let normalizedPackageDefaultNixExpr = normalizeNixExpr allowedNixDifferenceKeys packageDefaultNixExpr
+          normalizedTemplateDefaultNixExpr = normalizeNixExpr allowedNixDifferenceKeys templateDefaultNixExpr
        in pure $
-            formatNixTemplateDifferences
+            formatDefaultNixTemplateDifferences
               packageName
               templateDefaultNixPath
-              normalizedPackageNixExpr
-              normalizedTemplateNixExpr
+              normalizedPackageDefaultNixExpr
+              normalizedTemplateDefaultNixExpr
 parseNixExprFromText :: T.Text -> IO (Either String NExprLoc)
 parseNixExprFromText nixSource = do
   (temporaryNixPath, temporaryNixHandle) <- openTempFile "/tmp" "check-repository-template-override.nix"
@@ -1303,11 +1303,11 @@ removeFileIfExists :: FilePath -> IO ()
 removeFileIfExists filePath = do
   fileExists <- doesFileExist filePath
   when fileExists (removeFile filePath)
-inferTemplateName :: FilePath -> String -> IO (Maybe FilePath)
-inferTemplateName packageName nixSource = do
-  matches <- forM templateSpecs $ \templateSpec -> do
-    matched <- templateMatches templateSpec packageName nixSource
-    pure (if matched then Just (templateName templateSpec) else Nothing)
+inferDefaultNixTemplateName :: FilePath -> String -> IO (Maybe FilePath)
+inferDefaultNixTemplateName packageName nixSource = do
+  matches <- forM defaultNixTemplateSpecs $ \defaultNixTemplateSpec -> do
+    matched <- defaultNixTemplateMatches defaultNixTemplateSpec packageName nixSource
+    pure (if matched then Just (defaultNixTemplateName defaultNixTemplateSpec) else Nothing)
   pure (listToMaybe (catMaybes matches))
 normalizeNixExpr :: Set.Set T.Text -> NExprLoc -> NExprLoc
 normalizeNixExpr allowedNixDifferenceKeys (Fix (Compose (AnnUnit nixExprSpan expressionFunctor))) =
@@ -1345,16 +1345,16 @@ renderNixExpr =
     . layoutPretty defaultLayoutOptions
     . prettyNix
     . stripAnnotation
-formatNixTemplateDifferences :: FilePath -> FilePath -> NExprLoc -> NExprLoc -> [String]
-formatNixTemplateDifferences packageName templateDefaultNixPath packageNixExpr templateNixExpr =
-  let renderedPackage = renderNixExpr packageNixExpr
-      renderedTemplate = renderNixExpr templateNixExpr
-   in if renderedPackage == renderedTemplate
+formatDefaultNixTemplateDifferences :: FilePath -> FilePath -> NExprLoc -> NExprLoc -> [String]
+formatDefaultNixTemplateDifferences packageName templateDefaultNixPath packageDefaultNixExpr templateDefaultNixExpr =
+  let renderedPackageDefaultNix = renderNixExpr packageDefaultNixExpr
+      renderedTemplateDefaultNix = renderNixExpr templateDefaultNixExpr
+   in if renderedPackageDefaultNix == renderedTemplateDefaultNix
         then []
         else
-          let packageBindingsMaybe = extractPrimaryNixBindings packageNixExpr
-              templateBindingsMaybe = extractPrimaryNixBindings templateNixExpr
-           in case (packageBindingsMaybe, templateBindingsMaybe) of
+          let maybePackageBindingMap = extractPrimaryNixBindings packageDefaultNixExpr
+              maybeTemplateBindingMap = extractPrimaryNixBindings templateDefaultNixExpr
+           in case (maybePackageBindingMap, maybeTemplateBindingMap) of
                 (Just packageBindingMap, Just templateBindingMap) ->
                   let missingBindingKeys = Map.keys (Map.difference templateBindingMap packageBindingMap)
                       unexpectedBindingKeys = Map.keys (Map.difference packageBindingMap templateBindingMap)
@@ -1364,9 +1364,9 @@ formatNixTemplateDifferences packageName templateDefaultNixPath packageNixExpr t
                         | bindingKey <- sharedBindingKeys,
                           Map.lookup bindingKey packageBindingMap /= Map.lookup bindingKey templateBindingMap
                         ]
-                      detailLines =
-                        map (formatBindingDifferenceLine "missing key") missingBindingKeys
-                          ++ map (formatBindingDifferenceLine "unexpected key") unexpectedBindingKeys
+                      differenceDetailLines =
+                        map (formatNixBindingDifferenceLine "missing key") missingBindingKeys
+                          ++ map (formatNixBindingDifferenceLine "unexpected key") unexpectedBindingKeys
                           ++ map
                             ( \bindingKey ->
                                 let expectedValue = compactTextToSingleLine (fromMaybe "" (Map.lookup bindingKey templateBindingMap))
@@ -1379,7 +1379,7 @@ formatNixTemplateDifferences packageName templateDefaultNixPath packageNixExpr t
                                       ++ actualValue
                             )
                             changedBindingKeys
-                   in if null detailLines
+                   in if null differenceDetailLines
                         then
                           [ "packages/"
                               ++ packageName
@@ -1393,7 +1393,7 @@ formatNixTemplateDifferences packageName templateDefaultNixPath packageNixExpr t
                               ++ "/default.nix: differs from template "
                               ++ templateDefaultNixPath
                               ++ " (excluding dependency keys)\n"
-                              ++ intercalate "\n" detailLines
+                              ++ intercalate "\n" differenceDetailLines
                           ]
                 _ ->
                   [ "packages/"
@@ -1402,8 +1402,8 @@ formatNixTemplateDifferences packageName templateDefaultNixPath packageNixExpr t
                       ++ templateDefaultNixPath
                       ++ " (excluding dependency keys)"
                   ]
-formatBindingDifferenceLine :: String -> T.Text -> String
-formatBindingDifferenceLine issue bindingKey = "  - " ++ issue ++ ": " ++ T.unpack bindingKey
+formatNixBindingDifferenceLine :: String -> T.Text -> String
+formatNixBindingDifferenceLine differenceKind bindingKey = "  - " ++ differenceKind ++ ": " ++ T.unpack bindingKey
 compactTextToSingleLine :: T.Text -> String
 compactTextToSingleLine textValue =
   let compactText = T.unwords (T.words textValue)
@@ -1438,7 +1438,7 @@ extractNamedNixBindings bindings =
   ]
 runDebugTests :: IO ()
 runDebugTests = do
-  hUnitCounts <- runTestTT debugTests
+  hUnitCounts <- runTestTT hUnitDebugTests
   propertySuccess <- quickCheckDebugProperties
   if errors hUnitCounts == 0 && failures hUnitCounts == 0 && propertySuccess
     then putStrLn "test ... ok"
@@ -1517,77 +1517,77 @@ malformedPathEntryGen = do
 pathSegmentGen :: [Char] -> QC.Gen String
 pathSegmentGen extraCharacters =
   QC.listOf1 (QC.elements (['a' .. 'z'] ++ ['0' .. '9'] ++ extraCharacters))
-debugTests :: Test
-debugTests =
+hUnitDebugTests :: Test
+hUnitDebugTests =
   TestList
     [ TestCase $ do
-        inferred <- inferTemplateName "test" uncommentNixFixture
+        inferred <- inferDefaultNixTemplateName "test" uncommentNixFixture
         assertEqual
           "Infers the uncomment template."
           (Just "uncomment_template")
           inferred,
       TestCase $ do
-        inferred <- inferTemplateName "test" rustNixFixture
+        inferred <- inferDefaultNixTemplateName "test" rustNixFixture
         assertEqual
           "Infers the Rust package template."
           (Just "rust_package_baseline")
           inferred,
       TestCase $ do
-        inferred <- inferTemplateName "test" haskellNixFixture
+        inferred <- inferDefaultNixTemplateName "test" haskellNixFixture
         assertEqual
           "Infers the Haskell package template."
           (Just "haskell_package_baseline")
           inferred,
       TestCase $ do
-        inferred <- inferTemplateName "test" pythonNixFixture
+        inferred <- inferDefaultNixTemplateName "test" pythonNixFixture
         assertEqual
           "Infers the Python template."
           (Just "python_template")
           inferred,
       TestCase $ do
-        inferred <- inferTemplateName "test" pythonPypiNixFixture
+        inferred <- inferDefaultNixTemplateName "test" pythonPypiNixFixture
         assertEqual
           "Infers the PyPI Python template."
           (Just "python_pypi_template")
           inferred,
       TestCase $ do
-        inferred <- inferTemplateName "test" binaryReleaseNixFixture
+        inferred <- inferDefaultNixTemplateName "test" binaryReleaseNixFixture
         assertEqual
           "Infers the binary release template."
           (Just "binary_release_template")
           inferred,
       TestCase $ do
-        inferred <- inferTemplateName "test" pythonLatexNixFixture
+        inferred <- inferDefaultNixTemplateName "test" pythonLatexNixFixture
         assertEqual
           "Infers the Python template for the python-latex fixture."
           (Just "python_template")
           inferred,
       TestCase $ do
-        inferred <- inferTemplateName "deploy_host_template" deployHostNixFixture
+        inferred <- inferDefaultNixTemplateName "deploy_host_template" deployHostNixFixture
         assertEqual
           "Infers the deploy host template."
           (Just "deploy_host_template")
           inferred,
       TestCase $ do
-        inferred <- inferTemplateName "test" cNixFixture
+        inferred <- inferDefaultNixTemplateName "test" cNixFixture
         assertEqual
           "Infers the C template."
           (Just "c_template")
           inferred,
       TestCase $ do
-        inferred <- inferTemplateName "test" latexNixFixture
+        inferred <- inferDefaultNixTemplateName "test" latexNixFixture
         assertEqual
           "Infers the LaTeX template."
           (Just "latex_template")
           inferred,
       TestCase $ do
-        inferred <- inferTemplateName "test" htmlNixFixture
+        inferred <- inferDefaultNixTemplateName "test" htmlNixFixture
         assertEqual
           "Infers the HTML template."
           (Just "html_template")
           inferred,
       TestCase $ do
-        inferred <- inferTemplateName "test" unknownNixFixture
+        inferred <- inferDefaultNixTemplateName "test" unknownNixFixture
         assertEqual
           "Returns no template for unknown input."
           Nothing
@@ -1599,9 +1599,9 @@ debugTests =
           (compactTextToSingleLine " a \n  b\t c "),
       TestCase $ do
         assertEqual
-          "Formats binding difference details with formatBindingDifferenceLine."
+          "Formats binding difference details with formatNixBindingDifferenceLine."
           "  - missing key: src"
-          (formatBindingDifferenceLine "missing key" "src"),
+          (formatNixBindingDifferenceLine "missing key" "src"),
       TestCase $ do
         assertEqual
           "Extracts the package section with extractTomlSection."
