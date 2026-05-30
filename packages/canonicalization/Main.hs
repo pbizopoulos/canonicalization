@@ -49,8 +49,8 @@ import Test.HUnit (Counts (errors, failures), Test (TestCase, TestList), assertE
 import Test.QuickCheck qualified as QC
 import Text.Regex.TDFA ((=~))
 import Prelude
-defaultAllowedKeys :: Set.Set T.Text
-defaultAllowedKeys =
+defaultAllowedDifferenceKeys :: Set.Set T.Text
+defaultAllowedDifferenceKeys =
   Set.fromList
     [ "buildInputs",
       "cargoHash",
@@ -68,107 +68,107 @@ defaultAllowedKeys =
 type TemplateSpec :: Type
 data TemplateSpec = TemplateSpec
   { templateName :: FilePath,
-    matchesTemplate :: FilePath -> String -> IO Bool,
-    allowedDifferenceKeys :: Set.Set T.Text,
-    embeddedBaseline :: Maybe T.Text
+    templateMatches :: FilePath -> String -> IO Bool,
+    templateAllowedDifferenceKeys :: Set.Set T.Text,
+    templateBaseline :: Maybe T.Text
   }
 templateSpecs :: [TemplateSpec]
 templateSpecs =
   [ TemplateSpec
       { templateName = "haskell_package_baseline",
-        matchesTemplate = \_ content -> pure ("haskellPackages.mkDerivation" `isInfixOf` content),
-        allowedDifferenceKeys = Set.insert "passthru" defaultAllowedKeys,
-        embeddedBaseline = Just haskellTemplateBaseline
+        templateMatches = \_ content -> pure ("haskellPackages.mkDerivation" `isInfixOf` content),
+        templateAllowedDifferenceKeys = Set.insert "passthru" defaultAllowedDifferenceKeys,
+        templateBaseline = Just haskellTemplateBaseline
       },
     TemplateSpec
       { templateName = "rust_package_baseline",
-        matchesTemplate = \_ content -> pure ("rustPlatform.buildRustPackage" `isInfixOf` content),
-        allowedDifferenceKeys = Set.insert "passthru" defaultAllowedKeys,
-        embeddedBaseline = Just rustTemplateBaseline
+        templateMatches = \_ content -> pure ("rustPlatform.buildRustPackage" `isInfixOf` content),
+        templateAllowedDifferenceKeys = Set.insert "passthru" defaultAllowedDifferenceKeys,
+        templateBaseline = Just rustTemplateBaseline
       },
     TemplateSpec
       { templateName = "html_template",
-        matchesTemplate = \_ content -> pure ("writeShellScriptBin" `isInfixOf` content),
-        allowedDifferenceKeys = Set.insert "text" defaultAllowedKeys,
-        embeddedBaseline = Just htmlTemplateBaseline
+        templateMatches = \_ content -> pure ("writeShellScriptBin" `isInfixOf` content),
+        templateAllowedDifferenceKeys = Set.insert "text" defaultAllowedDifferenceKeys,
+        templateBaseline = Just htmlTemplateBaseline
       },
     TemplateSpec
       { templateName = "python_latex_template",
-        matchesTemplate = pythonLatexDetector,
-        allowedDifferenceKeys = Set.fromList ["propagatedBuildInputs", "version"],
-        embeddedBaseline = Just pythonLatexTemplateBaseline
+        templateMatches = pythonLaTeXDetector,
+        templateAllowedDifferenceKeys = Set.fromList ["propagatedBuildInputs", "version"],
+        templateBaseline = Just pythonLaTeXTemplateBaseline
       },
     TemplateSpec
       { templateName = "python_pypi_template",
-        matchesTemplate = pythonPypiDetector,
-        allowedDifferenceKeys = Set.fromList ["nativeBuildInputs", "propagatedBuildInputs", "src", "version"],
-        embeddedBaseline = Just pythonPypiBaseline
+        templateMatches = pythonPyPIDetector,
+        templateAllowedDifferenceKeys = Set.fromList ["nativeBuildInputs", "propagatedBuildInputs", "src", "version"],
+        templateBaseline = Just pythonPyPIBaseline
       },
     TemplateSpec
       { templateName = "binary_release_template",
-        matchesTemplate = binaryReleaseDetector,
-        allowedDifferenceKeys = Set.fromList ["installCheckPhase", "src", "version"],
-        embeddedBaseline = Just binaryReleaseBaseline
+        templateMatches = binaryReleaseDetector,
+        templateAllowedDifferenceKeys = Set.fromList ["installCheckPhase", "src", "version"],
+        templateBaseline = Just binaryReleaseBaseline
       },
     TemplateSpec
       { templateName = "python_template",
-        matchesTemplate = \_ content -> pure ("buildPythonPackage" `isInfixOf` content),
-        allowedDifferenceKeys = Set.fromList ["propagatedBuildInputs", "shellHook", "version"],
-        embeddedBaseline = Just pythonTemplateBaseline
+        templateMatches = \_ content -> pure ("buildPythonPackage" `isInfixOf` content),
+        templateAllowedDifferenceKeys = Set.fromList ["propagatedBuildInputs", "shellHook", "version"],
+        templateBaseline = Just pythonTemplateBaseline
       },
     TemplateSpec
       { templateName = "deploy_host_template",
-        matchesTemplate = \_ content ->
+        templateMatches = \_ content ->
           pure
             ( "writeShellApplication" `isInfixOf` content
                 && ("opentofu" `isInfixOf` content || "agenix-shell" `isInfixOf` content)
             ),
-        allowedDifferenceKeys = defaultAllowedKeys,
-        embeddedBaseline = Just deployHostTemplateBaseline
+        templateAllowedDifferenceKeys = defaultAllowedDifferenceKeys,
+        templateBaseline = Just deployHostTemplateBaseline
       },
     TemplateSpec
       { templateName = "latex_template",
-        matchesTemplate = \_ content ->
+        templateMatches = \_ content ->
           pure
             ( "stdenv.mkDerivation" `isInfixOf` content
                 && "latexmk -pdf ms.tex" `isInfixOf` content
             ),
-        allowedDifferenceKeys = defaultAllowedKeys,
-        embeddedBaseline = Just latexTemplateBaseline
+        templateAllowedDifferenceKeys = defaultAllowedDifferenceKeys,
+        templateBaseline = Just latexTemplateBaseline
       },
     TemplateSpec
       { templateName = "c_template",
-        matchesTemplate = \_ content ->
+        templateMatches = \_ content ->
           pure
             ( "stdenv.mkDerivation" `isInfixOf` content
                 && "cc -o ${pname} main.c -std=c89" `isInfixOf` content
             ),
-        allowedDifferenceKeys = Set.union defaultAllowedKeys (Set.fromList ["buildPhase", "checkPhase"]),
-        embeddedBaseline = Just cTemplateBaseline
+        templateAllowedDifferenceKeys = Set.union defaultAllowedDifferenceKeys (Set.fromList ["buildPhase", "checkPhase"]),
+        templateBaseline = Just cTemplateBaseline
       },
     TemplateSpec
       { templateName = "uncomment_template",
-        matchesTemplate = \_ content ->
+        templateMatches = \_ content ->
           pure
             ( "stdenv.mkDerivation" `isInfixOf` content
                 && "autoPatchelfHook" `isInfixOf` content
                 && "Goldziher" `isInfixOf` content
             ),
-        allowedDifferenceKeys = Set.union defaultAllowedKeys (Set.fromList ["pname", "src"]),
-        embeddedBaseline = Just uncommentTemplateBaseline
+        templateAllowedDifferenceKeys = Set.union defaultAllowedDifferenceKeys (Set.fromList ["pname", "src"]),
+        templateBaseline = Just uncommentTemplateBaseline
       }
   ]
-pythonLatexDetector :: FilePath -> String -> IO Bool
-pythonLatexDetector packageName content
+pythonLaTeXDetector :: FilePath -> String -> IO Bool
+pythonLaTeXDetector packageName content
   | "buildPythonPackage" `isInfixOf` content = do
       let packageDir = "packages" </> packageName
-      hasMsTex <- doesFileExist (packageDir </> "ms.tex")
+      hasManuscriptTexFile <- doesFileExist (packageDir </> "ms.tex")
       hasRefsBib <- doesFileExist (packageDir </> "refs.bib")
       hasFiguresDir <- doesDirectoryExist (packageDir </> "figures")
-      pure (hasMsTex || hasRefsBib || hasFiguresDir)
+      pure (hasManuscriptTexFile || hasRefsBib || hasFiguresDir)
   | otherwise = pure False
-pythonPypiDetector :: FilePath -> String -> IO Bool
-pythonPypiDetector _ content =
+pythonPyPIDetector :: FilePath -> String -> IO Bool
+pythonPyPIDetector _ content =
   pure
     ( "buildPythonPackage" `isInfixOf` content
         && not ("src = ./.;" `isInfixOf` content)
@@ -197,15 +197,16 @@ data TestResult = TestResult
 type TestCaseResult :: Type
 data TestCaseResult
   = TestCaseResult
-      String
-      CheckStatus
-      [String]
+  { testCaseName :: String,
+    testCaseStatus :: CheckStatus,
+    testCaseIssues :: [String]
+  }
 type PackageCheck :: Type
 data PackageCheck = PackageCheck
-  { packageNodeName :: String,
-    packageKind :: ProjectKind,
-    packageTests :: [TestResult],
-    packageErrors :: [String]
+  { packageCheckName :: String,
+    packageCheckKind :: PackageKind,
+    packageCheckTests :: [TestResult],
+    packageCheckIssues :: [String]
   }
 main :: IO ()
 main = do
@@ -222,30 +223,30 @@ runCli :: [String] -> IO ()
 runCli args =
   case args of
     ["check-repository"] -> runInGitRepository "." runCheckMode
-    ["check-repository", repoDir] -> runInGitRepository repoDir runCheckMode
-    ["check-gitmodules"] -> runCheckGitmodulesMode
+    ["check-repository", repositoryDirectory] -> runInGitRepository repositoryDirectory runCheckMode
+    ["check-gitmodules"] -> runCheckGitModulesMode
     _ -> do
       putStrLn "Usage: canonicalization check-repository [git-directory]"
       putStrLn "       canonicalization check-gitmodules"
       exitFailure
 runInGitRepository :: FilePath -> IO a -> IO a
-runInGitRepository repoDir action = do
-  isDir <- doesDirectoryExist repoDir
-  unless isDir $ do
-    putStrLn ("not a directory: " ++ repoDir)
+runInGitRepository repositoryDirectory action = do
+  isDirectory <- doesDirectoryExist repositoryDirectory
+  unless isDirectory $ do
+    putStrLn ("not a directory: " ++ repositoryDirectory)
     exitFailure
-  (insideExit, insideStdout, _insideStderr) <- readProcessWithExitCode "git" ["-C", repoDir, "rev-parse", "--is-inside-work-tree"] ""
+  (insideExit, insideStdout, _insideStderr) <- readProcessWithExitCode "git" ["-C", repositoryDirectory, "rev-parse", "--is-inside-work-tree"] ""
   unless (insideExit == ExitSuccess && trimString insideStdout == "true") $ do
-    putStrLn ("not a git directory: " ++ repoDir)
+    putStrLn ("not a git directory: " ++ repositoryDirectory)
     exitFailure
-  (topExit, topStdout, _topStderr) <- readProcessWithExitCode "git" ["-C", repoDir, "rev-parse", "--show-toplevel"] ""
+  (topExit, topStdout, _topStderr) <- readProcessWithExitCode "git" ["-C", repositoryDirectory, "rev-parse", "--show-toplevel"] ""
   unless (topExit == ExitSuccess) $ do
-    putStrLn ("not a git directory: " ++ repoDir)
+    putStrLn ("not a git directory: " ++ repositoryDirectory)
     exitFailure
-  canonicalInput <- canonicalizePath repoDir
+  canonicalInput <- canonicalizePath repositoryDirectory
   canonicalTop <- canonicalizePath (trimString topStdout)
   unless (canonicalInput == canonicalTop) $ do
-    putStrLn ("not a git repository root directory: " ++ repoDir)
+    putStrLn ("not a git repository root directory: " ++ repositoryDirectory)
     exitFailure
   setCurrentDirectory canonicalInput
   action
@@ -253,15 +254,15 @@ trimString :: String -> String
 trimString = T.unpack . T.strip . T.pack
 runCheckMode :: IO ()
 runCheckMode = do
-  structureIssuesOnly <- checkRepositoryStructure
-  unless (null structureIssuesOnly) $ do
-    reportComplianceFailures "directory-structure" structureIssuesOnly
+  structureIssues <- checkRepositoryStructure
+  unless (null structureIssues) $ do
+    reportComplianceFailures "directory-structure" structureIssues
     exitFailure
   packageNames <- listPackageNames
-  packageResultsWithoutStructureContext <- forM packageNames (checkPackage [])
-  let fileComplianceIssues = concatMap packageErrors packageResultsWithoutStructureContext
-  unless (null fileComplianceIssues) $ do
-    reportComplianceFailures "file-compliance" fileComplianceIssues
+  packageChecks <- forM packageNames (checkPackage [])
+  let fileIssues = concatMap packageCheckIssues packageChecks
+  unless (null fileIssues) $ do
+    reportComplianceFailures "file-compliance" fileIssues
     exitFailure
 reportComplianceFailures :: String -> [String] -> IO ()
 reportComplianceFailures phase issues = do
@@ -274,27 +275,27 @@ reportComplianceFailures phase issues = do
     "file-compliance" ->
       putStrLn "hint: align package files with the expected internal templates and language-specific policy checks."
     _ -> pure ()
-runCheckGitmodulesMode :: IO ()
-runCheckGitmodulesMode = do
-  repos <- loadHomeGitmoduleRepos
-  let invalidEntries = [gitmoduleRepoPathEntry repo | repo <- repos, not (gitmoduleRepoCompatible repo)]
-  if null invalidEntries
+runCheckGitModulesMode :: IO ()
+runCheckGitModulesMode = do
+  repositories <- loadHomeGitModuleRepos
+  let invalidPathEntries = [gitModuleRepoPathEntry repository | repository <- repositories, not (gitModuleRepoCompatible repository)]
+  if null invalidPathEntries
     then putStrLn "all .gitmodules path entries comply with go-style naming (<host>/<owner>/<repo>)"
     else do
-      forM_ invalidEntries $ \entry ->
+      forM_ invalidPathEntries $ \entry ->
         putStrLn (entry ++ ": must be exactly <host>/<owner>/<repo>")
       exitFailure
-type GitmoduleRepo :: Type
-data GitmoduleRepo = GitmoduleRepo
-  { gitmoduleRepoHost :: String,
-    gitmoduleRepoUser :: String,
-    gitmoduleRepoName :: String,
-    gitmoduleRepoPathEntry :: FilePath,
-    gitmoduleRepoPath :: FilePath,
-    gitmoduleRepoCompatible :: Bool
+type GitModuleRepo :: Type
+data GitModuleRepo = GitModuleRepo
+  { gitModuleRepoHost :: String,
+    gitModuleRepoUser :: String,
+    gitModuleRepoName :: String,
+    gitModuleRepoPathEntry :: FilePath,
+    gitModuleRepoPath :: FilePath,
+    gitModuleRepoCompatible :: Bool
   }
-loadHomeGitmoduleRepos :: IO [GitmoduleRepo]
-loadHomeGitmoduleRepos = do
+loadHomeGitModuleRepos :: IO [GitModuleRepo]
+loadHomeGitModuleRepos = do
   home <- getHomeDirectory
   let gitmodulesPath = home </> ".gitmodules"
   fileExists <- doesFileExist gitmodulesPath
@@ -302,33 +303,33 @@ loadHomeGitmoduleRepos = do
     putStrLn ("missing file: " ++ gitmodulesPath)
     exitFailure
   contents <- T.unpack <$> TIO.readFile gitmodulesPath
-  let paths = parseGitmodulePaths contents
-  pure (map (buildGitmoduleRepo home) paths)
-buildGitmoduleRepo :: FilePath -> FilePath -> GitmoduleRepo
-buildGitmoduleRepo home pathEntry =
-  let repoPath = home </> pathEntry
+  let paths = parseGitModulePaths contents
+  pure (map (buildGitModuleRepo home) paths)
+buildGitModuleRepo :: FilePath -> FilePath -> GitModuleRepo
+buildGitModuleRepo home pathEntry =
+  let repositoryPath = home </> pathEntry
       parts = filter (`notElem` [".", ""]) (splitDirectories pathEntry)
    in case parts of
         [hostKey, userKey, repoKey] ->
-          GitmoduleRepo
-            { gitmoduleRepoHost = hostKey,
-              gitmoduleRepoUser = userKey,
-              gitmoduleRepoName = repoKey,
-              gitmoduleRepoPathEntry = pathEntry,
-              gitmoduleRepoPath = repoPath,
-              gitmoduleRepoCompatible = True
+          GitModuleRepo
+            { gitModuleRepoHost = hostKey,
+              gitModuleRepoUser = userKey,
+              gitModuleRepoName = repoKey,
+              gitModuleRepoPathEntry = pathEntry,
+              gitModuleRepoPath = repositoryPath,
+              gitModuleRepoCompatible = True
             }
         _ ->
-          GitmoduleRepo
-            { gitmoduleRepoHost = "",
-              gitmoduleRepoUser = "",
-              gitmoduleRepoName = takeFileName pathEntry,
-              gitmoduleRepoPathEntry = pathEntry,
-              gitmoduleRepoPath = repoPath,
-              gitmoduleRepoCompatible = False
+          GitModuleRepo
+            { gitModuleRepoHost = "",
+              gitModuleRepoUser = "",
+              gitModuleRepoName = takeFileName pathEntry,
+              gitModuleRepoPathEntry = pathEntry,
+              gitModuleRepoPath = repositoryPath,
+              gitModuleRepoCompatible = False
             }
-parseGitmodulePaths :: String -> [FilePath]
-parseGitmodulePaths content =
+parseGitModulePaths :: String -> [FilePath]
+parseGitModulePaths content =
   nub
     [ trimString value
     | line <- lines content,
@@ -340,11 +341,11 @@ parseGitmodulePaths content =
     ]
 checkRepositoryStructure :: IO [String]
 checkRepositoryStructure = do
-  allPaths <- collectRepoPaths "."
-  let relPaths = sort [path | path <- allPaths, path /= "."]
-      leafPaths = Set.fromList (filter (isLeafPath relPaths) relPaths)
-      packageRoots = Set.fromList (mapMaybe packageRoot relPaths)
-      hostRoots = Set.fromList (mapMaybe hostRoot relPaths)
+  allPaths <- collectRepositoryPaths "."
+  let relativePaths = sort [path | path <- allPaths, path /= "."]
+      leafPaths = Set.fromList (filter (isLeafPath relativePaths) relativePaths)
+      packageRoots = Set.fromList (mapMaybe packageRoot relativePaths)
+      hostRoots = Set.fromList (mapMaybe hostRoot relativePaths)
       packageInfos = map (buildPackageInfo leafPaths) (Set.toList packageRoots)
       globalAllowedPatterns :: [String]
       globalAllowedPatterns =
@@ -368,140 +369,140 @@ checkRepositoryStructure = do
         ]
       packageAllowedPatterns =
         concat
-          [ allowedPatternsForKind (packageRootPath pkgInfo) (packageDirName pkgInfo) (detectedKind pkgInfo)
-          | pkgInfo <- packageInfos
+          [ allowedPatternsForPackageKind (packageRootPath packageInfo) (packageDirName packageInfo) (detectedKind packageInfo)
+          | packageInfo <- packageInfos
           ]
       allowedPatterns = globalAllowedPatterns ++ packageAllowedPatterns
       missingPackageDefaults =
-        [ pkgRoot ++ ": missing required file default.nix"
-        | pkgRoot <- Set.toList packageRoots,
-          (pkgRoot </> "default.nix") `notElem` relPaths
+        [ packageRootPathValue ++ ": missing required file default.nix"
+        | packageRootPathValue <- Set.toList packageRoots,
+          (packageRootPathValue </> "default.nix") `notElem` relativePaths
         ]
       missingHostConfigs =
-        [ hostDir ++ ": missing required file configuration.nix"
-        | hostDir <- Set.toList hostRoots,
-          (hostDir </> "configuration.nix") `notElem` relPaths
+        [ hostDirectory ++ ": missing required file configuration.nix"
+        | hostDirectory <- Set.toList hostRoots,
+          (hostDirectory </> "configuration.nix") `notElem` relativePaths
         ]
       missingCabalForMain =
-        [ pkgRoot ++ ": missing required file " ++ pkgName ++ ".cabal for Main.hs package"
-        | pkgRoot <- Set.toList packageRoots,
-          Set.member (pkgRoot </> "Main.hs") (Set.fromList relPaths),
-          let pkgName = takeBaseName pkgRoot,
-          (pkgRoot </> pkgName <.> "cabal") `notElem` relPaths
+        [ packageRootPathValue ++ ": missing required file " ++ packageDirectoryName ++ ".cabal for Main.hs package"
+        | packageRootPathValue <- Set.toList packageRoots,
+          Set.member (packageRootPathValue </> "Main.hs") (Set.fromList relativePaths),
+          let packageDirectoryName = takeBaseName packageRootPathValue,
+          (packageRootPathValue </> packageDirectoryName <.> "cabal") `notElem` relativePaths
         ]
       badlyNamedCabals =
-        [ path ++ ": cabal file must be named " ++ pkgName ++ ".cabal"
-        | path <- relPaths,
+        [ path ++ ": cabal file must be named " ++ packageDirectoryName ++ ".cabal"
+        | path <- relativePaths,
           ".cabal" `isSuffixOf` path,
-          let pkgRoot = takeDirectory path,
-          "packages/" `isPrefixOf` pkgRoot,
-          let pkgName = takeBaseName pkgRoot,
-          takeFileName path /= pkgName <.> "cabal"
+          let packageRootPathValue = takeDirectory path,
+          "packages/" `isPrefixOf` packageRootPathValue,
+          let packageDirectoryName = takeBaseName packageRootPathValue,
+          takeFileName path /= packageDirectoryName <.> "cabal"
         ]
       packageKindIssues =
-        concatMap packageKindProblems packageInfos
+        concatMap packageKindIssuesForPackage packageInfos
       disallowedPaths =
         [ path ++ ": is not allowed"
         | path <- Set.toList leafPaths,
           not (any (`pathMatches` path) allowedPatterns)
         ]
   pure (missingPackageDefaults ++ missingHostConfigs ++ missingCabalForMain ++ badlyNamedCabals ++ packageKindIssues ++ disallowedPaths)
-type ProjectKind :: Type
-data ProjectKind
-  = HaskellKind
-  | RustKind
-  | HtmlKind
-  | PythonLatexKind
-  | PythonKind
-  | PythonPypiKind
-  | CKind
-  | TerraformKind
-  | LatexKind
-  | BinaryReleaseKind
-  | UnknownKind
+type PackageKind :: Type
+data PackageKind
+  = HaskellPackage
+  | RustPackage
+  | HtmlPackage
+  | PythonLaTeXPackage
+  | PythonPackage
+  | PythonPyPIPackage
+  | CPackage
+  | TerraformPackage
+  | LaTeXPackage
+  | BinaryReleasePackage
+  | UnknownPackage
   deriving stock (Eq, Ord, Show)
 type PackageInfo :: Type
 data PackageInfo = PackageInfo
   { packageRootPath :: FilePath,
     packageDirName :: FilePath,
     packageLeafFiles :: [FilePath],
-    detectedKind :: ProjectKind,
+    detectedKind :: PackageKind,
     matchedMarkers :: [String]
   }
 buildPackageInfo :: Set.Set FilePath -> FilePath -> PackageInfo
-buildPackageInfo leafPaths pkgRoot =
-  let pkgName = takeBaseName pkgRoot
+buildPackageInfo leafPaths packageRootPathValue =
+  let packageDirectoryName = takeBaseName packageRootPathValue
       leafFiles =
         catMaybes
-          [ stripPrefix (pkgRoot ++ "/") path
+          [ stripPrefix (packageRootPathValue ++ "/") path
           | path <- Set.toList leafPaths,
-            (pkgRoot ++ "/") `isPrefixOf` path
+            (packageRootPathValue ++ "/") `isPrefixOf` path
           ]
-      markers = detectMarkers leafFiles
+      markers = detectPackageMarkers leafFiles
    in PackageInfo
-        { packageRootPath = pkgRoot,
-          packageDirName = pkgName,
+        { packageRootPath = packageRootPathValue,
+          packageDirName = packageDirectoryName,
           packageLeafFiles = leafFiles,
-          detectedKind = detectKind markers,
+          detectedKind = detectPackageKindFromMarkers markers,
           matchedMarkers = map fst markers
         }
-detectMarkers :: [FilePath] -> [(String, ProjectKind)]
-detectMarkers leafFiles =
+detectPackageMarkers :: [FilePath] -> [(String, PackageKind)]
+detectPackageMarkers leafFiles =
   let has path = path `elem` leafFiles
       hasAny prefix = any (isPrefixOf prefix) leafFiles
    in catMaybes
-        [ if has "Main.hs" then Just ("Main.hs", HaskellKind) else Nothing,
-          if has "Cargo.toml" then Just ("Cargo.toml", RustKind) else Nothing,
-          if has "index.html" then Just ("index.html", HtmlKind) else Nothing,
-          if has "main.py" && has "ms.tex" then Just ("main.py+ms.tex", PythonLatexKind) else Nothing,
-          if has "main.py" && not (has "ms.tex") then Just ("main.py", PythonKind) else Nothing,
-          if has "main.c" then Just ("main.c", CKind) else Nothing,
-          if has "main.tf" then Just ("main.tf", TerraformKind) else Nothing,
-          if has "ms.tex" && not (has "main.py") then Just ("ms.tex", LatexKind) else Nothing,
-          if hasAny "Cargo.toml" then Nothing else if not (has "main.c") && not (has "Main.hs") && not (has "main.py") && not (has "index.html") && not (has "main.tf") && not (has "ms.tex") then Just ("binary-layout", BinaryReleaseKind) else Nothing
+        [ if has "Main.hs" then Just ("Main.hs", HaskellPackage) else Nothing,
+          if has "Cargo.toml" then Just ("Cargo.toml", RustPackage) else Nothing,
+          if has "index.html" then Just ("index.html", HtmlPackage) else Nothing,
+          if has "main.py" && has "ms.tex" then Just ("main.py+ms.tex", PythonLaTeXPackage) else Nothing,
+          if has "main.py" && not (has "ms.tex") then Just ("main.py", PythonPackage) else Nothing,
+          if has "main.c" then Just ("main.c", CPackage) else Nothing,
+          if has "main.tf" then Just ("main.tf", TerraformPackage) else Nothing,
+          if has "ms.tex" && not (has "main.py") then Just ("ms.tex", LaTeXPackage) else Nothing,
+          if hasAny "Cargo.toml" then Nothing else if not (has "main.c") && not (has "Main.hs") && not (has "main.py") && not (has "index.html") && not (has "main.tf") && not (has "ms.tex") then Just ("binary-layout", BinaryReleasePackage) else Nothing
         ]
-detectKind :: [(String, ProjectKind)] -> ProjectKind
-detectKind markers =
-  case [kind | (_, kind) <- markers, kind /= BinaryReleaseKind] of
-    [kind] -> kind
+detectPackageKindFromMarkers :: [(String, PackageKind)] -> PackageKind
+detectPackageKindFromMarkers markers =
+  case [markerKind | (_, markerKind) <- markers, markerKind /= BinaryReleasePackage] of
+    [markerKind] -> markerKind
     [] ->
-      if any ((== BinaryReleaseKind) . snd) markers
-        then BinaryReleaseKind
-        else UnknownKind
-    _ -> UnknownKind
-packageKindProblems :: PackageInfo -> [String]
-packageKindProblems pkgInfo =
-  [ packageRootPath pkgInfo
+      if any ((== BinaryReleasePackage) . snd) markers
+        then BinaryReleasePackage
+        else UnknownPackage
+    _ -> UnknownPackage
+packageKindIssuesForPackage :: PackageInfo -> [String]
+packageKindIssuesForPackage packageInfo =
+  [ packageRootPath packageInfo
       ++ ": has ambiguous project markers: "
-      ++ intercalate ", " (matchedMarkers pkgInfo)
-  | length (matchedMarkers pkgInfo) > 1
+      ++ intercalate ", " (matchedMarkers packageInfo)
+  | length (matchedMarkers packageInfo) > 1
   ]
-allowedPatternsForKind :: FilePath -> FilePath -> ProjectKind -> [String]
-allowedPatternsForKind pkgRoot pkgName kind =
-  let base = ["^" ++ pkgRoot ++ "/default\\.nix$", "^" ++ pkgRoot ++ "/\\.gitignore$"]
+allowedPatternsForPackageKind :: FilePath -> FilePath -> PackageKind -> [String]
+allowedPatternsForPackageKind packageRootPathValue packageDirectoryName packageKind =
+  let base = ["^" ++ packageRootPathValue ++ "/default\\.nix$", "^" ++ packageRootPathValue ++ "/\\.gitignore$"]
       add patterns = base ++ patterns
-   in case kind of
-        HaskellKind -> add ["^" ++ pkgRoot ++ "/Main\\.hs$", "^" ++ pkgRoot ++ "/" ++ pkgName ++ "\\.cabal$"]
-        RustKind -> add ["^" ++ pkgRoot ++ "/Cargo\\.toml$", "^" ++ pkgRoot ++ "/Cargo\\.lock$", "^" ++ pkgRoot ++ "/src/main\\.rs$"]
-        HtmlKind -> add ["^" ++ pkgRoot ++ "/index\\.html$", "^" ++ pkgRoot ++ "/script\\.js$", "^" ++ pkgRoot ++ "/style\\.css$"]
-        PythonLatexKind -> add ["^" ++ pkgRoot ++ "/main\\.py$", "^" ++ pkgRoot ++ "/ms\\.tex$", "^" ++ pkgRoot ++ "/ms\\.bib$", "^" ++ pkgRoot ++ "/refs\\.bib$", "^" ++ pkgRoot ++ "/figures(/.*)?$"]
-        PythonKind -> add ["^" ++ pkgRoot ++ "/main\\.py$"]
-        PythonPypiKind -> base
-        CKind -> add ["^" ++ pkgRoot ++ "/main\\.c$"]
-        TerraformKind -> add ["^" ++ pkgRoot ++ "/main\\.tf$", "^" ++ pkgRoot ++ "/\\.terraform(/.*)?$", "^" ++ pkgRoot ++ "/\\.terraform\\.lock\\.hcl$"]
-        LatexKind -> add ["^" ++ pkgRoot ++ "/ms\\.tex$", "^" ++ pkgRoot ++ "/ms\\.bib$"]
-        BinaryReleaseKind -> base
-        UnknownKind -> base
-collectRepoPaths :: FilePath -> IO [FilePath]
-collectRepoPaths root = do
+   in case packageKind of
+        HaskellPackage -> add ["^" ++ packageRootPathValue ++ "/Main\\.hs$", "^" ++ packageRootPathValue ++ "/" ++ packageDirectoryName ++ "\\.cabal$"]
+        RustPackage -> add ["^" ++ packageRootPathValue ++ "/Cargo\\.toml$", "^" ++ packageRootPathValue ++ "/Cargo\\.lock$", "^" ++ packageRootPathValue ++ "/src/main\\.rs$"]
+        HtmlPackage -> add ["^" ++ packageRootPathValue ++ "/index\\.html$", "^" ++ packageRootPathValue ++ "/script\\.js$", "^" ++ packageRootPathValue ++ "/style\\.css$"]
+        PythonLaTeXPackage -> add ["^" ++ packageRootPathValue ++ "/main\\.py$", "^" ++ packageRootPathValue ++ "/ms\\.tex$", "^" ++ packageRootPathValue ++ "/ms\\.bib$", "^" ++ packageRootPathValue ++ "/refs\\.bib$", "^" ++ packageRootPathValue ++ "/figures(/.*)?$"]
+        PythonPackage -> add ["^" ++ packageRootPathValue ++ "/main\\.py$"]
+        PythonPyPIPackage -> base
+        CPackage -> add ["^" ++ packageRootPathValue ++ "/main\\.c$"]
+        TerraformPackage -> add ["^" ++ packageRootPathValue ++ "/main\\.tf$", "^" ++ packageRootPathValue ++ "/\\.terraform(/.*)?$", "^" ++ packageRootPathValue ++ "/\\.terraform\\.lock\\.hcl$"]
+        LaTeXPackage -> add ["^" ++ packageRootPathValue ++ "/ms\\.tex$", "^" ++ packageRootPathValue ++ "/ms\\.bib$"]
+        BinaryReleasePackage -> base
+        UnknownPackage -> base
+collectRepositoryPaths :: FilePath -> IO [FilePath]
+collectRepositoryPaths root = do
   children <- listDirectory root
   let childPaths = sort [root </> child | child <- children]
   keptChildren <- fmap catMaybes $
     forM childPaths $ \childPath -> do
-      isDir <- doesDirectoryExist childPath
+      isDirectory <- doesDirectoryExist childPath
       let relativeChildPath = toRelativePath childPath
-      case (isDir, shouldTraverseDirectory relativeChildPath) of
-        (True, True) -> Just <$> collectRepoPaths childPath
+      case (isDirectory, shouldTraverseDirectory relativeChildPath) of
+        (True, True) -> Just <$> collectRepositoryPaths childPath
         (True, False) -> pure Nothing
         (False, _) -> pure (Just [relativeChildPath])
   pure (toRelativePath root : concat keptChildren)
@@ -532,7 +533,7 @@ packageRoot path =
 hostRoot :: FilePath -> Maybe FilePath
 hostRoot path =
   case splitDirectories path of
-    "hosts" : hostDirName : _ -> Just ("hosts" </> hostDirName)
+    "hosts" : hostDirectoryName : _ -> Just ("hosts" </> hostDirectoryName)
     _ -> Nothing
 listPackageNames :: IO [FilePath]
 listPackageNames = listSubdirectories "packages"
@@ -544,27 +545,27 @@ listSubdirectories root = do
     else do
       entries <- listDirectory root
       flags <- forM entries $ \name -> doesDirectoryExist (root </> name)
-      pure $ sort [name | (name, isDir) <- zip entries flags, isDir]
+      pure $ sort [name | (name, isDirectory) <- zip entries flags, isDirectory]
 checkPackage :: [String] -> FilePath -> IO PackageCheck
-checkPackage allStructureIssues currentPackageName = do
-  let packageDefault = "packages" </> currentPackageName </> "default.nix"
+checkPackage repositoryStructureIssues packageName = do
+  let packageDefaultPath = "packages" </> packageName </> "default.nix"
       scopedStructureIssues =
         [ issue
-        | issue <- allStructureIssues,
-          ("packages/" ++ currentPackageName) `isPrefixOf` issue
+        | issue <- repositoryStructureIssues,
+          ("packages/" ++ packageName) `isPrefixOf` issue
         ]
-  projectKind <- detectProjectKindForPackage currentPackageName
-  exists <- doesFileExist packageDefault
+  packageKind <- detectPackageKindForPackage packageName
+  packageDefaultExists <- doesFileExist packageDefaultPath
   (templateIssues, _) <-
-    if not exists
+    if not packageDefaultExists
       then pure ([], Nothing)
       else do
-        packageContents <- TIO.readFile packageDefault
-        inferredTemplate <- inferTemplateName currentPackageName (T.unpack packageContents)
+        packageContents <- TIO.readFile packageDefaultPath
+        inferredTemplate <- inferTemplateName packageName (T.unpack packageContents)
         case inferredTemplate of
           Nothing ->
             pure
-              ( [ "packages/" ++ currentPackageName ++ "/default.nix: could not infer corresponding template"
+              ( [ "packages/" ++ packageName ++ "/default.nix: could not infer corresponding template"
                 ],
                 Nothing
               )
@@ -572,75 +573,75 @@ checkPackage allStructureIssues currentPackageName = do
             case templateSpecByName inferredTemplateName of
               Nothing ->
                 pure
-                  ( [ "packages/" ++ currentPackageName ++ "/default.nix: unsupported template " ++ inferredTemplateName
+                  ( [ "packages/" ++ packageName ++ "/default.nix: unsupported template " ++ inferredTemplateName
                     ],
                     Just inferredTemplateName
                   )
-              Just spec ->
-                case embeddedBaseline spec of
+              Just templateSpec ->
+                case templateBaseline templateSpec of
                   Just templateContents ->
                     do
                       let allowedKeysForPackage =
-                            if currentPackageName == "c_template" && inferredTemplateName == "c_template"
-                              then defaultAllowedKeys
-                              else allowedDifferenceKeys spec
-                      issues <- compareWithTemplate currentPackageName packageDefault ("packages" </> inferredTemplateName </> "default.nix") allowedKeysForPackage (Just templateContents)
+                            if packageName == "c_template" && inferredTemplateName == "c_template"
+                              then defaultAllowedDifferenceKeys
+                              else templateAllowedDifferenceKeys templateSpec
+                      issues <- compareWithTemplate packageName packageDefaultPath ("packages" </> inferredTemplateName </> "default.nix") allowedKeysForPackage (Just templateContents)
                       pure (issues, Just inferredTemplateName)
                   Nothing ->
                     pure
                       ( [ "packages/"
-                            ++ currentPackageName
+                            ++ packageName
                             ++ "/default.nix: internal error: missing embedded template baseline for "
                             ++ inferredTemplateName
                         ],
                         Just inferredTemplateName
                       )
-  cargoIssues <- checkCargoToml currentPackageName
-  cabalIssues <- checkCabalFile currentPackageName
-  pythonDebugIssues <- checkPythonDebugUnittest currentPackageName projectKind
-  haskellDebugIssues <- checkHaskellDebugTests currentPackageName projectKind
-  rustDebugIssues <- checkRustDebugTests currentPackageName projectKind
-  pythonUnitTestNames <- discoverPythonUnitTestNames currentPackageName projectKind
-  haskellUnitTestNames <- discoverHaskellUnitTestNames currentPackageName projectKind
-  rustUnitTestNames <- discoverRustUnitTestNames currentPackageName projectKind
+  cargoIssues <- checkCargoToml packageName
+  cabalIssues <- checkCabalFile packageName
+  pythonDebugIssues <- checkPythonDebugUnitTest packageName packageKind
+  haskellDebugIssues <- checkHaskellDebugTests packageName packageKind
+  rustDebugIssues <- checkRustDebugTests packageName packageKind
+  pythonUnitTestNames <- discoverPythonUnitTestNames packageName packageKind
+  haskellUnitTestNames <- discoverHaskellUnitTestNames packageName packageKind
+  rustUnitTestNames <- discoverRustUnitTestNames packageName packageKind
   let cargoStatus = statusFromIssues cargoIssues
       cabalStatus = statusFromIssues cabalIssues
-      mkCase label status issues =
+      makeTestCaseResult label status issues =
         TestCaseResult
           label
           status
           (if status == Failed then issues else [])
-      mkTest name status label issues =
+      makeTestResult name status label issues =
         TestResult
           name
           status
-          [mkCase label status issues]
+          [makeTestCaseResult label status issues]
       defaultNixIssues =
         [issue | issue <- scopedStructureIssues, "/default.nix" `isInfixOf` issue]
           ++ templateIssues
       defaultNixStatus =
-        if exists && null defaultNixIssues
+        if packageDefaultExists && null defaultNixIssues
           then Passed
           else Failed
-      pythonStatus = if projectKind `elem` [PythonKind, PythonLatexKind] then statusFromIssues pythonDebugIssues else Skipped
-      haskellStatus = if projectKind == HaskellKind then statusFromIssues haskellDebugIssues else Skipped
-      rustStatus = if projectKind == RustKind then statusFromIssues rustDebugIssues else Skipped
+      pythonStatus = if packageKind `elem` [PythonPackage, PythonLaTeXPackage] then statusFromIssues pythonDebugIssues else Skipped
+      haskellStatus = if packageKind == HaskellPackage then statusFromIssues haskellDebugIssues else Skipped
+      rustStatus = if packageKind == RustPackage then statusFromIssues rustDebugIssues else Skipped
       baseTests =
         [ TestResult
             "directory structure"
             (statusFromIssues scopedStructureIssues)
             [],
-          mkTest "default.nix" defaultNixStatus "matches template and policy" defaultNixIssues
+          makeTestResult "default.nix" defaultNixStatus "matches template and policy" defaultNixIssues
         ]
       languageSpecificTests =
         concat
-          [ if projectKind == RustKind
+          [ if packageKind == RustPackage
               then
-                [ mkTest "Cargo.toml" cargoStatus "matches Cargo.toml conventions" cargoIssues,
+                [ makeTestResult "Cargo.toml" cargoStatus "matches Cargo.toml conventions" cargoIssues,
                   TestResult
                     "src/main.rs"
                     rustStatus
-                    ( mkCase
+                    ( makeTestCaseResult
                         "supports DEBUG test execution"
                         rustStatus
                         rustDebugIssues
@@ -648,13 +649,13 @@ checkPackage allStructureIssues currentPackageName = do
                     )
                 ]
               else [],
-            if projectKind == HaskellKind
+            if packageKind == HaskellPackage
               then
-                [ mkTest (currentPackageName ++ ".cabal") cabalStatus "matches Cabal conventions" cabalIssues,
+                [ makeTestResult (packageName ++ ".cabal") cabalStatus "matches Cabal conventions" cabalIssues,
                   TestResult
                     "Main.hs"
                     haskellStatus
-                    ( mkCase
+                    ( makeTestCaseResult
                         "supports DEBUG test execution"
                         haskellStatus
                         haskellDebugIssues
@@ -670,27 +671,29 @@ checkPackage allStructureIssues currentPackageName = do
             [ TestResult
                 "main.py"
                 pythonStatus
-                ( mkCase
+                ( makeTestCaseResult
                     "supports DEBUG test execution"
                     pythonStatus
                     pythonDebugIssues
                     : [TestCaseResult name Skipped [] | name <- pythonUnitTestNames]
                 )
-            | projectKind `elem` [PythonKind, PythonLatexKind]
+            | packageKind `elem` [PythonPackage, PythonLaTeXPackage]
             ]
           ]
       tests = baseTests ++ languageSpecificTests
-      _touchSelectorUsage =
+      _forcePackageCheckSelectorUse =
         [ ( testName testResult,
             testStatus testResult,
             [ (nameValue, statusValue, detailsValue)
             | caseResult <- testCases testResult,
-              let TestCaseResult nameValue statusValue detailsValue = caseResult
+              let nameValue = testCaseName caseResult,
+              let statusValue = testCaseStatus caseResult,
+              let detailsValue = testCaseIssues caseResult
             ]
           )
         | testResult <- tests
         ]
-      allIssues =
+      packageIssues =
         scopedStructureIssues
           ++ templateIssues
           ++ cargoIssues
@@ -700,24 +703,24 @@ checkPackage allStructureIssues currentPackageName = do
           ++ rustDebugIssues
   pure
     PackageCheck
-      { packageNodeName = currentPackageName,
-        packageKind = projectKind,
-        packageTests = tests,
-        packageErrors = allIssues
+      { packageCheckName = packageName,
+        packageCheckKind = packageKind,
+        packageCheckTests = tests,
+        packageCheckIssues = packageIssues
       }
-detectProjectKindForPackage :: FilePath -> IO ProjectKind
-detectProjectKindForPackage packageName = do
-  let pkgRoot = "packages" </> packageName
-      has rel = doesFileExist (pkgRoot </> rel)
-  hasMainHs <- has "Main.hs"
-  hasCargoToml <- has "Cargo.toml"
-  hasIndexHtml <- has "index.html"
-  hasMainPy <- has "main.py"
-  hasMsTex <- has "ms.tex"
-  hasMainC <- has "main.c"
-  hasMainTf <- has "main.tf"
-  defaultNixSource <- readTextFileIfExists (pkgRoot </> "default.nix")
-  let isPythonPypiPackage =
+detectPackageKindForPackage :: FilePath -> IO PackageKind
+detectPackageKindForPackage packageName = do
+  let packageRootPathValue = "packages" </> packageName
+      has relativePath = doesFileExist (packageRootPathValue </> relativePath)
+  hasMainHaskellFile <- has "Main.hs"
+  hasCargoTomlFile <- has "Cargo.toml"
+  hasIndexHtmlFile <- has "index.html"
+  hasMainPythonFile <- has "main.py"
+  hasManuscriptTexFile <- has "ms.tex"
+  hasMainCFile <- has "main.c"
+  hasMainTerraformFile <- has "main.tf"
+  defaultNixSource <- readTextFileIfExists (packageRootPathValue </> "default.nix")
+  let isPythonPyPIPackage =
         case defaultNixSource of
           Nothing -> False
           Just source ->
@@ -725,30 +728,30 @@ detectProjectKindForPackage packageName = do
              in "buildPythonPackage" `isInfixOf` content
                   && not ("src = ./.;" `isInfixOf` content)
                   && ("fetchPypi" `isInfixOf` content || "fetchurl" `isInfixOf` content)
-  let kind
-        | hasMainHs = HaskellKind
-        | hasCargoToml = RustKind
-        | hasIndexHtml = HtmlKind
-        | hasMainPy && hasMsTex = PythonLatexKind
-        | hasMainPy = PythonKind
-        | isPythonPypiPackage = PythonPypiKind
-        | hasMainC = CKind
-        | hasMainTf = TerraformKind
-        | hasMsTex = LatexKind
-        | otherwise = BinaryReleaseKind
-  pure kind
+  let packageKind
+        | hasMainHaskellFile = HaskellPackage
+        | hasCargoTomlFile = RustPackage
+        | hasIndexHtmlFile = HtmlPackage
+        | hasMainPythonFile && hasManuscriptTexFile = PythonLaTeXPackage
+        | hasMainPythonFile = PythonPackage
+        | isPythonPyPIPackage = PythonPyPIPackage
+        | hasMainCFile = CPackage
+        | hasMainTerraformFile = TerraformPackage
+        | hasManuscriptTexFile = LaTeXPackage
+        | otherwise = BinaryReleasePackage
+  pure packageKind
 readTextFileIfExists :: FilePath -> IO (Maybe T.Text)
 readTextFileIfExists path = do
-  exists <- doesFileExist path
-  if exists then Just <$> TIO.readFile path else pure Nothing
-checkPythonDebugUnittest :: FilePath -> ProjectKind -> IO [String]
-checkPythonDebugUnittest packageName projectKind =
-  if projectKind `notElem` [PythonKind, PythonLatexKind]
+  fileExists <- doesFileExist path
+  if fileExists then Just <$> TIO.readFile path else pure Nothing
+checkPythonDebugUnitTest :: FilePath -> PackageKind -> IO [String]
+checkPythonDebugUnitTest packageName packageKind =
+  if packageKind `notElem` [PythonPackage, PythonLaTeXPackage]
     then pure []
     else do
-      let mainPyPath = "packages" </> packageName </> "main.py"
-      maybeMainPy <- readTextFileIfExists mainPyPath
-      case maybeMainPy of
+      let mainPythonPath = "packages" </> packageName </> "main.py"
+      maybeMainPythonSource <- readTextFileIfExists mainPythonPath
+      case maybeMainPythonSource of
         Nothing -> pure []
         Just _ -> do
           python3Path <- findExecutable "python3"
@@ -761,13 +764,13 @@ checkPythonDebugUnittest packageName projectKind =
                     ++ "/main.py: missing Python interpreter (tried python3, python)"
                 ]
             Just pythonCommand -> do
-              (exitCode, stdoutText, stderrText) <- readProcessWithExitCode pythonCommand ["-c", pythonDebugUnittestValidator, mainPyPath] ""
-              let rawLines = lines stdoutText
-                  errorCodes = [drop 4 line | line <- rawLines, "ERR " `isPrefixOf` line]
+              (exitCode, stdoutText, stderrText) <- readProcessWithExitCode pythonCommand ["-c", pythonDebugUnitTestValidator, mainPythonPath] ""
+              let sourceLines = lines stdoutText
+                  errorCodes = [drop 4 line | line <- sourceLines, "ERR " `isPrefixOf` line]
                   mappedErrors = map (mapPythonValidatorError packageName) errorCodes
               case exitCode of
                 ExitSuccess ->
-                  if "OK" `elem` rawLines
+                  if "OK" `elem` sourceLines
                     then pure []
                     else
                       pure
@@ -781,25 +784,25 @@ checkPythonDebugUnittest packageName projectKind =
                         ++ "/main.py: python AST validator execution failed: "
                         ++ oneLine (T.pack stderrText)
                     ]
-discoverPythonUnitTestNames :: FilePath -> ProjectKind -> IO [String]
-discoverPythonUnitTestNames packageName projectKind =
-  if projectKind `notElem` [PythonKind, PythonLatexKind]
+discoverPythonUnitTestNames :: FilePath -> PackageKind -> IO [String]
+discoverPythonUnitTestNames packageName packageKind =
+  if packageKind `notElem` [PythonPackage, PythonLaTeXPackage]
     then pure []
     else do
-      let mainPyPath = "packages" </> packageName </> "main.py"
-      maybeContent <- readTextFileIfExists mainPyPath
-      case maybeContent of
+      let mainPythonPath = "packages" </> packageName </> "main.py"
+      maybeSource <- readTextFileIfExists mainPythonPath
+      case maybeSource of
         Nothing -> pure []
         Just content -> do
           let extracted =
-                [ fnName
-                | rawLine <- lines (T.unpack content),
-                  Just fnName <- [extractPythonTestName rawLine]
+                [ functionName
+                | sourceLine <- lines (T.unpack content),
+                  Just functionName <- [extractPythonTestName sourceLine]
                 ]
           pure (sort (Set.toList (Set.fromList extracted)))
 extractPythonTestName :: String -> Maybe String
-extractPythonTestName rawLine =
-  let trimmed = dropWhile (== ' ') rawLine
+extractPythonTestName sourceLine =
+  let trimmed = dropWhile (== ' ') sourceLine
       defPrefix :: String
       defPrefix = "def test_"
    in if defPrefix `isPrefixOf` trimmed
@@ -807,17 +810,17 @@ extractPythonTestName rawLine =
           let namePortion = takeWhile (\ch -> ch /= '(' && ch /= ' ' && ch /= ':') (drop 4 trimmed)
            in if null namePortion then Nothing else Just namePortion
         else Nothing
-checkHaskellDebugTests :: FilePath -> ProjectKind -> IO [String]
-checkHaskellDebugTests packageName projectKind =
-  if projectKind /= HaskellKind
+checkHaskellDebugTests :: FilePath -> PackageKind -> IO [String]
+checkHaskellDebugTests packageName packageKind =
+  if packageKind /= HaskellPackage
     then pure []
     else do
-      let mainHsPath = "packages" </> packageName </> "Main.hs"
-      mainExists <- doesFileExist mainHsPath
-      if not mainExists
+      let mainHaskellPath = "packages" </> packageName </> "Main.hs"
+      mainFileExists <- doesFileExist mainHaskellPath
+      if not mainFileExists
         then pure []
         else do
-          content <- TIO.readFile mainHsPath
+          content <- TIO.readFile mainHaskellPath
           let source = T.unpack content
               hasDebugEnvGate = "lookupEnv \"DEBUG\"" `isInfixOf` source
               hasTestRunner = "runTestTT" `isInfixOf` source || "runDebugTests" `isInfixOf` source
@@ -834,22 +837,22 @@ checkHaskellDebugTests packageName projectKind =
                   then Nothing
                   else Just ("packages/" ++ packageName ++ "/Main.hs: DEBUG=1 branch must run HUnit tests (runTestTT)")
               ]
-discoverHaskellUnitTestNames :: FilePath -> ProjectKind -> IO [String]
-discoverHaskellUnitTestNames packageName projectKind =
-  if projectKind /= HaskellKind
+discoverHaskellUnitTestNames :: FilePath -> PackageKind -> IO [String]
+discoverHaskellUnitTestNames packageName packageKind =
+  if packageKind /= HaskellPackage
     then pure []
     else do
-      let mainHsPath = "packages" </> packageName </> "Main.hs"
-      maybeContent <- readTextFileIfExists mainHsPath
-      case maybeContent of
+      let mainHaskellPath = "packages" </> packageName </> "Main.hs"
+      maybeSource <- readTextFileIfExists mainHaskellPath
+      case maybeSource of
         Nothing -> pure []
         Just content -> do
           let sourceLines = lines (T.unpack content)
               labelsFromFormattingHelper = extractMakeFormattingTestLabels sourceLines
               labelsFromTilde =
                 [ label
-                | rawLine <- sourceLines,
-                  Just label <- [extractHaskellTestLabel rawLine]
+                | sourceLine <- sourceLines,
+                  Just label <- [extractHaskellTestLabel sourceLine]
                 ]
               labelsFromAssertEqual = extractAssertEqualLabels sourceLines
               fallbackCaseNames =
@@ -862,8 +865,8 @@ discoverHaskellUnitTestNames packageName projectKind =
                   else labelsFromFormattingHelper ++ labelsFromTilde ++ labelsFromAssertEqual
           pure (sort (Set.toList (Set.fromList discovered)))
 extractHaskellTestLabel :: String -> Maybe String
-extractHaskellTestLabel rawLine =
-  case breakOnSubstring "~:" rawLine of
+extractHaskellTestLabel sourceLine =
+  case breakOnSubstring "~:" sourceLine of
     Nothing -> Nothing
     Just (beforeTilde, _) -> lastQuotedToken beforeTilde
 breakOnSubstring :: String -> String -> Maybe (String, String)
@@ -939,21 +942,21 @@ firstQuotedToken source =
               let token = takeWhile (/= '\'') rest
                in if null token then Nothing else Just token
             _ -> Nothing
-checkRustDebugTests :: FilePath -> ProjectKind -> IO [String]
-checkRustDebugTests packageName projectKind =
-  if projectKind /= RustKind
+checkRustDebugTests :: FilePath -> PackageKind -> IO [String]
+checkRustDebugTests packageName packageKind =
+  if packageKind /= RustPackage
     then pure []
     else do
-      let mainRsPath = "packages" </> packageName </> "src/main.rs"
+      let mainRustPath = "packages" </> packageName </> "src/main.rs"
           defaultNixPath = "packages" </> packageName </> "default.nix"
-      mainExists <- doesFileExist mainRsPath
-      defaultNixExists <- doesFileExist defaultNixPath
+      mainFileExists <- doesFileExist mainRustPath
+      defaultNixFileExists <- doesFileExist defaultNixPath
       mainSource <-
-        if mainExists
-          then T.unpack <$> TIO.readFile mainRsPath
+        if mainFileExists
+          then T.unpack <$> TIO.readFile mainRustPath
           else pure ""
       defaultNixSource <-
-        if defaultNixExists
+        if defaultNixFileExists
           then T.unpack <$> TIO.readFile defaultNixPath
           else pure ""
       let hasRustTestModule = "#[cfg(test)]" `isInfixOf` mainSource && "mod tests" `isInfixOf` mainSource
@@ -971,18 +974,18 @@ checkRustDebugTests packageName projectKind =
               then Nothing
               else Just ("packages/" ++ packageName ++ "/default.nix: DEBUG mode must run cargo test")
           ]
-discoverRustUnitTestNames :: FilePath -> ProjectKind -> IO [String]
-discoverRustUnitTestNames packageName projectKind =
-  if projectKind /= RustKind
+discoverRustUnitTestNames :: FilePath -> PackageKind -> IO [String]
+discoverRustUnitTestNames packageName packageKind =
+  if packageKind /= RustPackage
     then pure []
     else do
-      let mainRsPath = "packages" </> packageName </> "src/main.rs"
-      maybeContent <- readTextFileIfExists mainRsPath
-      case maybeContent of
+      let mainRustPath = "packages" </> packageName </> "src/main.rs"
+      maybeSource <- readTextFileIfExists mainRustPath
+      case maybeSource of
         Nothing -> pure []
         Just content -> pure (extractRustTests (lines (T.unpack content)))
 extractRustTests :: [String] -> [String]
-extractRustTests rawLines = sort (Set.toList (Set.fromList (go False rawLines)))
+extractRustTests sourceLines = sort (Set.toList (Set.fromList (go False sourceLines)))
   where
     go _ [] = []
     go awaitingFn (line : rest) =
@@ -992,8 +995,8 @@ extractRustTests rawLines = sort (Set.toList (Set.fromList (go False rawLines)))
             else
               if awaitingFn && "fn " `isPrefixOf` trimmed
                 then
-                  let fnName = takeWhile (\ch -> ch /= '(' && ch /= ' ') (drop 3 trimmed)
-                   in [fnName | not (null fnName)] ++ go False rest
+                  let functionName = takeWhile (\ch -> ch /= '(' && ch /= ' ') (drop 3 trimmed)
+                   in [functionName | not (null functionName)] ++ go False rest
                 else go False rest
 mapPythonValidatorError :: FilePath -> String -> String
 mapPythonValidatorError packageName errorCode =
@@ -1005,8 +1008,8 @@ mapPythonValidatorError packageName errorCode =
         "run_tests_missing_unittest" -> prefix ++ "run_tests() is called from DEBUG branch but does not run unittest"
         "parse_error" -> prefix ++ "python source could not be parsed"
         _ -> prefix ++ "python validator failed with error code: " ++ errorCode
-pythonDebugUnittestValidator :: String
-pythonDebugUnittestValidator =
+pythonDebugUnitTestValidator :: String
+pythonDebugUnitTestValidator =
   unlines
     [ "import ast",
       "import sys",
@@ -1117,12 +1120,12 @@ pythonDebugUnittestValidator =
     ]
 checkCargoToml :: FilePath -> IO [String]
 checkCargoToml packageName = do
-  let cargoPath = "packages" </> packageName </> "Cargo.toml"
-  cargoExists <- doesFileExist cargoPath
-  if not cargoExists
+  let cargoTomlPath = "packages" </> packageName </> "Cargo.toml"
+  cargoTomlExists <- doesFileExist cargoTomlPath
+  if not cargoTomlExists
     then pure []
     else do
-      cargoContents <- TIO.readFile cargoPath
+      cargoContents <- TIO.readFile cargoTomlPath
       let packageSection = extractTomlSection "package" cargoContents
           lintsRustSection = extractTomlSection "lints.rust" cargoContents
           packageNameValue = lookupTomlString "name" packageSection
@@ -1161,8 +1164,8 @@ checkCargoToml packageName = do
           ]
 normalizeCargoTomlForTightness :: FilePath -> T.Text -> T.Text
 normalizeCargoTomlForTightness packageName contents =
-  let step (currentHeader, acc) rawLine =
-        let stripped = T.strip rawLine
+  let step (currentHeader, acc) sourceLine =
+        let stripped = T.strip sourceLine
          in if isTomlSectionHeader stripped
               then
                 if isDependencyHeader stripped
@@ -1202,19 +1205,19 @@ isTomlSectionHeader line =
 lookupTomlString :: T.Text -> T.Text -> Maybe T.Text
 lookupTomlString key sectionContents =
   let keyPrefix = key <> " = "
-      maybeLine = listToMaybe [T.strip line | line <- T.lines sectionContents, keyPrefix `T.isPrefixOf` T.strip line]
+      matchingFieldLine = listToMaybe [T.strip line | line <- T.lines sectionContents, keyPrefix `T.isPrefixOf` T.strip line]
    in do
-        line <- maybeLine
+        line <- matchingFieldLine
         value <- T.stripPrefix keyPrefix line
         T.stripPrefix "\"" value >>= T.stripSuffix "\""
 checkCabalFile :: FilePath -> IO [String]
 checkCabalFile packageName = do
-  let cabalPath = "packages" </> packageName </> packageName <.> "cabal"
-  cabalExists <- doesFileExist cabalPath
-  if not cabalExists
+  let cabalFilePath = "packages" </> packageName </> packageName <.> "cabal"
+  cabalFileExists <- doesFileExist cabalFilePath
+  if not cabalFileExists
     then pure []
     else do
-      cabalContents <- TIO.readFile cabalPath
+      cabalContents <- TIO.readFile cabalFilePath
       let normalizedCabal = normalizeCabalForTightness packageName cabalContents
           normalizedTemplate = normalizeCabalForTightness packageName haskellCabalTightnessBaseline
           cabalName = lookupCabalField "name" cabalContents
@@ -1236,8 +1239,8 @@ checkCabalFile packageName = do
           ]
 normalizeCabalForTightness :: FilePath -> T.Text -> T.Text
 normalizeCabalForTightness packageName contents =
-  let step (inBuildDepends, acc) rawLine =
-        let stripped = T.strip rawLine
+  let step (inBuildDepends, acc) sourceLine =
+        let stripped = T.strip sourceLine
             normalized = normalizeCabalLine packageName stripped
          in if inBuildDepends
               then
@@ -1263,26 +1266,26 @@ normalizeCabalLine packageName stripped
 lookupCabalField :: T.Text -> T.Text -> Maybe T.Text
 lookupCabalField field contents =
   let fieldPrefix = field <> ":"
-      maybeLine = listToMaybe [T.strip line | line <- T.lines contents, fieldPrefix `T.isPrefixOf` T.strip line]
+      matchingFieldLine = listToMaybe [T.strip line | line <- T.lines contents, fieldPrefix `T.isPrefixOf` T.strip line]
    in do
-        line <- maybeLine
+        line <- matchingFieldLine
         value <- T.stripPrefix fieldPrefix line
         pure (T.strip value)
 compareWithTemplate :: FilePath -> FilePath -> FilePath -> Set.Set T.Text -> Maybe T.Text -> IO [String]
-compareWithTemplate packageName packageDefault templateDefault allowedKeys templateOverrideContents = do
-  packageExpr <- parseNixExprFromFile packageDefault
-  templateExpr <-
+compareWithTemplate packageName packageDefaultPath templateDefault allowedKeys templateOverrideContents = do
+  parsedPackageExpr <- parseNixExprFromFile packageDefaultPath
+  parsedTemplateExpr <-
     case templateOverrideContents of
       Just contents -> parseNixExprFromText contents
       Nothing -> parseNixExprFromFile templateDefault
-  case (packageExpr, templateExpr) of
+  case (parsedPackageExpr, parsedTemplateExpr) of
     (Left parseError, _) ->
       pure ["packages/" ++ packageName ++ "/default.nix: parse error: " ++ show parseError]
     (_, Left parseError) ->
       pure [templateDefault ++ ": parse error: " ++ show parseError]
-    (Right pkg, Right tmpl) ->
-      let normalizedPackage = normalizeExpr allowedKeys pkg
-          normalizedTemplate = normalizeExpr allowedKeys tmpl
+    (Right packageNixExpr, Right templateNixExpr) ->
+      let normalizedPackage = normalizeExpr allowedKeys packageNixExpr
+          normalizedTemplate = normalizeExpr allowedKeys templateNixExpr
        in pure $
             formatDifferences
               packageName
@@ -1291,42 +1294,42 @@ compareWithTemplate packageName packageDefault templateDefault allowedKeys templ
               normalizedTemplate
 parseNixExprFromText :: T.Text -> IO (Either String NExprLoc)
 parseNixExprFromText contents = do
-  (tempPath, handle) <- openTempFile "/tmp" "check-repository-template-override.nix"
+  (temporaryPath, handle) <- openTempFile "/tmp" "check-repository-template-override.nix"
   TIO.hPutStr handle contents
   hClose handle
-  parseNixExprFromFile tempPath
-    `finally` removeFileIfExists tempPath
+  parseNixExprFromFile temporaryPath
+    `finally` removeFileIfExists temporaryPath
 parseNixExprFromFile :: FilePath -> IO (Either String NExprLoc)
 parseNixExprFromFile path =
   fmap (either (Left . show) Right) (parseNixFileLoc (Path path))
 removeFileIfExists :: FilePath -> IO ()
 removeFileIfExists path = do
-  exists <- doesFileExist path
-  when exists (removeFile path)
+  packageDefaultExists <- doesFileExist path
+  when packageDefaultExists (removeFile path)
 inferTemplateName :: FilePath -> String -> IO (Maybe FilePath)
 inferTemplateName packageName content = do
-  matches <- forM templateSpecs $ \spec -> do
-    matched <- matchesTemplate spec packageName content
-    pure (if matched then Just (templateName spec) else Nothing)
+  matches <- forM templateSpecs $ \templateSpec -> do
+    matched <- templateMatches templateSpec packageName content
+    pure (if matched then Just (templateName templateSpec) else Nothing)
   pure (listToMaybe (catMaybes matches))
 normalizeExpr :: Set.Set T.Text -> NExprLoc -> NExprLoc
-normalizeExpr allowedKeys (Fix (Compose (AnnUnit exprSpan exprF))) =
-  let rebuiltExpr = case exprF of
-        NSet rec bindings -> NSet rec (normalizeBindings allowedKeys bindings)
+normalizeExpr allowedKeys (Fix (Compose (AnnUnit exprSpan expressionFunctor))) =
+  let rebuiltExpr = case expressionFunctor of
+        NSet isRecursive bindings -> NSet isRecursive (normalizeBindings allowedKeys bindings)
         NLet bindings body -> NLet (normalizeBindings allowedKeys bindings) (normalizeExpr allowedKeys body)
-        NAbs (ParamSet p1 p2 ps) body -> NAbs (ParamSet p1 p2 (sortParams ps)) (normalizeExpr allowedKeys body)
-        NAbs (Param p) body -> NAbs (Param p) (normalizeExpr allowedKeys body)
+        NAbs (ParamSet paramsEllipsis paramsAt params) body -> NAbs (ParamSet paramsEllipsis paramsAt (sortParams params)) (normalizeExpr allowedKeys body)
+        NAbs (Param paramName) body -> NAbs (Param paramName) (normalizeExpr allowedKeys body)
         otherExpr -> fmap (normalizeExpr allowedKeys) otherExpr
    in Fix (Compose (AnnUnit exprSpan rebuiltExpr))
 sortParams :: [(VarName, Maybe NExprLoc)] -> [(VarName, Maybe NExprLoc)]
-sortParams = sortBy (\(VarName a, _) (VarName b, _) -> compare a b)
+sortParams = sortBy (\(VarName leftName, _) (VarName rightName, _) -> compare leftName rightName)
 normalizeBindings :: Set.Set T.Text -> [Binding NExprLoc] -> [Binding NExprLoc]
 normalizeBindings allowedKeys bindings =
   [normalizeBinding allowedKeys binding | binding <- bindings, not (isAllowedDifferenceBinding allowedKeys binding)]
 normalizeBinding :: Set.Set T.Text -> Binding NExprLoc -> Binding NExprLoc
 normalizeBinding allowedKeys = \case
-  NamedVar keyPath value pos -> NamedVar keyPath (normalizeExpr allowedKeys value) pos
-  Inherit maybeExpr names pos -> Inherit (normalizeExpr allowedKeys <$> maybeExpr) names pos
+  NamedVar keyPath value sourcePosition -> NamedVar keyPath (normalizeExpr allowedKeys value) sourcePosition
+  Inherit maybeBoundExpr names sourcePosition -> Inherit (normalizeExpr allowedKeys <$> maybeBoundExpr) names sourcePosition
 isAllowedDifferenceBinding :: Set.Set T.Text -> Binding NExprLoc -> Bool
 isAllowedDifferenceBinding allowedKeys = \case
   NamedVar (key :| _) _ _ ->
@@ -1352,25 +1355,25 @@ formatDifferences packageName templateDefault packageExpr templateExpr =
    in if renderedPackage == renderedTemplate
         then []
         else
-          let packageBindings = extractPrimaryBindings packageExpr
-              templateBindings = extractPrimaryBindings templateExpr
-           in case (packageBindings, templateBindings) of
-                (Just pkgMap, Just tmplMap) ->
-                  let missingKeys = Map.keys (Map.difference tmplMap pkgMap)
-                      unexpectedKeys = Map.keys (Map.difference pkgMap tmplMap)
-                      sharedKeys = Map.keys (Map.intersection pkgMap tmplMap)
+          let maybePackageBindings = extractPrimaryBindings packageExpr
+              maybeTemplateBindings = extractPrimaryBindings templateExpr
+           in case (maybePackageBindings, maybeTemplateBindings) of
+                (Just packageBindingMap, Just templateBindingMap) ->
+                  let missingKeys = Map.keys (Map.difference templateBindingMap packageBindingMap)
+                      unexpectedKeys = Map.keys (Map.difference packageBindingMap templateBindingMap)
+                      sharedKeys = Map.keys (Map.intersection packageBindingMap templateBindingMap)
                       changedKeys =
                         [ key
                         | key <- sharedKeys,
-                          Map.lookup key pkgMap /= Map.lookup key tmplMap
+                          Map.lookup key packageBindingMap /= Map.lookup key templateBindingMap
                         ]
                       detailLines =
                         map (issueLine "missing key") missingKeys
                           ++ map (issueLine "unexpected key") unexpectedKeys
                           ++ map
                             ( \key ->
-                                let expectedValue = oneLine (fromMaybe "" (Map.lookup key tmplMap))
-                                    actualValue = oneLine (fromMaybe "" (Map.lookup key pkgMap))
+                                let expectedValue = oneLine (fromMaybe "" (Map.lookup key templateBindingMap))
+                                    actualValue = oneLine (fromMaybe "" (Map.lookup key packageBindingMap))
                                  in "  - changed key: "
                                       ++ T.unpack key
                                       ++ "\n    expected: "
@@ -1415,8 +1418,8 @@ extractPrimaryBindings expr = do
 maximumByLength :: [[a]] -> [a]
 maximumByLength = maximumBy (comparing length)
 collectSetBindings :: NExprLoc -> Maybe [[(T.Text, T.Text)]]
-collectSetBindings (Fix (Compose (AnnUnit _ exprF))) =
-  case exprF of
+collectSetBindings (Fix (Compose (AnnUnit _ expressionFunctor))) =
+  case expressionFunctor of
     NSet _ bindings ->
       let current = extractBindings bindings
           nested = concatMap collectFromBinding bindings
@@ -1430,7 +1433,7 @@ collectSetBindings (Fix (Compose (AnnUnit _ exprF))) =
       Just (concatMap (fromMaybe [] . collectSetBindings) otherExpr)
 collectFromBinding :: Binding NExprLoc -> [[(T.Text, T.Text)]]
 collectFromBinding (NamedVar _ value _) = fromMaybe [] (collectSetBindings value)
-collectFromBinding (Inherit maybeExpr _ _) = maybe [] (fromMaybe [] . collectSetBindings) maybeExpr
+collectFromBinding (Inherit maybeBoundExpr _ _) = maybe [] (fromMaybe [] . collectSetBindings) maybeBoundExpr
 extractBindings :: [Binding NExprLoc] -> [(T.Text, T.Text)]
 extractBindings bindings =
   [ (T.intercalate "." (mapMaybe keyNameText (NE.toList keyPath)), renderExpr value)
@@ -1452,19 +1455,19 @@ runPropertyTests = do
 quickCheckDebugProperties :: IO Bool
 quickCheckDebugProperties = do
   trimResult <- QC.quickCheckResult (QC.withMaxSuccess 100 prop_trimStringIdempotent)
-  gitmoduleParseResult <- QC.quickCheckResult (QC.withMaxSuccess 100 prop_parseGitmodulePathsPreservesFirstOccurrences)
-  gitmoduleRepoAcceptanceResult <- QC.quickCheckResult (QC.withMaxSuccess 100 prop_buildGitmoduleRepoAcceptsGoStylePaths)
-  gitmoduleRepoRejectionResult <- QC.quickCheckResult (QC.withMaxSuccess 100 prop_buildGitmoduleRepoRejectsMalformedPaths)
-  pure (all isQuickCheckSuccess [trimResult, gitmoduleParseResult, gitmoduleRepoAcceptanceResult, gitmoduleRepoRejectionResult])
+  gitModuleParseResult <- QC.quickCheckResult (QC.withMaxSuccess 100 prop_parseGitModulePathsPreservesFirstOccurrences)
+  gitModuleRepoAcceptanceResult <- QC.quickCheckResult (QC.withMaxSuccess 100 prop_buildGitModuleRepoAcceptsGoStylePaths)
+  gitModuleRepoRejectionResult <- QC.quickCheckResult (QC.withMaxSuccess 100 prop_buildGitModuleRepoRejectsMalformedPaths)
+  pure (all isQuickCheckSuccess [trimResult, gitModuleParseResult, gitModuleRepoAcceptanceResult, gitModuleRepoRejectionResult])
 isQuickCheckSuccess :: QC.Result -> Bool
 isQuickCheckSuccess QC.Success {} = True
 isQuickCheckSuccess _ = False
 prop_trimStringIdempotent :: String -> Bool
 prop_trimStringIdempotent source =
   trimString (trimString source) == trimString source
-prop_parseGitmodulePathsPreservesFirstOccurrences :: QC.Property
-prop_parseGitmodulePathsPreservesFirstOccurrences =
-  QC.forAll gitmodulePathEntriesGen $ \paths ->
+prop_parseGitModulePathsPreservesFirstOccurrences :: QC.Property
+prop_parseGitModulePathsPreservesFirstOccurrences =
+  QC.forAll gitModulePathEntriesGen $ \paths ->
     let rendered =
           concatMap
             ( \pathEntry ->
@@ -1476,28 +1479,28 @@ prop_parseGitmodulePathsPreservesFirstOccurrences =
             )
             paths
             ++ "ignore = this-line\n"
-     in parseGitmodulePaths rendered == nub paths
-prop_buildGitmoduleRepoAcceptsGoStylePaths :: QC.Property
-prop_buildGitmoduleRepoAcceptsGoStylePaths =
+     in parseGitModulePaths rendered == nub paths
+prop_buildGitModuleRepoAcceptsGoStylePaths :: QC.Property
+prop_buildGitModuleRepoAcceptsGoStylePaths =
   QC.forAll goStylePathGen $ \pathEntry ->
-    let repo = buildGitmoduleRepo "/home/test" pathEntry
+    let repo = buildGitModuleRepo "/home/test" pathEntry
         parts = splitDirectories pathEntry
      in case parts of
           [hostKey, userKey, repoKey] ->
-            gitmoduleRepoCompatible repo
-              && gitmoduleRepoPathEntry repo == pathEntry
-              && gitmoduleRepoPath repo == "/home/test" </> pathEntry
-              && gitmoduleRepoHost repo == hostKey
-              && gitmoduleRepoUser repo == userKey
-              && gitmoduleRepoName repo == repoKey
+            gitModuleRepoCompatible repo
+              && gitModuleRepoPathEntry repo == pathEntry
+              && gitModuleRepoPath repo == "/home/test" </> pathEntry
+              && gitModuleRepoHost repo == hostKey
+              && gitModuleRepoUser repo == userKey
+              && gitModuleRepoName repo == repoKey
           _ -> False
-prop_buildGitmoduleRepoRejectsMalformedPaths :: QC.Property
-prop_buildGitmoduleRepoRejectsMalformedPaths =
+prop_buildGitModuleRepoRejectsMalformedPaths :: QC.Property
+prop_buildGitModuleRepoRejectsMalformedPaths =
   QC.forAll malformedPathGen $ \pathEntry ->
-    let repo = buildGitmoduleRepo "/home/test" pathEntry
-     in not (gitmoduleRepoCompatible repo) && gitmoduleRepoPathEntry repo == pathEntry
-gitmodulePathEntriesGen :: QC.Gen [FilePath]
-gitmodulePathEntriesGen = QC.listOf goStylePathGen
+    let repo = buildGitModuleRepo "/home/test" pathEntry
+     in not (gitModuleRepoCompatible repo) && gitModuleRepoPathEntry repo == pathEntry
+gitModulePathEntriesGen :: QC.Gen [FilePath]
+gitModulePathEntriesGen = QC.listOf goStylePathGen
 goStylePathGen :: QC.Gen FilePath
 goStylePathGen = do
   hostKey <- hostSegmentGen
@@ -1545,7 +1548,7 @@ debugTests =
           (Just "python_template")
           inferred,
       TestCase $ do
-        inferred <- inferTemplateName "test" pythonPypiFixture
+        inferred <- inferTemplateName "test" pythonPyPIFixture
         assertEqual
           "Infers the PyPI Python template."
           (Just "python_pypi_template")
@@ -1557,7 +1560,7 @@ debugTests =
           (Just "binary_release_template")
           inferred,
       TestCase $ do
-        inferred <- inferTemplateName "test" pythonLatexFixture
+        inferred <- inferTemplateName "test" pythonLaTeXFixture
         assertEqual
           "Infers the Python template for the python-latex fixture."
           (Just "python_template")
@@ -1619,14 +1622,14 @@ debugTests =
           (lookupTomlString "unsafe_code" (extractTomlSection "lints.rust" removeEmptyLinesCargoFixture)),
       TestCase $ do
         assertEqual
-          "Marks canonical go-style gitmodule path as compatible."
+          "Marks canonical go-style .gitmodules path as compatible."
           True
-          (gitmoduleRepoCompatible (buildGitmoduleRepo "/home/user" "github.com/pbizopoulos/canonicalization")),
+          (gitModuleRepoCompatible (buildGitModuleRepo "/home/user" "github.com/pbizopoulos/canonicalization")),
       TestCase $ do
         assertEqual
-          "Rejects non go-style gitmodule path with extra segments."
+          "Rejects non go-style .gitmodules path with extra segments."
           False
-          (gitmoduleRepoCompatible (buildGitmoduleRepo "/home/user" "github.com/pbizopoulos/canonicalization/subdir"))
+          (gitModuleRepoCompatible (buildGitModuleRepo "/home/user" "github.com/pbizopoulos/canonicalization/subdir"))
     ]
 rustFixture :: String
 rustFixture =
@@ -1653,14 +1656,14 @@ pythonFixture =
     ++ "pkgs.python3Packages.buildPythonPackage rec {\n"
     ++ "  src = ./.;\n"
     ++ "}\n"
-pythonLatexFixture :: String
-pythonLatexFixture =
+pythonLaTeXFixture :: String
+pythonLaTeXFixture =
   "{ pkgs ? import <nixpkgs> { }, }:\n"
     ++ "pkgs.python3Packages.buildPythonPackage rec {\n"
     ++ "  installPhase = '' latexmk -cd -pdf tmp/ms.tex '';\n"
     ++ "}\n"
-pythonPypiFixture :: String
-pythonPypiFixture =
+pythonPyPIFixture :: String
+pythonPyPIFixture =
   "{ pkgs ? import <nixpkgs> { }, }:\n"
     ++ "let pyPkgs = pkgs.python3Packages; in\n"
     ++ "pyPkgs.buildPythonPackage rec {\n"
@@ -2174,8 +2177,8 @@ pythonTemplateBaseline =
       "  version = \"0.0.0\";",
       "}"
     ]
-pythonPypiBaseline :: T.Text
-pythonPypiBaseline =
+pythonPyPIBaseline :: T.Text
+pythonPyPIBaseline =
   T.unlines
     [ "{",
       "  pkgs ? import <nixpkgs> { },",
@@ -2234,8 +2237,8 @@ binaryReleaseBaseline =
       "  version = \"0.9.23\";",
       "}"
     ]
-pythonLatexTemplateBaseline :: T.Text
-pythonLatexTemplateBaseline =
+pythonLaTeXTemplateBaseline :: T.Text
+pythonLaTeXTemplateBaseline =
   T.unlines
     [ "{",
       "  pkgs ? import <nixpkgs> { },",
