@@ -684,11 +684,11 @@ checkPackage repositoryStructureIssues packageName = do
       _forcePackageCheckSelectorUse =
         [ ( packageTestName packageTest,
             packageTestOutcome packageTest,
-            [ (nameValue, outcomeValue, issuesValue)
+            [ (packageTestCaseNameValue, packageTestCaseOutcomeValue, packageTestCaseIssuesValue)
             | packageTestCase <- packageTestCases packageTest,
-              let nameValue = packageTestCaseName packageTestCase,
-              let outcomeValue = packageTestCaseOutcome packageTestCase,
-              let issuesValue = packageTestCaseIssues packageTestCase
+              let packageTestCaseNameValue = packageTestCaseName packageTestCase,
+              let packageTestCaseOutcomeValue = packageTestCaseOutcome packageTestCase,
+              let packageTestCaseIssuesValue = packageTestCaseIssues packageTestCase
             ]
           )
         | packageTest <- packageTests
@@ -766,7 +766,7 @@ checkPythonDebugUnitTest packageName packageKind =
             Just pythonCommand -> do
               (exitCode, stdoutText, stderrText) <- readProcessWithExitCode pythonCommand ["-c", pythonDebugUnitTestValidator, mainPythonPath] ""
               let validatorOutputLines = lines stdoutText
-                  errorCodes = [drop 4 line | line <- validatorOutputLines, "ERR " `isPrefixOf` line]
+                  errorCodes = [drop 4 validatorOutputLine | validatorOutputLine <- validatorOutputLines, "ERR " `isPrefixOf` validatorOutputLine]
                   mappedErrors = map (mapPythonValidatorError packageName) errorCodes
               case exitCode of
                 ExitSuccess ->
@@ -1205,7 +1205,7 @@ isTomlSectionHeader tomlLine =
 lookupTomlString :: T.Text -> T.Text -> Maybe T.Text
 lookupTomlString tomlKey sectionContents =
   let keyPrefix = tomlKey <> " = "
-      matchingFieldLine = listToMaybe [T.strip line | line <- T.lines sectionContents, keyPrefix `T.isPrefixOf` T.strip line]
+      matchingFieldLine = listToMaybe [T.strip sectionLine | sectionLine <- T.lines sectionContents, keyPrefix `T.isPrefixOf` T.strip sectionLine]
    in do
         matchingLine <- matchingFieldLine
         quotedValue <- T.stripPrefix keyPrefix matchingLine
@@ -1266,7 +1266,7 @@ normalizeCabalLine packageName trimmedLine
 lookupCabalField :: T.Text -> T.Text -> Maybe T.Text
 lookupCabalField cabalField cabalContents =
   let fieldPrefix = cabalField <> ":"
-      matchingFieldLine = listToMaybe [T.strip line | line <- T.lines cabalContents, fieldPrefix `T.isPrefixOf` T.strip line]
+      matchingFieldLine = listToMaybe [T.strip cabalLine | cabalLine <- T.lines cabalContents, fieldPrefix `T.isPrefixOf` T.strip cabalLine]
    in do
         matchingLine <- matchingFieldLine
         fieldValue <- T.stripPrefix fieldPrefix matchingLine
@@ -1328,12 +1328,12 @@ normalizeBindings allowedDifferenceKeys bindings =
   [normalizeBinding allowedDifferenceKeys binding | binding <- bindings, not (isAllowedDifferenceBinding allowedDifferenceKeys binding)]
 normalizeBinding :: Set.Set T.Text -> Binding NExprLoc -> Binding NExprLoc
 normalizeBinding allowedDifferenceKeys = \case
-  NamedVar keyPath value sourcePosition -> NamedVar keyPath (normalizeNixExpr allowedDifferenceKeys value) sourcePosition
+  NamedVar keyPath bindingValue sourcePosition -> NamedVar keyPath (normalizeNixExpr allowedDifferenceKeys bindingValue) sourcePosition
   Inherit maybeBoundExpr names sourcePosition -> Inherit (normalizeNixExpr allowedDifferenceKeys <$> maybeBoundExpr) names sourcePosition
 isAllowedDifferenceBinding :: Set.Set T.Text -> Binding NExprLoc -> Bool
 isAllowedDifferenceBinding allowedDifferenceKeys = \case
-  NamedVar (key :| _) _ _ ->
-    case keyNameText key of
+  NamedVar (bindingKey :| _) _ _ ->
+    case keyNameText bindingKey of
       Just keyText -> Set.member keyText allowedDifferenceKeys
       Nothing -> False
   _ -> False
@@ -1355,33 +1355,33 @@ formatDifferences packageName templateDefaultPath packageNixExpr templateNixExpr
    in if renderedPackage == renderedTemplate
         then []
         else
-          let maybePackageBindings = extractPrimaryBindings packageNixExpr
-              maybeTemplateBindings = extractPrimaryBindings templateNixExpr
-           in case (maybePackageBindings, maybeTemplateBindings) of
+          let packageBindingsMaybe = extractPrimaryBindings packageNixExpr
+              templateBindingsMaybe = extractPrimaryBindings templateNixExpr
+           in case (packageBindingsMaybe, templateBindingsMaybe) of
                 (Just packageBindingMap, Just templateBindingMap) ->
-                  let missingKeys = Map.keys (Map.difference templateBindingMap packageBindingMap)
-                      unexpectedKeys = Map.keys (Map.difference packageBindingMap templateBindingMap)
-                      sharedKeys = Map.keys (Map.intersection packageBindingMap templateBindingMap)
-                      changedKeys =
-                        [ key
-                        | key <- sharedKeys,
-                          Map.lookup key packageBindingMap /= Map.lookup key templateBindingMap
+                  let missingBindingKeys = Map.keys (Map.difference templateBindingMap packageBindingMap)
+                      unexpectedBindingKeys = Map.keys (Map.difference packageBindingMap templateBindingMap)
+                      sharedBindingKeys = Map.keys (Map.intersection packageBindingMap templateBindingMap)
+                      changedBindingKeys =
+                        [ bindingKey
+                        | bindingKey <- sharedBindingKeys,
+                          Map.lookup bindingKey packageBindingMap /= Map.lookup bindingKey templateBindingMap
                         ]
                       detailLines =
-                        map (issueLine "missing key") missingKeys
-                          ++ map (issueLine "unexpected key") unexpectedKeys
+                        map (issueLine "missing key") missingBindingKeys
+                          ++ map (issueLine "unexpected key") unexpectedBindingKeys
                           ++ map
-                            ( \key ->
-                                let expectedValue = oneLine (fromMaybe "" (Map.lookup key templateBindingMap))
-                                    actualValue = oneLine (fromMaybe "" (Map.lookup key packageBindingMap))
+                            ( \bindingKey ->
+                                let expectedValue = oneLine (fromMaybe "" (Map.lookup bindingKey templateBindingMap))
+                                    actualValue = oneLine (fromMaybe "" (Map.lookup bindingKey packageBindingMap))
                                  in "  - changed key: "
-                                      ++ T.unpack key
+                                      ++ T.unpack bindingKey
                                       ++ "\n    expected: "
                                       ++ expectedValue
                                       ++ "\n    actual:   "
                                       ++ actualValue
                             )
-                            changedKeys
+                            changedBindingKeys
                    in if null detailLines
                         then
                           [ "packages/"
@@ -1406,11 +1406,11 @@ formatDifferences packageName templateDefaultPath packageNixExpr templateNixExpr
                       ++ " (excluding dependency keys)"
                   ]
 issueLine :: String -> T.Text -> String
-issueLine issue key = "  - " ++ issue ++ ": " ++ T.unpack key
+issueLine issue bindingKey = "  - " ++ issue ++ ": " ++ T.unpack bindingKey
 oneLine :: T.Text -> String
-oneLine value =
-  let compact = T.unwords (T.words value)
-   in T.unpack compact
+oneLine textValue =
+  let compactText = T.unwords (T.words textValue)
+   in T.unpack compactText
 extractPrimaryBindings :: NExprLoc -> Maybe (Map.Map T.Text T.Text)
 extractPrimaryBindings nixExpression = do
   bindingGroups <- collectSetBindings nixExpression
@@ -1432,12 +1432,12 @@ collectSetBindings (Fix (Compose (AnnUnit _ expressionFunctor))) =
     otherNixExpr ->
       Just (concatMap (fromMaybe [] . collectSetBindings) otherNixExpr)
 collectFromBinding :: Binding NExprLoc -> [[(T.Text, T.Text)]]
-collectFromBinding (NamedVar _ value _) = fromMaybe [] (collectSetBindings value)
+collectFromBinding (NamedVar _ bindingValue _) = fromMaybe [] (collectSetBindings bindingValue)
 collectFromBinding (Inherit maybeBoundExpr _ _) = maybe [] (fromMaybe [] . collectSetBindings) maybeBoundExpr
 extractBindings :: [Binding NExprLoc] -> [(T.Text, T.Text)]
 extractBindings bindings =
-  [ (T.intercalate "." (mapMaybe keyNameText (NE.toList keyPath)), renderNixExpr value)
-  | NamedVar keyPath value _ <- bindings
+  [ (T.intercalate "." (mapMaybe keyNameText (NE.toList keyPath)), renderNixExpr bindingValue)
+  | NamedVar keyPath bindingValue _ <- bindings
   ]
 runDebugTests :: IO ()
 runDebugTests = do
