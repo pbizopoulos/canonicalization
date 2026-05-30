@@ -479,20 +479,20 @@ packageKindIssuesForPackage packageInfo =
   ]
 allowedPatternsForPackageKind :: FilePath -> FilePath -> PackageKind -> [String]
 allowedPatternsForPackageKind packageRootPathValue packageDirectoryName packageKind =
-  let base = ["^" ++ packageRootPathValue ++ "/default\\.nix$", "^" ++ packageRootPathValue ++ "/\\.gitignore$"]
-      add patterns = base ++ patterns
+  let basePackagePatterns = ["^" ++ packageRootPathValue ++ "/default\\.nix$", "^" ++ packageRootPathValue ++ "/\\.gitignore$"]
+      withBasePackagePatterns additionalPatterns = basePackagePatterns ++ additionalPatterns
    in case packageKind of
-        HaskellPackage -> add ["^" ++ packageRootPathValue ++ "/Main\\.hs$", "^" ++ packageRootPathValue ++ "/" ++ packageDirectoryName ++ "\\.cabal$"]
-        RustPackage -> add ["^" ++ packageRootPathValue ++ "/Cargo\\.toml$", "^" ++ packageRootPathValue ++ "/Cargo\\.lock$", "^" ++ packageRootPathValue ++ "/src/main\\.rs$"]
-        HTMLPackage -> add ["^" ++ packageRootPathValue ++ "/index\\.html$", "^" ++ packageRootPathValue ++ "/script\\.js$", "^" ++ packageRootPathValue ++ "/style\\.css$"]
-        PythonLaTeXPackage -> add ["^" ++ packageRootPathValue ++ "/main\\.py$", "^" ++ packageRootPathValue ++ "/ms\\.tex$", "^" ++ packageRootPathValue ++ "/ms\\.bib$", "^" ++ packageRootPathValue ++ "/refs\\.bib$", "^" ++ packageRootPathValue ++ "/figures(/.*)?$"]
-        PythonPackage -> add ["^" ++ packageRootPathValue ++ "/main\\.py$"]
-        PythonPyPIPackage -> base
-        CPackage -> add ["^" ++ packageRootPathValue ++ "/main\\.c$"]
-        TerraformPackage -> add ["^" ++ packageRootPathValue ++ "/main\\.tf$", "^" ++ packageRootPathValue ++ "/\\.terraform(/.*)?$", "^" ++ packageRootPathValue ++ "/\\.terraform\\.lock\\.hcl$"]
-        LaTeXPackage -> add ["^" ++ packageRootPathValue ++ "/ms\\.tex$", "^" ++ packageRootPathValue ++ "/ms\\.bib$"]
-        BinaryReleasePackage -> base
-        UnknownPackage -> base
+        HaskellPackage -> withBasePackagePatterns ["^" ++ packageRootPathValue ++ "/Main\\.hs$", "^" ++ packageRootPathValue ++ "/" ++ packageDirectoryName ++ "\\.cabal$"]
+        RustPackage -> withBasePackagePatterns ["^" ++ packageRootPathValue ++ "/Cargo\\.toml$", "^" ++ packageRootPathValue ++ "/Cargo\\.lock$", "^" ++ packageRootPathValue ++ "/src/main\\.rs$"]
+        HTMLPackage -> withBasePackagePatterns ["^" ++ packageRootPathValue ++ "/index\\.html$", "^" ++ packageRootPathValue ++ "/script\\.js$", "^" ++ packageRootPathValue ++ "/style\\.css$"]
+        PythonLaTeXPackage -> withBasePackagePatterns ["^" ++ packageRootPathValue ++ "/main\\.py$", "^" ++ packageRootPathValue ++ "/ms\\.tex$", "^" ++ packageRootPathValue ++ "/ms\\.bib$", "^" ++ packageRootPathValue ++ "/refs\\.bib$", "^" ++ packageRootPathValue ++ "/figures(/.*)?$"]
+        PythonPackage -> withBasePackagePatterns ["^" ++ packageRootPathValue ++ "/main\\.py$"]
+        PythonPyPIPackage -> basePackagePatterns
+        CPackage -> withBasePackagePatterns ["^" ++ packageRootPathValue ++ "/main\\.c$"]
+        TerraformPackage -> withBasePackagePatterns ["^" ++ packageRootPathValue ++ "/main\\.tf$", "^" ++ packageRootPathValue ++ "/\\.terraform(/.*)?$", "^" ++ packageRootPathValue ++ "/\\.terraform\\.lock\\.hcl$"]
+        LaTeXPackage -> withBasePackagePatterns ["^" ++ packageRootPathValue ++ "/ms\\.tex$", "^" ++ packageRootPathValue ++ "/ms\\.bib$"]
+        BinaryReleasePackage -> basePackagePatterns
+        UnknownPackage -> basePackagePatterns
 collectRepositoryPaths :: FilePath -> IO [FilePath]
 collectRepositoryPaths rootPath = do
   childNames <- listDirectory rootPath
@@ -750,8 +750,8 @@ checkPythonDebugUnitTest packageName packageKind =
     then pure []
     else do
       let mainPythonPath = "packages" </> packageName </> "main.py"
-      maybeMainPythonSource <- readTextFileIfExists mainPythonPath
-      case maybeMainPythonSource of
+      maybeMainPythonSourceText <- readTextFileIfExists mainPythonPath
+      case maybeMainPythonSourceText of
         Nothing -> pure []
         Just _ -> do
           python3Path <- findExecutable "python3"
@@ -794,21 +794,21 @@ discoverPythonUnitTestNames packageName packageKind =
       case maybeMainPythonSourceText of
         Nothing -> pure []
         Just mainPythonSourceText -> do
-          let extracted =
+          let extractedPythonTestNames =
                 [ functionName
                 | sourceLine <- lines (T.unpack mainPythonSourceText),
                   Just functionName <- [extractPythonTestName sourceLine]
                 ]
-          pure (sort (Set.toList (Set.fromList extracted)))
+          pure (sort (Set.toList (Set.fromList extractedPythonTestNames)))
 extractPythonTestName :: String -> Maybe String
 extractPythonTestName sourceLine =
-  let trimmed = dropWhile (== ' ') sourceLine
+  let trimmedSourceLine = dropWhile (== ' ') sourceLine
       defPrefix :: String
       defPrefix = "def test_"
-   in if defPrefix `isPrefixOf` trimmed
+   in if defPrefix `isPrefixOf` trimmedSourceLine
         then
-          let namePortion = takeWhile (\ch -> ch /= '(' && ch /= ' ' && ch /= ':') (drop 4 trimmed)
-           in if null namePortion then Nothing else Just namePortion
+          let testFunctionName = takeWhile (\character -> character /= '(' && character /= ' ' && character /= ':') (drop 4 trimmedSourceLine)
+           in if null testFunctionName then Nothing else Just testFunctionName
         else Nothing
 checkHaskellDebugTests :: FilePath -> PackageKind -> IO [String]
 checkHaskellDebugTests packageName packageKind =
@@ -859,11 +859,11 @@ discoverHaskellUnitTestNames packageName packageKind =
                 [ "Unnamed HUnit test case #" ++ show i
                 | i <- [1 .. length [() | sourceLine <- haskellSourceLines, "TestCase" `isInfixOf` sourceLine]]
                 ]
-              discovered =
+              discoveredHaskellTestNames =
                 if null labelsFromFormattingHelper && null labelsFromTilde && null labelsFromAssertEqual
                   then fallbackCaseNames
                   else labelsFromFormattingHelper ++ labelsFromTilde ++ labelsFromAssertEqual
-          pure (sort (Set.toList (Set.fromList discovered)))
+          pure (sort (Set.toList (Set.fromList discoveredHaskellTestNames)))
 extractHaskellTestLabel :: String -> Maybe String
 extractHaskellTestLabel sourceLine =
   case breakOnSubstring "~:" sourceLine of
@@ -995,7 +995,7 @@ extractRustTests sourceLines = sort (Set.toList (Set.fromList (go False sourceLi
             else
               if awaitingFunctionAfterTestAttribute && "fn " `isPrefixOf` trimmed
                 then
-                  let functionName = takeWhile (\ch -> ch /= '(' && ch /= ' ') (drop 3 trimmed)
+                  let functionName = takeWhile (\character -> character /= '(' && character /= ' ') (drop 3 trimmed)
                    in [functionName | not (null functionName)] ++ go False rest
                 else go False rest
 mapPythonValidatorError :: FilePath -> String -> String
@@ -1026,8 +1026,8 @@ pythonDebugUnitTestValidator =
       "        first = node.args[0]",
       "        return isinstance(first, ast.Constant) and first.value == 'DEBUG'",
       "    if isinstance(function.value, ast.Attribute) and function.attr == 'get':",
-      "        base = function.value",
-      "        if isinstance(base.value, ast.Name) and base.value.id == 'os' and base.attr == 'environ':",
+      "        environment_access = function.value",
+      "        if isinstance(environment_access.value, ast.Name) and environment_access.value.id == 'os' and environment_access.attr == 'environ':",
       "            if not node.args:",
       "                return False",
       "            first = node.args[0]",
@@ -1273,12 +1273,12 @@ lookupCabalField cabalField cabalContents =
         pure (T.strip fieldValue)
 compareWithTemplate :: FilePath -> FilePath -> FilePath -> Set.Set T.Text -> Maybe T.Text -> IO [String]
 compareWithTemplate packageName packageDefaultPath templateDefaultPath allowedDifferenceKeys templateOverrideNixSource = do
-  parsedPackageNixExpr <- parseNixExprFromFile packageDefaultPath
-  parsedTemplateNixExpr <-
+  packageNixParseResult <- parseNixExprFromFile packageDefaultPath
+  templateNixParseResult <-
     case templateOverrideNixSource of
       Just overrideNixSource -> parseNixExprFromText overrideNixSource
       Nothing -> parseNixExprFromFile templateDefaultPath
-  case (parsedPackageNixExpr, parsedTemplateNixExpr) of
+  case (packageNixParseResult, templateNixParseResult) of
     (Left parseError, _) ->
       pure ["packages/" ++ packageName ++ "/default.nix: parse error: " ++ show parseError]
     (_, Left parseError) ->
@@ -1329,7 +1329,7 @@ normalizeBindings allowedDifferenceKeys bindings =
 normalizeBinding :: Set.Set T.Text -> Binding NExprLoc -> Binding NExprLoc
 normalizeBinding allowedDifferenceKeys = \case
   NamedVar keyPath bindingValue sourcePosition -> NamedVar keyPath (normalizeNixExpr allowedDifferenceKeys bindingValue) sourcePosition
-  Inherit maybeBoundExpr names sourcePosition -> Inherit (normalizeNixExpr allowedDifferenceKeys <$> maybeBoundExpr) names sourcePosition
+  Inherit maybeBoundNixExpr inheritedNames sourcePosition -> Inherit (normalizeNixExpr allowedDifferenceKeys <$> maybeBoundNixExpr) inheritedNames sourcePosition
 isAllowedDifferenceBinding :: Set.Set T.Text -> Binding NExprLoc -> Bool
 isAllowedDifferenceBinding allowedDifferenceKeys = \case
   NamedVar (bindingKey :| _) _ _ ->
@@ -1421,19 +1421,19 @@ collectSetBindings :: NExprLoc -> Maybe [[(T.Text, T.Text)]]
 collectSetBindings (Fix (Compose (AnnUnit _ expressionFunctor))) =
   case expressionFunctor of
     NSet _ bindings ->
-      let currentBindings = extractBindings bindings
+      let currentSetBindings = extractBindings bindings
           nestedBindings = concatMap collectFromBinding bindings
-       in Just (currentBindings : nestedBindings)
+       in Just (currentSetBindings : nestedBindings)
     NLet bindings body ->
       let nestedFromBindings = concatMap collectFromBinding bindings
-          nestedFromBody = fromMaybe [] (collectSetBindings body)
-       in Just (nestedFromBindings ++ nestedFromBody)
+          nestedFromBodyExpr = fromMaybe [] (collectSetBindings body)
+       in Just (nestedFromBindings ++ nestedFromBodyExpr)
     NAbs _ body -> collectSetBindings body
     otherNixExpr ->
       Just (concatMap (fromMaybe [] . collectSetBindings) otherNixExpr)
 collectFromBinding :: Binding NExprLoc -> [[(T.Text, T.Text)]]
 collectFromBinding (NamedVar _ bindingValue _) = fromMaybe [] (collectSetBindings bindingValue)
-collectFromBinding (Inherit maybeBoundExpr _ _) = maybe [] (fromMaybe [] . collectSetBindings) maybeBoundExpr
+collectFromBinding (Inherit maybeBoundNixExpr _ _) = maybe [] (fromMaybe [] . collectSetBindings) maybeBoundNixExpr
 extractBindings :: [Binding NExprLoc] -> [(T.Text, T.Text)]
 extractBindings bindings =
   [ (T.intercalate "." (mapMaybe keyNameText (NE.toList keyPath)), renderNixExpr bindingValue)
