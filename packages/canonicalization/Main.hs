@@ -210,18 +210,18 @@ data PackageCheck = PackageCheck
   }
 main :: IO ()
 main = do
-  debug <- lookupEnv "DEBUG"
-  propertyOnly <- lookupEnv "PROPERTY_TESTS"
-  args <- getArgs
-  case debug of
+  debugMode <- lookupEnv "DEBUG"
+  propertyTestMode <- lookupEnv "PROPERTY_TESTS"
+  commandLineArgs <- getArgs
+  case debugMode of
     Just "1" ->
-      case propertyOnly of
+      case propertyTestMode of
         Just "1" -> runPropertyTests
         _ -> runDebugTests
-    _ -> runCli args
+    _ -> runCli commandLineArgs
 runCli :: [String] -> IO ()
-runCli args =
-  case args of
+runCli commandLineArgs =
+  case commandLineArgs of
     ["check-repository"] -> runInGitRepository "." runCheckMode
     ["check-repository", repositoryDirectory] -> runInGitRepository repositoryDirectory runCheckMode
     ["check-gitmodules"] -> runCheckGitModulesMode
@@ -265,11 +265,11 @@ runCheckMode = do
     reportComplianceFailures "file-compliance" fileIssues
     exitFailure
 reportComplianceFailures :: String -> [String] -> IO ()
-reportComplianceFailures phase issues = do
-  putStrLn ("check-repository failed at phase: " ++ phase)
-  forM_ issues $ \issue ->
-    putStrLn ("- [" ++ phase ++ "] " ++ issue)
-  case phase of
+reportComplianceFailures compliancePhase complianceIssues = do
+  putStrLn ("check-repository failed at phase: " ++ compliancePhase)
+  forM_ complianceIssues $ \issue ->
+    putStrLn ("- [" ++ compliancePhase ++ "] " ++ issue)
+  case compliancePhase of
     "directory-structure" ->
       putStrLn "hint: fix directory and required-file layout under packages/, hosts/, checks/, and repository root."
     "file-compliance" ->
@@ -282,8 +282,8 @@ runCheckGitModulesMode = do
   if null invalidPathEntries
     then putStrLn "all .gitmodules path entries comply with go-style naming (<host>/<owner>/<repo>)"
     else do
-      forM_ invalidPathEntries $ \entry ->
-        putStrLn (entry ++ ": must be exactly <host>/<owner>/<repo>")
+      forM_ invalidPathEntries $ \invalidPathEntry ->
+        putStrLn (invalidPathEntry ++ ": must be exactly <host>/<owner>/<repo>")
       exitFailure
 type GitModuleRepository :: Type
 data GitModuleRepository = GitModuleRepository
@@ -495,8 +495,8 @@ allowedPatternsForPackageKind packageRootPathValue packageDirectoryName packageK
         UnknownPackage -> base
 collectRepositoryPaths :: FilePath -> IO [FilePath]
 collectRepositoryPaths rootPath = do
-  children <- listDirectory rootPath
-  let childPaths = sort [rootPath </> child | child <- children]
+  childNames <- listDirectory rootPath
+  let childPaths = sort [rootPath </> childName | childName <- childNames]
   keptChildren <- fmap catMaybes $
     forM childPaths $ \childPath -> do
       isDirectory <- doesDirectoryExist childPath
@@ -508,21 +508,21 @@ collectRepositoryPaths rootPath = do
   pure (toRelativePath rootPath : concat keptChildren)
 toRelativePath :: FilePath -> FilePath
 toRelativePath "." = "."
-toRelativePath path =
-  case splitDirectories path of
-    "." : rest -> foldl1 (</>) rest
+toRelativePath filePath =
+  case splitDirectories filePath of
+    "." : relativeSegments -> foldl1 (</>) relativeSegments
     segments -> foldl1 (</>) segments
 shouldTraverseDirectory :: FilePath -> Bool
-shouldTraverseDirectory path =
+shouldTraverseDirectory repositoryPath =
   not
     ( any
         (`elem` ["tmp", "prm", "target", "result", ".agents", ".codex"])
-        (splitDirectories path)
+        (splitDirectories repositoryPath)
     )
 isLeafPath :: [FilePath] -> FilePath -> Bool
 isLeafPath repositoryPaths candidatePath =
-  let children = [path | path <- repositoryPaths, takeDirectory path == candidatePath]
-   in null children
+  let childPaths = [path | path <- repositoryPaths, takeDirectory path == candidatePath]
+   in null childPaths
 pathMatches :: String -> FilePath -> Bool
 pathMatches regexPattern path = path =~ regexPattern
 packageRoot :: FilePath -> Maybe FilePath
@@ -585,8 +585,8 @@ checkPackage repositoryStructureIssues packageName = do
                             if packageName == "c_template" && inferredTemplateName == "c_template"
                               then defaultAllowedDifferenceKeys
                               else templateAllowedDifferenceKeys templateSpec
-                      issues <- compareWithTemplate packageName packageDefaultPath ("packages" </> inferredTemplateName </> "default.nix") allowedKeysForPackage (Just templateNixSource)
-                      pure (issues, Just inferredTemplateName)
+                      templateComparisonIssues <- compareWithTemplate packageName packageDefaultPath ("packages" </> inferredTemplateName </> "default.nix") allowedKeysForPackage (Just templateNixSource)
+                      pure (templateComparisonIssues, Just inferredTemplateName)
                   Nothing ->
                     pure
                       ( [ "packages/"
@@ -606,16 +606,16 @@ checkPackage repositoryStructureIssues packageName = do
   rustUnitTestNames <- discoverRustUnitTestNames packageName packageKind
   let cargoOutcome = outcomeFromIssues cargoIssues
       cabalOutcome = outcomeFromIssues cabalIssues
-      makePackageTestCase label outcome issues =
+      makePackageTestCase testCaseName outcome issues =
         PackageTestCase
-          label
+          testCaseName
           outcome
           (if outcome == CheckFailed then issues else [])
-      makePackageTest name outcome label issues =
+      makePackageTest testName outcome testCaseName issues =
         PackageTest
-          name
+          testName
           outcome
-          [makePackageTestCase label outcome issues]
+          [makePackageTestCase testCaseName outcome issues]
       defaultNixIssues =
         [issue | issue <- scopedStructureIssues, "/default.nix" `isInfixOf` issue]
           ++ templateIssues
@@ -645,7 +645,7 @@ checkPackage repositoryStructureIssues packageName = do
                         "supports DEBUG test execution"
                         rustOutcome
                         rustDebugIssues
-                        : [PackageTestCase name CheckSkipped [] | name <- rustUnitTestNames]
+                        : [PackageTestCase rustUnitTestName CheckSkipped [] | rustUnitTestName <- rustUnitTestNames]
                     )
                 ]
               else [],
@@ -675,7 +675,7 @@ checkPackage repositoryStructureIssues packageName = do
                     "supports DEBUG test execution"
                     pythonOutcome
                     pythonDebugIssues
-                    : [PackageTestCase name CheckSkipped [] | name <- pythonUnitTestNames]
+                    : [PackageTestCase pythonUnitTestName CheckSkipped [] | pythonUnitTestName <- pythonUnitTestNames]
                 )
             | packageKind `elem` [PythonPackage, PythonLaTeXPackage]
             ]
@@ -711,14 +711,14 @@ checkPackage repositoryStructureIssues packageName = do
 detectPackageKindForPackage :: FilePath -> IO PackageKind
 detectPackageKindForPackage packageName = do
   let packageRootPathValue = "packages" </> packageName
-      has relativePath = doesFileExist (packageRootPathValue </> relativePath)
-  hasMainHaskellFile <- has "Main.hs"
-  hasCargoTomlFile <- has "Cargo.toml"
-  hasIndexHtmlFile <- has "index.html"
-  hasMainPythonFile <- has "main.py"
-  hasManuscriptTexFile <- has "ms.tex"
-  hasMainCFile <- has "main.c"
-  hasMainTerraformFile <- has "main.tf"
+      packageFileExists relativePath = doesFileExist (packageRootPathValue </> relativePath)
+  hasMainHaskellFile <- packageFileExists "Main.hs"
+  hasCargoTomlFile <- packageFileExists "Cargo.toml"
+  hasIndexHtmlFile <- packageFileExists "index.html"
+  hasMainPythonFile <- packageFileExists "main.py"
+  hasManuscriptTexFile <- packageFileExists "ms.tex"
+  hasMainCFile <- packageFileExists "main.c"
+  hasMainTerraformFile <- packageFileExists "main.tf"
   defaultNixSource <- readTextFileIfExists (packageRootPathValue </> "default.nix")
   let isPythonPyPIPackage =
         case defaultNixSource of
@@ -790,13 +790,13 @@ discoverPythonUnitTestNames packageName packageKind =
     then pure []
     else do
       let mainPythonPath = "packages" </> packageName </> "main.py"
-      maybeSourceText <- readTextFileIfExists mainPythonPath
-      case maybeSourceText of
+      maybeMainPythonSourceText <- readTextFileIfExists mainPythonPath
+      case maybeMainPythonSourceText of
         Nothing -> pure []
-        Just sourceText -> do
+        Just mainPythonSourceText -> do
           let extracted =
                 [ functionName
-                | sourceLine <- lines (T.unpack sourceText),
+                | sourceLine <- lines (T.unpack mainPythonSourceText),
                   Just functionName <- [extractPythonTestName sourceLine]
                 ]
           pure (sort (Set.toList (Set.fromList extracted)))
@@ -820,8 +820,8 @@ checkHaskellDebugTests packageName packageKind =
       if not mainFileExists
         then pure []
         else do
-          sourceText <- TIO.readFile mainHaskellPath
-          let haskellSource = T.unpack sourceText
+          mainHaskellSourceText <- TIO.readFile mainHaskellPath
+          let haskellSource = T.unpack mainHaskellSourceText
               hasDebugEnvGate = "lookupEnv \"DEBUG\"" `isInfixOf` haskellSource
               hasTestRunner = "runTestTT" `isInfixOf` haskellSource || "runDebugTests" `isInfixOf` haskellSource
               hasMainDebugBranch = "Just \"1\" ->" `isInfixOf` haskellSource
@@ -843,21 +843,21 @@ discoverHaskellUnitTestNames packageName packageKind =
     then pure []
     else do
       let mainHaskellPath = "packages" </> packageName </> "Main.hs"
-      maybeSourceText <- readTextFileIfExists mainHaskellPath
-      case maybeSourceText of
+      maybeMainHaskellSourceText <- readTextFileIfExists mainHaskellPath
+      case maybeMainHaskellSourceText of
         Nothing -> pure []
-        Just sourceText -> do
-          let sourceLines = lines (T.unpack sourceText)
-              labelsFromFormattingHelper = extractMakeFormattingTestLabels sourceLines
+        Just mainHaskellSourceText -> do
+          let haskellSourceLines = lines (T.unpack mainHaskellSourceText)
+              labelsFromFormattingHelper = extractMakeFormattingTestLabels haskellSourceLines
               labelsFromTilde =
                 [ label
-                | sourceLine <- sourceLines,
+                | sourceLine <- haskellSourceLines,
                   Just label <- [extractHaskellTestLabel sourceLine]
                 ]
-              labelsFromAssertEqual = extractAssertEqualLabels sourceLines
+              labelsFromAssertEqual = extractAssertEqualLabels haskellSourceLines
               fallbackCaseNames =
                 [ "Unnamed HUnit test case #" ++ show i
-                | i <- [1 .. length [() | line <- sourceLines, "TestCase" `isInfixOf` line]]
+                | i <- [1 .. length [() | sourceLine <- haskellSourceLines, "TestCase" `isInfixOf` sourceLine]]
                 ]
               discovered =
                 if null labelsFromFormattingHelper && null labelsFromTilde && null labelsFromAssertEqual
@@ -980,20 +980,20 @@ discoverRustUnitTestNames packageName packageKind =
     then pure []
     else do
       let mainRustPath = "packages" </> packageName </> "src/main.rs"
-      maybeSourceText <- readTextFileIfExists mainRustPath
-      case maybeSourceText of
+      maybeMainRustSourceText <- readTextFileIfExists mainRustPath
+      case maybeMainRustSourceText of
         Nothing -> pure []
-        Just sourceText -> pure (extractRustTests (lines (T.unpack sourceText)))
+        Just mainRustSourceText -> pure (extractRustTests (lines (T.unpack mainRustSourceText)))
 extractRustTests :: [String] -> [String]
 extractRustTests sourceLines = sort (Set.toList (Set.fromList (go False sourceLines)))
   where
     go _ [] = []
-    go awaitingFn (line : rest) =
+    go awaitingFunctionAfterTestAttribute (line : rest) =
       let trimmed = dropWhile (== ' ') line
        in if "#[test]" `isPrefixOf` trimmed
             then go True rest
             else
-              if awaitingFn && "fn " `isPrefixOf` trimmed
+              if awaitingFunctionAfterTestAttribute && "fn " `isPrefixOf` trimmed
                 then
                   let functionName = takeWhile (\ch -> ch /= '(' && ch /= ' ') (drop 3 trimmed)
                    in [functionName | not (null functionName)] ++ go False rest
@@ -1017,16 +1017,16 @@ pythonDebugUnitTestValidator =
       "def _is_os_getenv_debug(node):",
       "    if not isinstance(node, ast.Call):",
       "        return False",
-      "    func = node.func",
-      "    if not isinstance(func, ast.Attribute):",
+      "    function = node.func",
+      "    if not isinstance(function, ast.Attribute):",
       "        return False",
-      "    if isinstance(func.value, ast.Name) and func.value.id == 'os' and func.attr == 'getenv':",
+      "    if isinstance(function.value, ast.Name) and function.value.id == 'os' and function.attr == 'getenv':",
       "        if not node.args:",
       "            return False",
       "        first = node.args[0]",
       "        return isinstance(first, ast.Constant) and first.value == 'DEBUG'",
-      "    if isinstance(func.value, ast.Attribute) and func.attr == 'get':",
-      "        base = func.value",
+      "    if isinstance(function.value, ast.Attribute) and function.attr == 'get':",
+      "        base = function.value",
       "        if isinstance(base.value, ast.Name) and base.value.id == 'os' and base.attr == 'environ':",
       "            if not node.args:",
       "                return False",
@@ -1035,22 +1035,22 @@ pythonDebugUnitTestValidator =
       "    return False",
       "",
       "def _contains_debug_gate(expression):",
-      "    return any(_is_os_getenv_debug(n) for n in ast.walk(expression))",
+      "    return any(_is_os_getenv_debug(node) for node in ast.walk(expression))",
       "",
       "def _is_unittest_main_call(node):",
       "    if not isinstance(node, ast.Call):",
       "        return False",
-      "    func = node.func",
-      "    return isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id == 'unittest' and func.attr == 'main'",
+      "    function = node.func",
+      "    return isinstance(function, ast.Attribute) and isinstance(function.value, ast.Name) and function.value.id == 'unittest' and function.attr == 'main'",
       "",
       "def _contains_unittest_runner(statements):",
       "    for statement in statements:",
       "        for node in ast.walk(statement):",
       "            if not isinstance(node, ast.Call):",
       "                continue",
-      "            func = node.func",
-      "            if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id == 'unittest':",
-      "                if func.attr in {'main', 'TextTestRunner', 'defaultTestLoader'}:",
+      "            function = node.func",
+      "            if isinstance(function, ast.Attribute) and isinstance(function.value, ast.Name) and function.value.id == 'unittest':",
+      "                if function.attr in {'main', 'TextTestRunner', 'defaultTestLoader'}:",
       "                    return True",
       "    return False",
       "",
@@ -1089,8 +1089,8 @@ pythonDebugUnitTestValidator =
       "    if 'main' not in functions:",
       "        errors.append('missing_main_function')",
       "    else:",
-      "        main_fn = functions['main']",
-      "        debug_if_nodes = [n for n in ast.walk(main_fn) if isinstance(n, ast.If) and _contains_debug_gate(n.test)]",
+      "        main_function = functions['main']",
+      "        debug_if_nodes = [node for node in ast.walk(main_function) if isinstance(node, ast.If) and _contains_debug_gate(node.test)]",
       "        if not debug_if_nodes:",
       "            errors.append('missing_debug_gate')",
       "        else:",
