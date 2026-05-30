@@ -161,10 +161,10 @@ templateSpecs =
 pythonLaTeXDetector :: FilePath -> String -> IO Bool
 pythonLaTeXDetector packageName nixSource
   | "buildPythonPackage" `isInfixOf` nixSource = do
-      let packageDir = "packages" </> packageName
-      hasManuscriptTexFile <- doesFileExist (packageDir </> "ms.tex")
-      hasRefsBib <- doesFileExist (packageDir </> "refs.bib")
-      hasFiguresDir <- doesDirectoryExist (packageDir </> "figures")
+      let packageDirectory = "packages" </> packageName
+      hasManuscriptTexFile <- doesFileExist (packageDirectory </> "ms.tex")
+      hasRefsBib <- doesFileExist (packageDirectory </> "refs.bib")
+      hasFiguresDir <- doesDirectoryExist (packageDirectory </> "figures")
       pure (hasManuscriptTexFile || hasRefsBib || hasFiguresDir)
   | otherwise = pure False
 pythonPyPIDetector :: FilePath -> String -> IO Bool
@@ -235,20 +235,20 @@ runInGitRepository repositoryDirectory action = do
   unless isDirectory $ do
     putStrLn ("not a directory: " ++ repositoryDirectory)
     exitFailure
-  (insideExit, insideStdout, _insideStderr) <- readProcessWithExitCode "git" ["-C", repositoryDirectory, "rev-parse", "--is-inside-work-tree"] ""
-  unless (insideExit == ExitSuccess && trimString insideStdout == "true") $ do
+  (insideWorkTreeExit, insideWorkTreeStdout, _insideWorkTreeStderr) <- readProcessWithExitCode "git" ["-C", repositoryDirectory, "rev-parse", "--is-inside-work-tree"] ""
+  unless (insideWorkTreeExit == ExitSuccess && trimString insideWorkTreeStdout == "true") $ do
     putStrLn ("not a git directory: " ++ repositoryDirectory)
     exitFailure
-  (topExit, topStdout, _topStderr) <- readProcessWithExitCode "git" ["-C", repositoryDirectory, "rev-parse", "--show-toplevel"] ""
-  unless (topExit == ExitSuccess) $ do
+  (repositoryRootExit, repositoryRootStdout, _repositoryRootStderr) <- readProcessWithExitCode "git" ["-C", repositoryDirectory, "rev-parse", "--show-toplevel"] ""
+  unless (repositoryRootExit == ExitSuccess) $ do
     putStrLn ("not a git directory: " ++ repositoryDirectory)
     exitFailure
-  canonicalInput <- canonicalizePath repositoryDirectory
-  canonicalTop <- canonicalizePath (trimString topStdout)
-  unless (canonicalInput == canonicalTop) $ do
+  canonicalInputDirectory <- canonicalizePath repositoryDirectory
+  canonicalRepositoryRoot <- canonicalizePath (trimString repositoryRootStdout)
+  unless (canonicalInputDirectory == canonicalRepositoryRoot) $ do
     putStrLn ("not a git repository root directory: " ++ repositoryDirectory)
     exitFailure
-  setCurrentDirectory canonicalInput
+  setCurrentDirectory canonicalInputDirectory
   action
 trimString :: String -> String
 trimString = T.unpack . T.strip . T.pack
@@ -341,8 +341,8 @@ parseGitModulePaths gitmodulesContents =
     ]
 checkRepositoryStructure :: IO [String]
 checkRepositoryStructure = do
-  allPaths <- collectRepositoryPaths "."
-  let relativePaths = sort [path | path <- allPaths, path /= "."]
+  repositoryPaths <- collectRepositoryPaths "."
+  let relativePaths = sort [path | path <- repositoryPaths, path /= "."]
       leafPaths = Set.fromList (filter (isLeafPath relativePaths) relativePaths)
       packageRoots = Set.fromList (mapMaybe packageRoot relativePaths)
       hostRoots = Set.fromList (mapMaybe hostRoot relativePaths)
@@ -378,7 +378,7 @@ checkRepositoryStructure = do
         | packageRootPathValue <- Set.toList packageRoots,
           (packageRootPathValue </> "default.nix") `notElem` relativePaths
         ]
-      missingHostConfigs =
+      missingHostConfigurations =
         [ hostDirectory ++ ": missing required file configuration.nix"
         | hostDirectory <- Set.toList hostRoots,
           (hostDirectory </> "configuration.nix") `notElem` relativePaths
@@ -390,7 +390,7 @@ checkRepositoryStructure = do
           let packageDirectoryName = takeBaseName packageRootPathValue,
           (packageRootPathValue </> packageDirectoryName <.> "cabal") `notElem` relativePaths
         ]
-      badlyNamedCabals =
+      misnamedCabalFiles =
         [ path ++ ": cabal file must be named " ++ packageDirectoryName ++ ".cabal"
         | path <- relativePaths,
           ".cabal" `isSuffixOf` path,
@@ -406,7 +406,7 @@ checkRepositoryStructure = do
         | path <- Set.toList leafPaths,
           not (any (`pathMatches` path) allowedPatterns)
         ]
-  pure (missingPackageDefaults ++ missingHostConfigs ++ missingCabalForMain ++ badlyNamedCabals ++ packageKindIssues ++ disallowedPaths)
+  pure (missingPackageDefaults ++ missingHostConfigurations ++ missingCabalForMain ++ misnamedCabalFiles ++ packageKindIssues ++ disallowedPaths)
 type PackageKind :: Type
 data PackageKind
   = HaskellPackage
@@ -448,18 +448,18 @@ buildPackageInfo leafPaths packageRootPathValue =
         }
 detectPackageMarkers :: [FilePath] -> [(String, PackageKind)]
 detectPackageMarkers leafFiles =
-  let has path = path `elem` leafFiles
-      hasAny prefix = any (isPrefixOf prefix) leafFiles
+  let hasLeafFile leafFile = leafFile `elem` leafFiles
+      hasLeafFileWithPrefix pathPrefix = any (isPrefixOf pathPrefix) leafFiles
    in catMaybes
-        [ if has "Main.hs" then Just ("Main.hs", HaskellPackage) else Nothing,
-          if has "Cargo.toml" then Just ("Cargo.toml", RustPackage) else Nothing,
-          if has "index.html" then Just ("index.html", HTMLPackage) else Nothing,
-          if has "main.py" && has "ms.tex" then Just ("main.py+ms.tex", PythonLaTeXPackage) else Nothing,
-          if has "main.py" && not (has "ms.tex") then Just ("main.py", PythonPackage) else Nothing,
-          if has "main.c" then Just ("main.c", CPackage) else Nothing,
-          if has "main.tf" then Just ("main.tf", TerraformPackage) else Nothing,
-          if has "ms.tex" && not (has "main.py") then Just ("ms.tex", LaTeXPackage) else Nothing,
-          if hasAny "Cargo.toml" then Nothing else if not (has "main.c") && not (has "Main.hs") && not (has "main.py") && not (has "index.html") && not (has "main.tf") && not (has "ms.tex") then Just ("binary-layout", BinaryReleasePackage) else Nothing
+        [ if hasLeafFile "Main.hs" then Just ("Main.hs", HaskellPackage) else Nothing,
+          if hasLeafFile "Cargo.toml" then Just ("Cargo.toml", RustPackage) else Nothing,
+          if hasLeafFile "index.html" then Just ("index.html", HTMLPackage) else Nothing,
+          if hasLeafFile "main.py" && hasLeafFile "ms.tex" then Just ("main.py+ms.tex", PythonLaTeXPackage) else Nothing,
+          if hasLeafFile "main.py" && not (hasLeafFile "ms.tex") then Just ("main.py", PythonPackage) else Nothing,
+          if hasLeafFile "main.c" then Just ("main.c", CPackage) else Nothing,
+          if hasLeafFile "main.tf" then Just ("main.tf", TerraformPackage) else Nothing,
+          if hasLeafFile "ms.tex" && not (hasLeafFile "main.py") then Just ("ms.tex", LaTeXPackage) else Nothing,
+          if hasLeafFileWithPrefix "Cargo.toml" then Nothing else if not (hasLeafFile "main.c") && not (hasLeafFile "Main.hs") && not (hasLeafFile "main.py") && not (hasLeafFile "index.html") && not (hasLeafFile "main.tf") && not (hasLeafFile "ms.tex") then Just ("binary-layout", BinaryReleasePackage) else Nothing
         ]
 detectPackageKindFromMarkers :: [(String, PackageKind)] -> PackageKind
 detectPackageKindFromMarkers markers =
@@ -494,9 +494,9 @@ allowedPatternsForPackageKind packageRootPathValue packageDirectoryName packageK
         BinaryReleasePackage -> base
         UnknownPackage -> base
 collectRepositoryPaths :: FilePath -> IO [FilePath]
-collectRepositoryPaths root = do
-  children <- listDirectory root
-  let childPaths = sort [root </> child | child <- children]
+collectRepositoryPaths rootPath = do
+  children <- listDirectory rootPath
+  let childPaths = sort [rootPath </> child | child <- children]
   keptChildren <- fmap catMaybes $
     forM childPaths $ \childPath -> do
       isDirectory <- doesDirectoryExist childPath
@@ -505,7 +505,7 @@ collectRepositoryPaths root = do
         (True, True) -> Just <$> collectRepositoryPaths childPath
         (True, False) -> pure Nothing
         (False, _) -> pure (Just [relativeChildPath])
-  pure (toRelativePath root : concat keptChildren)
+  pure (toRelativePath rootPath : concat keptChildren)
 toRelativePath :: FilePath -> FilePath
 toRelativePath "." = "."
 toRelativePath path =
@@ -520,32 +520,32 @@ shouldTraverseDirectory path =
         (splitDirectories path)
     )
 isLeafPath :: [FilePath] -> FilePath -> Bool
-isLeafPath allPaths path =
-  let children = [candidate | candidate <- allPaths, takeDirectory candidate == path]
+isLeafPath repositoryPaths candidatePath =
+  let children = [path | path <- repositoryPaths, takeDirectory path == candidatePath]
    in null children
 pathMatches :: String -> FilePath -> Bool
-pathMatches regex path = path =~ regex
+pathMatches regexPattern path = path =~ regexPattern
 packageRoot :: FilePath -> Maybe FilePath
-packageRoot path =
-  case splitDirectories path of
+packageRoot repositoryPath =
+  case splitDirectories repositoryPath of
     "packages" : packageName : _ -> Just ("packages" </> packageName)
     _ -> Nothing
 hostRoot :: FilePath -> Maybe FilePath
-hostRoot path =
-  case splitDirectories path of
+hostRoot repositoryPath =
+  case splitDirectories repositoryPath of
     "hosts" : hostDirectoryName : _ -> Just ("hosts" </> hostDirectoryName)
     _ -> Nothing
 listPackageNames :: IO [FilePath]
 listPackageNames = listSubdirectories "packages"
 listSubdirectories :: FilePath -> IO [FilePath]
-listSubdirectories root = do
-  rootExists <- doesDirectoryExist root
-  if not rootExists
+listSubdirectories parentDirectory = do
+  parentDirectoryExists <- doesDirectoryExist parentDirectory
+  if not parentDirectoryExists
     then pure []
     else do
-      entries <- listDirectory root
-      flags <- forM entries $ \name -> doesDirectoryExist (root </> name)
-      pure $ sort [name | (name, isDirectory) <- zip entries flags, isDirectory]
+      childNames <- listDirectory parentDirectory
+      childIsDirectoryFlags <- forM childNames $ \childName -> doesDirectoryExist (parentDirectory </> childName)
+      pure $ sort [childName | (childName, isDirectory) <- zip childNames childIsDirectoryFlags, isDirectory]
 checkPackage :: [String] -> FilePath -> IO PackageCheck
 checkPackage repositoryStructureIssues packageName = do
   let packageDefaultPath = "packages" </> packageName </> "default.nix"
@@ -723,8 +723,8 @@ detectPackageKindForPackage packageName = do
   let isPythonPyPIPackage =
         case defaultNixSource of
           Nothing -> False
-          Just source ->
-            let nixSource = T.unpack source
+          Just defaultNixText ->
+            let nixSource = T.unpack defaultNixText
              in "buildPythonPackage" `isInfixOf` nixSource
                   && not ("src = ./.;" `isInfixOf` nixSource)
                   && ("fetchPypi" `isInfixOf` nixSource || "fetchurl" `isInfixOf` nixSource)
@@ -821,10 +821,10 @@ checkHaskellDebugTests packageName packageKind =
         then pure []
         else do
           sourceText <- TIO.readFile mainHaskellPath
-          let source = T.unpack sourceText
-              hasDebugEnvGate = "lookupEnv \"DEBUG\"" `isInfixOf` source
-              hasTestRunner = "runTestTT" `isInfixOf` source || "runDebugTests" `isInfixOf` source
-              hasMainDebugBranch = "Just \"1\" ->" `isInfixOf` source
+          let haskellSource = T.unpack sourceText
+              hasDebugEnvGate = "lookupEnv \"DEBUG\"" `isInfixOf` haskellSource
+              hasTestRunner = "runTestTT" `isInfixOf` haskellSource || "runDebugTests" `isInfixOf` haskellSource
+              hasMainDebugBranch = "Just \"1\" ->" `isInfixOf` haskellSource
           pure $
             catMaybes
               [ if hasDebugEnvGate
@@ -879,7 +879,7 @@ breakOnSubstring needle = go ""
           case rest of
             ch : tailRest -> go (prefix ++ [ch]) tailRest
 lastQuotedToken :: String -> Maybe String
-lastQuotedToken source =
+lastQuotedToken inputText =
   let go [] _currentQuote _currentToken acc = reverse acc
       go (ch : rest) currentQuote currentToken acc =
         case currentQuote of
@@ -891,7 +891,7 @@ lastQuotedToken source =
             if ch == q
               then go rest Nothing "" (if null currentToken then acc else currentToken : acc)
               else go rest (Just q) (currentToken ++ [ch]) acc
-      tokens = go source Nothing "" []
+      tokens = go inputText Nothing "" []
    in case tokens of
         [] -> Nothing
         token : _ -> Just token
@@ -929,9 +929,9 @@ extractMakeFormattingTestLabels = go False
                   Nothing -> go False rest
       | otherwise = go False rest
 firstQuotedToken :: String -> Maybe String
-firstQuotedToken source =
-  let afterDouble = dropWhile (/= '"') source
-      afterSingle = dropWhile (/= '\'') source
+firstQuotedToken inputText =
+  let afterDouble = dropWhile (/= '"') inputText
+      afterSingle = dropWhile (/= '\'') inputText
    in case afterDouble of
         '"' : rest ->
           let token = takeWhile (/= '"') rest
@@ -1125,13 +1125,13 @@ checkCargoToml packageName = do
   if not cargoTomlExists
     then pure []
     else do
-      cargoContents <- TIO.readFile cargoTomlPath
-      let packageSection = extractTomlSection "package" cargoContents
-          lintsRustSection = extractTomlSection "lints.rust" cargoContents
+      cargoTomlContents <- TIO.readFile cargoTomlPath
+      let packageSection = extractTomlSection "package" cargoTomlContents
+          lintsRustSection = extractTomlSection "lints.rust" cargoTomlContents
           packageNameValue = lookupTomlString "name" packageSection
           unsafeCodeLint = lookupTomlString "unsafe_code" lintsRustSection
-          normalizedCargo = normalizeCargoTomlForTightness packageName cargoContents
-          normalizedTemplateCargo = normalizeCargoTomlForTightness packageName rustCargoTightnessBaseline
+          normalizedCargoToml = normalizeCargoTomlForTightness packageName cargoTomlContents
+          normalizedTemplateCargoToml = normalizeCargoTomlForTightness packageName rustCargoTightnessBaseline
       pure $
         catMaybes
           [ case packageNameValue of
@@ -1153,7 +1153,7 @@ checkCargoToml packageName = do
             if unsafeCodeLint == Just "forbid"
               then Nothing
               else Just ("packages/" ++ packageName ++ "/Cargo.toml: [lints.rust].unsafe_code must be \"forbid\""),
-            if normalizedCargo == normalizedTemplateCargo
+            if normalizedCargoToml == normalizedTemplateCargoToml
               then Nothing
               else
                 Just
@@ -1164,52 +1164,52 @@ checkCargoToml packageName = do
           ]
 normalizeCargoTomlForTightness :: FilePath -> T.Text -> T.Text
 normalizeCargoTomlForTightness packageName tomlContents =
-  let step (currentHeader, acc) sourceLine =
-        let stripped = T.strip sourceLine
-         in if isTomlSectionHeader stripped
+  let step (currentTomlHeader, normalizedLinesSoFar) sourceLine =
+        let trimmedLine = T.strip sourceLine
+         in if isTomlSectionHeader trimmedLine
               then
-                if isDependencyHeader stripped
-                  then (Just stripped, acc)
-                  else (Just stripped, acc ++ [stripped])
-              else case currentHeader of
-                Just header | isDependencyHeader header -> (currentHeader, acc)
-                _ | T.null stripped -> (currentHeader, acc)
-                Just "[package]" | isNameLine stripped -> (currentHeader, acc ++ [nameLine])
-                Just "[[bin]]" | isNameLine stripped -> (currentHeader, acc ++ [nameLine])
-                _ -> (currentHeader, acc ++ [stripped])
+                if isDependencyHeader trimmedLine
+                  then (Just trimmedLine, normalizedLinesSoFar)
+                  else (Just trimmedLine, normalizedLinesSoFar ++ [trimmedLine])
+              else case currentTomlHeader of
+                Just header | isDependencyHeader header -> (currentTomlHeader, normalizedLinesSoFar)
+                _ | T.null trimmedLine -> (currentTomlHeader, normalizedLinesSoFar)
+                Just "[package]" | isNameLine trimmedLine -> (currentTomlHeader, normalizedLinesSoFar ++ [normalizedNameLine])
+                Just "[[bin]]" | isNameLine trimmedLine -> (currentTomlHeader, normalizedLinesSoFar ++ [normalizedNameLine])
+                _ -> (currentTomlHeader, normalizedLinesSoFar ++ [trimmedLine])
       (_, normalizedLines) = foldl' step (Nothing, []) (T.lines tomlContents)
-      nameLine = "name = \"" <> T.pack packageName <> "\""
+      normalizedNameLine = "name = \"" <> T.pack packageName <> "\""
    in T.unlines normalizedLines
 isDependencyHeader :: T.Text -> Bool
-isDependencyHeader stripped =
-  stripped == "[dependencies]"
-    || stripped == "[dev-dependencies]"
-    || stripped == "[build-dependencies]"
-    || isTargetDependenciesHeader stripped
+isDependencyHeader trimmedLine =
+  trimmedLine == "[dependencies]"
+    || trimmedLine == "[dev-dependencies]"
+    || trimmedLine == "[build-dependencies]"
+    || isTargetDependenciesHeader trimmedLine
 isTargetDependenciesHeader :: T.Text -> Bool
-isTargetDependenciesHeader stripped =
-  T.isPrefixOf "[target." stripped
-    && T.isSuffixOf ".dependencies]" stripped
+isTargetDependenciesHeader trimmedLine =
+  T.isPrefixOf "[target." trimmedLine
+    && T.isSuffixOf ".dependencies]" trimmedLine
 isNameLine :: T.Text -> Bool
-isNameLine stripped = "name = \"" `T.isPrefixOf` stripped
+isNameLine trimmedLine = "name = \"" `T.isPrefixOf` trimmedLine
 extractTomlSection :: T.Text -> T.Text -> T.Text
 extractTomlSection sectionName tomlContents =
   let sectionHeader = "[" <> sectionName <> "]"
-      linesOfFile = T.lines tomlContents
-      sectionStart = dropWhile (\line -> T.strip line /= sectionHeader) linesOfFile
+      tomlLines = T.lines tomlContents
+      sectionStart = dropWhile (\tomlLine -> T.strip tomlLine /= sectionHeader) tomlLines
       sectionBody = drop 1 sectionStart
    in T.unlines (takeWhile (not . isTomlSectionHeader . T.strip) sectionBody)
 isTomlSectionHeader :: T.Text -> Bool
-isTomlSectionHeader line =
-  T.length line >= 3 && T.head line == '[' && T.last line == ']'
+isTomlSectionHeader tomlLine =
+  T.length tomlLine >= 3 && T.head tomlLine == '[' && T.last tomlLine == ']'
 lookupTomlString :: T.Text -> T.Text -> Maybe T.Text
-lookupTomlString key sectionContents =
-  let keyPrefix = key <> " = "
+lookupTomlString tomlKey sectionContents =
+  let keyPrefix = tomlKey <> " = "
       matchingFieldLine = listToMaybe [T.strip line | line <- T.lines sectionContents, keyPrefix `T.isPrefixOf` T.strip line]
    in do
-        line <- matchingFieldLine
-        value <- T.stripPrefix keyPrefix line
-        T.stripPrefix "\"" value >>= T.stripSuffix "\""
+        matchingLine <- matchingFieldLine
+        quotedValue <- T.stripPrefix keyPrefix matchingLine
+        T.stripPrefix "\"" quotedValue >>= T.stripSuffix "\""
 checkCabalFile :: FilePath -> IO [String]
 checkCabalFile packageName = do
   let cabalFilePath = "packages" </> packageName </> packageName <.> "cabal"
@@ -1220,10 +1220,10 @@ checkCabalFile packageName = do
       cabalContents <- TIO.readFile cabalFilePath
       let normalizedCabal = normalizeCabalForTightness packageName cabalContents
           normalizedTemplateCabal = normalizeCabalForTightness packageName haskellCabalTightnessBaseline
-          cabalName = lookupCabalField "name" cabalContents
+          cabalPackageName = lookupCabalField "name" cabalContents
       pure $
         catMaybes
-          [ if cabalName == Just (T.pack packageName)
+          [ if cabalPackageName == Just (T.pack packageName)
               then Nothing
               else Just ("packages/" ++ packageName ++ "/" ++ packageName ++ ".cabal: name must match directory name"),
             if normalizedCabal == normalizedTemplateCabal
@@ -1239,44 +1239,44 @@ checkCabalFile packageName = do
           ]
 normalizeCabalForTightness :: FilePath -> T.Text -> T.Text
 normalizeCabalForTightness packageName cabalContents =
-  let step (inBuildDepends, acc) sourceLine =
-        let stripped = T.strip sourceLine
-            normalized = normalizeCabalLine packageName stripped
-         in if inBuildDepends
+  let step (insideBuildDependsSection, normalizedLinesSoFar) sourceLine =
+        let trimmedLine = T.strip sourceLine
+            normalizedLine = normalizeCabalLine packageName trimmedLine
+         in if insideBuildDependsSection
               then
-                if T.null stripped
-                  then (True, acc)
-                  else case T.breakOn ":" stripped of
-                    (_, "") -> (True, acc)
-                    _ -> (False, acc ++ [normalized])
+                if T.null trimmedLine
+                  then (True, normalizedLinesSoFar)
+                  else case T.breakOn ":" trimmedLine of
+                    (_, "") -> (True, normalizedLinesSoFar)
+                    _ -> (False, normalizedLinesSoFar ++ [normalizedLine])
               else
-                if "build-depends:" `T.isPrefixOf` stripped
-                  then (True, acc)
+                if "build-depends:" `T.isPrefixOf` trimmedLine
+                  then (True, normalizedLinesSoFar)
                   else
-                    if T.null stripped
-                      then (False, acc)
-                      else (False, acc ++ [normalized])
+                    if T.null trimmedLine
+                      then (False, normalizedLinesSoFar)
+                      else (False, normalizedLinesSoFar ++ [normalizedLine])
       (_, normalizedLines) = foldl' step (False, []) (T.lines cabalContents)
    in T.unlines normalizedLines
 normalizeCabalLine :: FilePath -> T.Text -> T.Text
-normalizeCabalLine packageName stripped
-  | "name:" `T.isPrefixOf` stripped = "name:          " <> T.pack packageName
-  | "executable " `T.isPrefixOf` stripped = "executable " <> T.pack packageName
-  | otherwise = stripped
+normalizeCabalLine packageName trimmedLine
+  | "name:" `T.isPrefixOf` trimmedLine = "name:          " <> T.pack packageName
+  | "executable " `T.isPrefixOf` trimmedLine = "executable " <> T.pack packageName
+  | otherwise = trimmedLine
 lookupCabalField :: T.Text -> T.Text -> Maybe T.Text
-lookupCabalField field cabalContents =
-  let fieldPrefix = field <> ":"
+lookupCabalField cabalField cabalContents =
+  let fieldPrefix = cabalField <> ":"
       matchingFieldLine = listToMaybe [T.strip line | line <- T.lines cabalContents, fieldPrefix `T.isPrefixOf` T.strip line]
    in do
-        line <- matchingFieldLine
-        value <- T.stripPrefix fieldPrefix line
-        pure (T.strip value)
+        matchingLine <- matchingFieldLine
+        fieldValue <- T.stripPrefix fieldPrefix matchingLine
+        pure (T.strip fieldValue)
 compareWithTemplate :: FilePath -> FilePath -> FilePath -> Set.Set T.Text -> Maybe T.Text -> IO [String]
 compareWithTemplate packageName packageDefaultPath templateDefaultPath allowedDifferenceKeys templateOverrideNixSource = do
   parsedPackageNixExpr <- parseNixExprFromFile packageDefaultPath
   parsedTemplateNixExpr <-
     case templateOverrideNixSource of
-      Just nixContents -> parseNixExprFromText nixContents
+      Just overrideNixSource -> parseNixExprFromText overrideNixSource
       Nothing -> parseNixExprFromFile templateDefaultPath
   case (parsedPackageNixExpr, parsedTemplateNixExpr) of
     (Left parseError, _) ->
@@ -1284,8 +1284,8 @@ compareWithTemplate packageName packageDefaultPath templateDefaultPath allowedDi
     (_, Left parseError) ->
       pure [templateDefaultPath ++ ": parse error: " ++ show parseError]
     (Right packageNixExpr, Right templateNixExpr) ->
-      let normalizedPackageNixExpr = normalizeExpr allowedDifferenceKeys packageNixExpr
-          normalizedTemplateNixExpr = normalizeExpr allowedDifferenceKeys templateNixExpr
+      let normalizedPackageNixExpr = normalizeNixExpr allowedDifferenceKeys packageNixExpr
+          normalizedTemplateNixExpr = normalizeNixExpr allowedDifferenceKeys templateNixExpr
        in pure $
             formatDifferences
               packageName
@@ -1293,34 +1293,34 @@ compareWithTemplate packageName packageDefaultPath templateDefaultPath allowedDi
               normalizedPackageNixExpr
               normalizedTemplateNixExpr
 parseNixExprFromText :: T.Text -> IO (Either String NExprLoc)
-parseNixExprFromText nixContents = do
+parseNixExprFromText nixSource = do
   (temporaryPath, temporaryHandle) <- openTempFile "/tmp" "check-repository-template-override.nix"
-  TIO.hPutStr temporaryHandle nixContents
+  TIO.hPutStr temporaryHandle nixSource
   hClose temporaryHandle
   parseNixExprFromFile temporaryPath
     `finally` removeFileIfExists temporaryPath
 parseNixExprFromFile :: FilePath -> IO (Either String NExprLoc)
-parseNixExprFromFile path =
-  fmap (either (Left . show) Right) (parseNixFileLoc (Path path))
+parseNixExprFromFile nixFilePath =
+  fmap (either (Left . show) Right) (parseNixFileLoc (Path nixFilePath))
 removeFileIfExists :: FilePath -> IO ()
-removeFileIfExists path = do
-  fileExists <- doesFileExist path
-  when fileExists (removeFile path)
+removeFileIfExists filePath = do
+  fileExists <- doesFileExist filePath
+  when fileExists (removeFile filePath)
 inferTemplateName :: FilePath -> String -> IO (Maybe FilePath)
 inferTemplateName packageName nixSource = do
   matches <- forM templateSpecs $ \templateSpec -> do
     matched <- templateMatches templateSpec packageName nixSource
     pure (if matched then Just (templateName templateSpec) else Nothing)
   pure (listToMaybe (catMaybes matches))
-normalizeExpr :: Set.Set T.Text -> NExprLoc -> NExprLoc
-normalizeExpr allowedDifferenceKeys (Fix (Compose (AnnUnit nixExprSpan expressionFunctor))) =
-  let rebuiltExpr = case expressionFunctor of
+normalizeNixExpr :: Set.Set T.Text -> NExprLoc -> NExprLoc
+normalizeNixExpr allowedDifferenceKeys (Fix (Compose (AnnUnit nixExprSpan expressionFunctor))) =
+  let rebuiltNixExpr = case expressionFunctor of
         NSet isRecursive bindings -> NSet isRecursive (normalizeBindings allowedDifferenceKeys bindings)
-        NLet bindings body -> NLet (normalizeBindings allowedDifferenceKeys bindings) (normalizeExpr allowedDifferenceKeys body)
-        NAbs (ParamSet paramsEllipsis paramsAt params) body -> NAbs (ParamSet paramsEllipsis paramsAt (sortParams params)) (normalizeExpr allowedDifferenceKeys body)
-        NAbs (Param paramName) body -> NAbs (Param paramName) (normalizeExpr allowedDifferenceKeys body)
-        otherExpr -> fmap (normalizeExpr allowedDifferenceKeys) otherExpr
-   in Fix (Compose (AnnUnit nixExprSpan rebuiltExpr))
+        NLet bindings body -> NLet (normalizeBindings allowedDifferenceKeys bindings) (normalizeNixExpr allowedDifferenceKeys body)
+        NAbs (ParamSet paramsEllipsis paramsAt params) body -> NAbs (ParamSet paramsEllipsis paramsAt (sortParams params)) (normalizeNixExpr allowedDifferenceKeys body)
+        NAbs (Param paramName) body -> NAbs (Param paramName) (normalizeNixExpr allowedDifferenceKeys body)
+        otherNixExpr -> fmap (normalizeNixExpr allowedDifferenceKeys) otherNixExpr
+   in Fix (Compose (AnnUnit nixExprSpan rebuiltNixExpr))
 sortParams :: [(VarName, Maybe NExprLoc)] -> [(VarName, Maybe NExprLoc)]
 sortParams = sortBy (\(VarName leftName, _) (VarName rightName, _) -> compare leftName rightName)
 normalizeBindings :: Set.Set T.Text -> [Binding NExprLoc] -> [Binding NExprLoc]
@@ -1328,8 +1328,8 @@ normalizeBindings allowedDifferenceKeys bindings =
   [normalizeBinding allowedDifferenceKeys binding | binding <- bindings, not (isAllowedDifferenceBinding allowedDifferenceKeys binding)]
 normalizeBinding :: Set.Set T.Text -> Binding NExprLoc -> Binding NExprLoc
 normalizeBinding allowedDifferenceKeys = \case
-  NamedVar keyPath value sourcePosition -> NamedVar keyPath (normalizeExpr allowedDifferenceKeys value) sourcePosition
-  Inherit maybeBoundExpr names sourcePosition -> Inherit (normalizeExpr allowedDifferenceKeys <$> maybeBoundExpr) names sourcePosition
+  NamedVar keyPath value sourcePosition -> NamedVar keyPath (normalizeNixExpr allowedDifferenceKeys value) sourcePosition
+  Inherit maybeBoundExpr names sourcePosition -> Inherit (normalizeNixExpr allowedDifferenceKeys <$> maybeBoundExpr) names sourcePosition
 isAllowedDifferenceBinding :: Set.Set T.Text -> Binding NExprLoc -> Bool
 isAllowedDifferenceBinding allowedDifferenceKeys = \case
   NamedVar (key :| _) _ _ ->
@@ -1342,16 +1342,16 @@ keyNameText = \case
   StaticKey (VarName keyText) -> Just keyText
   DynamicKey (Plain (DoubleQuoted [Plain keyText])) -> Just keyText
   _ -> Nothing
-renderExpr :: NExprLoc -> T.Text
-renderExpr =
+renderNixExpr :: NExprLoc -> T.Text
+renderNixExpr =
   renderStrict
     . layoutPretty defaultLayoutOptions
     . prettyNix
     . stripAnnotation
 formatDifferences :: FilePath -> FilePath -> NExprLoc -> NExprLoc -> [String]
 formatDifferences packageName templateDefaultPath packageNixExpr templateNixExpr =
-  let renderedPackage = renderExpr packageNixExpr
-      renderedTemplate = renderExpr templateNixExpr
+  let renderedPackage = renderNixExpr packageNixExpr
+      renderedTemplate = renderNixExpr templateNixExpr
    in if renderedPackage == renderedTemplate
         then []
         else
@@ -1412,8 +1412,8 @@ oneLine value =
   let compact = T.unwords (T.words value)
    in T.unpack compact
 extractPrimaryBindings :: NExprLoc -> Maybe (Map.Map T.Text T.Text)
-extractPrimaryBindings nixExpr = do
-  bindingGroups <- collectSetBindings nixExpr
+extractPrimaryBindings nixExpression = do
+  bindingGroups <- collectSetBindings nixExpression
   pure $ Map.fromList (maximumByLength bindingGroups)
 maximumByLength :: [[a]] -> [a]
 maximumByLength = maximumBy (comparing length)
@@ -1429,14 +1429,14 @@ collectSetBindings (Fix (Compose (AnnUnit _ expressionFunctor))) =
           nestedFromBody = fromMaybe [] (collectSetBindings body)
        in Just (nestedFromBindings ++ nestedFromBody)
     NAbs _ body -> collectSetBindings body
-    otherExpr ->
-      Just (concatMap (fromMaybe [] . collectSetBindings) otherExpr)
+    otherNixExpr ->
+      Just (concatMap (fromMaybe [] . collectSetBindings) otherNixExpr)
 collectFromBinding :: Binding NExprLoc -> [[(T.Text, T.Text)]]
 collectFromBinding (NamedVar _ value _) = fromMaybe [] (collectSetBindings value)
 collectFromBinding (Inherit maybeBoundExpr _ _) = maybe [] (fromMaybe [] . collectSetBindings) maybeBoundExpr
 extractBindings :: [Binding NExprLoc] -> [(T.Text, T.Text)]
 extractBindings bindings =
-  [ (T.intercalate "." (mapMaybe keyNameText (NE.toList keyPath)), renderExpr value)
+  [ (T.intercalate "." (mapMaybe keyNameText (NE.toList keyPath)), renderNixExpr value)
   | NamedVar keyPath value _ <- bindings
   ]
 runDebugTests :: IO ()
@@ -1463,8 +1463,8 @@ isQuickCheckSuccess :: QC.Result -> Bool
 isQuickCheckSuccess QC.Success {} = True
 isQuickCheckSuccess _ = False
 prop_trimStringIdempotent :: String -> Bool
-prop_trimStringIdempotent source =
-  trimString (trimString source) == trimString source
+prop_trimStringIdempotent inputText =
+  trimString (trimString inputText) == trimString inputText
 prop_parseGitModulePathsPreservesFirstOccurrences :: QC.Property
 prop_parseGitModulePathsPreservesFirstOccurrences =
   QC.forAll gitModulePathEntriesGen $ \gitModulePathEntries ->
