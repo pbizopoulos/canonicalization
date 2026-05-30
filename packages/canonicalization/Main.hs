@@ -183,7 +183,7 @@ binaryReleaseDetector _ nixSource =
         && "install -Dm755 ${pname}-v${version}-x86_64-unknown-linux-musl/${pname}" `isInfixOf` nixSource
     )
 templateSpecByName :: FilePath -> Maybe TemplateSpec
-templateSpecByName name = find ((== name) . templateName) templateSpecs
+templateSpecByName templateNameToFind = find ((== templateNameToFind) . templateName) templateSpecs
 type CheckOutcome :: Type
 data CheckOutcome = CheckPassed | CheckFailed | CheckSkipped | CheckIncompatible deriving stock (Eq, Show)
 outcomeFromIssues :: [a] -> CheckOutcome
@@ -310,11 +310,11 @@ buildGitModuleRepository homeDirectory gitModulePathEntry =
   let repositoryPath = homeDirectory </> gitModulePathEntry
       pathSegments = splitDirectories gitModulePathEntry
    in case pathSegments of
-        [hostKey, ownerKey, repositoryKey] ->
+        [hostSegment, ownerSegment, repositorySegment] ->
           GitModuleRepository
-            { gitModuleRepositoryHost = hostKey,
-              gitModuleRepositoryOwner = ownerKey,
-              gitModuleRepositoryName = repositoryKey,
+            { gitModuleRepositoryHost = hostSegment,
+              gitModuleRepositoryOwner = ownerSegment,
+              gitModuleRepositoryName = repositorySegment,
               gitModuleRepositoryPathEntry = gitModulePathEntry,
               gitModuleRepositoryPath = repositoryPath,
               gitModuleRepositoryCompatible = True
@@ -329,15 +329,15 @@ buildGitModuleRepository homeDirectory gitModulePathEntry =
               gitModuleRepositoryCompatible = False
             }
 parseGitModulePaths :: String -> [FilePath]
-parseGitModulePaths nixSource =
+parseGitModulePaths gitmodulesContents =
   nub
-    [ trimString value
-    | line <- lines nixSource,
-      let stripped = trimString line,
-      "path" `isPrefixOf` stripped,
-      "=" `isInfixOf` stripped,
-      let value = drop 1 (dropWhile (/= '=') stripped),
-      not (null (trimString value))
+    [ trimString pathValue
+    | gitmodulesLine <- lines gitmodulesContents,
+      let trimmedLine = trimString gitmodulesLine,
+      "path" `isPrefixOf` trimmedLine,
+      "=" `isInfixOf` trimmedLine,
+      let pathValue = drop 1 (dropWhile (/= '=') trimmedLine),
+      not (null (trimString pathValue))
     ]
 checkRepositoryStructure :: IO [String]
 checkRepositoryStructure = do
@@ -369,7 +369,7 @@ checkRepositoryStructure = do
         ]
       packageAllowedPatterns =
         concat
-          [ allowedPatternsForPackageKind (packageRootPath packageInfo) (packageDirName packageInfo) (detectedKind packageInfo)
+          [ allowedPatternsForPackageKind (packageRootPath packageInfo) (packageRootDirectoryName packageInfo) (detectedPackageKind packageInfo)
           | packageInfo <- packageInfos
           ]
       allowedPatterns = globalAllowedPatterns ++ packageAllowedPatterns
@@ -411,7 +411,7 @@ type PackageKind :: Type
 data PackageKind
   = HaskellPackage
   | RustPackage
-  | HtmlPackage
+  | HTMLPackage
   | PythonLaTeXPackage
   | PythonPackage
   | PythonPyPIPackage
@@ -424,10 +424,10 @@ data PackageKind
 type PackageInfo :: Type
 data PackageInfo = PackageInfo
   { packageRootPath :: FilePath,
-    packageDirName :: FilePath,
+    packageRootDirectoryName :: FilePath,
     packageLeafFiles :: [FilePath],
-    detectedKind :: PackageKind,
-    matchedMarkers :: [String]
+    detectedPackageKind :: PackageKind,
+    matchedPackageMarkers :: [String]
   }
 buildPackageInfo :: Set.Set FilePath -> FilePath -> PackageInfo
 buildPackageInfo leafPaths packageRootPathValue =
@@ -441,10 +441,10 @@ buildPackageInfo leafPaths packageRootPathValue =
       markers = detectPackageMarkers leafFiles
    in PackageInfo
         { packageRootPath = packageRootPathValue,
-          packageDirName = packageDirectoryName,
+          packageRootDirectoryName = packageDirectoryName,
           packageLeafFiles = leafFiles,
-          detectedKind = detectPackageKindFromMarkers markers,
-          matchedMarkers = map fst markers
+          detectedPackageKind = detectPackageKindFromMarkers markers,
+          matchedPackageMarkers = map fst markers
         }
 detectPackageMarkers :: [FilePath] -> [(String, PackageKind)]
 detectPackageMarkers leafFiles =
@@ -453,7 +453,7 @@ detectPackageMarkers leafFiles =
    in catMaybes
         [ if has "Main.hs" then Just ("Main.hs", HaskellPackage) else Nothing,
           if has "Cargo.toml" then Just ("Cargo.toml", RustPackage) else Nothing,
-          if has "index.html" then Just ("index.html", HtmlPackage) else Nothing,
+          if has "index.html" then Just ("index.html", HTMLPackage) else Nothing,
           if has "main.py" && has "ms.tex" then Just ("main.py+ms.tex", PythonLaTeXPackage) else Nothing,
           if has "main.py" && not (has "ms.tex") then Just ("main.py", PythonPackage) else Nothing,
           if has "main.c" then Just ("main.c", CPackage) else Nothing,
@@ -474,8 +474,8 @@ packageKindIssuesForPackage :: PackageInfo -> [String]
 packageKindIssuesForPackage packageInfo =
   [ packageRootPath packageInfo
       ++ ": has ambiguous project markers: "
-      ++ intercalate ", " (matchedMarkers packageInfo)
-  | length (matchedMarkers packageInfo) > 1
+      ++ intercalate ", " (matchedPackageMarkers packageInfo)
+  | length (matchedPackageMarkers packageInfo) > 1
   ]
 allowedPatternsForPackageKind :: FilePath -> FilePath -> PackageKind -> [String]
 allowedPatternsForPackageKind packageRootPathValue packageDirectoryName packageKind =
@@ -484,7 +484,7 @@ allowedPatternsForPackageKind packageRootPathValue packageDirectoryName packageK
    in case packageKind of
         HaskellPackage -> add ["^" ++ packageRootPathValue ++ "/Main\\.hs$", "^" ++ packageRootPathValue ++ "/" ++ packageDirectoryName ++ "\\.cabal$"]
         RustPackage -> add ["^" ++ packageRootPathValue ++ "/Cargo\\.toml$", "^" ++ packageRootPathValue ++ "/Cargo\\.lock$", "^" ++ packageRootPathValue ++ "/src/main\\.rs$"]
-        HtmlPackage -> add ["^" ++ packageRootPathValue ++ "/index\\.html$", "^" ++ packageRootPathValue ++ "/script\\.js$", "^" ++ packageRootPathValue ++ "/style\\.css$"]
+        HTMLPackage -> add ["^" ++ packageRootPathValue ++ "/index\\.html$", "^" ++ packageRootPathValue ++ "/script\\.js$", "^" ++ packageRootPathValue ++ "/style\\.css$"]
         PythonLaTeXPackage -> add ["^" ++ packageRootPathValue ++ "/main\\.py$", "^" ++ packageRootPathValue ++ "/ms\\.tex$", "^" ++ packageRootPathValue ++ "/ms\\.bib$", "^" ++ packageRootPathValue ++ "/refs\\.bib$", "^" ++ packageRootPathValue ++ "/figures(/.*)?$"]
         PythonPackage -> add ["^" ++ packageRootPathValue ++ "/main\\.py$"]
         PythonPyPIPackage -> base
@@ -731,7 +731,7 @@ detectPackageKindForPackage packageName = do
   let packageKind
         | hasMainHaskellFile = HaskellPackage
         | hasCargoTomlFile = RustPackage
-        | hasIndexHtmlFile = HtmlPackage
+        | hasIndexHtmlFile = HTMLPackage
         | hasMainPythonFile && hasManuscriptTexFile = PythonLaTeXPackage
         | hasMainPythonFile = PythonPackage
         | isPythonPyPIPackage = PythonPyPIPackage
@@ -741,9 +741,9 @@ detectPackageKindForPackage packageName = do
         | otherwise = BinaryReleasePackage
   pure packageKind
 readTextFileIfExists :: FilePath -> IO (Maybe T.Text)
-readTextFileIfExists path = do
-  fileExists <- doesFileExist path
-  if fileExists then Just <$> TIO.readFile path else pure Nothing
+readTextFileIfExists filePath = do
+  fileExists <- doesFileExist filePath
+  if fileExists then Just <$> TIO.readFile filePath else pure Nothing
 checkPythonDebugUnitTest :: FilePath -> PackageKind -> IO [String]
 checkPythonDebugUnitTest packageName packageKind =
   if packageKind `notElem` [PythonPackage, PythonLaTeXPackage]
@@ -765,12 +765,12 @@ checkPythonDebugUnitTest packageName packageKind =
                 ]
             Just pythonCommand -> do
               (exitCode, stdoutText, stderrText) <- readProcessWithExitCode pythonCommand ["-c", pythonDebugUnitTestValidator, mainPythonPath] ""
-              let sourceLines = lines stdoutText
-                  errorCodes = [drop 4 line | line <- sourceLines, "ERR " `isPrefixOf` line]
+              let validatorOutputLines = lines stdoutText
+                  errorCodes = [drop 4 line | line <- validatorOutputLines, "ERR " `isPrefixOf` line]
                   mappedErrors = map (mapPythonValidatorError packageName) errorCodes
               case exitCode of
                 ExitSuccess ->
-                  if "OK" `elem` sourceLines
+                  if "OK" `elem` validatorOutputLines
                     then pure []
                     else
                       pure
@@ -1000,14 +1000,14 @@ extractRustTests sourceLines = sort (Set.toList (Set.fromList (go False sourceLi
                 else go False rest
 mapPythonValidatorError :: FilePath -> String -> String
 mapPythonValidatorError packageName errorCode =
-  let prefix = "packages/" ++ packageName ++ "/main.py: "
+  let messagePrefix = "packages/" ++ packageName ++ "/main.py: "
    in case errorCode of
-        "missing_main_function" -> prefix ++ "missing main() function"
-        "missing_debug_gate" -> prefix ++ "main() must include a DEBUG gate"
-        "debug_branch_no_unittest" -> prefix ++ "DEBUG branch in main() must run unittest"
-        "run_tests_missing_unittest" -> prefix ++ "run_tests() is called from DEBUG branch but does not run unittest"
-        "parse_error" -> prefix ++ "python source could not be parsed"
-        _ -> prefix ++ "python validator failed with error code: " ++ errorCode
+        "missing_main_function" -> messagePrefix ++ "missing main() function"
+        "missing_debug_gate" -> messagePrefix ++ "main() must include a DEBUG gate"
+        "debug_branch_no_unittest" -> messagePrefix ++ "DEBUG branch in main() must run unittest"
+        "run_tests_missing_unittest" -> messagePrefix ++ "run_tests() is called from DEBUG branch but does not run unittest"
+        "parse_error" -> messagePrefix ++ "python source could not be parsed"
+        _ -> messagePrefix ++ "python validator failed with error code: " ++ errorCode
 pythonDebugUnitTestValidator :: String
 pythonDebugUnitTestValidator =
   unlines
@@ -1034,8 +1034,8 @@ pythonDebugUnitTestValidator =
       "            return isinstance(first, ast.Constant) and first.value == 'DEBUG'",
       "    return False",
       "",
-      "def _contains_debug_gate(nixExpr):",
-      "    return any(_is_os_getenv_debug(n) for n in ast.walk(nixExpr))",
+      "def _contains_debug_gate(expression):",
+      "    return any(_is_os_getenv_debug(n) for n in ast.walk(expression))",
       "",
       "def _is_unittest_main_call(node):",
       "    if not isinstance(node, ast.Call):",
@@ -1219,14 +1219,14 @@ checkCabalFile packageName = do
     else do
       cabalContents <- TIO.readFile cabalFilePath
       let normalizedCabal = normalizeCabalForTightness packageName cabalContents
-          normalizedTemplateNixExpr = normalizeCabalForTightness packageName haskellCabalTightnessBaseline
+          normalizedTemplateCabal = normalizeCabalForTightness packageName haskellCabalTightnessBaseline
           cabalName = lookupCabalField "name" cabalContents
       pure $
         catMaybes
           [ if cabalName == Just (T.pack packageName)
               then Nothing
               else Just ("packages/" ++ packageName ++ "/" ++ packageName ++ ".cabal: name must match directory name"),
-            if normalizedCabal == normalizedTemplateNixExpr
+            if normalizedCabal == normalizedTemplateCabal
               then Nothing
               else
                 Just
@@ -1486,13 +1486,13 @@ prop_buildGitModuleRepositoryAcceptsGoStylePaths =
     let repository = buildGitModuleRepository "/home/test" gitModulePathEntry
         pathSegments = splitDirectories gitModulePathEntry
      in case pathSegments of
-          [hostKey, ownerKey, repositoryKey] ->
+          [hostSegment, ownerSegment, repositorySegment] ->
             gitModuleRepositoryCompatible repository
               && gitModuleRepositoryPathEntry repository == gitModulePathEntry
               && gitModuleRepositoryPath repository == "/home/test" </> gitModulePathEntry
-              && gitModuleRepositoryHost repository == hostKey
-              && gitModuleRepositoryOwner repository == ownerKey
-              && gitModuleRepositoryName repository == repositoryKey
+              && gitModuleRepositoryHost repository == hostSegment
+              && gitModuleRepositoryOwner repository == ownerSegment
+              && gitModuleRepositoryName repository == repositorySegment
           _ -> False
 prop_buildGitModuleRepositoryRejectsMalformedPaths :: QC.Property
 prop_buildGitModuleRepositoryRejectsMalformedPaths =
@@ -1503,10 +1503,10 @@ gitModulePathEntriesGen :: QC.Gen [FilePath]
 gitModulePathEntriesGen = QC.listOf goStylePathGen
 goStylePathGen :: QC.Gen FilePath
 goStylePathGen = do
-  hostKey <- hostSegmentGen
-  ownerKey <- pathSegmentGen "-"
-  repositoryKey <- pathSegmentGen "-_"
-  pure (intercalate "/" [hostKey, ownerKey, repositoryKey])
+  hostSegment <- hostSegmentGen
+  ownerSegment <- pathSegmentGen "-"
+  repositorySegment <- pathSegmentGen "-_"
+  pure (intercalate "/" [hostSegment, ownerSegment, repositorySegment])
 hostSegmentGen :: QC.Gen String
 hostSegmentGen = do
   firstCharacter <- QC.elements (['a' .. 'z'] ++ ['0' .. '9'])
