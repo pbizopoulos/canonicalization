@@ -1874,6 +1874,53 @@ hUnitDebugTests =
           (lookupCabalField "license" (T.pack "name: canonicalization\n")),
       TestCase $ do
         assertEqual
+          "Normalizes only cabal name lines when applicable."
+          "name:          demo"
+          (T.unpack (normalizeCabalLineForBaselineComparison "demo" "name: old")),
+      TestCase $ do
+        assertEqual
+          "Leaves unrelated cabal lines unchanged."
+          "version: 0.1.0"
+          (T.unpack (normalizeCabalLineForBaselineComparison "demo" "version: 0.1.0")),
+      TestCase $ do
+        assertEqual
+          "allowedPathRegexesForPackageKind includes expected Haskell paths."
+          True
+          ( let regexes = allowedPathRegexesForPackageKind "packages/demo" "demo" HaskellPackage
+             in any (`pathMatchesRegex` "packages/demo/Main.hs") regexes
+                  && any (`pathMatchesRegex` "packages/demo/demo.cabal") regexes
+          ),
+      TestCase $ do
+        assertEqual
+          "allowedPathRegexesForPackageKind includes Terraform lockfile pattern."
+          True
+          ( let regexes = allowedPathRegexesForPackageKind "packages/demo" "demo" TerraformPackage
+             in any (`pathMatchesRegex` "packages/demo/.terraform.lock.hcl") regexes
+          ),
+      TestCase $ do
+        assertEqual
+          "Detects binary-layout marker when language markers are absent."
+          [("binary-layout", BinaryReleasePackage)]
+          (detectPackageMarkers ["README", "notes.txt"]),
+      TestCase $ do
+        assertEqual
+          "Does not emit binary marker when Cargo.toml marker is present."
+          [("Cargo.toml", RustPackage)]
+          (detectPackageMarkers ["Cargo.toml", "README"]),
+      TestCase $ do
+        assertEqual
+          "buildPackageInfo extracts leaf paths relative to package root."
+          ["Main.hs", "demo.cabal"]
+          ( sort
+              ( packageLeafPaths
+                  ( buildPackageInfo
+                      (Set.fromList ["packages/demo/Main.hs", "packages/demo/demo.cabal", "packages/other/main.py"])
+                      "packages/demo"
+                  )
+              )
+          ),
+      TestCase $ do
+        assertEqual
           "Marks canonical go-style .gitmodules path as compatible."
           True
           (gitSubmoduleRepositoryIsCompatible (buildGitSubmoduleRepository "/home/user" "github.com/pbizopoulos/canonicalization")),
