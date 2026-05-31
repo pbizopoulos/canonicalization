@@ -213,11 +213,9 @@ main = do
   debugMode <- lookupEnv "DEBUG"
   propertyTestMode <- lookupEnv "PROPERTY_TESTS"
   commandLineArgs <- getArgs
-  case debugMode of
-    Just "1" ->
-      case propertyTestMode of
-        Just "1" -> runPropertyTests
-        _ -> runDebugTests
+  case (debugMode, propertyTestMode) of
+    (Just "1", Just "1") -> runPropertyTests
+    (Just "1", _) -> runDebugTests
     _ -> runCli commandLineArgs
 runCli :: [String] -> IO ()
 runCli commandLineArgs =
@@ -747,10 +745,10 @@ checkPythonDebugTests packageName packageKind =
     then pure []
     else do
       let mainPythonPath = "packages" </> packageName </> "main.py"
-      maybeMainPythonSourceText <- readTextFileIfExists mainPythonPath
-      case maybeMainPythonSourceText of
-        Nothing -> pure []
-        Just _ -> do
+      mainPythonFileExists <- doesFileExist mainPythonPath
+      if not mainPythonFileExists
+        then pure []
+        else do
           python3Path <- findExecutable "python3"
           pythonPath <- findExecutable "python"
           case python3Path <|> pythonPath of
@@ -813,15 +811,16 @@ checkHaskellDebugTests packageName packageKind =
     then pure []
     else do
       let mainHaskellPath = "packages" </> packageName </> "Main.hs"
-      mainHaskellFileExists <- doesFileExist mainHaskellPath
-      if not mainHaskellFileExists
-        then pure []
-        else do
-          mainHaskellSourceText <- TIO.readFile mainHaskellPath
+      maybeMainHaskellSourceText <- readTextFileIfExists mainHaskellPath
+      case maybeMainHaskellSourceText of
+        Nothing -> pure []
+        Just mainHaskellSourceText -> do
           let haskellSource = T.unpack mainHaskellSourceText
               hasDebugEnvironmentGate = "lookupEnv \"DEBUG\"" `isInfixOf` haskellSource
               hasHUnitTestRunner = "runTestTT" `isInfixOf` haskellSource || "runDebugTests" `isInfixOf` haskellSource
-              hasDebugBranchInMain = "Just \"1\" ->" `isInfixOf` haskellSource
+              hasDebugBranchInMain =
+                "Just \"1\" ->" `isInfixOf` haskellSource
+                  || "(Just \"1\", " `isInfixOf` haskellSource
           pure $
             catMaybes
               [ if hasDebugEnvironmentGate
@@ -867,14 +866,16 @@ extractHUnitTildeTestLabel sourceLine =
     Nothing -> Nothing
     Just (beforeTilde, _) -> lastQuotedToken beforeTilde
 breakOnSubstring :: String -> String -> Maybe (String, String)
-breakOnSubstring needle = go ""
+breakOnSubstring needle = go []
   where
-    go _prefix [] = Nothing
-    go prefix rest
+    go _prefixReversed [] = Nothing
+    go prefixReversed rest
       | needle `isPrefixOf` rest = Just (prefix, drop (length needle) rest)
       | otherwise =
           case rest of
-            ch : tailRest -> go (prefix ++ [ch]) tailRest
+            ch : tailRest -> go (ch : prefixReversed) tailRest
+      where
+        prefix = reverse prefixReversed
 lastQuotedToken :: String -> Maybe String
 lastQuotedToken inputText =
   let go [] _currentQuote _currentToken acc = reverse acc
@@ -927,18 +928,13 @@ extractMakeFormattingTestLabels = go False
       | otherwise = go False rest
 firstQuotedToken :: String -> Maybe String
 firstQuotedToken inputText =
-  let afterDouble = dropWhile (/= '"') inputText
-      afterSingle = dropWhile (/= '\'') inputText
-   in case afterDouble of
-        '"' : rest ->
-          let token = takeWhile (/= '"') rest
-           in if null token then Nothing else Just token
-        _ ->
-          case afterSingle of
-            '\'' : rest ->
-              let token = takeWhile (/= '\'') rest
-               in if null token then Nothing else Just token
-            _ -> Nothing
+  let firstTokenAfter quoteCharacter =
+        case dropWhile (/= quoteCharacter) inputText of
+          _ : rest ->
+            let token = takeWhile (/= quoteCharacter) rest
+             in if null token then Nothing else Just token
+          _ -> Nothing
+   in firstTokenAfter '"' <|> firstTokenAfter '\''
 checkRustDebugTests :: FilePath -> PackageKind -> IO [String]
 checkRustDebugTests packageName packageKind =
   if packageKind /= RustPackage
