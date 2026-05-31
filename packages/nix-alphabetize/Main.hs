@@ -90,12 +90,8 @@ main :: IO ()
 main = do
   args <- getArgs
   debug <- lookupEnv "DEBUG"
-  propertyOnly <- lookupEnv "PROPERTY_TESTS"
   case debug of
-    Just "1" ->
-      case propertyOnly of
-        Just "1" -> runPropertyTests
-        _ -> runDebugTests
+    Just "1" -> runDebugTests
     _ ->
       mapM_
         ( \filePath -> do
@@ -202,12 +198,6 @@ runDebugTests = do
   propertySuccess <- quickCheckFormattingProperties
   if errors counts == 0 && failures counts == 0 && propertySuccess
     then putStrLn "test ... ok"
-    else exitFailure
-runPropertyTests :: IO ()
-runPropertyTests = do
-  propertySuccess <- quickCheckFormattingProperties
-  if propertySuccess
-    then putStrLn "property tests ... ok"
     else exitFailure
 quickCheckFormattingProperties :: IO Bool
 quickCheckFormattingProperties = do
