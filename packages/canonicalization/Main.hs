@@ -1670,6 +1670,111 @@ hUnitDebugTests =
           (lookupTomlString "missing_key" (extractTomlSection "package" removeEmptyLinesCargoTomlFixture)),
       TestCase $ do
         assertEqual
+          "Extracts Python unit-test function names."
+          (Just "test_example_case")
+          (extractPythonUnitTestName "  def test_example_case():"),
+      TestCase $ do
+        assertEqual
+          "Ignores non-test Python functions."
+          Nothing
+          (extractPythonUnitTestName "def helper_function():"),
+      TestCase $ do
+        assertEqual
+          "breakOnSubstring returns prefix and suffix when found."
+          (Just ("hello ", " world"))
+          (breakOnSubstring "~:" "hello ~: world"),
+      TestCase $ do
+        assertEqual
+          "breakOnSubstring returns Nothing when missing."
+          Nothing
+          (breakOnSubstring "~:" "hello world"),
+      TestCase $ do
+        assertEqual
+          "Extracts label from HUnit tilde syntax."
+          (Just "alpha test")
+          (extractHUnitTildeTestLabel "  \"alpha test\" ~: assertEqual \"x\" 1 1"),
+      TestCase $ do
+        assertEqual
+          "Extracts the last quoted token."
+          (Just "first")
+          (lastQuotedToken "prefix \"first\" middle 'second' suffix"),
+      TestCase $ do
+        assertEqual
+          "Extracts first quoted token."
+          (Just "label one")
+          (firstQuotedToken "assertEqual \"label one\" expected actual"),
+      TestCase $ do
+        assertEqual
+          "Finds assertEqual labels from source lines."
+          ["label-a"]
+          ( extractAssertEqualTestLabels
+              [ "  assertEqual",
+                "    \"label-a\"",
+                "  assertEqual \"label-b\" 1 1"
+              ]
+          ),
+      TestCase $ do
+        assertEqual
+          "Finds makeFormattingTest labels from source lines."
+          ["format one"]
+          ( extractMakeFormattingTestLabels
+              [ "makeFormattingTest",
+                "  \"format one\"",
+                "makeFormattingTest \"format two\""
+              ]
+          ),
+      TestCase $ do
+        assertEqual
+          "toRelativePath drops leading ./ segments."
+          ("packages" </> "canonicalization" </> "Main.hs")
+          (toRelativePath ("." </> "packages" </> "canonicalization" </> "Main.hs")),
+      TestCase $ do
+        assertEqual
+          "shouldTraverseDirectory rejects ignored directories."
+          False
+          (shouldTraverseDirectory ("packages" </> "remove-empty-lines" </> "target")),
+      TestCase $ do
+        assertEqual
+          "shouldTraverseDirectory allows normal source directories."
+          True
+          (shouldTraverseDirectory ("packages" </> "canonicalization")),
+      TestCase $ do
+        assertEqual
+          "isLeafPath detects non-leaf paths."
+          False
+          (isLeafPath ["packages", "packages/canonicalization", "packages/canonicalization/Main.hs"] "packages/canonicalization"),
+      TestCase $ do
+        assertEqual
+          "isLeafPath detects leaf paths."
+          True
+          (isLeafPath ["packages", "packages/canonicalization", "packages/canonicalization/Main.hs"] "packages/canonicalization/Main.hs"),
+      TestCase $ do
+        assertEqual
+          "packageRootPathFromRepositoryPath extracts package root."
+          (Just "packages/canonicalization")
+          (packageRootPathFromRepositoryPath "packages/canonicalization/Main.hs"),
+      TestCase $ do
+        assertEqual
+          "hostRootPathFromRepositoryPath extracts host root."
+          (Just "hosts/default")
+          (hostRootPathFromRepositoryPath "hosts/default/configuration.nix"),
+      TestCase $ do
+        assertEqual
+          "detectPackageKindFromMarkers prefers a unique non-binary marker."
+          HaskellPackage
+          (detectPackageKindFromMarkers [("Main.hs", HaskellPackage), ("binary-layout", BinaryReleasePackage)]),
+      TestCase $ do
+        assertEqual
+          "detectPackageKindFromMarkers falls back to binary release marker."
+          BinaryReleasePackage
+          (detectPackageKindFromMarkers [("binary-layout", BinaryReleasePackage)]),
+      TestCase $ do
+        assertEqual
+          "detectPackageKindFromMarkers marks conflicting markers as unknown."
+          UnknownPackage
+          (detectPackageKindFromMarkers [("Main.hs", HaskellPackage), ("main.py", PythonPackage)]),
+      TestCase $ do
+        assertEqual
           "Marks canonical go-style .gitmodules path as compatible."
           True
           (gitSubmoduleRepositoryIsCompatible (buildGitSubmoduleRepository "/home/user" "github.com/pbizopoulos/canonicalization")),
