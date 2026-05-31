@@ -18,7 +18,7 @@ import Data.List (find, intercalate, isInfixOf, isPrefixOf, isSuffixOf, maximumB
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, fromMaybe, listToMaybe, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isNothing, listToMaybe, mapMaybe)
 import Data.Ord (comparing)
 import Data.Set qualified as Set
 import Data.Text qualified as T
@@ -45,7 +45,7 @@ import System.FilePath ((<.>), (</>))
 import System.FilePath.Posix (splitDirectories, takeBaseName, takeDirectory, takeFileName)
 import System.IO (hClose, openTempFile)
 import System.Process (readProcessWithExitCode)
-import Test.HUnit (Counts (errors, failures), Test (TestCase, TestList), assertEqual, runTestTT)
+import Test.HUnit (Counts (errors, failures), Test (TestCase, TestList), assertBool, assertEqual, runTestTT)
 import Test.QuickCheck qualified as QC
 import Text.Regex.TDFA ((=~))
 import Prelude
@@ -1604,6 +1604,52 @@ hUnitDebugTests =
           (formatNixBindingDifferenceLine "missing key" "src"),
       TestCase $ do
         assertEqual
+          "Looks up a known default Nix template by name."
+          True
+          (maybe False ((== "python_template") . defaultNixTemplateName) (defaultNixTemplateSpecByName "python_template")),
+      TestCase $ do
+        assertBool
+          "Returns Nothing for an unknown default Nix template name."
+          (isNothing (defaultNixTemplateSpecByName "not-a-template")),
+      TestCase $ do
+        assertEqual
+          "checkOutcomeFromIssues marks empty issue list as passed."
+          CheckPassed
+          (checkOutcomeFromIssues ([] :: [String])),
+      TestCase $ do
+        assertEqual
+          "checkOutcomeFromIssues marks non-empty issue list as failed."
+          CheckFailed
+          (checkOutcomeFromIssues ["issue" :: String] :: CheckOutcome),
+      TestCase $ do
+        assertEqual
+          "Parses and deduplicates .gitmodules path entries."
+          ["github.com/example/repo", "gitlab.com/org/project"]
+          ( parseGitSubmodulePathEntries
+              ( unlines
+                  [ "[submodule \"one\"]",
+                    "  path = github.com/example/repo",
+                    "  path = github.com/example/repo",
+                    "  url = https://example.test/repo.git",
+                    "  path = gitlab.com/org/project",
+                    "  path =    ",
+                    "  path-without-equals github.com/ignored/repo"
+                  ]
+              )
+          ),
+      TestCase $ do
+        let malformedRepository = buildGitSubmoduleRepository "/home/user" "github.com/example/repo/subdir"
+        assertEqual
+          "Malformed git-submodule paths are marked incompatible and keep leaf name."
+          (False, "subdir")
+          (gitSubmoduleRepositoryIsCompatible malformedRepository, gitSubmoduleRepositoryName malformedRepository),
+      TestCase $ do
+        assertEqual
+          "maximumByLength returns the longest list."
+          ([1, 2, 3] :: [Int])
+          (maximumByLength [[1 :: Int], [1, 2, 3], [1, 2]]),
+      TestCase $ do
+        assertEqual
           "Extracts the package section with extractTomlSection."
           "name = \"example-package\"\nversion = \"0.1.0\"\nedition = \"2021\"\ndescription = \"Example package fixture for TOML parsing.\"\nlicense = \"MIT\"\nrepository = \"https://github.com/pbizopoulos/canonicalization\"\nreadme = \"../../README\"\nkeywords = [\"check\", \"lint\", \"fixture\"]\ncategories = [\"development-tools\"]\n\n"
           (extractTomlSection "package" exampleCargoTomlFixture),
@@ -1617,6 +1663,11 @@ hUnitDebugTests =
           "Parses lints.rust.unsafe_code with lookupTomlString."
           (Just "forbid")
           (lookupTomlString "unsafe_code" (extractTomlSection "lints.rust" removeEmptyLinesCargoTomlFixture)),
+      TestCase $ do
+        assertEqual
+          "Returns Nothing for a TOML key missing from the section."
+          Nothing
+          (lookupTomlString "missing_key" (extractTomlSection "package" removeEmptyLinesCargoTomlFixture)),
       TestCase $ do
         assertEqual
           "Marks canonical go-style .gitmodules path as compatible."
