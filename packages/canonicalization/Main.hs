@@ -211,11 +211,9 @@ data PackageCheck = PackageCheck
 main :: IO ()
 main = do
   debugMode <- lookupEnv "DEBUG"
-  propertyTestMode <- lookupEnv "PROPERTY_TESTS"
   commandLineArgs <- getArgs
-  case (debugMode, propertyTestMode) of
-    (Just "1", Just "1") -> runPropertyTests
-    (Just "1", _) -> runDebugTests
+  case debugMode of
+    Just "1" -> runDebugTests
     _ -> runCli commandLineArgs
 runCli :: [String] -> IO ()
 runCli commandLineArgs =
@@ -1438,12 +1436,6 @@ runDebugTests = do
   propertySuccess <- quickCheckDebugProperties
   if errors hUnitCounts == 0 && failures hUnitCounts == 0 && propertySuccess
     then putStrLn "test ... ok"
-    else exitFailure
-runPropertyTests :: IO ()
-runPropertyTests = do
-  propertySuccess <- quickCheckDebugProperties
-  if propertySuccess
-    then putStrLn "property tests ... ok"
     else exitFailure
 quickCheckDebugProperties :: IO Bool
 quickCheckDebugProperties = do
