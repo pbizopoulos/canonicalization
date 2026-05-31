@@ -594,6 +594,7 @@ checkPackage allRepositoryStructureIssues packageName = do
                       )
   cargoTomlIssues <- checkCargoToml packageName
   cabalFileIssues <- checkCabalFile packageName
+  defaultNixConventionIssues <- checkDefaultNixConventions packageName packageKind
   pythonDebugTestIssues <- checkPythonDebugTests packageName packageKind
   haskellDebugTestIssues <- checkHaskellDebugTests packageName packageKind
   rustDebugTestIssues <- checkRustDebugTests packageName packageKind
@@ -689,6 +690,7 @@ checkPackage allRepositoryStructureIssues packageName = do
       packageIssues =
         packageStructureIssues
           ++ defaultNixTemplateIssues
+          ++ defaultNixConventionIssues
           ++ cargoTomlIssues
           ++ cabalFileIssues
           ++ pythonDebugTestIssues
@@ -737,6 +739,51 @@ readTextFileIfExists :: FilePath -> IO (Maybe T.Text)
 readTextFileIfExists filePath = do
   fileExists <- doesFileExist filePath
   if fileExists then Just <$> TIO.readFile filePath else pure Nothing
+checkDefaultNixConventions :: FilePath -> PackageKind -> IO [String]
+checkDefaultNixConventions packageName packageKind = do
+  let packageDefaultNixPath = "packages" </> packageName </> "default.nix"
+  maybeDefaultNixText <- readTextFileIfExists packageDefaultNixPath
+  case maybeDefaultNixText of
+    Nothing -> pure []
+    Just defaultNixText ->
+      let defaultNixSource = T.unpack defaultNixText
+          hasLegacyMainProgram = "\n  mainProgram = pname;" `isInfixOf` defaultNixSource
+          hasMetaMainProgram = "meta.mainProgram = pname;" `isInfixOf` defaultNixSource
+          hasInputsParameter = "inputs," `isInfixOf` defaultNixSource
+          hasExternalFetchUrlSource = "src = pkgs.fetchurl" `isInfixOf` defaultNixSource
+          hasLocalSource = "src = ./.;" `isInfixOf` defaultNixSource
+          hasPlaceholderVersion = "version = \"0.0.0\";" `isInfixOf` defaultNixSource
+          hasVersionAssignment = "version = \"" `isInfixOf` defaultNixSource
+          expectsMetaMainProgram =
+            packageKind `elem` [RustPackage, PythonLatexPackage, PythonPackage, CPackage, LatexPackage, BinaryReleasePackage]
+          requiresInputsParameter = packageName `elem` ["deploy_host_template", "python_template"]
+       in pure $
+            catMaybes
+              [ if packageKind == HaskellPackage && not hasLegacyMainProgram
+                  then Just ("packages/" ++ packageName ++ "/default.nix: Haskell packages must set mainProgram = pname;")
+                  else Nothing,
+                if packageKind == HaskellPackage && hasMetaMainProgram
+                  then Just ("packages/" ++ packageName ++ "/default.nix: Haskell packages must not set meta.mainProgram = pname;")
+                  else Nothing,
+                if expectsMetaMainProgram && not hasMetaMainProgram
+                  then Just ("packages/" ++ packageName ++ "/default.nix: package kind requires meta.mainProgram = pname;")
+                  else Nothing,
+                if expectsMetaMainProgram && hasLegacyMainProgram
+                  then Just ("packages/" ++ packageName ++ "/default.nix: package kind must use meta.mainProgram (not mainProgram)")
+                  else Nothing,
+                if requiresInputsParameter && not hasInputsParameter
+                  then Just ("packages/" ++ packageName ++ "/default.nix: package must accept inputs parameter")
+                  else Nothing,
+                if not requiresInputsParameter && hasInputsParameter
+                  then Just ("packages/" ++ packageName ++ "/default.nix: package must not accept inputs parameter")
+                  else Nothing,
+                if hasExternalFetchUrlSource && hasPlaceholderVersion
+                  then Just ("packages/" ++ packageName ++ "/default.nix: fetchurl-based packages must use a non-placeholder version")
+                  else Nothing,
+                if hasLocalSource && hasVersionAssignment && not hasPlaceholderVersion
+                  then Just ("packages/" ++ packageName ++ "/default.nix: src = ./.; packages must use version = \"0.0.0\";")
+                  else Nothing
+              ]
 checkPythonDebugTests :: FilePath -> PackageKind -> IO [String]
 checkPythonDebugTests packageName packageKind =
   if packageKind `notElem` [PythonPackage, PythonLatexPackage]
