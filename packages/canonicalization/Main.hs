@@ -995,6 +995,7 @@ formatPythonValidatorError packageName errorCode =
    in case errorCode of
         "missing_main_function" -> messagePrefix ++ "missing main() function"
         "missing_debug_gate" -> messagePrefix ++ "main() must include a DEBUG gate"
+        "noncanonical_debug_gate" -> messagePrefix ++ "main() DEBUG gate must check DEBUG == \"1\""
         "debug_branch_no_unittest" -> messagePrefix ++ "DEBUG branch in main() must run unittest"
         "run_tests_missing_unittest" -> messagePrefix ++ "run_tests() is called from DEBUG branch but does not run unittest"
         "parse_error" -> messagePrefix ++ "python source could not be parsed"
@@ -1027,6 +1028,21 @@ pythonDebugTestValidatorPythonSource =
       "",
       "def _contains_debug_gate(expression):",
       "    return any(_is_os_getenv_debug(node) for node in ast.walk(expression))",
+      "",
+      "def _contains_canonical_debug_gate(expression):",
+      "    for node in ast.walk(expression):",
+      "        if not isinstance(node, ast.Compare):",
+      "            continue",
+      "        if len(node.ops) != 1 or len(node.comparators) != 1:",
+      "            continue",
+      "        if not isinstance(node.ops[0], ast.Eq):",
+      "            continue",
+      "        if not _is_os_getenv_debug(node.left):",
+      "            continue",
+      "        comparator = node.comparators[0]",
+      "        if isinstance(comparator, ast.Constant) and comparator.value == '1':",
+      "            return True",
+      "    return False",
       "",
       "def _is_unittest_main_call(node):",
       "    if not isinstance(node, ast.Call):",
@@ -1085,6 +1101,8 @@ pythonDebugTestValidatorPythonSource =
       "        if not debug_if_nodes:",
       "            errors.append('missing_debug_gate')",
       "        else:",
+      "            if not any(_contains_canonical_debug_gate(node.test) for node in debug_if_nodes):",
+      "                errors.append('noncanonical_debug_gate')",
       "            debug_branch_ok = False",
       "            run_tests_invalid = False",
       "            for if_node in debug_if_nodes:",
