@@ -85,7 +85,7 @@ def create_figure(path: Path, samples: list[float]) -> None:
     axis.plot(x_values, samples, color="#1f77b4", linewidth=2.5, marker="o")
     axis.set_xlabel("Sample index")
     axis.set_ylabel("Value")
-    if os.getenv("DEBUG"):
+    if os.getenv("DEBUG") == "1":
         axis.set_title("Python-generated figure (in DEBUG mode)")
     else:
         axis.set_title("Python-generated figure")
