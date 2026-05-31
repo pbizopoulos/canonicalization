@@ -1775,6 +1775,105 @@ hUnitDebugTests =
           (detectPackageKindFromMarkers [("Main.hs", HaskellPackage), ("main.py", PythonPackage)]),
       TestCase $ do
         assertEqual
+          "Detects package markers for python-latex packages."
+          [("main.py+ms.tex", PythonLatexPackage)]
+          (detectPackageMarkers ["main.py", "ms.tex"]),
+      TestCase $ do
+        assertEqual
+          "Reports ambiguity when multiple markers match."
+          ["packages/example: has ambiguous project markers: Main.hs, main.py"]
+          ( ambiguousPackageMarkerIssuesForPackage
+              PackageInfo
+                { packageRootPath = "packages/example",
+                  packageRootDirectoryName = "example",
+                  packageLeafPaths = ["Main.hs", "main.py"],
+                  detectedPackageKind = UnknownPackage,
+                  matchedPackageMarkers = ["Main.hs", "main.py"]
+                }
+          ),
+      TestCase $ do
+        assertEqual
+          "pathMatchesRegex accepts matching paths."
+          True
+          (pathMatchesRegex "^packages/.+/Main\\.hs$" "packages/canonicalization/Main.hs"),
+      TestCase $ do
+        assertEqual
+          "pathMatchesRegex rejects non-matching paths."
+          False
+          (pathMatchesRegex "^packages/.+/Main\\.hs$" "packages/canonicalization/default.nix"),
+      TestCase $ do
+        assertEqual
+          "Detects Cargo dependency section headers."
+          True
+          (isCargoDependencySectionHeader "[target.x86_64-unknown-linux-gnu.dependencies]"),
+      TestCase $ do
+        assertEqual
+          "Detects non-dependency section headers."
+          False
+          (isCargoDependencySectionHeader "[package]"),
+      TestCase $ do
+        assertEqual
+          "Detects TOML section headers."
+          True
+          (isTomlSectionHeader "[package]"),
+      TestCase $ do
+        assertEqual
+          "Rejects malformed TOML section headers."
+          False
+          (isTomlSectionHeader "package"),
+      TestCase $ do
+        assertEqual
+          "Normalizes Cargo TOML names and drops dependency blocks."
+          ( T.unlines
+              [ "[[bin]]",
+                "name = \"demo\"",
+                "path = \"src/main.rs\"",
+                "[package]",
+                "name = \"demo\""
+              ]
+          )
+          ( normalizeCargoTomlForBaselineComparison
+              "demo"
+              ( T.unlines
+                  [ "[[bin]]",
+                    "name = \"old-bin\"",
+                    "path = \"src/main.rs\"",
+                    "[dependencies]",
+                    "a = \"1\"",
+                    "",
+                    "[package]",
+                    "name = \"old-pkg\""
+                  ]
+              )
+          ),
+      TestCase $ do
+        assertEqual
+          "Normalizes cabal executable and name lines."
+          "name:          demo\nexecutable demo\n"
+          ( T.unpack
+              ( normalizeCabalForBaselineComparison
+                  "demo"
+                  ( T.unlines
+                      [ "name: old-name",
+                        "executable old-name",
+                        "build-depends:",
+                        "  base"
+                      ]
+                  )
+              )
+          ),
+      TestCase $ do
+        assertEqual
+          "Looks up Cabal fields."
+          (Just "canonicalization")
+          (lookupCabalField "name" (T.pack "name: canonicalization\nversion: 0.0.0\n")),
+      TestCase $ do
+        assertEqual
+          "Returns Nothing for missing Cabal fields."
+          Nothing
+          (lookupCabalField "license" (T.pack "name: canonicalization\n")),
+      TestCase $ do
+        assertEqual
           "Marks canonical go-style .gitmodules path as compatible."
           True
           (gitSubmoduleRepositoryIsCompatible (buildGitSubmoduleRepository "/home/user" "github.com/pbizopoulos/canonicalization")),
