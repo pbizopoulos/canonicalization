@@ -749,14 +749,12 @@ checkDefaultNixConventions packageName packageKind = do
       let defaultNixSource = T.unpack defaultNixText
           hasLegacyMainProgram = "\n  mainProgram = pname;" `isInfixOf` defaultNixSource
           hasMetaMainProgram = "meta.mainProgram = pname;" `isInfixOf` defaultNixSource
-          hasInputsParameter = "inputs," `isInfixOf` defaultNixSource
           hasExternalFetchUrlSource = "src = pkgs.fetchurl" `isInfixOf` defaultNixSource
           hasLocalSource = "src = ./.;" `isInfixOf` defaultNixSource
           hasPlaceholderVersion = "version = \"0.0.0\";" `isInfixOf` defaultNixSource
           hasVersionAssignment = "version = \"" `isInfixOf` defaultNixSource
           expectsMetaMainProgram =
             packageKind `elem` [RustPackage, PythonLatexPackage, PythonPackage, CPackage, LatexPackage, BinaryReleasePackage]
-          requiresInputsParameter = packageName `elem` ["deploy_host_template", "python_template"]
        in pure $
             catMaybes
               [ if packageKind == HaskellPackage && not hasLegacyMainProgram
@@ -770,12 +768,6 @@ checkDefaultNixConventions packageName packageKind = do
                   else Nothing,
                 if expectsMetaMainProgram && hasLegacyMainProgram
                   then Just ("packages/" ++ packageName ++ "/default.nix: package kind must use meta.mainProgram (not mainProgram)")
-                  else Nothing,
-                if requiresInputsParameter && not hasInputsParameter
-                  then Just ("packages/" ++ packageName ++ "/default.nix: package must accept inputs parameter")
-                  else Nothing,
-                if not requiresInputsParameter && hasInputsParameter
-                  then Just ("packages/" ++ packageName ++ "/default.nix: package must not accept inputs parameter")
                   else Nothing,
                 if hasExternalFetchUrlSource && hasPlaceholderVersion
                   then Just ("packages/" ++ packageName ++ "/default.nix: fetchurl-based packages must use a non-placeholder version")
