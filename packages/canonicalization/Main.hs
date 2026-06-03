@@ -45,7 +45,7 @@ import System.FilePath ((<.>), (</>))
 import System.FilePath.Posix (splitDirectories, takeBaseName, takeDirectory, takeFileName)
 import System.IO (hClose, openTempFile)
 import System.Process (readProcessWithExitCode)
-import Test.HUnit (Counts (errors, failures), Test (TestCase, TestList), assertBool, assertEqual, runTestTT)
+import Test.HUnit (Counts (errors, failures), Test (TestCase, TestList), assertBool, assertEqual, assertFailure, runTestTT)
 import Test.QuickCheck qualified as QC
 import Text.Regex.TDFA ((=~))
 import Prelude
@@ -1403,66 +1403,82 @@ formatDefaultNixTemplateDifferences packageName templateDefaultNixPath packageDe
    in if renderedPackageDefaultNix == renderedTemplateDefaultNix
         then []
         else
-          let maybePackageBindingMap = extractPrimaryNixBindings packageDefaultNixExpr
-              maybeTemplateBindingMap = extractPrimaryNixBindings templateDefaultNixExpr
-           in case (maybePackageBindingMap, maybeTemplateBindingMap) of
-                (Just packageBindingMap, Just templateBindingMap) ->
-                  let missingBindingKeys = Map.keys (Map.difference templateBindingMap packageBindingMap)
-                      unexpectedBindingKeys = Map.keys (Map.difference packageBindingMap templateBindingMap)
-                      sharedBindingKeys = Map.keys (Map.intersection packageBindingMap templateBindingMap)
-                      changedBindingKeys =
-                        [ bindingKey
-                        | bindingKey <- sharedBindingKeys,
-                          Map.lookup bindingKey packageBindingMap /= Map.lookup bindingKey templateBindingMap
-                        ]
-                      differenceDetailLines =
-                        map (formatNixBindingDifferenceLine "missing key") missingBindingKeys
-                          ++ map (formatNixBindingDifferenceLine "unexpected key") unexpectedBindingKeys
-                          ++ map
-                            ( \bindingKey ->
-                                let expectedValue = compactTextToSingleLine (fromMaybe "" (Map.lookup bindingKey templateBindingMap))
-                                    actualValue = compactTextToSingleLine (fromMaybe "" (Map.lookup bindingKey packageBindingMap))
-                                 in "  - changed key: "
-                                      ++ T.unpack bindingKey
-                                      ++ "\n    expected: "
-                                      ++ expectedValue
-                                      ++ "\n    actual:   "
-                                      ++ actualValue
-                            )
-                            changedBindingKeys
-                   in if null differenceDetailLines
-                        then
-                          [ "packages/"
-                              ++ packageName
-                              ++ "/default.nix: differs from template "
-                              ++ templateDefaultNixPath
-                              ++ " (excluding dependency keys)"
-                          ]
-                        else
-                          [ "packages/"
-                              ++ packageName
-                              ++ "/default.nix: differs from template "
-                              ++ templateDefaultNixPath
-                              ++ " (excluding dependency keys)\n"
-                              ++ intercalate "\n" differenceDetailLines
-                          ]
-                _ ->
-                  [ "packages/"
-                      ++ packageName
-                      ++ "/default.nix: differs from template "
-                      ++ templateDefaultNixPath
-                      ++ " (excluding dependency keys)"
-                  ]
+          let packageLetBindingMap = fromMaybe Map.empty (extractOutermostLetBindings packageDefaultNixExpr)
+              templateLetBindingMap = fromMaybe Map.empty (extractOutermostLetBindings templateDefaultNixExpr)
+              packagePrimaryBindingMap = fromMaybe Map.empty (extractPrimaryNixBindings packageDefaultNixExpr)
+              templatePrimaryBindingMap = fromMaybe Map.empty (extractPrimaryNixBindings templateDefaultNixExpr)
+              letBindingDifferenceLines =
+                if Map.null packageLetBindingMap && Map.null templateLetBindingMap
+                  then []
+                  else formatBindingMapDifferences "let key" packageLetBindingMap templateLetBindingMap
+              primaryBindingDifferenceLines =
+                if Map.null packagePrimaryBindingMap && Map.null templatePrimaryBindingMap
+                  then []
+                  else formatBindingMapDifferences "key" packagePrimaryBindingMap templatePrimaryBindingMap
+              differenceDetailLines = letBindingDifferenceLines ++ primaryBindingDifferenceLines
+              renderedDifferenceDetailLines =
+                if null differenceDetailLines
+                  then
+                    [ "  - expected normalized form: " ++ truncateDiagnosticValue (compactTextToSingleLine renderedTemplateDefaultNix),
+                      "  - actual normalized form:   " ++ truncateDiagnosticValue (compactTextToSingleLine renderedPackageDefaultNix)
+                    ]
+                  else differenceDetailLines
+           in [ "packages/"
+                  ++ packageName
+                  ++ "/default.nix: differs from template "
+                  ++ templateDefaultNixPath
+                  ++ " (excluding dependency keys)\n"
+                  ++ intercalate "\n" renderedDifferenceDetailLines
+              ]
+formatBindingMapDifferences :: String -> Map.Map T.Text T.Text -> Map.Map T.Text T.Text -> [String]
+formatBindingMapDifferences keyLabel packageBindingMap templateBindingMap =
+  let missingBindingKeys = Map.keys (Map.difference templateBindingMap packageBindingMap)
+      unexpectedBindingKeys = Map.keys (Map.difference packageBindingMap templateBindingMap)
+      sharedBindingKeys = Map.keys (Map.intersection packageBindingMap templateBindingMap)
+      changedBindingKeys =
+        [ bindingKey
+        | bindingKey <- sharedBindingKeys,
+          Map.lookup bindingKey packageBindingMap /= Map.lookup bindingKey templateBindingMap
+        ]
+   in map (formatNixBindingDifferenceLine ("missing " ++ keyLabel)) missingBindingKeys
+        ++ map (formatNixBindingDifferenceLine ("unexpected " ++ keyLabel)) unexpectedBindingKeys
+        ++ map
+          ( \bindingKey ->
+              let expectedValue = compactTextToSingleLine (fromMaybe "" (Map.lookup bindingKey templateBindingMap))
+                  actualValue = compactTextToSingleLine (fromMaybe "" (Map.lookup bindingKey packageBindingMap))
+               in "  - changed "
+                    ++ keyLabel
+                    ++ ": "
+                    ++ T.unpack bindingKey
+                    ++ "\n    expected: "
+                    ++ truncateDiagnosticValue expectedValue
+                    ++ "\n    actual:   "
+                    ++ truncateDiagnosticValue actualValue
+          )
+          changedBindingKeys
 formatNixBindingDifferenceLine :: String -> T.Text -> String
 formatNixBindingDifferenceLine differenceKind bindingKey = "  - " ++ differenceKind ++ ": " ++ T.unpack bindingKey
 compactTextToSingleLine :: T.Text -> String
 compactTextToSingleLine textValue =
   let compactText = T.unwords (T.words textValue)
    in T.unpack compactText
+truncateDiagnosticValue :: String -> String
+truncateDiagnosticValue textValue =
+  let maxDiagnosticLength :: Int
+      maxDiagnosticLength = 240
+   in if length textValue <= maxDiagnosticLength
+        then textValue
+        else take maxDiagnosticLength textValue ++ "..."
 extractPrimaryNixBindings :: NExprLoc -> Maybe (Map.Map T.Text T.Text)
 extractPrimaryNixBindings nixExpression = do
   bindingGroups <- collectNixSetBindingGroups nixExpression
   pure $ Map.fromList (maximumByLength bindingGroups)
+extractOutermostLetBindings :: NExprLoc -> Maybe (Map.Map T.Text T.Text)
+extractOutermostLetBindings (Fix (Compose (AnnUnit _ expressionFunctor))) =
+  case expressionFunctor of
+    NAbs _ body -> extractOutermostLetBindings body
+    NLet bindings _ -> Just (Map.fromList (extractNamedNixBindings bindings))
+    _ -> Nothing
 maximumByLength :: [[a]] -> [a]
 maximumByLength = maximumBy (comparing length)
 collectNixSetBindingGroups :: NExprLoc -> Maybe [[(T.Text, T.Text)]]
@@ -1647,6 +1663,19 @@ hUnitDebugTests =
           "Formats binding difference details with formatNixBindingDifferenceLine."
           "  - missing key: src"
           (formatNixBindingDifferenceLine "missing key" "src"),
+      TestCase $ do
+        legacyPythonTemplateParseResult <- parseNixExprFromText (T.pack legacyPythonTemplateNixFixture)
+        templatePythonParseResult <- parseNixExprFromText pythonTemplateBaselineNixSource
+        case (legacyPythonTemplateParseResult, templatePythonParseResult) of
+          (Right legacyPythonTemplateExpr, Right templatePythonExpr) ->
+            assertBool
+              "Reports legacy Python template let-binding differences explicitly."
+              ( any
+                  ("unexpected let key: pyPkgs" `isInfixOf`)
+                  (formatDefaultNixTemplateDifferences "test" "packages/python_template/default.nix" legacyPythonTemplateExpr templatePythonExpr)
+              )
+          (Left parseError, _) -> assertFailure ("Failed to parse legacy Python template fixture: " ++ parseError)
+          (_, Left parseError) -> assertFailure ("Failed to parse Python template baseline fixture: " ++ parseError),
       TestCase $ do
         assertEqual
           "Looks up a known default Nix template by name."
@@ -2000,6 +2029,48 @@ pythonNixFixture =
     ++ "let python = pkgs.python3; in\n"
     ++ "python.pkgs.buildPythonPackage rec {\n"
     ++ "  src = ./.;\n"
+    ++ "}\n"
+legacyPythonTemplateNixFixture :: String
+legacyPythonTemplateNixFixture =
+  "{\n"
+    ++ "  inputs,\n"
+    ++ "  pkgs ? import <nixpkgs> { },\n"
+    ++ "}:\n"
+    ++ "let\n"
+    ++ "  installationScript = inputs.agenix-shell.lib.installationScript pkgs.stdenv.system {\n"
+    ++ "    secrets.secrets.file = ../../secrets/secrets.age;\n"
+    ++ "  };\n"
+    ++ "  pyPkgs = pkgs.python312Packages;\n"
+    ++ "  python = pkgs.python312;\n"
+    ++ "in\n"
+    ++ "pyPkgs.buildPythonPackage rec {\n"
+    ++ "  installCheckPhase = ''\n"
+    ++ "    runHook preInstallCheck\n"
+    ++ "    HOME=\"$(mktemp -d)\"\n"
+    ++ "    DEBUG=1 \"$out/bin/${pname}\"\n"
+    ++ "    runHook postInstallCheck\n"
+    ++ "  '';\n"
+    ++ "  installPhase = ''\n"
+    ++ "    install -Dm644 main.py $out/${python.sitePackages}/${pname}.py\n"
+    ++ "    install -Dm755 ./main.py $out/bin/${pname}\n"
+    ++ "    if [ -d ./prm ]; then\n"
+    ++ "      cp -r ./prm/ $out/${python.sitePackages}/\n"
+    ++ "      cp -r ./prm/ $out/bin/\n"
+    ++ "    fi\n"
+    ++ "  '';\n"
+    ++ "  meta.mainProgram = pname;\n"
+    ++ "  pname = baseNameOf ./.;\n"
+    ++ "  propagatedBuildInputs = [\n"
+    ++ "    pyPkgs.hypothesis\n"
+    ++ "  ];\n"
+    ++ "  pyproject = false;\n"
+    ++ "  shellHook = ''\n"
+    ++ "    source ${pkgs.lib.getExe installationScript}\n"
+    ++ "    export $secrets\n"
+    ++ "  '';\n"
+    ++ "  src = ./.;\n"
+    ++ "  strictDeps = true;\n"
+    ++ "  version = \"0.0.0\";\n"
     ++ "}\n"
 pythonLatexNixFixture :: String
 pythonLatexNixFixture =
