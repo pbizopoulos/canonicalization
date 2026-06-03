@@ -10,10 +10,10 @@ in
 pkgs.runCommand "${checkName}"
   {
     nativeBuildInputs = [
-      pkgs.perf
       inputs.self.packages.${pkgs.stdenv.system}.${packageName}
+      pkgs.perf
     ];
-    src = ../../packages/${packageName};
+    src = ../.. + "/packages/${packageName}";
   }
   ''
     temp_dir="$PWD/workspace"

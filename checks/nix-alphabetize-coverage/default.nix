@@ -4,24 +4,24 @@
 }:
 let
   checkName = builtins.baseNameOf ./.;
-  packageName = pkgs.lib.removeSuffix "-coverage" checkName;
-  packageDrv = import ../../packages/${packageName}/default.nix { inherit pkgs; };
   debugGhc = pkgs.haskellPackages.ghcWithPackages (_: packageDrv.passthru.haskellExecutableDepends);
+  packageDrv = import (../.. + "/packages/${packageName}/default.nix") {
+    inherit pkgs;
+  };
+  packageName = pkgs.lib.removeSuffix "-coverage" checkName;
 in
-pkgs.runCommand "${checkName}"
+pkgs.runCommand checkName
   {
     nativeBuildInputs = [
       debugGhc
-      pkgs.coreutils
     ];
-    src = ../../packages/${packageName};
+    src = ../.. + "/packages/${packageName}";
   }
   ''
     coverage_dir="$PWD/coverage"
     hpcdir="$PWD/hpc"
     export HOME="$PWD"
     packageName="${packageName}"
-    rm -rf "$coverage_dir" "$hpcdir"
     mkdir -p "$coverage_dir/html" "$hpcdir"
     "${debugGhc}/bin/ghc" \
       -fhpc \

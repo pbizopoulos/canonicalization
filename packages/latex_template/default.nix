@@ -8,7 +8,6 @@ pkgs.stdenv.mkDerivation rec {
   installPhase = ''
     install -Dm644 ms.pdf $out/ms.pdf
   '';
-  meta.mainProgram = pname;
   nativeBuildInputs = [
     pkgs.texliveFull
   ];

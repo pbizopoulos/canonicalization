@@ -4,9 +4,9 @@
   ...
 }:
 let
+  inherit (inputs.self.packages.${pkgs.stdenv.system}.${packageName}) cargoDeps;
   checkName = builtins.baseNameOf ./.;
   packageName = pkgs.lib.removeSuffix "-mutation-testing" checkName;
-  inherit (inputs.self.packages.${pkgs.stdenv.system}.${packageName}) cargoDeps;
   rustBaseInputs =
     inputs.self.packages.${pkgs.stdenv.system}.${packageName}.passthru.rustCheckNativeBuildInputs;
 in
@@ -15,7 +15,7 @@ pkgs.runCommand "${checkName}"
     nativeBuildInputs = rustBaseInputs ++ [
       pkgs.cargo-mutants
     ];
-    src = ../../packages/${packageName};
+    src = ../.. + "/packages/${packageName}";
   }
   ''
     cp -R --no-preserve=mode "$src" "$PWD/workspace"

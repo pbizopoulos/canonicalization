@@ -4,23 +4,23 @@
 }:
 let
   checkName = builtins.baseNameOf ./.;
+  packageDrv = import (../.. + "/packages/${packageName}/default.nix") {
+    inherit pkgs;
+  };
   packageName = pkgs.lib.removeSuffix "-profile" checkName;
-  packageDrv = import ../../packages/${packageName}/default.nix { inherit pkgs; };
   profileGhc = pkgs.haskellPackages.ghcWithPackages (_: packageDrv.passthru.haskellExecutableDepends);
 in
-pkgs.runCommand "${checkName}"
+pkgs.runCommand checkName
   {
     nativeBuildInputs = [
-      pkgs.coreutils
       profileGhc
     ];
-    src = ../../packages/${packageName};
+    src = ../.. + "/packages/${packageName}";
   }
   ''
     export HOME="$PWD"
     workspace="$PWD/workspace"
     packageName="${packageName}"
-    rm -rf "$workspace"
     mkdir -p "$workspace"
     cd "$workspace"
     "${profileGhc}/bin/ghc" \

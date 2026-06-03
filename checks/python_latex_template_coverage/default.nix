@@ -5,21 +5,26 @@
 }:
 let
   checkName = builtins.baseNameOf ./.;
-  packageName = pkgs.lib.removeSuffix "_coverage" checkName;
   packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${packageName};
+  packageName = pkgs.lib.removeSuffix "_coverage" checkName;
   packagePythonDeps = packageDrv.propagatedBuildInputs or [ ];
   python = packageDrv.python or pkgs.python3;
   pythonEnv = python.withPackages (
-    _: pkgs.lib.unique (packagePythonDeps ++ [ python.pkgs.coverage ])
+    _:
+    pkgs.lib.unique (
+      packagePythonDeps
+      ++ [
+        python.pkgs.coverage
+      ]
+    )
   );
 in
-pkgs.runCommand "${checkName}"
+pkgs.runCommand checkName
   {
     nativeBuildInputs = [
-      pkgs.coreutils
       pythonEnv
     ];
-    src = ../../packages/${packageName};
+    src = ../.. + "/packages/${packageName}";
   }
   ''
     export HOME="$(mktemp -d)"

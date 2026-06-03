@@ -4,16 +4,16 @@
   ...
 }:
 let
+  inherit (inputs.self.packages.${pkgs.stdenv.system}.${packageName}) cargoDeps;
   checkName = builtins.baseNameOf ./.;
   packageName = pkgs.lib.removeSuffix "-property-testing" checkName;
-  inherit (inputs.self.packages.${pkgs.stdenv.system}.${packageName}) cargoDeps;
   rustBaseInputs =
     inputs.self.packages.${pkgs.stdenv.system}.${packageName}.passthru.rustCheckNativeBuildInputs;
 in
 pkgs.runCommand "${checkName}"
   {
     nativeBuildInputs = rustBaseInputs;
-    src = ../../packages/${packageName};
+    src = ../.. + "/packages/${packageName}";
   }
   ''
     cp -R --no-preserve=mode "$src" "$PWD/workspace"
