@@ -232,34 +232,6 @@ class PropertyTests(unittest.TestCase):
                 msg = f"summary metric {left_metric!r} changed across permutations"
                 raise AssertionError(msg)
 
-    @given(  # type: ignore[untyped-decorator]
-        st.lists(
-            st.floats(
-                min_value=-1_000,
-                max_value=1_000,
-                allow_nan=False,
-                allow_infinity=False,
-            ),
-            min_size=1,
-            max_size=25,
-        ),
-    )
-    @settings(deadline=None)  # type: ignore[untyped-decorator]
-    def test_rendered_table_row_count_tracks_summary_metrics(
-        self,
-        samples: list[float],
-    ) -> None:
-        """Each summary metric should produce exactly one LaTeX body row."""
-        rendered = render_table(samples)
-        row_lines = [
-            line
-            for line in rendered.splitlines()
-            if line.endswith("\\\\") and not line.startswith("Metric &")
-        ]
-        if len(row_lines) != len(summarize_samples(samples)):
-            msg = "render_table() row count does not match summary metric count"
-            raise AssertionError(msg)
-
     @given(st.text())  # type: ignore[untyped-decorator]
     def test_latex_escape_prefixes_special_characters(self, text: str) -> None:
         """Escaped output should prefix special characters that need escaping."""

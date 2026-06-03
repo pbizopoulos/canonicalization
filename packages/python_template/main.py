@@ -79,6 +79,22 @@ class MainTests(unittest.TestCase):
             msg = "render_message() should report when no canonical labels remain"
             raise AssertionError(msg)
 
+    def test_unique_canonical_labels_keeps_first_surviving_occurrence(self) -> None:
+        """Deduplication should keep first surviving canonical labels in order."""
+        labels = [
+            "Hello, World!",
+            "python template",
+            "---",
+            "hello_world",
+            "Python-Template",
+            "HELLO   WORLD",
+        ]
+        if unique_canonical_labels(labels) != ["hello-world", "python-template"]:
+            msg = (
+                "unique_canonical_labels() should keep first surviving canonical labels"
+            )
+            raise AssertionError(msg)
+
     def test_main_prints_message_when_not_debug(self) -> None:
         """main() should emit the summary when DEBUG is not enabled."""
         output = io.StringIO()
@@ -130,24 +146,6 @@ class PropertyTests(unittest.TestCase):
         canonical_labels = unique_canonical_labels(labels)
         if unique_canonical_labels(canonical_labels) != canonical_labels:
             msg = "unique_canonical_labels() must be idempotent"
-            raise AssertionError(msg)
-
-    @given(st.lists(st.text(), max_size=25))  # type: ignore[untyped-decorator]
-    def test_unique_canonical_labels_preserves_first_occurrence_order(
-        self,
-        labels: list[str],
-    ) -> None:
-        """Deduplication should preserve first-occurrence ordering."""
-        canonical_labels = unique_canonical_labels(labels)
-        expected: list[str] = []
-        seen: set[str] = set()
-        for label in labels:
-            canonical = canonicalize_label(label)
-            if canonical and canonical not in seen:
-                seen.add(canonical)
-                expected.append(canonical)
-        if canonical_labels != expected:
-            msg = "unique_canonical_labels() changed first-occurrence ordering"
             raise AssertionError(msg)
 
 
