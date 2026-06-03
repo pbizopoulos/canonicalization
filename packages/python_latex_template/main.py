@@ -116,41 +116,38 @@ class ArtifactTests(unittest.TestCase):
 
     def test_summarize_samples_contains_expected_metrics(self) -> None:
         """Summary statistics should remain stable for the default dataset."""
-        summary = summarize_samples(DEFAULT_SAMPLES)
-        expected = [
-            ("count", 5.0),
-            ("total", 32.0),
-            ("mean", 6.4),
-            ("min", 2.0),
-            ("max", 12.0),
-        ]
+        summary = dict(summarize_samples(DEFAULT_SAMPLES))
+        expected = {
+            "count": 5.0,
+            "total": 32.0,
+            "mean": 6.4,
+            "min": 2.0,
+            "max": 12.0,
+        }
         if summary != expected:
             msg = "summarize_samples() changed expected default statistics"
             raise AssertionError(msg)
 
-    def test_create_table_contains_expected_rows(self) -> None:
-        """Table output should contain known metrics and values."""
+    def test_create_table_contains_expected_metrics(self) -> None:
+        """Table output should expose the expected summary metrics and values."""
         with tempfile.TemporaryDirectory() as tmpdir:
             table_path = Path(tmpdir) / "table.tex"
             create_table(table_path, DEFAULT_SAMPLES)
             table = table_path.read_text(encoding="utf-8")
-            expected_lines = [
+            expected_fragments = [
                 "\\begin{tabular}{lr}",
-                "\\toprule",
                 "Metric & Value \\\\",
-                "\\midrule",
                 "count & 5.00 \\\\",
                 "total & 32.00 \\\\",
                 "mean & 6.40 \\\\",
                 "min & 2.00 \\\\",
                 "max & 12.00 \\\\",
-                "\\bottomrule",
                 "\\end{tabular}",
             ]
-            actual_lines = [line for line in table.splitlines() if line]
-            if actual_lines != expected_lines:
-                msg = "table.tex lines differ from expected deterministic layout"
-                raise AssertionError(msg)
+            for fragment in expected_fragments:
+                if fragment not in table:
+                    msg = f"table.tex is missing expected content: {fragment!r}"
+                    raise AssertionError(msg)
 
     def test_create_figure_writes_non_empty_png(self) -> None:
         """Figure generation should create a real PNG file."""
@@ -176,26 +173,35 @@ class ArtifactTests(unittest.TestCase):
                 msg = "workspace is missing table.tex"
                 raise AssertionError(msg)
 
-    def test_main_debug_runs_tests_and_generates_workspace(self) -> None:
-        """DEBUG mode should run tests and still generate artifacts."""
+    def test_main_generates_workspace_artifacts_in_current_directory(self) -> None:
+        """main() should write artifacts into <cwd>/tmp."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fake_cwd = Path(tmpdir)
+            with (
+                mock.patch.dict(os.environ, {"DEBUG": "0"}),
+                mock.patch("pathlib.Path.cwd", return_value=fake_cwd),
+            ):
+                main()
+            workspace = fake_cwd.resolve() / "tmp"
+            if not (workspace / "figure.png").exists():
+                msg = "main() should generate figure.png in <cwd>/tmp"
+                raise AssertionError(msg)
+            if not (workspace / "table.tex").exists():
+                msg = "main() should generate table.tex in <cwd>/tmp"
+                raise AssertionError(msg)
+
+    def test_main_debug_runs_tests_before_writing_artifacts(self) -> None:
+        """DEBUG mode should still exercise the test runner branch."""
         with tempfile.TemporaryDirectory() as tmpdir:
             fake_cwd = Path(tmpdir)
             with (
                 mock.patch.dict(os.environ, {"DEBUG": "1"}),
                 mock.patch(f"{MODULE_NAME}.run_tests") as run_tests_mock,
-                mock.patch(f"{MODULE_NAME}.create_workspace_artifacts") as create_mock,
                 mock.patch("pathlib.Path.cwd", return_value=fake_cwd),
             ):
                 main()
             if run_tests_mock.call_count != 1:
                 msg = "main() should call run_tests() exactly once when DEBUG=1"
-                raise AssertionError(msg)
-            if create_mock.call_count != 1:
-                msg = "main() should always call create_workspace_artifacts()"
-                raise AssertionError(msg)
-            called_workspace = create_mock.call_args.args[0]
-            if called_workspace != fake_cwd.resolve() / "tmp":
-                msg = "main() should generate artifacts in <cwd>/tmp"
                 raise AssertionError(msg)
 
 

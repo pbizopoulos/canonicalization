@@ -28,5 +28,5 @@ description = "A CLI tool to remove empty lines from text files."
 license = "MIT"
 repository = "https://github.com/pbizopoulos/canonicalization"
 readme = "../../README"
-keywords = ["template"]
+keywords = ["cleanup", "formatter"]
 categories = ["development-tools"]

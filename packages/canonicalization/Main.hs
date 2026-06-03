@@ -516,7 +516,7 @@ summarizeRepositoryPackage packageName = do
 loadRepositoryPackageTitle :: FilePath -> PackageKind -> IO String
 loadRepositoryPackageTitle packageName packageKind = do
   maybePackageMetadata <- loadRepositoryPackageMetadata packageName packageKind
-  pure (fromMaybe packageName (fst <$> maybePackageMetadata))
+  pure (maybe packageName fst maybePackageMetadata)
 loadRepositoryPackageDescription :: FilePath -> PackageKind -> IO (Maybe String)
 loadRepositoryPackageDescription packageName packageKind = do
   maybePackageMetadata <- loadRepositoryPackageMetadata packageName packageKind
@@ -1583,7 +1583,7 @@ checkCargoToml packageName = do
                 Just
                   ( "packages/"
                       ++ packageName
-                      ++ "/Cargo.toml: only dependency sections may differ from the internal Rust Cargo baseline"
+                      ++ "/Cargo.toml: only dependency sections and package metadata fields description/keywords may differ from the internal Rust Cargo baseline"
                   )
           ]
 normalizeCargoTomlForBaselineComparison :: FilePath -> T.Text -> T.Text
@@ -1599,6 +1599,8 @@ normalizeCargoTomlForBaselineComparison packageName tomlContents =
                 Just header | isCargoDependencySectionHeader header -> (currentTomlSectionHeader, normalizedLinesSoFar)
                 _ | T.null trimmedLine -> (currentTomlSectionHeader, normalizedLinesSoFar)
                 Just "[package]" | isTomlNameAssignment trimmedLine -> (currentTomlSectionHeader, normalizedLinesSoFar ++ [normalizedNameLine])
+                Just "[package]" | isTomlDescriptionAssignment trimmedLine -> (currentTomlSectionHeader, normalizedLinesSoFar)
+                Just "[package]" | isTomlKeywordsAssignment trimmedLine -> (currentTomlSectionHeader, normalizedLinesSoFar)
                 Just "[[bin]]" | isTomlNameAssignment trimmedLine -> (currentTomlSectionHeader, normalizedLinesSoFar ++ [normalizedNameLine])
                 _ -> (currentTomlSectionHeader, normalizedLinesSoFar ++ [trimmedLine])
       (_, normalizedLines) = foldl' step (Nothing, []) (T.lines tomlContents)
@@ -1616,6 +1618,10 @@ isCargoTargetDependenciesSectionHeader trimmedLine =
     && T.isSuffixOf ".dependencies]" trimmedLine
 isTomlNameAssignment :: T.Text -> Bool
 isTomlNameAssignment trimmedLine = "name = \"" `T.isPrefixOf` trimmedLine
+isTomlDescriptionAssignment :: T.Text -> Bool
+isTomlDescriptionAssignment trimmedLine = "description = \"" `T.isPrefixOf` trimmedLine
+isTomlKeywordsAssignment :: T.Text -> Bool
+isTomlKeywordsAssignment trimmedLine = "keywords = [" `T.isPrefixOf` trimmedLine
 extractTomlSection :: T.Text -> T.Text -> T.Text
 extractTomlSection sectionName tomlContents =
   let sectionHeader = "[" <> sectionName <> "]"

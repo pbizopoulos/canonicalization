@@ -72,6 +72,13 @@ class MainTests(unittest.TestCase):
             msg = "render_message() should summarize canonical default labels"
             raise AssertionError(msg)
 
+    def test_render_message_reports_empty_result_when_no_labels_survive(self) -> None:
+        """Empty canonical labels should produce the fallback message."""
+        message = render_message(["...", "   ", "---"])
+        if message != "No canonical labels":
+            msg = "render_message() should report when no canonical labels remain"
+            raise AssertionError(msg)
+
     def test_main_prints_message_when_not_debug(self) -> None:
         """main() should emit the summary when DEBUG is not enabled."""
         output = io.StringIO()

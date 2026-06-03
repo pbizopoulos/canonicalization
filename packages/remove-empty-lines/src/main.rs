@@ -90,29 +90,49 @@ mod tests {
         rendered
     }
     #[test]
-    fn test_main_and_process_root_path() -> Result<()> {
+    fn test_process_root_path_removes_empty_lines_from_text_files() -> Result<()> {
         use tempfile::tempdir;
         let dir = tempdir()?;
         let root = dir.path();
         let file1_path = root.join("test.txt");
         fs::write(&file1_path, "line1\n\nline2\n   \nline3\n")?;
+        process_root_path(root);
+        let content1 = fs::read_to_string(&file1_path)?;
+        assert_eq!(content1, "line1\nline2\nline3\n");
+        Ok(())
+    }
+    #[test]
+    fn test_process_root_path_respects_gitignore_and_skips_binary_files() -> Result<()> {
+        use tempfile::tempdir;
+        let dir = tempdir()?;
+        let root = dir.path();
         let gitignore_path = root.join(".gitignore");
         fs::write(&gitignore_path, "ignored.txt\n")?;
         let ignored_path = root.join("ignored.txt");
         fs::write(&ignored_path, "should be ignored\n\n")?;
         let binary_path = root.join("binary.bin");
         fs::write(&binary_path, [0, 15, 255, 0, 1, 2, 3])?;
+        process_root_path(root);
+        let content_ignored = fs::read_to_string(&ignored_path)?;
+        assert_eq!(content_ignored, "should be ignored\n\n");
+        let content_binary = fs::read(&binary_path)?;
+        assert_eq!(content_binary, vec![0, 15, 255, 0, 1, 2, 3]);
+        Ok(())
+    }
+    #[test]
+    fn test_main_processes_current_directory_when_no_args() -> Result<()> {
+        use tempfile::tempdir;
+        let dir = tempdir()?;
+        let root = dir.path();
+        let file_path = root.join("test.txt");
+        fs::write(&file_path, "line1\n\nline2\n")?;
         let previous_dir = env::current_dir()?;
         env::set_current_dir(root)?;
         let result = main();
         env::set_current_dir(previous_dir)?;
         result?;
-        let content1 = fs::read_to_string(&file1_path)?;
-        assert_eq!(content1, "line1\nline2\nline3\n");
-        let content_ignored = fs::read_to_string(&ignored_path)?;
-        assert_eq!(content_ignored, "should be ignored\n\n");
-        let content_binary = fs::read(&binary_path)?;
-        assert_eq!(content_binary, vec![0, 15, 255, 0, 1, 2, 3]);
+        let content = fs::read_to_string(&file_path)?;
+        assert_eq!(content, "line1\nline2\n");
         Ok(())
     }
     #[test]
