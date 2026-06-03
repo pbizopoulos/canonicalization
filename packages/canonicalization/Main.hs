@@ -11,6 +11,7 @@ module Main (main) where
 import Control.Applicative ((<|>))
 import Control.Exception (finally)
 import Control.Monad (forM, forM_, unless, when)
+import Data.Char (isAlphaNum)
 import Data.Fix (Fix (Fix))
 import Data.Functor.Compose (Compose (Compose))
 import Data.Kind (Type)
@@ -409,9 +410,15 @@ runCli commandLineArgs =
   case commandLineArgs of
     ["check-repository"] -> runInGitRepositoryRoot "." runCheckRepositoryMode
     ["check-repository", repositoryDirectory] -> runInGitRepositoryRoot repositoryDirectory runCheckRepositoryMode
+    ["describe-repository", "--json"] -> runInGitRepositoryRoot "." runDescribeRepositoryJsonMode
+    ["describe-repository", "--json", repositoryDirectory] -> runInGitRepositoryRoot repositoryDirectory runDescribeRepositoryJsonMode
+    ["describe-repository"] -> runInGitRepositoryRoot "." runDescribeRepositoryMode
+    ["describe-repository", repositoryDirectory] -> runInGitRepositoryRoot repositoryDirectory runDescribeRepositoryMode
     ["check-gitmodules"] -> runCheckGitSubmodulesMode
     _ -> do
       putStrLn "Usage: canonicalization check-repository [git-directory]"
+      putStrLn "       canonicalization describe-repository [git-directory]"
+      putStrLn "       canonicalization describe-repository --json [git-directory]"
       putStrLn "       canonicalization check-gitmodules"
       exitFailure
 runInGitRepositoryRoot :: FilePath -> IO a -> IO a
@@ -474,6 +481,151 @@ runCheckGitSubmodulesMode = do
       forM_ invalidGitSubmodulePathEntries $ \invalidGitSubmodulePathEntry ->
         putStrLn (invalidGitSubmodulePathEntry ++ ": must be exactly <host>/<owner>/<repo>")
       exitFailure
+type RepositoryPackageSummary :: Type
+data RepositoryPackageSummary = RepositoryPackageSummary
+  { repositoryPackageName :: FilePath,
+    repositoryPackageType :: String,
+    repositoryPackageTitle :: String,
+    repositoryPackageDescription :: Maybe String,
+    repositoryPackageTestNames :: [String]
+  }
+runDescribeRepositoryMode :: IO ()
+runDescribeRepositoryMode = do
+  packageNames <- listPackageNames
+  packageSummaries <- forM packageNames summarizeRepositoryPackage
+  putStr (renderRepositoryPackageSummaries packageSummaries)
+runDescribeRepositoryJsonMode :: IO ()
+runDescribeRepositoryJsonMode = do
+  packageNames <- listPackageNames
+  packageSummaries <- forM packageNames summarizeRepositoryPackage
+  putStr (renderRepositoryPackageSummariesJson packageSummaries)
+summarizeRepositoryPackage :: FilePath -> IO RepositoryPackageSummary
+summarizeRepositoryPackage packageName = do
+  packageKind <- detectPackageKindForPackage packageName
+  repositoryPackageTitleValue <- loadRepositoryPackageTitle packageName packageKind
+  repositoryPackageDescriptionValue <- loadRepositoryPackageDescription packageName packageKind
+  repositoryPackageTestNamesValue <- discoverRepositoryPackageTestNames packageName packageKind
+  pure
+    RepositoryPackageSummary
+      { repositoryPackageName = packageName,
+        repositoryPackageType = renderPackageKind packageKind,
+        repositoryPackageTitle = repositoryPackageTitleValue,
+        repositoryPackageDescription = repositoryPackageDescriptionValue,
+        repositoryPackageTestNames = repositoryPackageTestNamesValue
+      }
+loadRepositoryPackageTitle :: FilePath -> PackageKind -> IO String
+loadRepositoryPackageTitle packageName packageKind = do
+  maybePackageMetadata <- loadRepositoryPackageMetadata packageName packageKind
+  pure (fromMaybe packageName (fst <$> maybePackageMetadata))
+loadRepositoryPackageDescription :: FilePath -> PackageKind -> IO (Maybe String)
+loadRepositoryPackageDescription packageName packageKind = do
+  maybePackageMetadata <- loadRepositoryPackageMetadata packageName packageKind
+  pure (snd =<< maybePackageMetadata)
+loadRepositoryPackageMetadata :: FilePath -> PackageKind -> IO (Maybe (String, Maybe String))
+loadRepositoryPackageMetadata packageName packageKind =
+  case packageKind of
+    HaskellPackage -> loadHaskellPackageMetadata packageName
+    RustPackage -> loadRustPackageMetadata packageName
+    _ -> pure (Just (packageName, Nothing))
+loadHaskellPackageMetadata :: FilePath -> IO (Maybe (String, Maybe String))
+loadHaskellPackageMetadata packageName = do
+  let cabalFilePath = "packages" </> packageName </> packageName <.> "cabal"
+  maybeCabalContents <- readTextFileIfExists cabalFilePath
+  pure (extractHaskellPackageMetadata packageName =<< maybeCabalContents)
+extractHaskellPackageMetadata :: FilePath -> T.Text -> Maybe (String, Maybe String)
+extractHaskellPackageMetadata packageName cabalContents =
+  let packageTitle = T.unpack <$> lookupCabalField "name" cabalContents
+      packageDescription =
+        (T.unpack <$> lookupCabalField "description" cabalContents)
+          <|> (T.unpack <$> lookupCabalField "synopsis" cabalContents)
+   in Just (fromMaybe packageName packageTitle, packageDescription)
+loadRustPackageMetadata :: FilePath -> IO (Maybe (String, Maybe String))
+loadRustPackageMetadata packageName = do
+  let cargoTomlPath = "packages" </> packageName </> "Cargo.toml"
+  maybeCargoTomlContents <- readTextFileIfExists cargoTomlPath
+  pure (extractRustPackageMetadata packageName =<< maybeCargoTomlContents)
+extractRustPackageMetadata :: FilePath -> T.Text -> Maybe (String, Maybe String)
+extractRustPackageMetadata packageName cargoTomlContents =
+  let packageSection = extractTomlSection "package" cargoTomlContents
+      packageTitle = T.unpack <$> lookupTomlString "name" packageSection
+      packageDescription = T.unpack <$> lookupTomlString "description" packageSection
+   in Just (fromMaybe packageName packageTitle, packageDescription)
+discoverRepositoryPackageTestNames :: FilePath -> PackageKind -> IO [String]
+discoverRepositoryPackageTestNames packageName packageKind =
+  case packageKind of
+    HaskellPackage -> discoverHaskellUnitTestNames packageName packageKind
+    RustPackage -> discoverRustUnitTestNames packageName packageKind
+    PythonPackage -> discoverPythonUnitTestNames packageName packageKind
+    PythonLatexPackage -> discoverPythonUnitTestNames packageName packageKind
+    _ -> pure []
+renderRepositoryPackageSummaries :: [RepositoryPackageSummary] -> String
+renderRepositoryPackageSummaries packageSummaries =
+  intercalate "\n\n" (map renderRepositoryPackageSummary packageSummaries) ++ if null packageSummaries then "" else "\n"
+renderRepositoryPackageSummary :: RepositoryPackageSummary -> String
+renderRepositoryPackageSummary packageSummary =
+  unlines
+    ( [ "package: " ++ repositoryPackageName packageSummary,
+        "packageType: " ++ repositoryPackageType packageSummary,
+        "title: " ++ repositoryPackageTitle packageSummary,
+        "description: " ++ fromMaybe "(none)" (repositoryPackageDescription packageSummary),
+        "tests:"
+      ]
+        ++ renderRepositoryPackageTestLines (repositoryPackageTestNames packageSummary)
+    )
+renderRepositoryPackageTestLines :: [String] -> [String]
+renderRepositoryPackageTestLines [] = ["  (none)"]
+renderRepositoryPackageTestLines testNames = ["  - " ++ testName | testName <- testNames]
+renderRepositoryPackageSummariesJson :: [RepositoryPackageSummary] -> String
+renderRepositoryPackageSummariesJson packageSummaries =
+  "{\n"
+    ++ "  \"packages\": [\n"
+    ++ intercalate ",\n" (map renderRepositoryPackageSummaryJson packageSummaries)
+    ++ "\n"
+    ++ "  ]\n"
+    ++ "}\n"
+renderRepositoryPackageSummaryJson :: RepositoryPackageSummary -> String
+renderRepositoryPackageSummaryJson packageSummary =
+  unlines
+    [ "    {",
+      "      \"name\": " ++ renderJsonString (repositoryPackageName packageSummary) ++ ",",
+      "      \"packageType\": " ++ renderJsonString (repositoryPackageType packageSummary) ++ ",",
+      "      \"title\": " ++ renderJsonString (repositoryPackageTitle packageSummary) ++ ",",
+      "      \"description\": " ++ renderJsonMaybeString (repositoryPackageDescription packageSummary) ++ ",",
+      "      \"tests\": " ++ renderRepositoryPackageTestNames (repositoryPackageTestNames packageSummary),
+      "    }"
+    ]
+renderRepositoryPackageTestNames :: [String] -> String
+renderRepositoryPackageTestNames testNames =
+  "[" ++ intercalate ", " (map renderJsonString testNames) ++ "]"
+renderJsonMaybeString :: Maybe String -> String
+renderJsonMaybeString Nothing = "null"
+renderJsonMaybeString (Just value) = renderJsonString value
+renderJsonString :: String -> String
+renderJsonString value =
+  "\"" ++ concatMap escapeCharacter value ++ "\""
+  where
+    escapeCharacter character =
+      case character of
+        '\\' -> "\\\\"
+        '"' -> "\\\""
+        '\n' -> "\\n"
+        '\r' -> "\\r"
+        '\t' -> "\\t"
+        _ -> [character]
+renderPackageKind :: PackageKind -> String
+renderPackageKind packageKind =
+  case packageKind of
+    HaskellPackage -> "haskell"
+    RustPackage -> "rust"
+    HtmlPackage -> "html"
+    PythonLatexPackage -> "python-latex"
+    PythonPackage -> "python"
+    PythonPypiPackage -> "python-pypi"
+    CPackage -> "c"
+    TerraformPackage -> "terraform"
+    LatexPackage -> "latex"
+    BinaryReleasePackage -> "binary-release"
+    UnknownPackage -> "unknown"
 type GitSubmoduleRepository :: Type
 data GitSubmoduleRepository = GitSubmoduleRepository
   { gitSubmoduleRepositoryHost :: String,
@@ -1115,7 +1267,12 @@ discoverHaskellUnitTestNames packageName packageKind =
                 if null labelsFromMakeFormattingTest && null labelsFromHUnitTilde && null labelsFromAssertEqual
                   then fallbackHUnitTestNames
                   else labelsFromMakeFormattingTest ++ labelsFromHUnitTilde ++ labelsFromAssertEqual
-          pure (sort (Set.toList (Set.fromList discoveredHaskellUnitTestNames)))
+              meaningfulHaskellUnitTestNames = filter isMeaningfulTestLabel discoveredHaskellUnitTestNames
+          pure (sort (Set.toList (Set.fromList meaningfulHaskellUnitTestNames)))
+isMeaningfulTestLabel :: String -> Bool
+isMeaningfulTestLabel label =
+  let trimmedLabel = trimString label
+   in not (null trimmedLabel) && any isAlphaNum trimmedLabel
 extractHUnitTildeTestLabel :: String -> Maybe String
 extractHUnitTildeTestLabel sourceLine =
   case breakOnSubstring "~:" sourceLine of
@@ -2293,6 +2450,75 @@ hUnitDebugTests =
           (lookupCabalField "license" (T.pack "name: canonicalization\n")),
       TestCase $ do
         assertEqual
+          "Extracts Haskell package metadata using name and synopsis."
+          (Just ("haskell-template", Just "Hello World Haskell"))
+          (extractHaskellPackageMetadata "canonicalization" haskellCabalBaseline),
+      TestCase $ do
+        assertEqual
+          "Extracts Rust package metadata using Cargo package fields."
+          (Just ("remove-empty-lines", Just "A CLI tool to remove empty lines from text files."))
+          (extractRustPackageMetadata "remove-empty-lines" removeEmptyLinesCargoTomlFixture),
+      TestCase $ do
+        assertEqual
+          "Renders empty repository test lists explicitly for human output."
+          ["  (none)"]
+          (renderRepositoryPackageTestLines []),
+      TestCase $ do
+        assertEqual
+          "Renders repository package summaries in stable human-readable output."
+          ( unlines
+              [ "package: demo",
+                "packageType: python",
+                "title: Demo",
+                "description: Example package",
+                "tests:",
+                "  - alpha",
+                "  - beta"
+              ]
+          )
+          ( renderRepositoryPackageSummary
+              RepositoryPackageSummary
+                { repositoryPackageName = "demo",
+                  repositoryPackageType = "python",
+                  repositoryPackageTitle = "Demo",
+                  repositoryPackageDescription = Just "Example package",
+                  repositoryPackageTestNames = ["alpha", "beta"]
+                }
+          ),
+      TestCase $ do
+        assertEqual
+          "Renders repository package summaries in stable JSON."
+          ( unlines
+              [ "    {",
+                "      \"name\": \"demo\",",
+                "      \"packageType\": \"python\",",
+                "      \"title\": \"Demo\",",
+                "      \"description\": \"Example package\",",
+                "      \"tests\": [\"alpha\", \"beta\"]",
+                "    }"
+              ]
+          )
+          ( renderRepositoryPackageSummaryJson
+              RepositoryPackageSummary
+                { repositoryPackageName = "demo",
+                  repositoryPackageType = "python",
+                  repositoryPackageTitle = "Demo",
+                  repositoryPackageDescription = Just "Example package",
+                  repositoryPackageTestNames = ["alpha", "beta"]
+                }
+          ),
+      TestCase $ do
+        assertEqual
+          "Filters meaningless Haskell test labels."
+          False
+          (isMeaningfulTestLabel "\\"),
+      TestCase $ do
+        assertEqual
+          "Renders package kinds for repository output."
+          "python-latex"
+          (renderPackageKind PythonLatexPackage),
+      TestCase $ do
+        assertEqual
           "Normalizes only cabal name lines when applicable."
           "name:          demo"
           (T.unpack (normalizeCabalLineForBaselineComparison "demo" "name: old")),
@@ -2540,7 +2766,7 @@ removeEmptyLinesCargoTomlFixture =
       "name = \"remove-empty-lines\"",
       "version = \"0.1.0\"",
       "edition = \"2021\"",
-      "description = \"A CLI tool to remove empty lines from files.\"",
+      "description = \"A CLI tool to remove empty lines from text files.\"",
       "license = \"MIT\"",
       "repository = \"https://github.com/pbizopoulos/canonicalization\"",
       "readme = \"../../README\"",
