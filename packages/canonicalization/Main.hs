@@ -1997,21 +1997,23 @@ haskellNixFixture =
 pythonNixFixture :: String
 pythonNixFixture =
   "{ pkgs ? import <nixpkgs> { }, }:\n"
-    ++ "pkgs.python3Packages.buildPythonPackage rec {\n"
+    ++ "let python = pkgs.python3; in\n"
+    ++ "python.pkgs.buildPythonPackage rec {\n"
     ++ "  src = ./.;\n"
     ++ "}\n"
 pythonLatexNixFixture :: String
 pythonLatexNixFixture =
   "{ pkgs ? import <nixpkgs> { }, }:\n"
-    ++ "pkgs.python3Packages.buildPythonPackage rec {\n"
+    ++ "let python = pkgs.python3; in\n"
+    ++ "python.pkgs.buildPythonPackage rec {\n"
     ++ "  installPhase = '' latexmk -cd -pdf tmp/ms.tex '';\n"
     ++ "}\n"
 pythonPypiNixFixture :: String
 pythonPypiNixFixture =
   "{ pkgs ? import <nixpkgs> { }, }:\n"
-    ++ "let pyPkgs = pkgs.python3Packages; in\n"
-    ++ "pyPkgs.buildPythonPackage rec {\n"
-    ++ "  src = pyPkgs.fetchPypi { pname = \"x\"; version = \"1.0.0\"; hash = \"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"; };\n"
+    ++ "let python = pkgs.python3; in\n"
+    ++ "python.pkgs.buildPythonPackage rec {\n"
+    ++ "  src = python.pkgs.fetchPypi { pname = \"x\"; version = \"1.0.0\"; hash = \"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"; };\n"
     ++ "}\n"
 deployHostNixFixture :: String
 deployHostNixFixture =
@@ -2491,10 +2493,9 @@ pythonTemplateBaselineNixSource =
       "  installationScript = inputs.agenix-shell.lib.installationScript pkgs.stdenv.system {",
       "    secrets.secrets.file = ../../secrets/secrets.age;",
       "  };",
-      "  pyPkgs = pkgs.python312Packages;",
       "  python = pkgs.python312;",
       "in",
-      "pyPkgs.buildPythonPackage rec {",
+      "python.pkgs.buildPythonPackage rec {",
       "  installCheckPhase = ''",
       "    runHook preInstallCheck",
       "    HOME=\"$(mktemp -d)\"",
@@ -2528,16 +2529,16 @@ pythonPypiTemplateBaselineNixSource =
       "  pkgs ? import <nixpkgs> { },",
       "}:",
       "let",
-      "  pyPkgs = pkgs.python312Packages;",
+      "  python = pkgs.python312;",
       "in",
-      "pyPkgs.buildPythonPackage rec {",
+      "python.pkgs.buildPythonPackage rec {",
       "  format = \"wheel\";",
       "  pname = baseNameOf ./.;",
       "  propagatedBuildInputs = [];",
       "  pythonImportsCheck = [",
       "    pname",
       "  ];",
-      "  src = pyPkgs.fetchPypi rec {",
+      "  src = python.pkgs.fetchPypi rec {",
       "    inherit",
       "      format",
       "      pname",
@@ -2588,13 +2589,14 @@ pythonLatexTemplateBaselineNixSource =
       "  pkgs ? import <nixpkgs> { },",
       "}:",
       "let",
+      "  python = pkgs.python3;",
       "  pythonDeps = [",
-      "    pkgs.python3Packages.matplotlib",
-      "    pkgs.python3Packages.pandas",
+      "    python.pkgs.matplotlib",
+      "    python.pkgs.pandas",
       "  ];",
-      "  pythonEnv = pkgs.python3.withPackages (_: pythonDeps);",
+      "  pythonEnv = python.withPackages (_: pythonDeps);",
       "in",
-      "pkgs.python3Packages.buildPythonPackage rec {",
+      "python.pkgs.buildPythonPackage rec {",
       "  installCheckPhase = ''",
       "    runHook preInstallCheck",
       "    HOME=\"$(mktemp -d)\"",

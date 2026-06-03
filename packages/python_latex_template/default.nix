@@ -2,13 +2,14 @@
   pkgs ? import <nixpkgs> { },
 }:
 let
+  python = pkgs.python3;
   pythonDeps = [
-    pkgs.python3Packages.matplotlib
-    pkgs.python3Packages.pandas
+    python.pkgs.matplotlib
+    python.pkgs.pandas
   ];
-  pythonEnv = pkgs.python3.withPackages (_: pythonDeps);
+  pythonEnv = python.withPackages (_: pythonDeps);
 in
-pkgs.python3Packages.buildPythonPackage rec {
+python.pkgs.buildPythonPackage rec {
   installCheckPhase = ''
     runHook preInstallCheck
     HOME="$(mktemp -d)"
@@ -32,7 +33,7 @@ pkgs.python3Packages.buildPythonPackage rec {
   meta.mainProgram = pname;
   pname = baseNameOf ./.;
   propagatedBuildInputs = pythonDeps ++ [
-    pkgs.python3Packages.hypothesis
+    python.pkgs.hypothesis
   ];
   pyproject = false;
   src = ./.;

@@ -6,10 +6,9 @@ let
   installationScript = inputs.agenix-shell.lib.installationScript pkgs.stdenv.system {
     secrets.secrets.file = ../../secrets/secrets.age;
   };
-  pyPkgs = pkgs.python312Packages;
   python = pkgs.python312;
 in
-pyPkgs.buildPythonPackage rec {
+python.pkgs.buildPythonPackage rec {
   installCheckPhase = ''
     runHook preInstallCheck
     HOME="$(mktemp -d)"
@@ -27,7 +26,7 @@ pyPkgs.buildPythonPackage rec {
   meta.mainProgram = pname;
   pname = baseNameOf ./.;
   propagatedBuildInputs = [
-    pkgs.python312Packages.hypothesis
+    python.pkgs.hypothesis
   ];
   pyproject = false;
   shellHook = ''
