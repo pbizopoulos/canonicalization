@@ -1196,13 +1196,15 @@ discoverPythonUnitTestNames packageName packageKind =
       maybeMainPythonSourceText <- readTextFileIfExists mainPythonPath
       case maybeMainPythonSourceText of
         Nothing -> pure []
-        Just mainPythonSourceText -> do
-          let extractedPythonUnitTestNames =
-                [ functionName
-                | sourceLine <- lines (T.unpack mainPythonSourceText),
-                  Just functionName <- [extractPythonUnitTestName sourceLine]
-                ]
-          pure (sort (Set.toList (Set.fromList extractedPythonUnitTestNames)))
+        Just mainPythonSourceText -> pure (discoverPythonUnitTestNamesFromSource (T.unpack mainPythonSourceText))
+discoverPythonUnitTestNamesFromSource :: String -> [String]
+discoverPythonUnitTestNamesFromSource pythonSource =
+  let extractedPythonUnitTestNames =
+        [ functionName
+        | sourceLine <- lines pythonSource,
+          Just functionName <- [extractPythonUnitTestName sourceLine]
+        ]
+   in sort (Set.toList (Set.fromList extractedPythonUnitTestNames))
 extractPythonUnitTestName :: String -> Maybe String
 extractPythonUnitTestName sourceLine =
   let trimmedSourceLine = dropWhile (== ' ') sourceLine
@@ -1250,25 +1252,27 @@ discoverHaskellUnitTestNames packageName packageKind =
       maybeMainHaskellSourceText <- readTextFileIfExists mainHaskellPath
       case maybeMainHaskellSourceText of
         Nothing -> pure []
-        Just mainHaskellSourceText -> do
-          let haskellSourceLines = lines (T.unpack mainHaskellSourceText)
-              labelsFromMakeFormattingTest = extractMakeFormattingTestLabels haskellSourceLines
-              labelsFromHUnitTilde =
-                [ label
-                | sourceLine <- haskellSourceLines,
-                  Just label <- [extractHUnitTildeTestLabel sourceLine]
-                ]
-              labelsFromAssertEqual = extractAssertEqualTestLabels haskellSourceLines
-              fallbackHUnitTestNames =
-                [ "Unnamed HUnit test case #" ++ show i
-                | i <- [1 .. length [() | sourceLine <- haskellSourceLines, "TestCase" `isInfixOf` sourceLine]]
-                ]
-              discoveredHaskellUnitTestNames =
-                if null labelsFromMakeFormattingTest && null labelsFromHUnitTilde && null labelsFromAssertEqual
-                  then fallbackHUnitTestNames
-                  else labelsFromMakeFormattingTest ++ labelsFromHUnitTilde ++ labelsFromAssertEqual
-              meaningfulHaskellUnitTestNames = filter isMeaningfulTestLabel discoveredHaskellUnitTestNames
-          pure (sort (Set.toList (Set.fromList meaningfulHaskellUnitTestNames)))
+        Just mainHaskellSourceText -> pure (discoverHaskellUnitTestNamesFromSource (T.unpack mainHaskellSourceText))
+discoverHaskellUnitTestNamesFromSource :: String -> [String]
+discoverHaskellUnitTestNamesFromSource haskellSource =
+  let haskellSourceLines = lines haskellSource
+      labelsFromMakeFormattingTest = extractMakeFormattingTestLabels haskellSourceLines
+      labelsFromHUnitTilde =
+        [ label
+        | sourceLine <- haskellSourceLines,
+          Just label <- [extractHUnitTildeTestLabel sourceLine]
+        ]
+      labelsFromAssertEqual = extractAssertEqualTestLabels haskellSourceLines
+      fallbackHUnitTestNames =
+        [ "Unnamed HUnit test case #" ++ show i
+        | i <- [1 .. length [() | sourceLine <- haskellSourceLines, "TestCase" `isInfixOf` sourceLine]]
+        ]
+      discoveredHaskellUnitTestNames =
+        if null labelsFromMakeFormattingTest && null labelsFromHUnitTilde && null labelsFromAssertEqual
+          then fallbackHUnitTestNames
+          else labelsFromMakeFormattingTest ++ labelsFromHUnitTilde ++ labelsFromAssertEqual
+      meaningfulHaskellUnitTestNames = filter isMeaningfulTestLabel discoveredHaskellUnitTestNames
+   in sort (Set.toList (Set.fromList meaningfulHaskellUnitTestNames))
 isMeaningfulTestLabel :: String -> Bool
 isMeaningfulTestLabel label =
   let trimmedLabel = trimString label
@@ -1389,7 +1393,10 @@ discoverRustUnitTestNames packageName packageKind =
       maybeMainRustSourceText <- readTextFileIfExists mainRustPath
       case maybeMainRustSourceText of
         Nothing -> pure []
-        Just mainRustSourceText -> pure (extractRustUnitTestNames (lines (T.unpack mainRustSourceText)))
+        Just mainRustSourceText -> pure (discoverRustUnitTestNamesFromSource (T.unpack mainRustSourceText))
+discoverRustUnitTestNamesFromSource :: String -> [String]
+discoverRustUnitTestNamesFromSource rustSource =
+  extractRustUnitTestNames (lines rustSource)
 extractRustUnitTestNames :: [String] -> [String]
 extractRustUnitTestNames sourceLines = sort (Set.toList (Set.fromList (go False sourceLines)))
   where
@@ -2055,6 +2062,14 @@ pathSegmentGen extraCharacters =
 hUnitDebugTests :: Test
 hUnitDebugTests =
   TestList
+    [ templateInferenceDebugTests,
+      checkTemplateDebugTests,
+      metadataAndDiscoveryDebugTests,
+      repositoryPolicyDebugTests
+    ]
+templateInferenceDebugTests :: Test
+templateInferenceDebugTests =
+  TestList
     [ TestCase $ do
         inferred <- inferDefaultNixTemplateName "test" uncommentNixFixture
         assertEqual
@@ -2144,8 +2159,12 @@ hUnitDebugTests =
         assertEqual
           "Infers the Rust mutation-testing check template."
           (Just "rust_mutation_testing_check")
-          inferred,
-      TestCase $ do
+          inferred
+    ]
+checkTemplateDebugTests :: Test
+checkTemplateDebugTests =
+  TestList
+    [ TestCase $ do
         let matched = isCPackageVmCheckShape CPackage cPackageVmCheckFixture
         assertBool
           "Matches a generic C-package VM check."
@@ -2162,16 +2181,6 @@ hUnitDebugTests =
           []
           validationIssues,
       TestCase $ do
-        assertEqual
-          "Compacts whitespace with compactTextToSingleLine."
-          "a b c"
-          (compactTextToSingleLine " a \n  b\t c "),
-      TestCase $ do
-        assertEqual
-          "Formats binding difference details with formatNixBindingDifferenceLine."
-          "  - missing key: src"
-          (formatNixBindingDifferenceLine "missing key" "src"),
-      TestCase $ do
         legacyPythonTemplateParseResult <- parseNixExprFromText (T.pack legacyPythonTemplateNixFixture)
         templatePythonParseResult <- parseNixExprFromText pythonTemplateBaselineNixSource
         case (legacyPythonTemplateParseResult, templatePythonParseResult) of
@@ -2183,7 +2192,88 @@ hUnitDebugTests =
                   (formatDefaultNixTemplateDifferences "test" "packages/python_template/default.nix" legacyPythonTemplateExpr templatePythonExpr)
               )
           (Left parseError, _) -> assertFailure ("Failed to parse legacy Python template fixture: " ++ parseError)
-          (_, Left parseError) -> assertFailure ("Failed to parse Python template baseline fixture: " ++ parseError),
+          (_, Left parseError) -> assertFailure ("Failed to parse Python template baseline fixture: " ++ parseError)
+    ]
+metadataAndDiscoveryDebugTests :: Test
+metadataAndDiscoveryDebugTests =
+  TestList
+    [ TestCase $ do
+        assertEqual
+          "Extracts the package section with extractTomlSection."
+          "name = \"example-package\"\nversion = \"0.1.0\"\nedition = \"2021\"\ndescription = \"Example package fixture for TOML parsing.\"\nlicense = \"MIT\"\nrepository = \"https://github.com/pbizopoulos/canonicalization\"\nreadme = \"../../README\"\nkeywords = [\"check\", \"lint\", \"fixture\"]\ncategories = [\"development-tools\"]\n\n"
+          (extractTomlSection "package" exampleCargoTomlFixture),
+      TestCase $ do
+        assertEqual
+          "Parses the package name with lookupTomlString."
+          (Just "remove-empty-lines")
+          (lookupTomlString "name" (extractTomlSection "package" removeEmptyLinesCargoTomlFixture)),
+      TestCase $ do
+        assertEqual
+          "Parses lints.rust.unsafe_code with lookupTomlString."
+          (Just "forbid")
+          (lookupTomlString "unsafe_code" (extractTomlSection "lints.rust" removeEmptyLinesCargoTomlFixture)),
+      TestCase $ do
+        assertEqual
+          "Returns Nothing for a TOML key missing from the section."
+          Nothing
+          (lookupTomlString "missing_key" (extractTomlSection "package" removeEmptyLinesCargoTomlFixture)),
+      TestCase $ do
+        assertEqual
+          "Discovers Python unit-test names from source."
+          ["test_alpha_case", "test_beta_case"]
+          ( discoverPythonUnitTestNamesFromSource
+              ( unlines
+                  [ "def helper_function():",
+                    "    return None",
+                    "def test_beta_case():",
+                    "    return None",
+                    "def test_alpha_case():",
+                    "    return None"
+                  ]
+              )
+          ),
+      TestCase $ do
+        assertEqual
+          "Discovers Haskell unit-test names from source."
+          ["alpha test", "format one"]
+          ( discoverHaskellUnitTestNamesFromSource
+              ( unlines
+                  [ "suite = TestList",
+                    "  [ \"alpha test\" ~: assertEqual \"x\" 1 1",
+                    "  , makeFormattingTest",
+                    "      \"format one\"",
+                    "      input",
+                    "      output"
+                  ]
+              )
+          ),
+      TestCase $ do
+        assertEqual
+          "Falls back to unnamed HUnit test cases when labels are absent."
+          ["Unnamed HUnit test case #1", "Unnamed HUnit test case #2"]
+          ( discoverHaskellUnitTestNamesFromSource
+              ( unlines
+                  [ "suite = TestList",
+                    "  [ TestCase $ pure ()",
+                    "  , TestCase $ pure ()"
+                  ]
+              )
+          ),
+      TestCase $ do
+        assertEqual
+          "Discovers Rust unit-test names from source."
+          ["alpha_case", "beta_case"]
+          ( discoverRustUnitTestNamesFromSource
+              ( unlines
+                  [ "#[test]",
+                    "fn beta_case() {",
+                    "}",
+                    "#[test]",
+                    "fn alpha_case() {",
+                    "}"
+                  ]
+              )
+          ),
       TestCase $ do
         assertEqual
           "Looks up a known default Nix template by name."
@@ -2227,11 +2317,6 @@ hUnitDebugTests =
           (gitSubmoduleRepositoryIsCompatible malformedRepository, gitSubmoduleRepositoryName malformedRepository),
       TestCase $ do
         assertEqual
-          "maximumByLength returns the longest list."
-          ([1, 2, 3] :: [Int])
-          (maximumByLength [[1 :: Int], [1, 2, 3], [1, 2]]),
-      TestCase $ do
-        assertEqual
           "Extracts the package section with extractTomlSection."
           "name = \"example-package\"\nversion = \"0.1.0\"\nedition = \"2021\"\ndescription = \"Example package fixture for TOML parsing.\"\nlicense = \"MIT\"\nrepository = \"https://github.com/pbizopoulos/canonicalization\"\nreadme = \"../../README\"\nkeywords = [\"check\", \"lint\", \"fixture\"]\ncategories = [\"development-tools\"]\n\n"
           (extractTomlSection "package" exampleCargoTomlFixture),
@@ -2260,51 +2345,6 @@ hUnitDebugTests =
           "Ignores non-test Python functions."
           Nothing
           (extractPythonUnitTestName "def helper_function():"),
-      TestCase $ do
-        assertEqual
-          "breakOnSubstring returns prefix and suffix when found."
-          (Just ("hello ", " world"))
-          (breakOnSubstring "~:" "hello ~: world"),
-      TestCase $ do
-        assertEqual
-          "breakOnSubstring returns Nothing when missing."
-          Nothing
-          (breakOnSubstring "~:" "hello world"),
-      TestCase $ do
-        assertEqual
-          "Extracts label from HUnit tilde syntax."
-          (Just "alpha test")
-          (extractHUnitTildeTestLabel "  \"alpha test\" ~: assertEqual \"x\" 1 1"),
-      TestCase $ do
-        assertEqual
-          "Extracts the last quoted token."
-          (Just "first")
-          (lastQuotedToken "prefix \"first\" middle 'second' suffix"),
-      TestCase $ do
-        assertEqual
-          "Extracts first quoted token."
-          (Just "label one")
-          (firstQuotedToken "assertEqual \"label one\" expected actual"),
-      TestCase $ do
-        assertEqual
-          "Finds assertEqual labels from source lines."
-          ["label-a"]
-          ( extractAssertEqualTestLabels
-              [ "  assertEqual",
-                "    \"label-a\"",
-                "  assertEqual \"label-b\" 1 1"
-              ]
-          ),
-      TestCase $ do
-        assertEqual
-          "Finds makeFormattingTest labels from source lines."
-          ["format one"]
-          ( extractMakeFormattingTestLabels
-              [ "makeFormattingTest",
-                "  \"format one\"",
-                "makeFormattingTest \"format two\""
-              ]
-          ),
       TestCase $ do
         assertEqual
           "toRelativePath drops leading ./ segments."
@@ -2375,36 +2415,6 @@ hUnitDebugTests =
           ),
       TestCase $ do
         assertEqual
-          "pathMatchesRegex accepts matching paths."
-          True
-          (pathMatchesRegex "^packages/.+/Main\\.hs$" "packages/canonicalization/Main.hs"),
-      TestCase $ do
-        assertEqual
-          "pathMatchesRegex rejects non-matching paths."
-          False
-          (pathMatchesRegex "^packages/.+/Main\\.hs$" "packages/canonicalization/default.nix"),
-      TestCase $ do
-        assertEqual
-          "Detects Cargo dependency section headers."
-          True
-          (isCargoDependencySectionHeader "[target.x86_64-unknown-linux-gnu.dependencies]"),
-      TestCase $ do
-        assertEqual
-          "Detects non-dependency section headers."
-          False
-          (isCargoDependencySectionHeader "[package]"),
-      TestCase $ do
-        assertEqual
-          "Detects TOML section headers."
-          True
-          (isTomlSectionHeader "[package]"),
-      TestCase $ do
-        assertEqual
-          "Rejects malformed TOML section headers."
-          False
-          (isTomlSectionHeader "package"),
-      TestCase $ do
-        assertEqual
           "Normalizes Cargo TOML names and drops dependency blocks."
           ( T.unlines
               [ "[[bin]]",
@@ -2463,76 +2473,139 @@ hUnitDebugTests =
         assertEqual
           "Extracts Rust package metadata using Cargo package fields."
           (Just ("remove-empty-lines", Just "A CLI tool to remove empty lines from text files."))
-          (extractRustPackageMetadata "remove-empty-lines" removeEmptyLinesCargoTomlFixture),
+          (extractRustPackageMetadata "remove-empty-lines" removeEmptyLinesCargoTomlFixture)
+    ]
+repositoryPolicyDebugTests :: Test
+repositoryPolicyDebugTests =
+  TestList
+    [ TestCase $ do
+        assertEqual
+          "checkOutcomeFromIssues marks empty issue list as passed."
+          CheckPassed
+          (checkOutcomeFromIssues ([] :: [String])),
       TestCase $ do
         assertEqual
-          "Renders empty repository test lists explicitly for human output."
-          ["  (none)"]
-          (renderRepositoryPackageTestLines []),
+          "checkOutcomeFromIssues marks non-empty issue list as failed."
+          CheckFailed
+          (checkOutcomeFromIssues ["issue" :: String] :: CheckOutcome),
       TestCase $ do
         assertEqual
-          "Renders repository package summaries in stable human-readable output."
-          ( unlines
-              [ "package: demo",
-                "packageType: python",
-                "title: Demo",
-                "description: Example package",
-                "tests:",
-                "  - alpha",
-                "  - beta"
-              ]
-          )
-          ( renderRepositoryPackageSummary
-              RepositoryPackageSummary
-                { repositoryPackageName = "demo",
-                  repositoryPackageType = "python",
-                  repositoryPackageTitle = "Demo",
-                  repositoryPackageDescription = Just "Example package",
-                  repositoryPackageTestNames = ["alpha", "beta"]
-                }
+          "Parses and deduplicates .gitmodules path entries."
+          ["github.com/example/repo", "gitlab.com/org/project"]
+          ( parseGitSubmodulePathEntries
+              ( unlines
+                  [ "[submodule \"one\"]",
+                    "  path = github.com/example/repo",
+                    "  path = github.com/example/repo",
+                    "  url = https://example.test/repo.git",
+                    "  path = gitlab.com/org/project",
+                    "  path =    ",
+                    "  path-without-equals github.com/ignored/repo"
+                  ]
+              )
           ),
       TestCase $ do
+        let malformedRepository = buildGitSubmoduleRepository "/home/user" "github.com/example/repo/subdir"
         assertEqual
-          "Renders repository package summaries in stable JSON."
-          ( unlines
-              [ "    {",
-                "      \"name\": \"demo\",",
-                "      \"packageType\": \"python\",",
-                "      \"title\": \"Demo\",",
-                "      \"description\": \"Example package\",",
-                "      \"tests\": [\"alpha\", \"beta\"]",
-                "    }"
-              ]
-          )
-          ( renderRepositoryPackageSummaryJson
-              RepositoryPackageSummary
-                { repositoryPackageName = "demo",
-                  repositoryPackageType = "python",
-                  repositoryPackageTitle = "Demo",
-                  repositoryPackageDescription = Just "Example package",
-                  repositoryPackageTestNames = ["alpha", "beta"]
-                }
-          ),
+          "Malformed git-submodule paths are marked incompatible and keep leaf name."
+          (False, "subdir")
+          (gitSubmoduleRepositoryIsCompatible malformedRepository, gitSubmoduleRepositoryName malformedRepository),
       TestCase $ do
         assertEqual
-          "Filters meaningless Haskell test labels."
+          "toRelativePath drops leading ./ segments."
+          ("packages" </> "canonicalization" </> "Main.hs")
+          (toRelativePath ("." </> "packages" </> "canonicalization" </> "Main.hs")),
+      TestCase $ do
+        assertEqual
+          "shouldTraverseDirectory rejects ignored directories."
           False
-          (isMeaningfulTestLabel "\\"),
+          (shouldTraverseDirectory ("packages" </> "remove-empty-lines" </> "target")),
       TestCase $ do
         assertEqual
-          "Renders package kinds for repository output."
-          "python-latex"
-          (renderPackageKind PythonLatexPackage),
+          "shouldTraverseDirectory allows normal source directories."
+          True
+          (shouldTraverseDirectory ("packages" </> "canonicalization")),
       TestCase $ do
         assertEqual
-          "Normalizes only cabal name lines when applicable."
-          "name:          demo"
-          (T.unpack (normalizeCabalLineForBaselineComparison "demo" "name: old")),
+          "isLeafPath detects non-leaf paths."
+          False
+          (isLeafPath ["packages", "packages/canonicalization", "packages/canonicalization/Main.hs"] "packages/canonicalization"),
       TestCase $ do
         assertEqual
-          "Leaves unrelated cabal lines unchanged."
-          "version: 0.1.0"
-          (T.unpack (normalizeCabalLineForBaselineComparison "demo" "version: 0.1.0")),
+          "isLeafPath detects leaf paths."
+          True
+          (isLeafPath ["packages", "packages/canonicalization", "packages/canonicalization/Main.hs"] "packages/canonicalization/Main.hs"),
+      TestCase $ do
+        assertEqual
+          "packageRootPathFromRepositoryPath extracts package root."
+          (Just "packages/canonicalization")
+          (packageRootPathFromRepositoryPath "packages/canonicalization/Main.hs"),
+      TestCase $ do
+        assertEqual
+          "hostRootPathFromRepositoryPath extracts host root."
+          (Just "hosts/default")
+          (hostRootPathFromRepositoryPath "hosts/default/configuration.nix"),
+      TestCase $ do
+        assertEqual
+          "detectPackageKindFromMarkers prefers a unique non-binary marker."
+          HaskellPackage
+          (detectPackageKindFromMarkers [("Main.hs", HaskellPackage), ("binary-layout", BinaryReleasePackage)]),
+      TestCase $ do
+        assertEqual
+          "detectPackageKindFromMarkers falls back to binary release marker."
+          BinaryReleasePackage
+          (detectPackageKindFromMarkers [("binary-layout", BinaryReleasePackage)]),
+      TestCase $ do
+        assertEqual
+          "detectPackageKindFromMarkers marks conflicting markers as unknown."
+          UnknownPackage
+          (detectPackageKindFromMarkers [("Main.hs", HaskellPackage), ("main.py", PythonPackage)]),
+      TestCase $ do
+        assertEqual
+          "Detects package markers for python-latex packages."
+          [("main.py+ms.tex", PythonLatexPackage)]
+          (detectPackageMarkers ["main.py", "ms.tex"]),
+      TestCase $ do
+        assertEqual
+          "Reports ambiguity when multiple markers match."
+          ["packages/example: has ambiguous project markers: Main.hs, main.py"]
+          ( ambiguousPackageMarkerIssuesForPackage
+              PackageInfo
+                { packageRootPath = "packages/example",
+                  packageRootDirectoryName = "example",
+                  packageLeafPaths = ["Main.hs", "main.py"],
+                  detectedPackageKind = UnknownPackage,
+                  matchedPackageMarkers = ["Main.hs", "main.py"]
+                }
+          ),
+      TestCase $ do
+        assertEqual
+          "Normalizes Cargo TOML while ignoring package description and keywords differences."
+          ( unlines
+              [ "[[bin]]",
+                "name = \"demo\"",
+                "path = \"src/main.rs\"",
+                "[package]",
+                "name = \"demo\"",
+                "version = \"0.1.0\""
+              ]
+          )
+          ( T.unpack
+              ( normalizeCargoTomlForBaselineComparison
+                  "demo"
+                  ( T.unlines
+                      [ "[[bin]]",
+                        "name = \"old-bin\"",
+                        "path = \"src/main.rs\"",
+                        "[package]",
+                        "name = \"old-pkg\"",
+                        "version = \"0.1.0\"",
+                        "description = \"Custom package description\"",
+                        "keywords = [\"custom\", \"keywords\"]"
+                      ]
+                  )
+              )
+          ),
       TestCase $ do
         assertEqual
           "allowedPathRegexesForPackageKind includes expected Haskell paths."
