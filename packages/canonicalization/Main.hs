@@ -77,8 +77,13 @@ data CheckDefaultNixTemplateSpec = CheckDefaultNixTemplateSpec
   { checkDefaultNixTemplateName :: FilePath,
     checkDefaultNixTemplateMatches :: FilePath -> String -> IO Bool,
     checkDefaultNixTemplateAllowedDifferenceKeys :: Set.Set T.Text,
-    checkDefaultNixTemplateBaselineSource :: T.Text
+    checkDefaultNixTemplateBaselineSource :: T.Text,
+    checkDefaultNixTemplateComparisonMode :: CheckDefaultNixTemplateComparisonMode
   }
+type CheckDefaultNixTemplateComparisonMode :: Type
+data CheckDefaultNixTemplateComparisonMode
+  = ExactCheckTemplate
+  | StructuralCPackageVmCheck
 defaultNixTemplateSpecs :: [DefaultNixTemplateSpec]
 defaultNixTemplateSpecs =
   [ DefaultNixTemplateSpec
@@ -197,79 +202,99 @@ checkDefaultNixTemplateSpecs =
       { checkDefaultNixTemplateName = "haskell_coverage_check",
         checkDefaultNixTemplateMatches = matchesHaskellCoverageCheck,
         checkDefaultNixTemplateAllowedDifferenceKeys = Set.empty,
-        checkDefaultNixTemplateBaselineSource = haskellCoverageCheckBaselineNixSource
+        checkDefaultNixTemplateBaselineSource = haskellCoverageCheckBaselineNixSource,
+        checkDefaultNixTemplateComparisonMode = ExactCheckTemplate
       },
     CheckDefaultNixTemplateSpec
       { checkDefaultNixTemplateName = "haskell_profile_check",
         checkDefaultNixTemplateMatches = matchesHaskellProfileCheck,
         checkDefaultNixTemplateAllowedDifferenceKeys = Set.empty,
-        checkDefaultNixTemplateBaselineSource = haskellProfileCheckBaselineNixSource
+        checkDefaultNixTemplateBaselineSource = haskellProfileCheckBaselineNixSource,
+        checkDefaultNixTemplateComparisonMode = ExactCheckTemplate
       },
     CheckDefaultNixTemplateSpec
       { checkDefaultNixTemplateName = "haskell_property_testing_check",
         checkDefaultNixTemplateMatches = matchesHaskellPropertyTestingCheck,
         checkDefaultNixTemplateAllowedDifferenceKeys = Set.empty,
-        checkDefaultNixTemplateBaselineSource = haskellPropertyTestingCheckBaselineNixSource
+        checkDefaultNixTemplateBaselineSource = haskellPropertyTestingCheckBaselineNixSource,
+        checkDefaultNixTemplateComparisonMode = ExactCheckTemplate
       },
     CheckDefaultNixTemplateSpec
       { checkDefaultNixTemplateName = "python_coverage_check",
         checkDefaultNixTemplateMatches = matchesPythonCoverageCheck,
         checkDefaultNixTemplateAllowedDifferenceKeys = Set.empty,
-        checkDefaultNixTemplateBaselineSource = pythonCoverageCheckBaselineNixSource
+        checkDefaultNixTemplateBaselineSource = pythonCoverageCheckBaselineNixSource,
+        checkDefaultNixTemplateComparisonMode = ExactCheckTemplate
       },
     CheckDefaultNixTemplateSpec
       { checkDefaultNixTemplateName = "python_profile_check",
         checkDefaultNixTemplateMatches = matchesPythonProfileCheck,
         checkDefaultNixTemplateAllowedDifferenceKeys = Set.empty,
-        checkDefaultNixTemplateBaselineSource = pythonProfileCheckBaselineNixSource
+        checkDefaultNixTemplateBaselineSource = pythonProfileCheckBaselineNixSource,
+        checkDefaultNixTemplateComparisonMode = ExactCheckTemplate
       },
     CheckDefaultNixTemplateSpec
       { checkDefaultNixTemplateName = "python_property_testing_check",
         checkDefaultNixTemplateMatches = matchesPythonPropertyTestingCheck,
         checkDefaultNixTemplateAllowedDifferenceKeys = Set.empty,
-        checkDefaultNixTemplateBaselineSource = pythonPropertyTestingCheckBaselineNixSource
+        checkDefaultNixTemplateBaselineSource = pythonPropertyTestingCheckBaselineNixSource,
+        checkDefaultNixTemplateComparisonMode = ExactCheckTemplate
       },
     CheckDefaultNixTemplateSpec
       { checkDefaultNixTemplateName = "rust_coverage_check",
         checkDefaultNixTemplateMatches = matchesRustCoverageCheck,
         checkDefaultNixTemplateAllowedDifferenceKeys = Set.empty,
-        checkDefaultNixTemplateBaselineSource = rustCoverageCheckBaselineNixSource
+        checkDefaultNixTemplateBaselineSource = rustCoverageCheckBaselineNixSource,
+        checkDefaultNixTemplateComparisonMode = ExactCheckTemplate
       },
     CheckDefaultNixTemplateSpec
       { checkDefaultNixTemplateName = "rust_profile_check",
         checkDefaultNixTemplateMatches = matchesRustProfileCheck,
         checkDefaultNixTemplateAllowedDifferenceKeys = Set.empty,
-        checkDefaultNixTemplateBaselineSource = rustProfileCheckBaselineNixSource
+        checkDefaultNixTemplateBaselineSource = rustProfileCheckBaselineNixSource,
+        checkDefaultNixTemplateComparisonMode = ExactCheckTemplate
       },
     CheckDefaultNixTemplateSpec
       { checkDefaultNixTemplateName = "rust_property_testing_check",
         checkDefaultNixTemplateMatches = matchesRustPropertyTestingCheck,
         checkDefaultNixTemplateAllowedDifferenceKeys = Set.empty,
-        checkDefaultNixTemplateBaselineSource = rustPropertyTestingCheckBaselineNixSource
+        checkDefaultNixTemplateBaselineSource = rustPropertyTestingCheckBaselineNixSource,
+        checkDefaultNixTemplateComparisonMode = ExactCheckTemplate
       },
     CheckDefaultNixTemplateSpec
       { checkDefaultNixTemplateName = "rust_mutation_testing_check",
         checkDefaultNixTemplateMatches = matchesRustMutationTestingCheck,
         checkDefaultNixTemplateAllowedDifferenceKeys = Set.empty,
-        checkDefaultNixTemplateBaselineSource = rustMutationTestingCheckBaselineNixSource
+        checkDefaultNixTemplateBaselineSource = rustMutationTestingCheckBaselineNixSource,
+        checkDefaultNixTemplateComparisonMode = ExactCheckTemplate
       },
     CheckDefaultNixTemplateSpec
       { checkDefaultNixTemplateName = "html_template_check",
         checkDefaultNixTemplateMatches = \checkName _ -> pure (checkName == "html_template"),
         checkDefaultNixTemplateAllowedDifferenceKeys = Set.empty,
-        checkDefaultNixTemplateBaselineSource = htmlTemplateCheckBaselineNixSource
+        checkDefaultNixTemplateBaselineSource = htmlTemplateCheckBaselineNixSource,
+        checkDefaultNixTemplateComparisonMode = ExactCheckTemplate
       },
     CheckDefaultNixTemplateSpec
       { checkDefaultNixTemplateName = "c_template_check",
         checkDefaultNixTemplateMatches = \checkName _ -> pure (checkName == "c_template"),
         checkDefaultNixTemplateAllowedDifferenceKeys = Set.empty,
-        checkDefaultNixTemplateBaselineSource = cTemplateCheckBaselineNixSource
+        checkDefaultNixTemplateBaselineSource = cTemplateCheckBaselineNixSource,
+        checkDefaultNixTemplateComparisonMode = ExactCheckTemplate
+      },
+    CheckDefaultNixTemplateSpec
+      { checkDefaultNixTemplateName = "c_package_vm_check",
+        checkDefaultNixTemplateMatches = matchesCPackageVmCheck,
+        checkDefaultNixTemplateAllowedDifferenceKeys = Set.empty,
+        checkDefaultNixTemplateBaselineSource = cTemplateCheckBaselineNixSource,
+        checkDefaultNixTemplateComparisonMode = StructuralCPackageVmCheck
       },
     CheckDefaultNixTemplateSpec
       { checkDefaultNixTemplateName = "host_default_check",
         checkDefaultNixTemplateMatches = \checkName _ -> pure (checkName == "host_default"),
         checkDefaultNixTemplateAllowedDifferenceKeys = Set.empty,
-        checkDefaultNixTemplateBaselineSource = hostDefaultCheckBaselineNixSource
+        checkDefaultNixTemplateBaselineSource = hostDefaultCheckBaselineNixSource,
+        checkDefaultNixTemplateComparisonMode = ExactCheckTemplate
       }
   ]
 checkDefaultNixTemplateSpecByName :: FilePath -> Maybe CheckDefaultNixTemplateSpec
@@ -338,6 +363,16 @@ matchesRustMutationTestingCheck checkName nixSource =
     ( isJust (removeSuffix "-mutation-testing" checkName)
         && "cargo mutants" `isInfixOf` nixSource
     )
+matchesCPackageVmCheck :: FilePath -> String -> IO Bool
+matchesCPackageVmCheck checkName nixSource = do
+  packageKind <- detectPackageKindForPackage checkName
+  pure (isCPackageVmCheckShape packageKind nixSource)
+isCPackageVmCheckShape :: PackageKind -> String -> Bool
+isCPackageVmCheckShape packageKind nixSource =
+  packageKind == CPackage
+    && "pkgs.testers.runNixOSTest" `isInfixOf` nixSource
+    && "nodes.machine" `isInfixOf` nixSource
+    && "testScript = ''" `isInfixOf` nixSource
 type CheckOutcome :: Type
 data CheckOutcome = CheckPassed | CheckFailed | CheckSkipped | CheckIncompatible deriving stock (Eq, Show)
 checkOutcomeFromIssues :: [a] -> CheckOutcome
@@ -883,9 +918,10 @@ checkCheck checkName = do
                 [ "checks/" ++ checkName ++ "/default.nix: unsupported check template " ++ matchedCheckDefaultNixTemplateName
                 ]
             Just checkDefaultNixTemplateSpec ->
-              compareCheckDefaultNixWithTemplate
+              validateCheckDefaultNix
+                checkName
                 checkDefaultNixPath
-                (checkDefaultNixTemplateBaselineSource checkDefaultNixTemplateSpec)
+                checkDefaultNixTemplateSpec
 detectPackageKindForPackage :: FilePath -> IO PackageKind
 detectPackageKindForPackage packageName = do
   let packageRootDirectory = "packages" </> packageName
@@ -1531,6 +1567,54 @@ compareCheckDefaultNixWithTemplate checkDefaultNixPath templateDefaultNixSource 
                 ++ ": differs from embedded check template\n"
                 ++ intercalate "\n" mismatchDetails
             ]
+validateCheckDefaultNix :: FilePath -> FilePath -> CheckDefaultNixTemplateSpec -> IO [String]
+validateCheckDefaultNix checkName checkDefaultNixPath checkDefaultNixTemplateSpec =
+  case checkDefaultNixTemplateComparisonMode checkDefaultNixTemplateSpec of
+    ExactCheckTemplate ->
+      compareCheckDefaultNixWithTemplate
+        checkDefaultNixPath
+        (checkDefaultNixTemplateBaselineSource checkDefaultNixTemplateSpec)
+    StructuralCPackageVmCheck ->
+      validateCPackageVmCheck checkName checkDefaultNixPath
+validateCPackageVmCheck :: FilePath -> FilePath -> IO [String]
+validateCPackageVmCheck checkName checkDefaultNixPath = do
+  maybeCheckDefaultNixText <- readTextFileIfExists checkDefaultNixPath
+  case maybeCheckDefaultNixText of
+    Nothing -> pure []
+    Just checkDefaultNixText -> do
+      packageKind <- detectPackageKindForPackage checkName
+      pure (validateCPackageVmCheckSource packageKind checkName checkDefaultNixPath (T.unpack checkDefaultNixText))
+validateCPackageVmCheckSource :: PackageKind -> FilePath -> FilePath -> String -> [String]
+validateCPackageVmCheckSource packageKind checkName checkDefaultNixPath checkDefaultNixSource =
+  let hasCanonicalNameBinding =
+        "name = builtins.baseNameOf ./.;" `isInfixOf` checkDefaultNixSource
+          || "name = baseNameOf ./.;" `isInfixOf` checkDefaultNixSource
+      hasRunNixOSTest = "pkgs.testers.runNixOSTest" `isInfixOf` checkDefaultNixSource
+      hasMachineNode = "nodes.machine" `isInfixOf` checkDefaultNixSource
+      hasTestScript = "testScript = ''" `isInfixOf` checkDefaultNixSource
+      hasSameNamePackageReference =
+        "inputs.self.packages.${pkgs.stdenv.system}.${name}" `isInfixOf` checkDefaultNixSource
+          || ("inputs.self.packages.${pkgs.stdenv.system}." ++ checkName) `isInfixOf` checkDefaultNixSource
+   in catMaybes
+        [ if packageKind == CPackage
+            then Nothing
+            else Just (checkDefaultNixPath ++ ": generic C VM checks require a same-name C package under packages/"),
+          if hasRunNixOSTest
+            then Nothing
+            else Just (checkDefaultNixPath ++ ": generic C VM checks must use pkgs.testers.runNixOSTest"),
+          if hasCanonicalNameBinding
+            then Nothing
+            else Just (checkDefaultNixPath ++ ": generic C VM checks must bind name from ./."),
+          if hasMachineNode
+            then Nothing
+            else Just (checkDefaultNixPath ++ ": generic C VM checks must define nodes.machine"),
+          if hasTestScript
+            then Nothing
+            else Just (checkDefaultNixPath ++ ": generic C VM checks must define testScript"),
+          if hasSameNamePackageReference
+            then Nothing
+            else Just (checkDefaultNixPath ++ ": generic C VM checks must install or override the same-name package from inputs.self.packages")
+        ]
 compareNixFileWithTemplate :: FilePath -> FilePath -> Set.Set T.Text -> Maybe T.Text -> IO [String]
 compareNixFileWithTemplate subjectNixPath templateDefaultNixPath allowedNixDifferenceKeys maybeTemplateDefaultNixSourceOverride = do
   subjectNixParseResult <- parseNixExprFromFile subjectNixPath
@@ -1898,6 +1982,22 @@ hUnitDebugTests =
           "Infers the Rust mutation-testing check template."
           (Just "rust_mutation_testing_check")
           inferred,
+      TestCase $ do
+        let matched = isCPackageVmCheckShape CPackage cPackageVmCheckFixture
+        assertBool
+          "Matches a generic C-package VM check."
+          matched,
+      TestCase $ do
+        let validationIssues =
+              validateCPackageVmCheckSource
+                CPackage
+                "c_template"
+                "checks/c_template/default.nix"
+                cPackageVmCheckFixture
+        assertEqual
+          "Validates a generic C-package VM check."
+          []
+          validationIssues,
       TestCase $ do
         assertEqual
           "Compacts whitespace with compactTextToSingleLine."
@@ -2356,6 +2456,23 @@ htmlNixFixture =
     ++ "pkgs.writeShellScriptBin \"x\" ''\n"
     ++ "  echo hi\n"
     ++ "''\n"
+cPackageVmCheckFixture :: String
+cPackageVmCheckFixture =
+  "{ inputs, pkgs, ... }:\n"
+    ++ "pkgs.testers.runNixOSTest {\n"
+    ++ "  name = builtins.baseNameOf ./.;\n"
+    ++ "  nodes.machine = { pkgs, ... }: {\n"
+    ++ "    environment.systemPackages = [\n"
+    ++ "      (inputs.self.packages.${pkgs.stdenv.system}.${name}.overrideAttrs (_: {\n"
+    ++ "        NIX_CFLAGS_COMPILE = \"-O1 -g3 -fsanitize=address,undefined\";\n"
+    ++ "      }))\n"
+    ++ "      pkgs.xterm\n"
+    ++ "    ];\n"
+    ++ "  };\n"
+    ++ "  testScript = ''\n"
+    ++ "    machine.succeed(\"true\")\n"
+    ++ "  '';\n"
+    ++ "}\n"
 unknownNixFixture :: String
 unknownNixFixture =
   "{ pkgs ? import <nixpkgs> { }, }:\n"
