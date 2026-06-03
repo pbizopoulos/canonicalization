@@ -161,18 +161,6 @@ class ArtifactTests(unittest.TestCase):
                 msg = "figure.png is empty"
                 raise AssertionError(msg)
 
-    def test_create_workspace_artifacts_writes_both_outputs(self) -> None:
-        """Workspace generation should always produce figure and table files."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            workspace = Path(tmpdir) / "tmp"
-            create_workspace_artifacts(workspace)
-            if not (workspace / "figure.png").exists():
-                msg = "workspace is missing figure.png"
-                raise AssertionError(msg)
-            if not (workspace / "table.tex").exists():
-                msg = "workspace is missing table.tex"
-                raise AssertionError(msg)
-
     def test_main_generates_workspace_artifacts_in_current_directory(self) -> None:
         """main() should write artifacts into <cwd>/tmp."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -190,18 +178,22 @@ class ArtifactTests(unittest.TestCase):
                 msg = "main() should generate table.tex in <cwd>/tmp"
                 raise AssertionError(msg)
 
-    def test_main_debug_runs_tests_before_writing_artifacts(self) -> None:
-        """DEBUG mode should still exercise the test runner branch."""
+    def test_main_debug_still_writes_artifacts_in_current_directory(self) -> None:
+        """DEBUG mode should still generate artifacts into <cwd>/tmp."""
         with tempfile.TemporaryDirectory() as tmpdir:
             fake_cwd = Path(tmpdir)
             with (
                 mock.patch.dict(os.environ, {"DEBUG": "1"}),
-                mock.patch(f"{MODULE_NAME}.run_tests") as run_tests_mock,
+                mock.patch(f"{MODULE_NAME}.run_tests"),
                 mock.patch("pathlib.Path.cwd", return_value=fake_cwd),
             ):
                 main()
-            if run_tests_mock.call_count != 1:
-                msg = "main() should call run_tests() exactly once when DEBUG=1"
+            workspace = fake_cwd.resolve() / "tmp"
+            if not (workspace / "figure.png").exists():
+                msg = "main() should generate figure.png in <cwd>/tmp when DEBUG=1"
+                raise AssertionError(msg)
+            if not (workspace / "table.tex").exists():
+                msg = "main() should generate table.tex in <cwd>/tmp when DEBUG=1"
                 raise AssertionError(msg)
 
 

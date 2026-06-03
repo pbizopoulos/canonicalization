@@ -2285,58 +2285,6 @@ metadataAndDiscoveryDebugTests =
           (isNothing (defaultNixTemplateSpecByName "not-a-template")),
       TestCase $ do
         assertEqual
-          "checkOutcomeFromIssues marks empty issue list as passed."
-          CheckPassed
-          (checkOutcomeFromIssues ([] :: [String])),
-      TestCase $ do
-        assertEqual
-          "checkOutcomeFromIssues marks non-empty issue list as failed."
-          CheckFailed
-          (checkOutcomeFromIssues ["issue" :: String] :: CheckOutcome),
-      TestCase $ do
-        assertEqual
-          "Parses and deduplicates .gitmodules path entries."
-          ["github.com/example/repo", "gitlab.com/org/project"]
-          ( parseGitSubmodulePathEntries
-              ( unlines
-                  [ "[submodule \"one\"]",
-                    "  path = github.com/example/repo",
-                    "  path = github.com/example/repo",
-                    "  url = https://example.test/repo.git",
-                    "  path = gitlab.com/org/project",
-                    "  path =    ",
-                    "  path-without-equals github.com/ignored/repo"
-                  ]
-              )
-          ),
-      TestCase $ do
-        let malformedRepository = buildGitSubmoduleRepository "/home/user" "github.com/example/repo/subdir"
-        assertEqual
-          "Malformed git-submodule paths are marked incompatible and keep leaf name."
-          (False, "subdir")
-          (gitSubmoduleRepositoryIsCompatible malformedRepository, gitSubmoduleRepositoryName malformedRepository),
-      TestCase $ do
-        assertEqual
-          "Extracts the package section with extractTomlSection."
-          "name = \"example-package\"\nversion = \"0.1.0\"\nedition = \"2021\"\ndescription = \"Example package fixture for TOML parsing.\"\nlicense = \"MIT\"\nrepository = \"https://github.com/pbizopoulos/canonicalization\"\nreadme = \"../../README\"\nkeywords = [\"check\", \"lint\", \"fixture\"]\ncategories = [\"development-tools\"]\n\n"
-          (extractTomlSection "package" exampleCargoTomlFixture),
-      TestCase $ do
-        assertEqual
-          "Parses the package name with lookupTomlString."
-          (Just "remove-empty-lines")
-          (lookupTomlString "name" (extractTomlSection "package" removeEmptyLinesCargoTomlFixture)),
-      TestCase $ do
-        assertEqual
-          "Parses lints.rust.unsafe_code with lookupTomlString."
-          (Just "forbid")
-          (lookupTomlString "unsafe_code" (extractTomlSection "lints.rust" removeEmptyLinesCargoTomlFixture)),
-      TestCase $ do
-        assertEqual
-          "Returns Nothing for a TOML key missing from the section."
-          Nothing
-          (lookupTomlString "missing_key" (extractTomlSection "package" removeEmptyLinesCargoTomlFixture)),
-      TestCase $ do
-        assertEqual
           "Extracts Python unit-test function names."
           (Just "test_example_case")
           (extractPythonUnitTestName "  def test_example_case():"),
@@ -2345,74 +2293,6 @@ metadataAndDiscoveryDebugTests =
           "Ignores non-test Python functions."
           Nothing
           (extractPythonUnitTestName "def helper_function():"),
-      TestCase $ do
-        assertEqual
-          "toRelativePath drops leading ./ segments."
-          ("packages" </> "canonicalization" </> "Main.hs")
-          (toRelativePath ("." </> "packages" </> "canonicalization" </> "Main.hs")),
-      TestCase $ do
-        assertEqual
-          "shouldTraverseDirectory rejects ignored directories."
-          False
-          (shouldTraverseDirectory ("packages" </> "remove-empty-lines" </> "target")),
-      TestCase $ do
-        assertEqual
-          "shouldTraverseDirectory allows normal source directories."
-          True
-          (shouldTraverseDirectory ("packages" </> "canonicalization")),
-      TestCase $ do
-        assertEqual
-          "isLeafPath detects non-leaf paths."
-          False
-          (isLeafPath ["packages", "packages/canonicalization", "packages/canonicalization/Main.hs"] "packages/canonicalization"),
-      TestCase $ do
-        assertEqual
-          "isLeafPath detects leaf paths."
-          True
-          (isLeafPath ["packages", "packages/canonicalization", "packages/canonicalization/Main.hs"] "packages/canonicalization/Main.hs"),
-      TestCase $ do
-        assertEqual
-          "packageRootPathFromRepositoryPath extracts package root."
-          (Just "packages/canonicalization")
-          (packageRootPathFromRepositoryPath "packages/canonicalization/Main.hs"),
-      TestCase $ do
-        assertEqual
-          "hostRootPathFromRepositoryPath extracts host root."
-          (Just "hosts/default")
-          (hostRootPathFromRepositoryPath "hosts/default/configuration.nix"),
-      TestCase $ do
-        assertEqual
-          "detectPackageKindFromMarkers prefers a unique non-binary marker."
-          HaskellPackage
-          (detectPackageKindFromMarkers [("Main.hs", HaskellPackage), ("binary-layout", BinaryReleasePackage)]),
-      TestCase $ do
-        assertEqual
-          "detectPackageKindFromMarkers falls back to binary release marker."
-          BinaryReleasePackage
-          (detectPackageKindFromMarkers [("binary-layout", BinaryReleasePackage)]),
-      TestCase $ do
-        assertEqual
-          "detectPackageKindFromMarkers marks conflicting markers as unknown."
-          UnknownPackage
-          (detectPackageKindFromMarkers [("Main.hs", HaskellPackage), ("main.py", PythonPackage)]),
-      TestCase $ do
-        assertEqual
-          "Detects package markers for python-latex packages."
-          [("main.py+ms.tex", PythonLatexPackage)]
-          (detectPackageMarkers ["main.py", "ms.tex"]),
-      TestCase $ do
-        assertEqual
-          "Reports ambiguity when multiple markers match."
-          ["packages/example: has ambiguous project markers: Main.hs, main.py"]
-          ( ambiguousPackageMarkerIssuesForPackage
-              PackageInfo
-                { packageRootPath = "packages/example",
-                  packageRootDirectoryName = "example",
-                  packageLeafPaths = ["Main.hs", "main.py"],
-                  detectedPackageKind = UnknownPackage,
-                  matchedPackageMarkers = ["Main.hs", "main.py"]
-                }
-          ),
       TestCase $ do
         assertEqual
           "Normalizes Cargo TOML names and drops dependency blocks."

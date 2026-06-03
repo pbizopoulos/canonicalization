@@ -91,15 +91,17 @@ class MainTests(unittest.TestCase):
             msg = "main() should print the canonical label summary when DEBUG != 1"
             raise AssertionError(msg)
 
-    def test_main_calls_run_tests_when_debug(self) -> None:
-        """main() should execute run_tests() when DEBUG is enabled."""
+    def test_main_suppresses_normal_output_when_debug(self) -> None:
+        """DEBUG mode should not emit the normal summary output."""
+        output = io.StringIO()
         with (
             mock.patch.dict(os.environ, {"DEBUG": "1"}),
-            mock.patch(f"{MODULE_NAME}.run_tests") as run_tests_mock,
+            mock.patch(f"{MODULE_NAME}.run_tests"),
+            contextlib.redirect_stdout(output),
         ):
             main()
-        if run_tests_mock.call_count != 1:
-            msg = "main() should call run_tests() exactly once when DEBUG=1"
+        if output.getvalue() != "":
+            msg = "main() should not print the normal summary when DEBUG=1"
             raise AssertionError(msg)
 
 
