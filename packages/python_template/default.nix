@@ -16,7 +16,7 @@ python.pkgs.buildPythonPackage rec {
     runHook postInstallCheck
   '';
   installPhase = ''
-    install -Dm644 main.py $out/${python.sitePackages}/${pname}.py
+    install -Dm644 ./main.py $out/${python.sitePackages}/${pname}.py
     install -Dm755 ./main.py $out/bin/${pname}
     if [ -d ./prm ]; then
       cp -r ./prm/ $out/${python.sitePackages}/
