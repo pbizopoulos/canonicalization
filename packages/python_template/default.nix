@@ -24,6 +24,9 @@ python.pkgs.buildPythonPackage rec {
     fi
   '';
   meta.mainProgram = pname;
+  passthru = {
+    inherit python;
+  };
   pname = baseNameOf ./.;
   propagatedBuildInputs = [
     python.pkgs.hypothesis

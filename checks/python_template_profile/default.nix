@@ -1,19 +1,23 @@
 {
+  inputs,
   pkgs,
   ...
 }:
 let
   checkName = builtins.baseNameOf ./.;
   packageName = pkgs.lib.removeSuffix "_profile" checkName;
-  pyPkgs = pkgs.python312Packages;
+  packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${packageName};
+  packagePythonDeps = packageDrv.propagatedBuildInputs or [ ];
+  python = packageDrv.python or pkgs.python3;
+  pythonEnv = python.withPackages (
+    _: pkgs.lib.unique (packagePythonDeps ++ [ python.pkgs.pyinstrument ])
+  );
 in
 pkgs.runCommand "${checkName}"
   {
     nativeBuildInputs = [
       pkgs.coreutils
-      pkgs.python312
-      pyPkgs.hypothesis
-      pyPkgs.pyinstrument
+      pythonEnv
     ];
     src = ../../packages/${packageName};
   }

@@ -1,21 +1,16 @@
 {
+  inputs,
   pkgs,
   ...
 }:
 let
   checkName = builtins.baseNameOf ./.;
   packageName = pkgs.lib.removeSuffix "_profile" checkName;
-  pythonDeps = [
-    pkgs.python3Packages.matplotlib
-    pkgs.python3Packages.pandas
-  ];
-  pythonEnv = pkgs.python3.withPackages (
-    _:
-    pythonDeps
-    ++ [
-      pkgs.python3Packages.hypothesis
-      pkgs.python3Packages.pyinstrument
-    ]
+  packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${packageName};
+  packagePythonDeps = packageDrv.propagatedBuildInputs or [ ];
+  python = packageDrv.python or pkgs.python3;
+  pythonEnv = python.withPackages (
+    _: pkgs.lib.unique (packagePythonDeps ++ [ python.pkgs.pyinstrument ])
   );
 in
 pkgs.runCommand "${checkName}"

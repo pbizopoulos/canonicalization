@@ -8,7 +8,10 @@ let
   packageName = pkgs.lib.removeSuffix "_property_testing" checkName;
   packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${packageName};
   packagePythonDeps = packageDrv.propagatedBuildInputs or [ ];
-  pythonEnv = pkgs.python3.withPackages (_: packagePythonDeps ++ [ pkgs.python3Packages.hypothesis ]);
+  python = packageDrv.python or pkgs.python3;
+  pythonEnv = python.withPackages (
+    _: pkgs.lib.unique (packagePythonDeps ++ [ python.pkgs.hypothesis ])
+  );
 in
 pkgs.runCommand "${checkName}"
   {

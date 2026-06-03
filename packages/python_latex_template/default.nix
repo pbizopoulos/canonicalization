@@ -31,6 +31,9 @@ python.pkgs.buildPythonPackage rec {
     chmod +x "$out/bin/${pname}"
   '';
   meta.mainProgram = pname;
+  passthru = {
+    inherit python;
+  };
   pname = baseNameOf ./.;
   propagatedBuildInputs = pythonDeps ++ [
     python.pkgs.hypothesis

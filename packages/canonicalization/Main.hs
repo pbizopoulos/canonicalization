@@ -18,7 +18,7 @@ import Data.List (find, intercalate, isInfixOf, isPrefixOf, isSuffixOf, maximumB
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, fromMaybe, isNothing, listToMaybe, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing, listToMaybe, mapMaybe)
 import Data.Ord (comparing)
 import Data.Set qualified as Set
 import Data.Text qualified as T
@@ -71,6 +71,13 @@ data DefaultNixTemplateSpec = DefaultNixTemplateSpec
     defaultNixTemplateMatches :: FilePath -> String -> IO Bool,
     defaultNixTemplateAllowedDifferenceKeys :: Set.Set T.Text,
     defaultNixTemplateBaselineSource :: Maybe T.Text
+  }
+type CheckDefaultNixTemplateSpec :: Type
+data CheckDefaultNixTemplateSpec = CheckDefaultNixTemplateSpec
+  { checkDefaultNixTemplateName :: FilePath,
+    checkDefaultNixTemplateMatches :: FilePath -> String -> IO Bool,
+    checkDefaultNixTemplateAllowedDifferenceKeys :: Set.Set T.Text,
+    checkDefaultNixTemplateBaselineSource :: T.Text
   }
 defaultNixTemplateSpecs :: [DefaultNixTemplateSpec]
 defaultNixTemplateSpecs =
@@ -184,6 +191,153 @@ matchesBinaryReleaseTemplate _ nixSource =
     )
 defaultNixTemplateSpecByName :: FilePath -> Maybe DefaultNixTemplateSpec
 defaultNixTemplateSpecByName defaultNixTemplateNameToFind = find ((== defaultNixTemplateNameToFind) . defaultNixTemplateName) defaultNixTemplateSpecs
+checkDefaultNixTemplateSpecs :: [CheckDefaultNixTemplateSpec]
+checkDefaultNixTemplateSpecs =
+  [ CheckDefaultNixTemplateSpec
+      { checkDefaultNixTemplateName = "haskell_coverage_check",
+        checkDefaultNixTemplateMatches = matchesHaskellCoverageCheck,
+        checkDefaultNixTemplateAllowedDifferenceKeys = Set.empty,
+        checkDefaultNixTemplateBaselineSource = haskellCoverageCheckBaselineNixSource
+      },
+    CheckDefaultNixTemplateSpec
+      { checkDefaultNixTemplateName = "haskell_profile_check",
+        checkDefaultNixTemplateMatches = matchesHaskellProfileCheck,
+        checkDefaultNixTemplateAllowedDifferenceKeys = Set.empty,
+        checkDefaultNixTemplateBaselineSource = haskellProfileCheckBaselineNixSource
+      },
+    CheckDefaultNixTemplateSpec
+      { checkDefaultNixTemplateName = "haskell_property_testing_check",
+        checkDefaultNixTemplateMatches = matchesHaskellPropertyTestingCheck,
+        checkDefaultNixTemplateAllowedDifferenceKeys = Set.empty,
+        checkDefaultNixTemplateBaselineSource = haskellPropertyTestingCheckBaselineNixSource
+      },
+    CheckDefaultNixTemplateSpec
+      { checkDefaultNixTemplateName = "python_coverage_check",
+        checkDefaultNixTemplateMatches = matchesPythonCoverageCheck,
+        checkDefaultNixTemplateAllowedDifferenceKeys = Set.empty,
+        checkDefaultNixTemplateBaselineSource = pythonCoverageCheckBaselineNixSource
+      },
+    CheckDefaultNixTemplateSpec
+      { checkDefaultNixTemplateName = "python_profile_check",
+        checkDefaultNixTemplateMatches = matchesPythonProfileCheck,
+        checkDefaultNixTemplateAllowedDifferenceKeys = Set.empty,
+        checkDefaultNixTemplateBaselineSource = pythonProfileCheckBaselineNixSource
+      },
+    CheckDefaultNixTemplateSpec
+      { checkDefaultNixTemplateName = "python_property_testing_check",
+        checkDefaultNixTemplateMatches = matchesPythonPropertyTestingCheck,
+        checkDefaultNixTemplateAllowedDifferenceKeys = Set.empty,
+        checkDefaultNixTemplateBaselineSource = pythonPropertyTestingCheckBaselineNixSource
+      },
+    CheckDefaultNixTemplateSpec
+      { checkDefaultNixTemplateName = "rust_coverage_check",
+        checkDefaultNixTemplateMatches = matchesRustCoverageCheck,
+        checkDefaultNixTemplateAllowedDifferenceKeys = Set.empty,
+        checkDefaultNixTemplateBaselineSource = rustCoverageCheckBaselineNixSource
+      },
+    CheckDefaultNixTemplateSpec
+      { checkDefaultNixTemplateName = "rust_profile_check",
+        checkDefaultNixTemplateMatches = matchesRustProfileCheck,
+        checkDefaultNixTemplateAllowedDifferenceKeys = Set.empty,
+        checkDefaultNixTemplateBaselineSource = rustProfileCheckBaselineNixSource
+      },
+    CheckDefaultNixTemplateSpec
+      { checkDefaultNixTemplateName = "rust_property_testing_check",
+        checkDefaultNixTemplateMatches = matchesRustPropertyTestingCheck,
+        checkDefaultNixTemplateAllowedDifferenceKeys = Set.empty,
+        checkDefaultNixTemplateBaselineSource = rustPropertyTestingCheckBaselineNixSource
+      },
+    CheckDefaultNixTemplateSpec
+      { checkDefaultNixTemplateName = "rust_mutation_testing_check",
+        checkDefaultNixTemplateMatches = matchesRustMutationTestingCheck,
+        checkDefaultNixTemplateAllowedDifferenceKeys = Set.empty,
+        checkDefaultNixTemplateBaselineSource = rustMutationTestingCheckBaselineNixSource
+      },
+    CheckDefaultNixTemplateSpec
+      { checkDefaultNixTemplateName = "html_template_check",
+        checkDefaultNixTemplateMatches = \checkName _ -> pure (checkName == "html_template"),
+        checkDefaultNixTemplateAllowedDifferenceKeys = Set.empty,
+        checkDefaultNixTemplateBaselineSource = htmlTemplateCheckBaselineNixSource
+      },
+    CheckDefaultNixTemplateSpec
+      { checkDefaultNixTemplateName = "c_template_check",
+        checkDefaultNixTemplateMatches = \checkName _ -> pure (checkName == "c_template"),
+        checkDefaultNixTemplateAllowedDifferenceKeys = Set.empty,
+        checkDefaultNixTemplateBaselineSource = cTemplateCheckBaselineNixSource
+      },
+    CheckDefaultNixTemplateSpec
+      { checkDefaultNixTemplateName = "host_default_check",
+        checkDefaultNixTemplateMatches = \checkName _ -> pure (checkName == "host_default"),
+        checkDefaultNixTemplateAllowedDifferenceKeys = Set.empty,
+        checkDefaultNixTemplateBaselineSource = hostDefaultCheckBaselineNixSource
+      }
+  ]
+checkDefaultNixTemplateSpecByName :: FilePath -> Maybe CheckDefaultNixTemplateSpec
+checkDefaultNixTemplateSpecByName checkDefaultNixTemplateNameToFind = find ((== checkDefaultNixTemplateNameToFind) . checkDefaultNixTemplateName) checkDefaultNixTemplateSpecs
+matchesHaskellCoverageCheck :: FilePath -> String -> IO Bool
+matchesHaskellCoverageCheck checkName nixSource =
+  pure
+    ( isJust (removeSuffix "-coverage" checkName)
+        && "ghcWithPackages" `isInfixOf` nixSource
+        && "-fhpc" `isInfixOf` nixSource
+    )
+matchesHaskellProfileCheck :: FilePath -> String -> IO Bool
+matchesHaskellProfileCheck checkName nixSource =
+  pure
+    ( isJust (removeSuffix "-profile" checkName)
+        && "ghcWithPackages" `isInfixOf` nixSource
+        && "-fprof-auto" `isInfixOf` nixSource
+    )
+matchesHaskellPropertyTestingCheck :: FilePath -> String -> IO Bool
+matchesHaskellPropertyTestingCheck checkName nixSource =
+  pure
+    ( isJust (removeSuffix "-property-testing" checkName)
+        && "ghcWithPackages" `isInfixOf` nixSource
+        && "PROPERTY_TESTS=1" `isInfixOf` nixSource
+    )
+matchesPythonCoverageCheck :: FilePath -> String -> IO Bool
+matchesPythonCoverageCheck checkName nixSource =
+  pure
+    ( isJust (removeSuffix "_coverage" checkName)
+        && "coverage run" `isInfixOf` nixSource
+    )
+matchesPythonProfileCheck :: FilePath -> String -> IO Bool
+matchesPythonProfileCheck checkName nixSource =
+  pure
+    ( isJust (removeSuffix "_profile" checkName)
+        && "pyinstrument" `isInfixOf` nixSource
+    )
+matchesPythonPropertyTestingCheck :: FilePath -> String -> IO Bool
+matchesPythonPropertyTestingCheck checkName nixSource =
+  pure
+    ( isJust (removeSuffix "_property_testing" checkName)
+        && "python -m unittest -v main.PropertyTests" `isInfixOf` nixSource
+    )
+matchesRustCoverageCheck :: FilePath -> String -> IO Bool
+matchesRustCoverageCheck checkName nixSource =
+  pure
+    ( isJust (removeSuffix "-coverage" checkName)
+        && "cargo llvm-cov" `isInfixOf` nixSource
+    )
+matchesRustProfileCheck :: FilePath -> String -> IO Bool
+matchesRustProfileCheck checkName nixSource =
+  pure
+    ( isJust (removeSuffix "-profile" checkName)
+        && "pkgs.perf" `isInfixOf` nixSource
+        && "perf record" `isInfixOf` nixSource
+    )
+matchesRustPropertyTestingCheck :: FilePath -> String -> IO Bool
+matchesRustPropertyTestingCheck checkName nixSource =
+  pure
+    ( isJust (removeSuffix "-property-testing" checkName)
+        && "cargo test --locked" `isInfixOf` nixSource
+    )
+matchesRustMutationTestingCheck :: FilePath -> String -> IO Bool
+matchesRustMutationTestingCheck checkName nixSource =
+  pure
+    ( isJust (removeSuffix "-mutation-testing" checkName)
+        && "cargo mutants" `isInfixOf` nixSource
+    )
 type CheckOutcome :: Type
 data CheckOutcome = CheckPassed | CheckFailed | CheckSkipped | CheckIncompatible deriving stock (Eq, Show)
 checkOutcomeFromIssues :: [a] -> CheckOutcome
@@ -248,6 +402,8 @@ runInGitRepositoryRoot repositoryDirectory action = do
   action
 trimString :: String -> String
 trimString = T.unpack . T.strip . T.pack
+removeSuffix :: (Eq a) => [a] -> [a] -> Maybe [a]
+removeSuffix suffix value = reverse <$> stripPrefix (reverse suffix) (reverse value)
 runCheckRepositoryMode :: IO ()
 runCheckRepositoryMode = do
   repositoryStructureIssues <- checkRepositoryStructure
@@ -256,7 +412,9 @@ runCheckRepositoryMode = do
     exitFailure
   packageNames <- listPackageNames
   packageChecks <- forM packageNames (checkPackage [])
-  let fileComplianceIssues = concatMap packageCheckIssues packageChecks
+  checkNames <- listCheckNames
+  checkComplianceIssues <- concat <$> forM checkNames checkCheck
+  let fileComplianceIssues = concatMap packageCheckIssues packageChecks ++ checkComplianceIssues
   unless (null fileComplianceIssues) $ do
     reportCheckRepositoryFailures "file-compliance" fileComplianceIssues
     exitFailure
@@ -533,6 +691,8 @@ hostRootPathFromRepositoryPath repositoryPath =
     _ -> Nothing
 listPackageNames :: IO [FilePath]
 listPackageNames = listSubdirectoryNames "packages"
+listCheckNames :: IO [FilePath]
+listCheckNames = listSubdirectoryNames "checks"
 listSubdirectoryNames :: FilePath -> IO [FilePath]
 listSubdirectoryNames parentDirectory = do
   parentDirectoryExists <- doesDirectoryExist parentDirectory
@@ -703,6 +863,29 @@ checkPackage allRepositoryStructureIssues packageName = do
         packageCheckTests = packageTests,
         packageCheckIssues = packageIssues
       }
+checkCheck :: FilePath -> IO [String]
+checkCheck checkName = do
+  let checkDefaultNixPath = "checks" </> checkName </> "default.nix"
+  maybeCheckDefaultNixText <- readTextFileIfExists checkDefaultNixPath
+  case maybeCheckDefaultNixText of
+    Nothing -> pure []
+    Just checkDefaultNixText -> do
+      inferredCheckDefaultNixTemplateName <- inferCheckDefaultNixTemplateName checkName (T.unpack checkDefaultNixText)
+      case inferredCheckDefaultNixTemplateName of
+        Nothing ->
+          pure
+            [ "checks/" ++ checkName ++ "/default.nix: could not infer corresponding check template"
+            ]
+        Just matchedCheckDefaultNixTemplateName ->
+          case checkDefaultNixTemplateSpecByName matchedCheckDefaultNixTemplateName of
+            Nothing ->
+              pure
+                [ "checks/" ++ checkName ++ "/default.nix: unsupported check template " ++ matchedCheckDefaultNixTemplateName
+                ]
+            Just checkDefaultNixTemplateSpec ->
+              compareCheckDefaultNixWithTemplate
+                checkDefaultNixPath
+                (checkDefaultNixTemplateBaselineSource checkDefaultNixTemplateSpec)
 detectPackageKindForPackage :: FilePath -> IO PackageKind
 detectPackageKindForPackage packageName = do
   let packageRootDirectory = "packages" </> packageName
@@ -1320,25 +1503,54 @@ lookupCabalField cabalField cabalContents =
         fieldValue <- T.stripPrefix fieldPrefix matchingLine
         pure (T.strip fieldValue)
 comparePackageDefaultNixWithTemplate :: FilePath -> FilePath -> FilePath -> Set.Set T.Text -> Maybe T.Text -> IO [String]
-comparePackageDefaultNixWithTemplate packageName packageDefaultNixPath templateDefaultNixPath allowedNixDifferenceKeys maybeTemplateDefaultNixSourceOverride = do
-  packageDefaultNixParseResult <- parseNixExprFromFile packageDefaultNixPath
+comparePackageDefaultNixWithTemplate _packageName =
+  compareNixFileWithTemplate
+compareCheckDefaultNixWithTemplate :: FilePath -> T.Text -> IO [String]
+compareCheckDefaultNixWithTemplate checkDefaultNixPath templateDefaultNixSource = do
+  checkDefaultNixSource <- TIO.readFile checkDefaultNixPath
+  let normalizedCheckDefaultNix = T.strip checkDefaultNixSource
+      normalizedTemplateDefaultNix = T.strip templateDefaultNixSource
+  pure $
+    if normalizedCheckDefaultNix == normalizedTemplateDefaultNix
+      then []
+      else
+        let checkDefaultNixLines = T.lines normalizedCheckDefaultNix
+            templateDefaultNixLines = T.lines normalizedTemplateDefaultNix
+            mismatchDetails =
+              case firstMismatchedLine checkDefaultNixLines templateDefaultNixLines of
+                Just (lineNumber, actualLine, expectedLine) ->
+                  [ "  - changed line " ++ show lineNumber,
+                    "    expected: " ++ truncateDiagnosticValue (T.unpack expectedLine),
+                    "    actual:   " ++ truncateDiagnosticValue (T.unpack actualLine)
+                  ]
+                Nothing ->
+                  [ "  - expected normalized form: " ++ truncateDiagnosticValue (compactTextToSingleLine normalizedTemplateDefaultNix),
+                    "  - actual normalized form:   " ++ truncateDiagnosticValue (compactTextToSingleLine normalizedCheckDefaultNix)
+                  ]
+         in [ checkDefaultNixPath
+                ++ ": differs from embedded check template\n"
+                ++ intercalate "\n" mismatchDetails
+            ]
+compareNixFileWithTemplate :: FilePath -> FilePath -> Set.Set T.Text -> Maybe T.Text -> IO [String]
+compareNixFileWithTemplate subjectNixPath templateDefaultNixPath allowedNixDifferenceKeys maybeTemplateDefaultNixSourceOverride = do
+  subjectNixParseResult <- parseNixExprFromFile subjectNixPath
   templateDefaultNixParseResult <-
     case maybeTemplateDefaultNixSourceOverride of
       Just templateDefaultNixSource -> parseNixExprFromText templateDefaultNixSource
       Nothing -> parseNixExprFromFile templateDefaultNixPath
-  case (packageDefaultNixParseResult, templateDefaultNixParseResult) of
+  case (subjectNixParseResult, templateDefaultNixParseResult) of
     (Left parseError, _) ->
-      pure ["packages/" ++ packageName ++ "/default.nix: parse error: " ++ show parseError]
+      pure [subjectNixPath ++ ": parse error: " ++ show parseError]
     (_, Left parseError) ->
       pure [templateDefaultNixPath ++ ": parse error: " ++ show parseError]
-    (Right packageDefaultNixExpr, Right templateDefaultNixExpr) ->
-      let normalizedPackageDefaultNixExpr = normalizeNixExpr allowedNixDifferenceKeys packageDefaultNixExpr
+    (Right subjectNixExpr, Right templateDefaultNixExpr) ->
+      let normalizedSubjectNixExpr = normalizeNixExpr allowedNixDifferenceKeys subjectNixExpr
           normalizedTemplateDefaultNixExpr = normalizeNixExpr allowedNixDifferenceKeys templateDefaultNixExpr
        in pure $
-            formatDefaultNixTemplateDifferences
-              packageName
+            formatNixTemplateDifferences
+              subjectNixPath
               templateDefaultNixPath
-              normalizedPackageDefaultNixExpr
+              normalizedSubjectNixExpr
               normalizedTemplateDefaultNixExpr
 parseNixExprFromText :: T.Text -> IO (Either String NExprLoc)
 parseNixExprFromText nixSource = do
@@ -1360,6 +1572,12 @@ inferDefaultNixTemplateName packageName nixSource = do
     matched <- defaultNixTemplateMatches defaultNixTemplateSpec packageName nixSource
     pure (if matched then Just (defaultNixTemplateName defaultNixTemplateSpec) else Nothing)
   pure (listToMaybe (catMaybes maybeMatchedDefaultNixTemplateNames))
+inferCheckDefaultNixTemplateName :: FilePath -> String -> IO (Maybe FilePath)
+inferCheckDefaultNixTemplateName checkName nixSource = do
+  maybeMatchedCheckDefaultNixTemplateNames <- forM checkDefaultNixTemplateSpecs $ \checkDefaultNixTemplateSpec -> do
+    matched <- checkDefaultNixTemplateMatches checkDefaultNixTemplateSpec checkName nixSource
+    pure (if matched then Just (checkDefaultNixTemplateName checkDefaultNixTemplateSpec) else Nothing)
+  pure (listToMaybe (catMaybes maybeMatchedCheckDefaultNixTemplateNames))
 normalizeNixExpr :: Set.Set T.Text -> NExprLoc -> NExprLoc
 normalizeNixExpr allowedNixDifferenceKeys (Fix (Compose (AnnUnit nixExprSpan expressionFunctor))) =
   let rebuiltExpressionFunctor = case expressionFunctor of
@@ -1397,15 +1615,18 @@ renderNixExpr =
     . prettyNix
     . stripAnnotation
 formatDefaultNixTemplateDifferences :: FilePath -> FilePath -> NExprLoc -> NExprLoc -> [String]
-formatDefaultNixTemplateDifferences packageName templateDefaultNixPath packageDefaultNixExpr templateDefaultNixExpr =
-  let renderedPackageDefaultNix = renderNixExpr packageDefaultNixExpr
+formatDefaultNixTemplateDifferences packageName =
+  formatNixTemplateDifferences ("packages/" ++ packageName ++ "/default.nix")
+formatNixTemplateDifferences :: FilePath -> FilePath -> NExprLoc -> NExprLoc -> [String]
+formatNixTemplateDifferences subjectNixPath templateDefaultNixPath subjectNixExpr templateDefaultNixExpr =
+  let renderedPackageDefaultNix = renderNixExpr subjectNixExpr
       renderedTemplateDefaultNix = renderNixExpr templateDefaultNixExpr
    in if renderedPackageDefaultNix == renderedTemplateDefaultNix
         then []
         else
-          let packageLetBindingMap = fromMaybe Map.empty (extractOutermostLetBindings packageDefaultNixExpr)
+          let packageLetBindingMap = fromMaybe Map.empty (extractOutermostLetBindings subjectNixExpr)
               templateLetBindingMap = fromMaybe Map.empty (extractOutermostLetBindings templateDefaultNixExpr)
-              packagePrimaryBindingMap = fromMaybe Map.empty (extractPrimaryNixBindings packageDefaultNixExpr)
+              packagePrimaryBindingMap = fromMaybe Map.empty (extractPrimaryNixBindings subjectNixExpr)
               templatePrimaryBindingMap = fromMaybe Map.empty (extractPrimaryNixBindings templateDefaultNixExpr)
               letBindingDifferenceLines =
                 if Map.null packageLetBindingMap && Map.null templateLetBindingMap
@@ -1423,9 +1644,8 @@ formatDefaultNixTemplateDifferences packageName templateDefaultNixPath packageDe
                       "  - actual normalized form:   " ++ truncateDiagnosticValue (compactTextToSingleLine renderedPackageDefaultNix)
                     ]
                   else differenceDetailLines
-           in [ "packages/"
-                  ++ packageName
-                  ++ "/default.nix: differs from template "
+           in [ subjectNixPath
+                  ++ ": differs from template "
                   ++ templateDefaultNixPath
                   ++ " (excluding dependency keys)\n"
                   ++ intercalate "\n" renderedDifferenceDetailLines
@@ -1469,6 +1689,13 @@ truncateDiagnosticValue textValue =
    in if length textValue <= maxDiagnosticLength
         then textValue
         else take maxDiagnosticLength textValue ++ "..."
+firstMismatchedLine :: [T.Text] -> [T.Text] -> Maybe (Int, T.Text, T.Text)
+firstMismatchedLine actualLines expectedLines =
+  listToMaybe
+    [ (lineNumber, actualLine, expectedLine)
+    | (lineNumber, (actualLine, expectedLine)) <- zip [1 ..] (zip actualLines expectedLines),
+      actualLine /= expectedLine
+    ]
 extractPrimaryNixBindings :: NExprLoc -> Maybe (Map.Map T.Text T.Text)
 extractPrimaryNixBindings nixExpression = do
   bindingGroups <- collectNixSetBindingGroups nixExpression
@@ -1652,6 +1879,24 @@ hUnitDebugTests =
         assertEqual
           "Returns no template for unknown input."
           Nothing
+          inferred,
+      TestCase $ do
+        inferred <- inferCheckDefaultNixTemplateName "python_template_coverage" (T.unpack pythonCoverageCheckBaselineNixSource)
+        assertEqual
+          "Infers the Python coverage check template."
+          (Just "python_coverage_check")
+          inferred,
+      TestCase $ do
+        inferred <- inferCheckDefaultNixTemplateName "canonicalization-profile" (T.unpack haskellProfileCheckBaselineNixSource)
+        assertEqual
+          "Infers the Haskell profile check template."
+          (Just "haskell_profile_check")
+          inferred,
+      TestCase $ do
+        inferred <- inferCheckDefaultNixTemplateName "remove-empty-lines-mutation-testing" (T.unpack rustMutationTestingCheckBaselineNixSource)
+        assertEqual
+          "Infers the Rust mutation-testing check template."
+          (Just "rust_mutation_testing_check")
           inferred,
       TestCase $ do
         assertEqual
@@ -2582,6 +2827,9 @@ pythonTemplateBaselineNixSource =
       "    fi",
       "  '';",
       "  meta.mainProgram = pname;",
+      "  passthru = {",
+      "    inherit python;",
+      "  };",
       "  pname = baseNameOf ./.;",
       "  pyproject = false;",
       "  shellHook = ''",
@@ -2689,6 +2937,9 @@ pythonLatexTemplateBaselineNixSource =
       "    chmod +x \"$out/bin/${pname}\"",
       "  '';",
       "  meta.mainProgram = pname;",
+      "  passthru = {",
+      "    inherit python;",
+      "  };",
       "  pname = baseNameOf ./.;",
       "  propagatedBuildInputs = pythonDeps;",
       "  pyproject = false;",
@@ -2696,6 +2947,441 @@ pythonLatexTemplateBaselineNixSource =
       "  strictDeps = true;",
       "  version = \"0.0.0\";",
       "}"
+    ]
+haskellCoverageCheckBaselineNixSource :: T.Text
+haskellCoverageCheckBaselineNixSource =
+  T.unlines
+    [ "{",
+      "  pkgs,",
+      "  ...",
+      "}:",
+      "let",
+      "  checkName = builtins.baseNameOf ./.;",
+      "  packageName = pkgs.lib.removeSuffix \"-coverage\" checkName;",
+      "  packageDrv = import ../../packages/${packageName}/default.nix { inherit pkgs; };",
+      "  debugGhc = pkgs.haskellPackages.ghcWithPackages (_: packageDrv.passthru.haskellExecutableDepends);",
+      "in",
+      "pkgs.runCommand \"${checkName}\"",
+      "  {",
+      "    nativeBuildInputs = [",
+      "      debugGhc",
+      "      pkgs.coreutils",
+      "    ];",
+      "    src = ../../packages/${packageName};",
+      "  }",
+      "  ''",
+      "    coverage_dir=\"$PWD/coverage\"",
+      "    hpcdir=\"$PWD/hpc\"",
+      "    export HOME=\"$PWD\"",
+      "    packageName=\"${packageName}\"",
+      "    rm -rf \"$coverage_dir\" \"$hpcdir\"",
+      "    mkdir -p \"$coverage_dir/html\" \"$hpcdir\"",
+      "    \"${debugGhc}/bin/ghc\" \\",
+      "      -fhpc \\",
+      "      -hpcdir \"$hpcdir\" \\",
+      "      -outputdir \"$PWD\" \\",
+      "      -odir \"$PWD\" \\",
+      "      -hidir \"$PWD\" \\",
+      "      -o \"$PWD/$packageName\" \\",
+      "      \"$src/Main.hs\"",
+      "    HPCTIXFILE=\"$coverage_dir/$packageName.tix\" DEBUG=1 \"$PWD/$packageName\"",
+      "    \"${debugGhc}/bin/hpc\" markup \"$coverage_dir/$packageName.tix\" \\",
+      "      --hpcdir=\"$hpcdir\" \\",
+      "      --destdir=\"$coverage_dir/html\"",
+      "    \"${debugGhc}/bin/hpc\" report \"$coverage_dir/$packageName.tix\" \\",
+      "      --hpcdir=\"$hpcdir\" | tee \"$coverage_dir/summary.txt\"",
+      "    touch \"$out\"",
+      "  ''"
+    ]
+haskellProfileCheckBaselineNixSource :: T.Text
+haskellProfileCheckBaselineNixSource =
+  T.unlines
+    [ "{",
+      "  pkgs,",
+      "  ...",
+      "}:",
+      "let",
+      "  checkName = builtins.baseNameOf ./.;",
+      "  packageName = pkgs.lib.removeSuffix \"-profile\" checkName;",
+      "  packageDrv = import ../../packages/${packageName}/default.nix { inherit pkgs; };",
+      "  profileGhc = pkgs.haskellPackages.ghcWithPackages (_: packageDrv.passthru.haskellExecutableDepends);",
+      "in",
+      "pkgs.runCommand \"${checkName}\"",
+      "  {",
+      "    nativeBuildInputs = [",
+      "      pkgs.coreutils",
+      "      profileGhc",
+      "    ];",
+      "    src = ../../packages/${packageName};",
+      "  }",
+      "  ''",
+      "    export HOME=\"$PWD\"",
+      "    workspace=\"$PWD/workspace\"",
+      "    packageName=\"${packageName}\"",
+      "    rm -rf \"$workspace\"",
+      "    mkdir -p \"$workspace\"",
+      "    cd \"$workspace\"",
+      "    \"${profileGhc}/bin/ghc\" \\",
+      "      -prof \\",
+      "      -fprof-auto \\",
+      "      -rtsopts \\",
+      "      -O2 \\",
+      "      -outputdir \"$PWD\" \\",
+      "      -odir \"$PWD\" \\",
+      "      -hidir \"$PWD\" \\",
+      "      -o \"$PWD/$packageName\" \\",
+      "      \"$src/Main.hs\"",
+      "    DEBUG=1 \"$PWD/$packageName\" +RTS -p -RTS",
+      "    cat \"$PWD/$packageName.prof\"",
+      "    touch \"$out\"",
+      "  ''"
+    ]
+haskellPropertyTestingCheckBaselineNixSource :: T.Text
+haskellPropertyTestingCheckBaselineNixSource =
+  T.unlines
+    [ "{",
+      "  pkgs,",
+      "  ...",
+      "}:",
+      "let",
+      "  checkName = builtins.baseNameOf ./.;",
+      "  packageName = pkgs.lib.removeSuffix \"-property-testing\" checkName;",
+      "  packageDrv = import ../../packages/${packageName}/default.nix { inherit pkgs; };",
+      "  debugGhc = pkgs.haskellPackages.ghcWithPackages (_: packageDrv.passthru.haskellExecutableDepends);",
+      "in",
+      "pkgs.runCommand \"${checkName}\"",
+      "  {",
+      "    nativeBuildInputs = [",
+      "      debugGhc",
+      "    ];",
+      "    src = ../../packages/${packageName};",
+      "  }",
+      "  ''",
+      "    export HOME=\"$PWD\"",
+      "    packageName=\"${packageName}\"",
+      "    \"${debugGhc}/bin/ghc\" \\",
+      "      -O2 \\",
+      "      -outputdir \"$PWD\" \\",
+      "      -odir \"$PWD\" \\",
+      "      -hidir \"$PWD\" \\",
+      "      -o \"$PWD/$packageName\" \\",
+      "      \"$src/Main.hs\"",
+      "    DEBUG=1 PROPERTY_TESTS=1 \"$PWD/$packageName\"",
+      "    touch \"$out\"",
+      "  ''"
+    ]
+pythonCoverageCheckBaselineNixSource :: T.Text
+pythonCoverageCheckBaselineNixSource =
+  T.unlines
+    [ "{",
+      "  inputs,",
+      "  pkgs,",
+      "  ...",
+      "}:",
+      "let",
+      "  checkName = builtins.baseNameOf ./.;",
+      "  packageName = pkgs.lib.removeSuffix \"_coverage\" checkName;",
+      "  packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${packageName};",
+      "  packagePythonDeps = packageDrv.propagatedBuildInputs or [ ];",
+      "  python = packageDrv.python or pkgs.python3;",
+      "  pythonEnv = python.withPackages (",
+      "    _: pkgs.lib.unique (packagePythonDeps ++ [ python.pkgs.coverage ])",
+      "  );",
+      "in",
+      "pkgs.runCommand \"${checkName}\"",
+      "  {",
+      "    nativeBuildInputs = [",
+      "      pkgs.coreutils",
+      "      pythonEnv",
+      "    ];",
+      "    src = ../../packages/${packageName};",
+      "  }",
+      "  ''",
+      "    export HOME=\"$(mktemp -d)\"",
+      "    coverage_dir=\"$PWD/coverage\"",
+      "    mkdir -p \"$coverage_dir\"",
+      "    DEBUG=1 PYTHONWARNINGS=error coverage run --source=\"$src\" \"$src/main.py\"",
+      "    coverage report | tee \"$coverage_dir/summary.txt\"",
+      "    coverage html -d \"$coverage_dir/html\"",
+      "    touch \"$out\"",
+      "  ''"
+    ]
+pythonProfileCheckBaselineNixSource :: T.Text
+pythonProfileCheckBaselineNixSource =
+  T.unlines
+    [ "{",
+      "  inputs,",
+      "  pkgs,",
+      "  ...",
+      "}:",
+      "let",
+      "  checkName = builtins.baseNameOf ./.;",
+      "  packageName = pkgs.lib.removeSuffix \"_profile\" checkName;",
+      "  packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${packageName};",
+      "  packagePythonDeps = packageDrv.propagatedBuildInputs or [ ];",
+      "  python = packageDrv.python or pkgs.python3;",
+      "  pythonEnv = python.withPackages (",
+      "    _: pkgs.lib.unique (packagePythonDeps ++ [ python.pkgs.pyinstrument ])",
+      "  );",
+      "in",
+      "pkgs.runCommand \"${checkName}\"",
+      "  {",
+      "    nativeBuildInputs = [",
+      "      pkgs.coreutils",
+      "      pythonEnv",
+      "    ];",
+      "    src = ../../packages/${packageName};",
+      "  }",
+      "  ''",
+      "    export HOME=\"$(mktemp -d)\"",
+      "    DEBUG=1 PYTHONWARNINGS=error pyinstrument \"$src/main.py\"",
+      "    touch \"$out\"",
+      "  ''"
+    ]
+pythonPropertyTestingCheckBaselineNixSource :: T.Text
+pythonPropertyTestingCheckBaselineNixSource =
+  T.unlines
+    [ "{",
+      "  inputs,",
+      "  pkgs,",
+      "  ...",
+      "}:",
+      "let",
+      "  checkName = builtins.baseNameOf ./.;",
+      "  packageName = pkgs.lib.removeSuffix \"_property_testing\" checkName;",
+      "  packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${packageName};",
+      "  packagePythonDeps = packageDrv.propagatedBuildInputs or [ ];",
+      "  python = packageDrv.python or pkgs.python3;",
+      "  pythonEnv = python.withPackages (",
+      "    _: pkgs.lib.unique (packagePythonDeps ++ [ python.pkgs.hypothesis ])",
+      "  );",
+      "in",
+      "pkgs.runCommand \"${checkName}\"",
+      "  {",
+      "    nativeBuildInputs = [",
+      "      pkgs.coreutils",
+      "      pythonEnv",
+      "    ];",
+      "    src = ../../packages/${packageName};",
+      "  }",
+      "  ''",
+      "    export HOME=\"$(mktemp -d)\"",
+      "    export PYTHONWARNINGS=error",
+      "    PYTHONPATH=\"$src\" python -m unittest -v main.PropertyTests",
+      "    touch \"$out\"",
+      "  ''"
+    ]
+rustCoverageCheckBaselineNixSource :: T.Text
+rustCoverageCheckBaselineNixSource =
+  T.unlines
+    [ "{",
+      "  inputs,",
+      "  pkgs,",
+      "  ...",
+      "}:",
+      "let",
+      "  checkName = builtins.baseNameOf ./.;",
+      "  packageName = pkgs.lib.removeSuffix \"-coverage\" checkName;",
+      "  inherit (inputs.self.packages.${pkgs.stdenv.system}.${packageName}) cargoDeps;",
+      "  rustBaseInputs =",
+      "    inputs.self.packages.${pkgs.stdenv.system}.${packageName}.passthru.rustCheckNativeBuildInputs;",
+      "in",
+      "pkgs.runCommand \"${checkName}\"",
+      "  {",
+      "    nativeBuildInputs = rustBaseInputs ++ [",
+      "      pkgs.cargo-llvm-cov",
+      "      pkgs.llvmPackages.llvm",
+      "    ];",
+      "    src = ../../packages/${packageName};",
+      "  }",
+      "  ''",
+      "    export LLVM_COV='${pkgs.lib.getExe' pkgs.llvmPackages.llvm \"llvm-cov\"}'",
+      "    export LLVM_PROFDATA='${pkgs.lib.getExe' pkgs.llvmPackages.llvm \"llvm-profdata\"}'",
+      "    cp -R --no-preserve=mode \"$src\" \"$PWD/workspace\"",
+      "    install -Dm644 \"${cargoDeps}/.cargo/config.toml\" \"$PWD/workspace/.cargo/config.toml\"",
+      "    substituteInPlace \"$PWD/workspace/.cargo/config.toml\" \\",
+      "      --replace-fail \"@vendor@\" \"${cargoDeps}\"",
+      "    cd \"$PWD/workspace\"",
+      "    cargo llvm-cov",
+      "    touch \"$out\"",
+      "  ''"
+    ]
+rustMutationTestingCheckBaselineNixSource :: T.Text
+rustMutationTestingCheckBaselineNixSource =
+  T.unlines
+    [ "{",
+      "  inputs,",
+      "  pkgs,",
+      "  ...",
+      "}:",
+      "let",
+      "  checkName = builtins.baseNameOf ./.;",
+      "  packageName = pkgs.lib.removeSuffix \"-mutation-testing\" checkName;",
+      "  inherit (inputs.self.packages.${pkgs.stdenv.system}.${packageName}) cargoDeps;",
+      "  rustBaseInputs =",
+      "    inputs.self.packages.${pkgs.stdenv.system}.${packageName}.passthru.rustCheckNativeBuildInputs;",
+      "in",
+      "pkgs.runCommand \"${checkName}\"",
+      "  {",
+      "    nativeBuildInputs = rustBaseInputs ++ [",
+      "      pkgs.cargo-mutants",
+      "    ];",
+      "    src = ../../packages/${packageName};",
+      "  }",
+      "  ''",
+      "    cp -R --no-preserve=mode \"$src\" \"$PWD/workspace\"",
+      "    install -Dm644 \"${cargoDeps}/.cargo/config.toml\" \"$PWD/workspace/.cargo/config.toml\"",
+      "    substituteInPlace \"$PWD/workspace/.cargo/config.toml\" \\",
+      "      --replace-fail \"@vendor@\" \"${cargoDeps}\"",
+      "    cd \"$PWD/workspace\"",
+      "    cargo mutants || mutation_status=$?",
+      "    if [ \"''${mutation_status:-0}\" != 0 ] && [ \"''${mutation_status:-0}\" != 2 ]; then",
+      "      exit \"$mutation_status\"",
+      "    fi",
+      "    touch \"$out\"",
+      "  ''"
+    ]
+rustProfileCheckBaselineNixSource :: T.Text
+rustProfileCheckBaselineNixSource =
+  T.unlines
+    [ "{",
+      "  inputs,",
+      "  pkgs,",
+      "  ...",
+      "}:",
+      "let",
+      "  checkName = builtins.baseNameOf ./.;",
+      "  packageName = pkgs.lib.removeSuffix \"-profile\" checkName;",
+      "in",
+      "pkgs.runCommand \"${checkName}\"",
+      "  {",
+      "    nativeBuildInputs = [",
+      "      pkgs.perf",
+      "      inputs.self.packages.${pkgs.stdenv.system}.${packageName}",
+      "    ];",
+      "    src = ../../packages/${packageName};",
+      "  }",
+      "  ''",
+      "    temp_dir=\"$PWD/workspace\"",
+      "    mkdir -p \"$temp_dir\"",
+      "    printf 'line1\\n\\nline2\\n' > \"$temp_dir/test.txt\"",
+      "    run_cmd() {",
+      "      remove-empty-lines \"$temp_dir\"",
+      "    }",
+      "    if perf stat -e cpu-clock true >/dev/null 2>&1; then",
+      "      perf record --no-buildid-mmap --call-graph dwarf -e cpu-clock -o perf.data -- \\",
+      "        run_cmd",
+      "      perf report --stdio -i perf.data",
+      "    else",
+      "      echo \"perf is unavailable in this environment; running without profiling.\"",
+      "      run_cmd",
+      "    fi",
+      "    touch \"$out\"",
+      "  ''"
+    ]
+rustPropertyTestingCheckBaselineNixSource :: T.Text
+rustPropertyTestingCheckBaselineNixSource =
+  T.unlines
+    [ "{",
+      "  inputs,",
+      "  pkgs,",
+      "  ...",
+      "}:",
+      "let",
+      "  checkName = builtins.baseNameOf ./.;",
+      "  packageName = pkgs.lib.removeSuffix \"-property-testing\" checkName;",
+      "  inherit (inputs.self.packages.${pkgs.stdenv.system}.${packageName}) cargoDeps;",
+      "  rustBaseInputs =",
+      "    inputs.self.packages.${pkgs.stdenv.system}.${packageName}.passthru.rustCheckNativeBuildInputs;",
+      "in",
+      "pkgs.runCommand \"${checkName}\"",
+      "  {",
+      "    nativeBuildInputs = rustBaseInputs;",
+      "    src = ../../packages/${packageName};",
+      "  }",
+      "  ''",
+      "    cp -R --no-preserve=mode \"$src\" \"$PWD/workspace\"",
+      "    install -Dm644 \"${cargoDeps}/.cargo/config.toml\" \"$PWD/workspace/.cargo/config.toml\"",
+      "    substituteInPlace \"$PWD/workspace/.cargo/config.toml\" \\",
+      "      --replace-fail \"@vendor@\" \"${cargoDeps}\"",
+      "    cd \"$PWD/workspace\"",
+      "    cargo test --locked",
+      "    touch \"$out\"",
+      "  ''"
+    ]
+htmlTemplateCheckBaselineNixSource :: T.Text
+htmlTemplateCheckBaselineNixSource =
+  T.unlines
+    [ "{",
+      "  inputs,",
+      "  pkgs,",
+      "  ...",
+      "}:",
+      "pkgs.testers.runNixOSTest rec {",
+      "  name = builtins.baseNameOf ./.;",
+      "  nodes.machine.environment.systemPackages = [",
+      "    inputs.self.packages.${pkgs.stdenv.system}.${name}",
+      "    pkgs.curl",
+      "  ];",
+      "  testScript = ''",
+      "    machine.succeed(\"${name} -p 8080 >/tmp/${name}.log 2>&1 &\")",
+      "    machine.wait_until_succeeds(\"curl -fsS http://127.0.0.1:8080 | grep -F 'Hello World!'\")",
+      "  '';",
+      "}"
+    ]
+cTemplateCheckBaselineNixSource :: T.Text
+cTemplateCheckBaselineNixSource =
+  T.unlines
+    [ "{",
+      "  inputs,",
+      "  pkgs,",
+      "  ...",
+      "}:",
+      "pkgs.testers.runNixOSTest rec {",
+      "  name = builtins.baseNameOf ./.;",
+      "  nodes.machine =",
+      "    {",
+      "      pkgs,",
+      "      ...",
+      "    }:",
+      "    let",
+      "      cTemplateForCheck = inputs.self.packages.${pkgs.stdenv.system}.${name}.overrideAttrs (_: {",
+      "        NIX_CFLAGS_COMPILE = \"-O1 -g3 -fno-omit-frame-pointer -fno-sanitize-recover=all -fsanitize=address,undefined\";",
+      "      });",
+      "    in",
+      "    {",
+      "      environment = {",
+      "        systemPackages = [",
+      "          cTemplateForCheck",
+      "        ];",
+      "        variables = {",
+      "          ASAN_OPTIONS = \"abort_on_error=1:strict_string_checks=1:detect_stack_use_after_return=1:check_printf=1:allocator_may_return_null=0\";",
+      "          UBSAN_OPTIONS = \"halt_on_error=1:print_stacktrace=1:report_error_type=1\";",
+      "        };",
+      "      };",
+      "    };",
+      "  testScript = ''",
+      "    machine.succeed(\"DEBUG=1 ${name}\")",
+      "  '';",
+      "}"
+    ]
+hostDefaultCheckBaselineNixSource :: T.Text
+hostDefaultCheckBaselineNixSource =
+  T.unlines
+    [ "{",
+      "  inputs,",
+      "  pkgs,",
+      "  ...",
+      "}:",
+      "pkgs.runCommand \"host_default\"",
+      "  {",
+      "    nativeBuildInputs = [",
+      "      inputs.self.nixosConfigurations.default.config.system.build.vm",
+      "    ];",
+      "  }",
+      "  ''",
+      "    touch \"$out\"",
+      "  ''"
     ]
 uncommentTemplateBaselineNixSource :: T.Text
 uncommentTemplateBaselineNixSource =
