@@ -20,9 +20,7 @@ let
         pkgs.stdenv.cc
       ]
     }:$PATH"
-    find packages -name Cargo.toml -execdir cargo clippy --fix --allow-dirty --allow-staged \
-      --all-targets --all-features -- \
-      -D warnings -D clippy::all -D clippy::pedantic -D clippy::nursery -D clippy::cargo \;
+    find packages -name Cargo.toml -execdir cargo clippy --fix --allow-dirty --allow-staged --all-targets --all-features -- -D warnings -D clippy::all -D clippy::pedantic -D clippy::nursery -D clippy::cargo -D clippy::restriction \;
   '';
   formatter = treefmtEval.config.build.wrapper;
   treefmtEval = inputs.treefmt-nix.lib.evalModule pkgs {

@@ -1,8 +1,8 @@
 #![allow(clippy::multiple_crate_versions)]
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use ignore::WalkBuilder;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::Path;
 fn main() -> Result<()> {
     let input_paths: Vec<String> = std::env::args().skip(1).collect();
@@ -66,9 +66,9 @@ mod tests {
         fn arbitrary(g: &mut Gen) -> Self {
             let line = String::arbitrary(g)
                 .chars()
-                .filter(|character| *character != '\n' && *character != '\r')
+                .filter(|character| return *character != '\n' && *character != '\r')
                 .collect();
-            Self(line)
+            return Self(line);
         }
     }
     fn render_lines(lines: &[LogicalLine]) -> Vec<u8> {
@@ -77,7 +77,7 @@ mod tests {
             rendered.extend_from_slice(line.0.as_bytes());
             rendered.push(b'\n');
         }
-        rendered
+        return rendered;
     }
     fn expected_non_empty_lines(lines: &[LogicalLine]) -> Vec<u8> {
         let mut rendered = Vec::new();
@@ -87,7 +87,7 @@ mod tests {
                 rendered.push(b'\n');
             }
         }
-        rendered
+        return rendered;
     }
     #[test]
     fn test_process_root_path_removes_empty_lines_from_text_files() -> Result<()> {
@@ -99,7 +99,7 @@ mod tests {
         process_root_path(root);
         let content1 = fs::read_to_string(&file1_path)?;
         assert_eq!(content1, "line1\nline2\nline3\n");
-        Ok(())
+        return Ok(());
     }
     #[test]
     fn test_process_root_path_respects_gitignore_and_skips_binary_files() -> Result<()> {
@@ -117,7 +117,7 @@ mod tests {
         assert_eq!(content_ignored, "should be ignored\n\n");
         let content_binary = fs::read(&binary_path)?;
         assert_eq!(content_binary, vec![0, 15, 255, 0, 1, 2, 3]);
-        Ok(())
+        return Ok(());
     }
     #[test]
     fn test_main_processes_current_directory_when_no_args() -> Result<()> {
@@ -133,15 +133,19 @@ mod tests {
         result?;
         let content = fs::read_to_string(&file_path)?;
         assert_eq!(content, "line1\nline2\n");
-        Ok(())
+        return Ok(());
     }
     #[test]
     fn quickcheck_strip_empty_lines_matches_filtered_sequence() {
         fn property(lines: Vec<LogicalLine>) -> TestResult {
             let input = render_lines(&lines);
             match strip_empty_lines_from_bytes(&input) {
-                Ok(actual) => TestResult::from_bool(actual == expected_non_empty_lines(&lines)),
-                Err(_) => TestResult::error("strip_empty_lines_from_bytes returned an error"),
+                Ok(actual) => {
+                    return TestResult::from_bool(actual == expected_non_empty_lines(&lines));
+                }
+                Err(_) => {
+                    return TestResult::error("strip_empty_lines_from_bytes returned an error");
+                }
             }
         }
         QuickCheck::new()
@@ -154,12 +158,18 @@ mod tests {
             let input = render_lines(&lines);
             match strip_empty_lines_from_bytes(&input) {
                 Ok(first_pass) => match strip_empty_lines_from_bytes(&first_pass) {
-                    Ok(second_pass) => TestResult::from_bool(first_pass == second_pass),
+                    Ok(second_pass) => return TestResult::from_bool(first_pass == second_pass),
                     Err(_) => {
-                        TestResult::error("second strip_empty_lines_from_bytes returned an error")
+                        return TestResult::error(
+                            "second strip_empty_lines_from_bytes returned an error",
+                        );
                     }
                 },
-                Err(_) => TestResult::error("first strip_empty_lines_from_bytes returned an error"),
+                Err(_) => {
+                    return TestResult::error(
+                        "first strip_empty_lines_from_bytes returned an error",
+                    );
+                }
             }
         }
         QuickCheck::new()
