@@ -3,22 +3,31 @@
 }:
 let
   python = pkgs.python3;
-  pythonDeps = [
+  pythonEnv = python.withPackages (_: runtimePythonDeps);
+  pythonTestEnv = python.withPackages (
+    _:
+    runtimePythonDeps
+    ++ [
+      python.pkgs.hypothesis
+    ]
+  );
+  runtimePythonDeps = [
     python.pkgs.matplotlib
     python.pkgs.pandas
   ];
-  pythonEnv = python.withPackages (_: pythonDeps);
 in
 python.pkgs.buildPythonPackage rec {
   installCheckPhase = ''
     runHook preInstallCheck
     HOME="$(mktemp -d)"
-    DEBUG=1 "$out/bin/${pname}"
+    cd "$src"
+    ${pythonTestEnv}/bin/python -m unittest main.py
     runHook postInstallCheck
   '';
   installPhase = ''
     datadir="$out/share/${pname}"
     install -Dm644 main.py ms.tex ms.bib -t "$datadir"
+    install -Dm644 main.py $out/${python.sitePackages}/${pname}.py
     mkdir -p "$out/bin"
     cat > "$out/bin/${pname}" <<EOF
     #!${pkgs.bash}/bin/bash
@@ -35,7 +44,7 @@ python.pkgs.buildPythonPackage rec {
     inherit python;
   };
   pname = baseNameOf ./.;
-  propagatedBuildInputs = pythonDeps ++ [
+  propagatedBuildInputs = runtimePythonDeps ++ [
     python.pkgs.hypothesis
   ];
   pyproject = false;

@@ -7,7 +7,7 @@
 {-# LANGUAGE StandaloneKindSignatures #-}
 {-# LANGUAGE Trustworthy #-}
 {-# OPTIONS_GHC -Wno-missing-import-lists -Wno-unsafe #-}
-module Main (main) where
+module Main (main, runPackageTests) where
 import Control.Applicative ((<|>))
 import Control.Exception (finally)
 import Control.Monad (forM, forM_, unless, when)
@@ -40,7 +40,7 @@ import Nix.Utils (Path (Path))
 import Prettyprinter (defaultLayoutOptions, layoutPretty)
 import Prettyprinter.Render.Text (renderStrict)
 import System.Directory (canonicalizePath, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, doesPathExist, findExecutable, getCurrentDirectory, getHomeDirectory, listDirectory, removeFile, setCurrentDirectory)
-import System.Environment (getArgs, lookupEnv)
+import System.Environment (getArgs)
 import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitFailure)
 import System.FilePath ((<.>), (</>))
 import System.FilePath.Posix (splitDirectories, takeBaseName, takeDirectory, takeFileName)
@@ -319,7 +319,7 @@ matchesHaskellPropertyTestingCheck checkName nixSource =
   pure
     ( isJust (removeSuffix "-property-testing" checkName)
         && "ghcWithPackages" `isInfixOf` nixSource
-        && "PROPERTY_TESTS=1" `isInfixOf` nixSource
+        && "runPackageTests" `isInfixOf` nixSource
     )
 matchesPythonCoverageCheck :: FilePath -> String -> IO Bool
 matchesPythonCoverageCheck checkName nixSource =
@@ -400,11 +400,8 @@ data PackageCheck = PackageCheck
   }
 main :: IO ()
 main = do
-  debugMode <- lookupEnv "DEBUG"
   commandLineArgs <- getArgs
-  case debugMode of
-    Just "1" -> runDebugTests
-    _ -> runCli commandLineArgs
+  runCli commandLineArgs
 runCli :: [String] -> IO ()
 runCli commandLineArgs =
   case commandLineArgs of
@@ -1093,9 +1090,9 @@ checkPackage allRepositoryStructureIssues packageName = do
   cargoTomlIssues <- checkCargoToml packageName
   cabalFileIssues <- checkCabalFile packageName
   defaultNixConventionIssues <- checkDefaultNixConventions packageName packageKind
-  pythonDebugTestIssues <- checkPythonDebugTests packageName packageKind
-  haskellDebugTestIssues <- checkHaskellDebugTests packageName packageKind
-  rustDebugTestIssues <- checkRustDebugTests packageName packageKind
+  pythonTestConventionIssues <- checkPythonTestConventions packageName packageKind
+  haskellTestConventionIssues <- checkHaskellTestConventions packageName packageKind
+  rustTestConventionIssues <- checkRustTestConventions packageName packageKind
   pythonUnitTestNames <- discoverPythonUnitTestNames packageName packageKind
   haskellUnitTestNames <- discoverHaskellUnitTestNames packageName packageKind
   rustUnitTestNames <- discoverRustUnitTestNames packageName packageKind
@@ -1118,9 +1115,9 @@ checkPackage allRepositoryStructureIssues packageName = do
         if packageDefaultNixExists && null defaultNixIssues
           then CheckPassed
           else CheckFailed
-      pythonDebugTestOutcome = if packageKind `elem` [PythonPackage, PythonLatexPackage] then checkOutcomeFromIssues pythonDebugTestIssues else CheckSkipped
-      haskellDebugTestOutcome = if packageKind == HaskellPackage then checkOutcomeFromIssues haskellDebugTestIssues else CheckSkipped
-      rustDebugTestOutcome = if packageKind == RustPackage then checkOutcomeFromIssues rustDebugTestIssues else CheckSkipped
+      pythonTestConventionOutcome = if packageKind `elem` [PythonPackage, PythonLatexPackage] then checkOutcomeFromIssues pythonTestConventionIssues else CheckSkipped
+      haskellTestConventionOutcome = if packageKind == HaskellPackage then checkOutcomeFromIssues haskellTestConventionIssues else CheckSkipped
+      rustTestConventionOutcome = if packageKind == RustPackage then checkOutcomeFromIssues rustTestConventionIssues else CheckSkipped
       basePackageTests =
         [ PackageTest
             "directory structure"
@@ -1135,11 +1132,11 @@ checkPackage allRepositoryStructureIssues packageName = do
                 [ makePackageTest "Cargo.toml" cargoTomlOutcome "matches Cargo.toml conventions" cargoTomlIssues,
                   PackageTest
                     "src/main.rs"
-                    rustDebugTestOutcome
+                    rustTestConventionOutcome
                     ( makePackageTestCase
-                        "supports DEBUG test execution"
-                        rustDebugTestOutcome
-                        rustDebugTestIssues
+                        "defines Rust test cases"
+                        rustTestConventionOutcome
+                        rustTestConventionIssues
                         : [PackageTestCase rustUnitTestName CheckSkipped [] | rustUnitTestName <- rustUnitTestNames]
                     )
                 ]
@@ -1149,11 +1146,11 @@ checkPackage allRepositoryStructureIssues packageName = do
                 [ makePackageTest (packageName ++ ".cabal") cabalFileOutcome "matches Cabal conventions" cabalFileIssues,
                   PackageTest
                     "Main.hs"
-                    haskellDebugTestOutcome
+                    haskellTestConventionOutcome
                     ( makePackageTestCase
-                        "supports DEBUG test execution"
-                        haskellDebugTestOutcome
-                        haskellDebugTestIssues
+                        "defines HUnit test cases"
+                        haskellTestConventionOutcome
+                        haskellTestConventionIssues
                         : [ PackageTestCase
                               haskellUnitTestName
                               CheckSkipped
@@ -1165,11 +1162,11 @@ checkPackage allRepositoryStructureIssues packageName = do
               else [],
             [ PackageTest
                 "main.py"
-                pythonDebugTestOutcome
+                pythonTestConventionOutcome
                 ( makePackageTestCase
-                    "supports DEBUG test execution"
-                    pythonDebugTestOutcome
-                    pythonDebugTestIssues
+                    "defines unittest test cases"
+                    pythonTestConventionOutcome
+                    pythonTestConventionIssues
                     : [PackageTestCase pythonUnitTestName CheckSkipped [] | pythonUnitTestName <- pythonUnitTestNames]
                 )
             | packageKind `elem` [PythonPackage, PythonLatexPackage]
@@ -1191,9 +1188,9 @@ checkPackage allRepositoryStructureIssues packageName = do
           ++ defaultNixConventionIssues
           ++ cargoTomlIssues
           ++ cabalFileIssues
-          ++ pythonDebugTestIssues
-          ++ haskellDebugTestIssues
-          ++ rustDebugTestIssues
+          ++ pythonTestConventionIssues
+          ++ haskellTestConventionIssues
+          ++ rustTestConventionIssues
   pure
     PackageCheck
       { packageCheckName = packageName,
@@ -1298,8 +1295,8 @@ checkDefaultNixConventions packageName packageKind = do
                   then Just ("packages/" ++ packageName ++ "/default.nix: src = ./.; packages must use version = \"0.0.0\";")
                   else Nothing
               ]
-checkPythonDebugTests :: FilePath -> PackageKind -> IO [String]
-checkPythonDebugTests packageName packageKind =
+checkPythonTestConventions :: FilePath -> PackageKind -> IO [String]
+checkPythonTestConventions packageName packageKind =
   if packageKind `notElem` [PythonPackage, PythonLatexPackage]
     then pure []
     else do
@@ -1318,7 +1315,7 @@ checkPythonDebugTests packageName packageKind =
                     ++ "/main.py: missing Python interpreter (tried python3, python)"
                 ]
             Just pythonCommand -> do
-              (exitCode, validatorStdout, validatorStderr) <- readProcessWithExitCode pythonCommand ["-c", pythonDebugTestValidatorPythonSource, mainPythonPath] ""
+              (exitCode, validatorStdout, validatorStderr) <- readProcessWithExitCode pythonCommand ["-c", pythonUnittestValidatorPythonSource, mainPythonPath] ""
               let validatorOutputLines = lines validatorStdout
                   validatorErrorCodes = [drop 4 validatorOutputLine | validatorOutputLine <- validatorOutputLines, "ERR " `isPrefixOf` validatorOutputLine]
                   validatorErrorMessages = map (formatPythonValidatorError packageName) validatorErrorCodes
@@ -1366,8 +1363,8 @@ extractPythonUnitTestName sourceLine =
           let testFunctionName = takeWhile (\character -> character /= '(' && character /= ' ' && character /= ':') (drop 4 trimmedSourceLine)
            in if null testFunctionName then Nothing else Just testFunctionName
         else Nothing
-checkHaskellDebugTests :: FilePath -> PackageKind -> IO [String]
-checkHaskellDebugTests packageName packageKind =
+checkHaskellTestConventions :: FilePath -> PackageKind -> IO [String]
+checkHaskellTestConventions packageName packageKind =
   if packageKind /= HaskellPackage
     then pure []
     else do
@@ -1377,22 +1374,18 @@ checkHaskellDebugTests packageName packageKind =
         Nothing -> pure []
         Just mainHaskellSourceText -> do
           let haskellSource = T.unpack mainHaskellSourceText
-              hasDebugEnvironmentGate = "lookupEnv \"DEBUG\"" `isInfixOf` haskellSource
-              hasHUnitTestRunner = "runTestTT" `isInfixOf` haskellSource || "runDebugTests" `isInfixOf` haskellSource
-              hasDebugBranchInMain =
-                "Just \"1\" ->" `isInfixOf` haskellSource
-                  || "(Just \"1\", " `isInfixOf` haskellSource
+              hasHUnitTestRunner = "runTestTT" `isInfixOf` haskellSource
+              hasNamedTestSuite =
+                "hUnitDebugTests" `isInfixOf` haskellSource
+                  || "getAllFormattingTests" `isInfixOf` haskellSource
           pure $
             catMaybes
-              [ if hasDebugEnvironmentGate
+              [ if hasHUnitTestRunner
                   then Nothing
-                  else Just ("packages/" ++ packageName ++ "/Main.hs: missing DEBUG environment check (lookupEnv \"DEBUG\")"),
-                if hasDebugBranchInMain
+                  else Just ("packages/" ++ packageName ++ "/Main.hs: must run HUnit tests with runTestTT"),
+                if hasNamedTestSuite
                   then Nothing
-                  else Just ("packages/" ++ packageName ++ "/Main.hs: main() must branch on DEBUG=1"),
-                if hasHUnitTestRunner
-                  then Nothing
-                  else Just ("packages/" ++ packageName ++ "/Main.hs: DEBUG=1 branch must run HUnit tests (runTestTT)")
+                  else Just ("packages/" ++ packageName ++ "/Main.hs: missing discoverable HUnit test suite")
               ]
 discoverHaskellUnitTestNames :: FilePath -> PackageKind -> IO [String]
 discoverHaskellUnitTestNames packageName packageKind =
@@ -1503,26 +1496,19 @@ firstQuotedToken inputText =
              in if null token then Nothing else Just token
           _ -> Nothing
    in firstTokenAfter '"' <|> firstTokenAfter '\''
-checkRustDebugTests :: FilePath -> PackageKind -> IO [String]
-checkRustDebugTests packageName packageKind =
+checkRustTestConventions :: FilePath -> PackageKind -> IO [String]
+checkRustTestConventions packageName packageKind =
   if packageKind /= RustPackage
     then pure []
     else do
       let mainRustPath = "packages" </> packageName </> "src/main.rs"
-          packageDefaultNixPath = "packages" </> packageName </> "default.nix"
       mainRustFileExists <- doesFileExist mainRustPath
-      packageDefaultNixFileExists <- doesFileExist packageDefaultNixPath
       mainRustSource <-
         if mainRustFileExists
           then T.unpack <$> TIO.readFile mainRustPath
           else pure ""
-      packageDefaultNixSource <-
-        if packageDefaultNixFileExists
-          then T.unpack <$> TIO.readFile packageDefaultNixPath
-          else pure ""
       let hasRustTestModule = "#[cfg(test)]" `isInfixOf` mainRustSource && "mod tests" `isInfixOf` mainRustSource
           hasRustTestCases = "#[test]" `isInfixOf` mainRustSource
-          hasDebugGateInDefaultNix = "DEBUG" `isInfixOf` packageDefaultNixSource && "cargo test" `isInfixOf` packageDefaultNixSource
       pure $
         catMaybes
           [ if hasRustTestModule
@@ -1530,10 +1516,7 @@ checkRustDebugTests packageName packageKind =
               else Just ("packages/" ++ packageName ++ "/src/main.rs: missing #[cfg(test)] mod tests"),
             if hasRustTestCases
               then Nothing
-              else Just ("packages/" ++ packageName ++ "/src/main.rs: missing #[test] test cases"),
-            if hasDebugGateInDefaultNix
-              then Nothing
-              else Just ("packages/" ++ packageName ++ "/default.nix: DEBUG mode must run cargo test")
+              else Just ("packages/" ++ packageName ++ "/src/main.rs: missing #[test] test cases")
           ]
 discoverRustUnitTestNames :: FilePath -> PackageKind -> IO [String]
 discoverRustUnitTestNames packageName packageKind =
@@ -1567,89 +1550,28 @@ formatPythonValidatorError packageName errorCode =
   let messagePrefix = "packages/" ++ packageName ++ "/main.py: "
    in case errorCode of
         "missing_main_function" -> messagePrefix ++ "missing main() function"
-        "missing_debug_gate" -> messagePrefix ++ "main() must include a DEBUG gate"
-        "noncanonical_debug_gate" -> messagePrefix ++ "main() DEBUG gate must check DEBUG == \"1\""
-        "debug_branch_no_unittest" -> messagePrefix ++ "DEBUG branch in main() must run unittest"
-        "run_tests_missing_unittest" -> messagePrefix ++ "run_tests() is called from DEBUG branch but does not run unittest"
+        "missing_unittest_test_case" -> messagePrefix ++ "must define at least one unittest test case"
         "parse_error" -> messagePrefix ++ "python source could not be parsed"
         _ -> messagePrefix ++ "python validator failed with error code: " ++ errorCode
-pythonDebugTestValidatorPythonSource :: String
-pythonDebugTestValidatorPythonSource =
+pythonUnittestValidatorPythonSource :: String
+pythonUnittestValidatorPythonSource =
   unlines
     [ "import ast",
       "import sys",
       "",
-      "def _is_os_getenv_debug(node):",
-      "    if not isinstance(node, ast.Call):",
+      "def _is_unittest_test_case(node):",
+      "    if not isinstance(node, ast.ClassDef):",
       "        return False",
-      "    function = node.func",
-      "    if not isinstance(function, ast.Attribute):",
-      "        return False",
-      "    if isinstance(function.value, ast.Name) and function.value.id == 'os' and function.attr == 'getenv':",
-      "        if not node.args:",
-      "            return False",
-      "        first = node.args[0]",
-      "        return isinstance(first, ast.Constant) and first.value == 'DEBUG'",
-      "    if isinstance(function.value, ast.Attribute) and function.attr == 'get':",
-      "        environment_access = function.value",
-      "        if isinstance(environment_access.value, ast.Name) and environment_access.value.id == 'os' and environment_access.attr == 'environ':",
-      "            if not node.args:",
-      "                return False",
-      "            first = node.args[0]",
-      "            return isinstance(first, ast.Constant) and first.value == 'DEBUG'",
-      "    return False",
-      "",
-      "def _contains_debug_gate(expression):",
-      "    return any(_is_os_getenv_debug(node) for node in ast.walk(expression))",
-      "",
-      "def _contains_canonical_debug_gate(expression):",
-      "    for node in ast.walk(expression):",
-      "        if not isinstance(node, ast.Compare):",
-      "            continue",
-      "        if len(node.ops) != 1 or len(node.comparators) != 1:",
-      "            continue",
-      "        if not isinstance(node.ops[0], ast.Eq):",
-      "            continue",
-      "        if not _is_os_getenv_debug(node.left):",
-      "            continue",
-      "        comparator = node.comparators[0]",
-      "        if isinstance(comparator, ast.Constant) and comparator.value == '1':",
+      "    for base in node.bases:",
+      "        if isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name):",
+      "            if base.value.id == 'unittest' and base.attr == 'TestCase':",
+      "                return True",
+      "        if isinstance(base, ast.Name) and base.id == 'TestCase':",
       "            return True",
       "    return False",
       "",
-      "def _is_unittest_main_call(node):",
-      "    if not isinstance(node, ast.Call):",
-      "        return False",
-      "    function = node.func",
-      "    return isinstance(function, ast.Attribute) and isinstance(function.value, ast.Name) and function.value.id == 'unittest' and function.attr == 'main'",
-      "",
-      "def _contains_unittest_runner(statements):",
-      "    for statement in statements:",
-      "        for node in ast.walk(statement):",
-      "            if not isinstance(node, ast.Call):",
-      "                continue",
-      "            function = node.func",
-      "            if isinstance(function, ast.Attribute) and isinstance(function.value, ast.Name) and function.value.id == 'unittest':",
-      "                if function.attr in {'main', 'TextTestRunner', 'defaultTestLoader'}:",
-      "                    return True",
-      "    return False",
-      "",
-      "def _is_run_tests_call(node):",
-      "    return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'run_tests'",
-      "",
-      "def _branch_runs_unittest(branch_statements, functions):",
-      "    if _contains_unittest_runner(branch_statements):",
-      "        return True, False",
-      "    run_tests_called = False",
-      "    for statement in branch_statements:",
-      "        for node in ast.walk(statement):",
-      "            if _is_run_tests_call(node):",
-      "                run_tests_called = True",
-      "    if run_tests_called and 'run_tests' in functions:",
-      "        if _contains_unittest_runner(functions['run_tests'].body):",
-      "            return True, False",
-      "        return False, True",
-      "    return False, False",
+      "def _contains_test_method(class_node):",
+      "    return any(isinstance(node, ast.FunctionDef) and node.name.startswith('test_') for node in class_node.body)",
       "",
       "def main():",
       "    path = sys.argv[1]",
@@ -1668,27 +1590,9 @@ pythonDebugTestValidatorPythonSource =
       "    errors = []",
       "    if 'main' not in functions:",
       "        errors.append('missing_main_function')",
-      "    else:",
-      "        main_function = functions['main']",
-      "        debug_if_nodes = [node for node in ast.walk(main_function) if isinstance(node, ast.If) and _contains_debug_gate(node.test)]",
-      "        if not debug_if_nodes:",
-      "            errors.append('missing_debug_gate')",
-      "        else:",
-      "            if not any(_contains_canonical_debug_gate(node.test) for node in debug_if_nodes):",
-      "                errors.append('noncanonical_debug_gate')",
-      "            debug_branch_ok = False",
-      "            run_tests_invalid = False",
-      "            for if_node in debug_if_nodes:",
-      "                branch_ok, run_tests_missing = _branch_runs_unittest(if_node.body, functions)",
-      "                if branch_ok:",
-      "                    debug_branch_ok = True",
-      "                    break",
-      "                if run_tests_missing:",
-      "                    run_tests_invalid = True",
-      "            if not debug_branch_ok:",
-      "                if run_tests_invalid:",
-      "                    errors.append('run_tests_missing_unittest')",
-      "                errors.append('debug_branch_no_unittest')",
+      "    test_case_classes = [node for node in module.body if _is_unittest_test_case(node)]",
+      "    if not any(_contains_test_method(node) for node in test_case_classes):",
+      "        errors.append('missing_unittest_test_case')",
       "",
       "    if errors:",
       "        for err in errors:",
@@ -2135,8 +2039,8 @@ extractNamedNixBindings bindings =
   [ (T.intercalate "." (mapMaybe nixKeyNameText (NE.toList keyPath)), renderNixExpr bindingValue)
   | NamedVar keyPath bindingValue _ <- bindings
   ]
-runDebugTests :: IO ()
-runDebugTests = do
+runPackageTests :: IO ()
+runPackageTests = do
   hUnitCounts <- runTestTT hUnitDebugTests
   propertySuccess <- quickCheckDebugProperties
   if errors hUnitCounts == 0 && failures hUnitCounts == 0 && propertySuccess
@@ -2882,7 +2786,8 @@ legacyPythonTemplateNixFixture =
     ++ "  installCheckPhase = ''\n"
     ++ "    runHook preInstallCheck\n"
     ++ "    HOME=\"$(mktemp -d)\"\n"
-    ++ "    DEBUG=1 \"$out/bin/${pname}\"\n"
+    ++ "    export PYTHONPATH=\"$out/${python.sitePackages}${PYTHONPATH:+:$PYTHONPATH}\"\n"
+    ++ "    ${python.withPackages (_: [ pyPkgs.hypothesis ])}/bin/python -m unittest \"${pname}\"\n"
     ++ "    runHook postInstallCheck\n"
     ++ "  '';\n"
     ++ "  installPhase = ''\n"
@@ -3047,7 +2952,6 @@ pythonMainSource =
       "",
       "from __future__ import annotations",
       "",
-      "import os",
       "import re",
       "import unittest",
       "",
@@ -3089,21 +2993,9 @@ pythonMainSource =
       "        self.assertEqual(render_message([\"...\", \"---\"]), \"No canonical labels\")",
       "",
       "",
-      "def run_tests() -> None:",
-      "    \"\"\"Run the unittest suite.\"\"\"",
-      "    result = unittest.TextTestRunner(verbosity=2).run(",
-      "        unittest.defaultTestLoader.loadTestsFromTestCase(MainTests)",
-      "    )",
-      "    if not result.wasSuccessful():",
-      "        raise SystemExit(1)",
-      "",
-      "",
       "def main() -> None:",
       "    \"\"\"Run main.\"\"\"",
-      "    if os.getenv(\"DEBUG\") == \"1\":",
-      "        run_tests()",
-      "    else:",
-      "        print(render_message())  # noqa: T201",
+      "    print(render_message())  # noqa: T201",
       "",
       "",
       "if __name__ == \"__main__\":",
@@ -3117,7 +3009,6 @@ pythonLatexMainSource =
       "",
       "from __future__ import annotations",
       "",
-      "import os",
       "import tempfile",
       "import unittest",
       "from pathlib import Path",
@@ -3182,19 +3073,8 @@ pythonLatexMainSource =
       "            self.assertTrue((workspace / \"table.tex\").exists())",
       "",
       "",
-      "def run_tests() -> None:",
-      "    \"\"\"Run the unittest suite.\"\"\"",
-      "    result = unittest.TextTestRunner(verbosity=2).run(",
-      "        unittest.defaultTestLoader.loadTestsFromTestCase(ArtifactTests)",
-      "    )",
-      "    if not result.wasSuccessful():",
-      "        raise SystemExit(1)",
-      "",
-      "",
       "def main() -> None:",
       "    \"\"\"Generate the build workspace artifacts for LaTeX compilation.\"\"\"",
-      "    if os.getenv(\"DEBUG\") == \"1\":",
-      "        run_tests()",
       "    workspace = Path.cwd().resolve() / \"tmp\"",
       "    create_workspace_artifacts(workspace)",
       "",
@@ -3215,8 +3095,8 @@ haskellMainSource =
       "renderMessage :: String",
       "renderMessage = \"Hello World Haskell\"",
       "",
-      "runDebugTests :: IO ()",
-      "runDebugTests = do",
+      "runPackageTests :: IO ()",
+      "runPackageTests = do",
       "  counts <- runTestTT hUnitDebugTests",
       "  if errors counts == 0 && failures counts == 0",
       "    then putStrLn \"test ... ok\"",
@@ -3232,10 +3112,7 @@ haskellMainSource =
       "main :: IO ()",
       "main = do",
       "  _ <- getArgs",
-      "  debugMode <- lookupEnv \"DEBUG\"",
-      "  case debugMode of",
-      "    Just \"1\" -> runDebugTests",
-      "    _ -> putStrLn renderMessage"
+      "  putStrLn renderMessage"
     ]
 rustMainSource :: T.Text
 rustMainSource =
@@ -3440,22 +3317,9 @@ htmlStyleSource =
 cMainSource :: T.Text
 cMainSource =
   T.unlines
-    [ "#include <assert.h>",
-      "#include <stdio.h>",
-      "#include <stdlib.h>",
-      "#include <string.h>",
-      "static void run_tests(void);",
-      "static void run_tests(void) {",
-      "  assert(1 + 1 == 2);",
-      "  printf(\"test ... ok\\n\");",
-      "}",
+    [ "#include <stdio.h>",
       "int main(void) {",
-      "  const char *debug = getenv(\"DEBUG\");",
-      "  if (debug && strcmp(debug, \"1\") == 0) {",
-      "    run_tests();",
-      "  } else {",
-      "    printf(\"Hello World\\n\");",
-      "  }",
+      "  printf(\"Hello World\\n\");",
       "  return 0;",
       "}"
     ]
@@ -3568,13 +3432,17 @@ haskellTemplateBaselineNixSource =
     [ "{",
       "  pkgs ? import <nixpkgs> { },",
       "}:",
-      "pkgs.haskellPackages.mkDerivation rec {",
+      "let",
       "  executableHaskellDepends = [",
       "    pkgs.haskellPackages.HUnit",
       "    pkgs.haskellPackages.aeson",
       "    pkgs.haskellPackages.base",
       "    pkgs.haskellPackages.bytestring",
       "  ];",
+      "  ghcForTests = pkgs.haskellPackages.ghcWithPackages (_: executableHaskellDepends);",
+      "in",
+      "pkgs.haskellPackages.mkDerivation rec {",
+      "  inherit executableHaskellDepends;",
       "  executableToolDepends = [",
       "    pkgs.makeWrapper",
       "  ];",
@@ -3582,7 +3450,7 @@ haskellTemplateBaselineNixSource =
       "  pname = baseNameOf ./.;",
       "  postInstall = ''",
       "    wrapProgram $out/bin/${pname} --run \"rm -f tmp/${pname}.tix\" --set-default HPCTIXFILE tmp/${pname}.tix",
-      "    DEBUG=1 \"$out/bin/${pname}\"",
+      "    ${ghcForTests}/bin/ghc -i. -e 'Main.runPackageTests' Main.hs",
       "  '';",
       "  src = ./.;",
       "  version = \"0.0.0\";",
@@ -3597,21 +3465,6 @@ rustTemplateBaselineNixSource =
       "}:",
       "let",
       "  pname = baseNameOf ./.;",
-      "  wrapperScript = pkgs.writeShellScript \"${pname}-wrapper\" ''",
-      "    set -euo pipefail",
-      "    export PATH='${",
-      "      pkgs.lib.makeBinPath [",
-      "        pkgs.cargo",
-      "        pkgs.rustc",
-      "        pkgs.stdenv.cc",
-      "      ]",
-      "    }':\"$PATH\"",
-      "    if [ \"''${DEBUG:-0}\" = \"1\" ]; then",
-      "      cd \"packages/${pname}\"",
-      "      cargo test --locked",
-      "    fi",
-      "    exec \"@wrappedBin@\" \"$@\"",
-      "  '';",
       "in",
       "pkgs.rustPlatform.buildRustPackage {",
       "  inherit pname;",
@@ -3630,12 +3483,6 @@ rustTemplateBaselineNixSource =
       "    runHook postInstallCheck",
       "  '';",
       "  meta.mainProgram = pname;",
-      "  postInstall = ''",
-      "    mv \"$out/bin/${pname}\" \"$out/bin/.${pname}-wrapped\"",
-      "    install -m755 ${wrapperScript} \"$out/bin/${pname}\"",
-      "    substituteInPlace \"$out/bin/${pname}\" \\",
-      "      --replace-fail \"@wrappedBin@\" \"$out/bin/.${pname}-wrapped\"",
-      "  '';",
       "  src = ./.;",
       "  strictDeps = true;",
       "  version = \"0.0.0\";",
@@ -3652,9 +3499,7 @@ htmlTemplateBaselineNixSource =
       "  pname = baseNameOf ./.;",
       "in",
       "pkgs.writeShellScriptBin pname ''",
-      "  if [ \"$DEBUG\" != \"1\" ]; then",
-      "    exec ${pkgs.http-server}/bin/http-server ${./.} \"$@\"",
-      "  fi",
+      "  exec ${pkgs.http-server}/bin/http-server ${./.} \"$@\"",
       "''",
       ""
     ]
@@ -3880,12 +3725,16 @@ pythonTemplateBaselineNixSource =
       "    secrets.secrets.file = ../../secrets/secrets.age;",
       "  };",
       "  python = pkgs.python312;",
+      "  pythonTestEnv = python.withPackages (_: [",
+      "    python.pkgs.hypothesis",
+      "  ]);",
       "in",
       "python.pkgs.buildPythonPackage rec {",
       "  installCheckPhase = ''",
       "    runHook preInstallCheck",
       "    HOME=\"$(mktemp -d)\"",
-      "    DEBUG=1 \"$out/bin/${pname}\"",
+      "    cd \"$src\"",
+      "    ${pythonTestEnv}/bin/python -m unittest main.py",
       "    runHook postInstallCheck",
       "  '';",
       "  installPhase = ''",
@@ -3897,6 +3746,9 @@ pythonTemplateBaselineNixSource =
       "    fi",
       "  '';",
       "  meta.mainProgram = pname;",
+      "  nativeBuildInputs = [",
+      "    python.pkgs.coverage",
+      "  ];",
       "  passthru = {",
       "    inherit python;",
       "  };",
@@ -3979,22 +3831,28 @@ pythonLatexTemplateBaselineNixSource =
       "}:",
       "let",
       "  python = pkgs.python3;",
-      "  pythonDeps = [",
+      "  pythonEnv = python.withPackages (_: runtimePythonDeps);",
+      "  pythonTestEnv = python.withPackages (_:",
+      "    runtimePythonDeps ++ [",
+      "      python.pkgs.hypothesis",
+      "    ]);",
+      "  runtimePythonDeps = [",
       "    python.pkgs.matplotlib",
       "    python.pkgs.pandas",
       "  ];",
-      "  pythonEnv = python.withPackages (_: pythonDeps);",
       "in",
       "python.pkgs.buildPythonPackage rec {",
       "  installCheckPhase = ''",
       "    runHook preInstallCheck",
       "    HOME=\"$(mktemp -d)\"",
-      "    DEBUG=1 \"$out/bin/${pname}\"",
+      "    cd \"$src\"",
+      "    ${pythonTestEnv}/bin/python -m unittest main.py",
       "    runHook postInstallCheck",
       "  '';",
       "  installPhase = ''",
       "    datadir=\"$out/share/${pname}\"",
       "    install -Dm644 main.py ms.tex ms.bib -t \"$datadir\"",
+      "    install -Dm644 main.py $out/${python.sitePackages}/${pname}.py",
       "    mkdir -p \"$out/bin\"",
       "    cat > \"$out/bin/${pname}\" <<EOF",
       "    #!${pkgs.bash}/bin/bash",
@@ -4011,7 +3869,9 @@ pythonLatexTemplateBaselineNixSource =
       "    inherit python;",
       "  };",
       "  pname = baseNameOf ./.;",
-      "  propagatedBuildInputs = pythonDeps;",
+      "  propagatedBuildInputs = runtimePythonDeps ++ [",
+      "    python.pkgs.hypothesis",
+      "  ];",
       "  pyproject = false;",
       "  src = ./.;",
       "  strictDeps = true;",
@@ -4046,15 +3906,24 @@ haskellCoverageCheckBaselineNixSource =
       "    export HOME=\"$PWD\"",
       "    packageName=\"${packageName}\"",
       "    mkdir -p \"$coverage_dir/html\" \"$hpcdir\"",
+      "    cat > \"$PWD/TestMain.hs\" <<EOF",
+      "    module TestMain (main) where",
+      "    import qualified Main as PackageMain",
+      "    main :: IO ()",
+      "    main = PackageMain.runPackageTests",
+      "    EOF",
       "    \"${debugGhc}/bin/ghc\" \\",
       "      -fhpc \\",
       "      -hpcdir \"$hpcdir\" \\",
+      "      -main-is TestMain.main \\",
+      "      -i\"$src\" \\",
       "      -outputdir \"$PWD\" \\",
       "      -odir \"$PWD\" \\",
       "      -hidir \"$PWD\" \\",
       "      -o \"$PWD/$packageName\" \\",
+      "      \"$PWD/TestMain.hs\" \\",
       "      \"$src/Main.hs\"",
-      "    HPCTIXFILE=\"$coverage_dir/$packageName.tix\" DEBUG=1 \"$PWD/$packageName\"",
+      "    HPCTIXFILE=\"$coverage_dir/$packageName.tix\" \"$PWD/$packageName\"",
       "    \"${debugGhc}/bin/hpc\" markup \"$coverage_dir/$packageName.tix\" \\",
       "      --hpcdir=\"$hpcdir\" \\",
       "      --destdir=\"$coverage_dir/html\"",
@@ -4091,17 +3960,26 @@ haskellProfileCheckBaselineNixSource =
       "    packageName=\"${packageName}\"",
       "    mkdir -p \"$workspace\"",
       "    cd \"$workspace\"",
+      "    cat > \"$PWD/TestMain.hs\" <<EOF",
+      "    module TestMain (main) where",
+      "    import qualified Main as PackageMain",
+      "    main :: IO ()",
+      "    main = PackageMain.runPackageTests",
+      "    EOF",
       "    \"${profileGhc}/bin/ghc\" \\",
       "      -prof \\",
       "      -fprof-auto \\",
       "      -rtsopts \\",
       "      -O2 \\",
+      "      -main-is TestMain.main \\",
+      "      -i\"$src\" \\",
       "      -outputdir \"$PWD\" \\",
       "      -odir \"$PWD\" \\",
       "      -hidir \"$PWD\" \\",
       "      -o \"$PWD/$packageName\" \\",
+      "      \"$PWD/TestMain.hs\" \\",
       "      \"$src/Main.hs\"",
-      "    DEBUG=1 \"$PWD/$packageName\" +RTS -p -RTS",
+      "    \"$PWD/$packageName\" +RTS -p -RTS",
       "    cat \"$PWD/$packageName.prof\"",
       "    touch \"$out\"",
       "  ''"
@@ -4131,14 +4009,23 @@ haskellPropertyTestingCheckBaselineNixSource =
       "  ''",
       "    export HOME=\"$PWD\"",
       "    packageName=\"${packageName}\"",
+      "    cat > \"$PWD/TestMain.hs\" <<EOF",
+      "    module TestMain (main) where",
+      "    import qualified Main as PackageMain",
+      "    main :: IO ()",
+      "    main = PackageMain.runPackageTests",
+      "    EOF",
       "    \"${debugGhc}/bin/ghc\" \\",
       "      -O2 \\",
+      "      -main-is TestMain.main \\",
+      "      -i\"$src\" \\",
       "      -outputdir \"$PWD\" \\",
       "      -odir \"$PWD\" \\",
       "      -hidir \"$PWD\" \\",
       "      -o \"$PWD/$packageName\" \\",
+      "      \"$PWD/TestMain.hs\" \\",
       "      \"$src/Main.hs\"",
-      "    DEBUG=1 PROPERTY_TESTS=1 \"$PWD/$packageName\"",
+      "    \"$PWD/$packageName\"",
       "    touch \"$out\"",
       "  ''"
     ]
@@ -4177,7 +4064,9 @@ pythonCoverageCheckBaselineNixSource =
       "    export HOME=\"$(mktemp -d)\"",
       "    coverage_dir=\"$PWD/coverage\"",
       "    mkdir -p \"$coverage_dir\"",
-      "    DEBUG=1 PYTHONWARNINGS=error coverage run --source=\"$src\" \"$src/main.py\"",
+      "    cp -R --no-preserve=mode \"$src\" \"$PWD/workspace\"",
+      "    cd \"$PWD/workspace\"",
+      "    PYTHONWARNINGS=error coverage run -m unittest main.py",
       "    coverage report | tee \"$coverage_dir/summary.txt\"",
       "    coverage html -d \"$coverage_dir/html\"",
       "    touch \"$out\"",
@@ -4216,7 +4105,7 @@ pythonProfileCheckBaselineNixSource =
       "  }",
       "  ''",
       "    export HOME=\"$(mktemp -d)\"",
-      "    DEBUG=1 PYTHONWARNINGS=error pyinstrument \"$src/main.py\"",
+      "    PYTHONWARNINGS=error pyinstrument \"$src/main.py\"",
       "    touch \"$out\"",
       "  ''"
     ]
@@ -4448,7 +4337,7 @@ cTemplateCheckBaselineNixSource =
       "      };",
       "    };",
       "  testScript = ''",
-      "    machine.succeed(\"DEBUG=1 ${name}\")",
+      "    machine.succeed(\"${name}\")",
       "  '';",
       "}"
     ]

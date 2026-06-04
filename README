@@ -7,7 +7,7 @@ nix flake update <URL-*> 						# update flake lock file
 nix flake check <URL-*>			 				# check whether the flake evaluates and run its tests
 cd <URL-local> && nix fmt						# run formatter
 nix build <URL-*>#packages.<cpu>.<package>				# build <package> for <cpu>, you can use --print-out-paths
-nix run <URL-*>#<package>						# run <package>, export DEBUG=1 to run tests and use the next command if build is slow
+nix run <URL-*>#<package>						# run <package>; use the next command to run tests if the build is slow
 nix run <URL-*>#<package> --extra-substituters "https://nix-community.cachix.org https://cache.nixos-cuda.org" --extra-trusted-public-keys "nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs= cache.nixos-cuda.org:74DUi4Ye579gUqzH4ziL9IyiJBlDpMRn9MBN8oNan9M="
 nix run --impure github:numtide/nix-gl-host -- nix run <URL-*>#<package>	# run <package> on non-NixOS with host graphics drivers, export NIXPKGS_ALLOW_UNFREE=1 if needed
 nix run <URL-*>#nixosConfigurations.<host>.config.system.build.vm	# run <host> in virtual machine (replace with vmWithDisko if using Disko)

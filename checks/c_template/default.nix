@@ -27,6 +27,6 @@ pkgs.testers.runNixOSTest rec {
       };
     };
   testScript = ''
-    machine.succeed("DEBUG=1 ${name}")
+    machine.succeed("${name}")
   '';
 }

@@ -1,7 +1,7 @@
 {
   pkgs ? import <nixpkgs> { },
 }:
-pkgs.haskellPackages.mkDerivation rec {
+let
   executableHaskellDepends = [
     pkgs.haskellPackages.HUnit
     pkgs.haskellPackages.QuickCheck
@@ -16,6 +16,10 @@ pkgs.haskellPackages.mkDerivation rec {
     pkgs.haskellPackages.regex-tdfa
     pkgs.haskellPackages.text
   ];
+  ghcForTests = pkgs.haskellPackages.ghcWithPackages (_: executableHaskellDepends);
+in
+pkgs.haskellPackages.mkDerivation rec {
+  inherit executableHaskellDepends;
   executableToolDepends = [
     pkgs.makeWrapper
     pkgs.python3
@@ -29,7 +33,7 @@ pkgs.haskellPackages.mkDerivation rec {
         pkgs.python3
       ]
     } --run "rm -f tmp/${pname}.tix" --set-default HPCTIXFILE tmp/${pname}.tix
-    DEBUG=1 "$out/bin/${pname}"
+    ${ghcForTests}/bin/ghc -i. -e 'Main.runPackageTests' Main.hs
   '';
   src = ./.;
   version = "0.0.0";

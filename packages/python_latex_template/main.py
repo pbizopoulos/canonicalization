@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import math
-import os
 import re
 import tempfile
 import unittest
@@ -19,7 +18,6 @@ mpl.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 
-MODULE_NAME = __name__
 DEFAULT_SAMPLES = [2.0, 3.5, 5.0, 9.5, 12.0]
 LATEX_ESCAPES = {
     "\\": r"\textbackslash{}",
@@ -85,10 +83,7 @@ def create_figure(path: Path, samples: list[float]) -> None:
     axis.plot(x_values, samples, color="#1f77b4", linewidth=2.5, marker="o")
     axis.set_xlabel("Sample index")
     axis.set_ylabel("Value")
-    if os.getenv("DEBUG") == "1":
-        axis.set_title("Python-generated figure (in DEBUG mode)")
-    else:
-        axis.set_title("Python-generated figure")
+    axis.set_title("Python-generated figure")
     axis.grid(alpha=0.3)
     figure.tight_layout()
     figure.savefig(path, dpi=200)
@@ -109,6 +104,12 @@ def create_workspace_artifacts(
     workspace.mkdir(parents=True, exist_ok=True)
     create_figure(workspace / "figure.png", resolved_samples)
     create_table(workspace / "table.tex", resolved_samples)
+
+
+def main() -> None:
+    """Generate the build workspace artifacts for LaTeX compilation."""
+    workspace = Path.cwd().resolve() / "tmp"
+    create_workspace_artifacts(workspace)
 
 
 class ArtifactTests(unittest.TestCase):
@@ -165,10 +166,7 @@ class ArtifactTests(unittest.TestCase):
         """main() should write artifacts into <cwd>/tmp."""
         with tempfile.TemporaryDirectory() as tmpdir:
             fake_cwd = Path(tmpdir)
-            with (
-                mock.patch.dict(os.environ, {"DEBUG": "0"}),
-                mock.patch("pathlib.Path.cwd", return_value=fake_cwd),
-            ):
+            with mock.patch("pathlib.Path.cwd", return_value=fake_cwd):
                 main()
             workspace = fake_cwd.resolve() / "tmp"
             if not (workspace / "figure.png").exists():
@@ -176,24 +174,6 @@ class ArtifactTests(unittest.TestCase):
                 raise AssertionError(msg)
             if not (workspace / "table.tex").exists():
                 msg = "main() should generate table.tex in <cwd>/tmp"
-                raise AssertionError(msg)
-
-    def test_main_debug_still_writes_artifacts_in_current_directory(self) -> None:
-        """DEBUG mode should still generate artifacts into <cwd>/tmp."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            fake_cwd = Path(tmpdir)
-            with (
-                mock.patch.dict(os.environ, {"DEBUG": "1"}),
-                mock.patch(f"{MODULE_NAME}.run_tests"),
-                mock.patch("pathlib.Path.cwd", return_value=fake_cwd),
-            ):
-                main()
-            workspace = fake_cwd.resolve() / "tmp"
-            if not (workspace / "figure.png").exists():
-                msg = "main() should generate figure.png in <cwd>/tmp when DEBUG=1"
-                raise AssertionError(msg)
-            if not (workspace / "table.tex").exists():
-                msg = "main() should generate table.tex in <cwd>/tmp when DEBUG=1"
                 raise AssertionError(msg)
 
 
@@ -269,27 +249,6 @@ class PropertyTests(unittest.TestCase):
             if not table_path.exists():
                 msg = "create_workspace_artifacts() must produce table.tex"
                 raise AssertionError(msg)
-
-
-def run_tests() -> None:
-    """Run this module's unittest suite, including property tests."""
-    suite = unittest.TestSuite(
-        [
-            unittest.defaultTestLoader.loadTestsFromTestCase(ArtifactTests),
-            unittest.defaultTestLoader.loadTestsFromTestCase(PropertyTests),
-        ],
-    )
-    result = unittest.TextTestRunner(verbosity=2).run(suite)
-    if not result.wasSuccessful():
-        raise SystemExit(1)
-
-
-def main() -> None:
-    """Generate the build workspace artifacts for LaTeX compilation."""
-    if os.getenv("DEBUG") == "1":
-        run_tests()
-    workspace = Path.cwd().resolve() / "tmp"
-    create_workspace_artifacts(workspace)
 
 
 if __name__ == "__main__":

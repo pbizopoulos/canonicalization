@@ -28,6 +28,6 @@ pkgs.runCommand checkName
   }
   ''
     export HOME="$(mktemp -d)"
-    DEBUG=1 PYTHONWARNINGS=error pyinstrument "$src/main.py"
+    PYTHONWARNINGS=error pyinstrument "$src/main.py"
     touch "$out"
   ''

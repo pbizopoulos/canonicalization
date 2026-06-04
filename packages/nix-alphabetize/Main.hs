@@ -1,7 +1,7 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE Trustworthy #-}
 {-# OPTIONS_GHC -Wno-unsafe #-}
-module Main (main) where
+module Main (main, runPackageTests) where
 import Data.Fix (Fix (Fix))
 import Data.Function (on)
 import Data.Functor.Compose (Compose (Compose))
@@ -42,7 +42,7 @@ import Prettyprinter
     layoutPretty,
   )
 import Prettyprinter.Render.Text (renderStrict)
-import System.Environment (getArgs, lookupEnv)
+import System.Environment (getArgs)
 import System.Exit (exitFailure)
 import System.IO (hClose)
 import System.IO.Temp (withSystemTempFile)
@@ -61,7 +61,6 @@ import Prelude
     FilePath,
     IO,
     Int,
-    Maybe (Just),
     Show (show),
     String,
     all,
@@ -89,18 +88,14 @@ import Prelude
 main :: IO ()
 main = do
   args <- getArgs
-  debug <- lookupEnv "DEBUG"
-  case debug of
-    Just "1" -> runDebugTests
-    _ ->
-      mapM_
-        ( \filePath -> do
-            parseResult <- parseNixFileLoc (Path filePath)
-            case parseResult of
-              Left parseError -> putStrLn ("Error parsing " ++ filePath ++ ": " ++ show parseError)
-              Right expr -> writeFormattedFile filePath expr
-        )
-        args
+  mapM_
+    ( \filePath -> do
+        parseResult <- parseNixFileLoc (Path filePath)
+        case parseResult of
+          Left parseError -> putStrLn ("Error parsing " ++ filePath ++ ": " ++ show parseError)
+          Right expr -> writeFormattedFile filePath expr
+    )
+    args
 writeFormattedFile :: FilePath -> NExprLoc -> IO ()
 writeFormattedFile filePath expr = do
   let finalText =
@@ -192,8 +187,8 @@ formatText input =
         TIO.readFile tmpFile
       Left parseError ->
         assertFailure ("Property fixture failed to parse: " ++ show parseError)
-runDebugTests :: IO ()
-runDebugTests = do
+runPackageTests :: IO ()
+runPackageTests = do
   counts <- runTestTT getAllFormattingTests
   propertySuccess <- quickCheckFormattingProperties
   if errors counts == 0 && failures counts == 0 && propertySuccess

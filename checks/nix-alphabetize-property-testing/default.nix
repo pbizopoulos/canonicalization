@@ -20,13 +20,22 @@ pkgs.runCommand "${checkName}"
   ''
     export HOME="$PWD"
     packageName="${packageName}"
+    cat > "$PWD/TestMain.hs" <<EOF
+    module TestMain (main) where
+    import qualified Main as PackageMain
+    main :: IO ()
+    main = PackageMain.runPackageTests
+    EOF
     "${debugGhc}/bin/ghc" \
       -O2 \
+      -main-is TestMain.main \
+      -i"$src" \
       -outputdir "$PWD" \
       -odir "$PWD" \
       -hidir "$PWD" \
       -o "$PWD/$packageName" \
+      "$PWD/TestMain.hs" \
       "$src/Main.hs"
-    DEBUG=1 PROPERTY_TESTS=1 "$PWD/$packageName"
+    "$PWD/$packageName"
     touch "$out"
   ''

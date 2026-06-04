@@ -3,21 +3,6 @@
 }:
 let
   pname = baseNameOf ./.;
-  wrapperScript = pkgs.writeShellScript "${pname}-wrapper" ''
-    set -euo pipefail
-    export PATH='${
-      pkgs.lib.makeBinPath [
-        pkgs.cargo
-        pkgs.rustc
-        pkgs.stdenv.cc
-      ]
-    }':"$PATH"
-    if [ "''${DEBUG:-0}" = "1" ]; then
-      cd "packages/${pname}"
-      cargo test --locked
-    fi
-    exec "@wrappedBin@" "$@"
-  '';
 in
 pkgs.rustPlatform.buildRustPackage {
   inherit pname;
@@ -41,12 +26,6 @@ pkgs.rustPlatform.buildRustPackage {
     pkgs.rustc
     pkgs.stdenv.cc
   ];
-  postInstall = ''
-    mv "$out/bin/${pname}" "$out/bin/.${pname}-wrapped"
-    install -m755 ${wrapperScript} "$out/bin/${pname}"
-    substituteInPlace "$out/bin/${pname}" \
-      --replace-fail "@wrappedBin@" "$out/bin/.${pname}-wrapped"
-  '';
   src = ./.;
   strictDeps = true;
   version = "0.0.0";

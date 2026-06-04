@@ -5,15 +5,12 @@ from __future__ import annotations
 
 import contextlib
 import io
-import os
 import re
 import unittest
-from unittest import mock
 
 from hypothesis import given
 from hypothesis import strategies as st
 
-MODULE_NAME = __name__
 DEFAULT_LABELS = [
     "Hello, World!",
     "hello_world",
@@ -48,6 +45,11 @@ def render_message(labels: list[str] | None = None) -> str:
     if not canonical_labels:
         return "No canonical labels"
     return ", ".join(canonical_labels)
+
+
+def main() -> None:
+    """Run main."""
+    print(render_message())  # noqa: T201
 
 
 class MainTests(unittest.TestCase):
@@ -95,29 +97,13 @@ class MainTests(unittest.TestCase):
             )
             raise AssertionError(msg)
 
-    def test_main_prints_message_when_not_debug(self) -> None:
-        """main() should emit the summary when DEBUG is not enabled."""
+    def test_main_prints_message(self) -> None:
+        """main() should emit the canonical label summary."""
         output = io.StringIO()
-        with (
-            mock.patch.dict(os.environ, {"DEBUG": "0"}),
-            contextlib.redirect_stdout(output),
-        ):
+        with contextlib.redirect_stdout(output):
             main()
         if output.getvalue().strip() != "hello-world, python-template":
-            msg = "main() should print the canonical label summary when DEBUG != 1"
-            raise AssertionError(msg)
-
-    def test_main_suppresses_normal_output_when_debug(self) -> None:
-        """DEBUG mode should not emit the normal summary output."""
-        output = io.StringIO()
-        with (
-            mock.patch.dict(os.environ, {"DEBUG": "1"}),
-            mock.patch(f"{MODULE_NAME}.run_tests"),
-            contextlib.redirect_stdout(output),
-        ):
-            main()
-        if output.getvalue() != "":
-            msg = "main() should not print the normal summary when DEBUG=1"
+            msg = "main() should print the canonical label summary"
             raise AssertionError(msg)
 
 
@@ -147,27 +133,6 @@ class PropertyTests(unittest.TestCase):
         if unique_canonical_labels(canonical_labels) != canonical_labels:
             msg = "unique_canonical_labels() must be idempotent"
             raise AssertionError(msg)
-
-
-def run_tests() -> None:
-    """Run this module's unittest suite, including property tests."""
-    suite = unittest.TestSuite(
-        [
-            unittest.defaultTestLoader.loadTestsFromTestCase(MainTests),
-            unittest.defaultTestLoader.loadTestsFromTestCase(PropertyTests),
-        ],
-    )
-    result = unittest.TextTestRunner(verbosity=2).run(suite)
-    if not result.wasSuccessful():
-        raise SystemExit(1)
-
-
-def main() -> None:
-    """Run main."""
-    if os.getenv("DEBUG") == "1":
-        run_tests()
-    else:
-        print(render_message())  # noqa: T201
 
 
 if __name__ == "__main__":
