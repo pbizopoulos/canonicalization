@@ -20,7 +20,7 @@ let
         pkgs.stdenv.cc
       ]
     }:$PATH"
-    find packages -name Cargo.toml -execdir cargo clippy --fix --allow-dirty --allow-staged --all-targets --all-features -- -D warnings -D clippy::all -D clippy::pedantic -D clippy::nursery -D clippy::cargo -D clippy::restriction \;
+    find packages -name Cargo.toml -execdir cargo clippy --fix --allow-dirty --allow-staged --all-targets --all-features -- -D warnings -D clippy::all -D clippy::pedantic -D clippy::nursery -D clippy::cargo -D clippy::restriction -A clippy::needless_return \;
   '';
   formatter = treefmtEval.config.build.wrapper;
   treefmtEval = inputs.treefmt-nix.lib.evalModule pkgs {
@@ -94,7 +94,7 @@ let
           includes = [
             "*.rs"
           ];
-          priority = 1;
+          priority = 0;
         };
         mypy = {
           command = pkgs.mypy;

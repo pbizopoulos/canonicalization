@@ -13,7 +13,7 @@ fn main() -> Result<()> {
             process_root_path(Path::new(&input_path));
         }
     }
-    Ok(())
+    return Ok(());
 }
 fn process_root_path(root: &Path) {
     let walker = WalkBuilder::new(root).require_git(false).build();
@@ -42,7 +42,7 @@ fn remove_empty_lines(path: &Path) -> Result<()> {
     if output != data {
         fs::write(path, output).with_context(|| format!("Failed to write file: {path_display}"))?;
     }
-    Ok(())
+    return Ok(());
 }
 fn strip_empty_lines_from_bytes(data: &[u8]) -> Result<Vec<u8>> {
     let reader = BufReader::new(data);
@@ -53,7 +53,7 @@ fn strip_empty_lines_from_bytes(data: &[u8]) -> Result<Vec<u8>> {
             writeln!(output, "{line}")?;
         }
     }
-    Ok(output)
+    return Ok(output);
 }
 #[cfg(test)]
 mod tests {
