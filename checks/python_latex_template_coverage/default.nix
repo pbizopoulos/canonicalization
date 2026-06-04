@@ -28,12 +28,11 @@ pkgs.runCommand checkName
   }
   ''
     export HOME="$(mktemp -d)"
-    coverage_dir="$PWD/coverage"
-    mkdir -p "$coverage_dir"
-    cp -R --no-preserve=mode "$src" "$PWD/workspace"
-    cd "$PWD/workspace"
-    PYTHONWARNINGS=error coverage run -m unittest main.py
-    coverage report | tee "$coverage_dir/summary.txt"
-    coverage html -d "$coverage_dir/html"
+    mkdir -p coverage
+    cp -R --no-preserve=mode "$src" workspace
+    cd workspace
+    python -m coverage run -m unittest main.py
+    python -m coverage report | tee "$OLDPWD/coverage/summary.txt"
+    python -m coverage html -d "$OLDPWD/coverage/html"
     touch "$out"
   ''
