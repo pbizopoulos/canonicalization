@@ -18,7 +18,7 @@ python.pkgs.buildPythonPackage rec {
   '';
   installPhase = ''
     datadir="$out/share/${pname}"
-    install -Dm644 ./main.py ./ms.tex ./ms.bib -t "$datadir"
+    install -Dm644 main.py ms.tex ms.bib -t "$datadir"
     mkdir -p "$out/bin"
     cat > "$out/bin/${pname}" <<EOF
     #!${pkgs.bash}/bin/bash

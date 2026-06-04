@@ -2887,10 +2887,10 @@ legacyPythonTemplateNixFixture =
     ++ "  '';\n"
     ++ "  installPhase = ''\n"
     ++ "    install -Dm644 main.py $out/${python.sitePackages}/${pname}.py\n"
-    ++ "    install -Dm755 ./main.py $out/bin/${pname}\n"
-    ++ "    if [ -d ./prm ]; then\n"
-    ++ "      cp -r ./prm/ $out/${python.sitePackages}/\n"
-    ++ "      cp -r ./prm/ $out/bin/\n"
+    ++ "    install -Dm755 main.py $out/bin/${pname}\n"
+    ++ "    if [ -d prm ]; then\n"
+    ++ "      cp -r prm/ $out/${python.sitePackages}/\n"
+    ++ "      cp -r prm/ $out/bin/\n"
     ++ "    fi\n"
     ++ "  '';\n"
     ++ "  meta.mainProgram = pname;\n"
@@ -3913,11 +3913,11 @@ pythonTemplateBaselineNixSource =
       "    runHook postInstallCheck",
       "  '';",
       "  installPhase = ''",
-      "    install -Dm644 ./main.py $out/${python.sitePackages}/${pname}.py",
-      "    install -Dm755 ./main.py $out/bin/${pname}",
-      "    if [ -d ./prm ]; then",
-      "      cp -r ./prm/ $out/${python.sitePackages}/",
-      "      cp -r ./prm/ $out/bin/",
+      "    install -Dm644 main.py $out/${python.sitePackages}/${pname}.py",
+      "    install -Dm755 main.py $out/bin/${pname}",
+      "    if [ -d prm ]; then",
+      "      cp -r prm/ $out/${python.sitePackages}/",
+      "      cp -r prm/ $out/bin/",
       "    fi",
       "  '';",
       "  meta.mainProgram = pname;",
@@ -4018,7 +4018,7 @@ pythonLatexTemplateBaselineNixSource =
       "  '';",
       "  installPhase = ''",
       "    datadir=\"$out/share/${pname}\"",
-      "    install -Dm644 ./main.py ./ms.tex ./ms.bib -t \"$datadir\"",
+      "    install -Dm644 main.py ms.tex ms.bib -t \"$datadir\"",
       "    mkdir -p \"$out/bin\"",
       "    cat > \"$out/bin/${pname}\" <<EOF",
       "    #!${pkgs.bash}/bin/bash",
