@@ -2008,15 +2008,17 @@ firstMismatchedLine actualLines expectedLines =
 extractPrimaryNixBindings :: NExprLoc -> Maybe (Map.Map T.Text T.Text)
 extractPrimaryNixBindings nixExpression = do
   bindingGroups <- collectNixSetBindingGroups nixExpression
-  pure $ Map.fromList (maximumByLength bindingGroups)
+  primaryBindingGroup <- maximumByLength bindingGroups
+  pure (Map.fromList primaryBindingGroup)
 extractOutermostLetBindings :: NExprLoc -> Maybe (Map.Map T.Text T.Text)
 extractOutermostLetBindings (Fix (Compose (AnnUnit _ expressionFunctor))) =
   case expressionFunctor of
     NAbs _ body -> extractOutermostLetBindings body
     NLet bindings _ -> Just (Map.fromList (extractNamedNixBindings bindings))
     _ -> Nothing
-maximumByLength :: [[a]] -> [a]
-maximumByLength = maximumBy (comparing length)
+maximumByLength :: [[a]] -> Maybe [a]
+maximumByLength [] = Nothing
+maximumByLength bindingGroups = Just (maximumBy (comparing length) bindingGroups)
 collectNixSetBindingGroups :: NExprLoc -> Maybe [[(T.Text, T.Text)]]
 collectNixSetBindingGroups (Fix (Compose (AnnUnit _ expressionFunctor))) =
   case expressionFunctor of
@@ -2248,7 +2250,24 @@ checkTemplateDebugTests =
                   (formatDefaultNixTemplateDifferences "test" "packages/python_template/default.nix" legacyPythonTemplateExpr templatePythonExpr)
               )
           (Left parseError, _) -> assertFailure ("Failed to parse legacy Python template fixture: " ++ parseError)
-          (_, Left parseError) -> assertFailure ("Failed to parse Python template baseline fixture: " ++ parseError)
+          (_, Left parseError) -> assertFailure ("Failed to parse Python template baseline fixture: " ++ parseError),
+      TestCase $ do
+        runNixOsTestParseResult <-
+          parseNixExprFromText
+            ( T.unlines
+                [ "{ pkgs, ... }:",
+                  "pkgs.testers.runNixOSTest {",
+                  "  name = \"example\";",
+                  "}"
+                ]
+            )
+        case runNixOsTestParseResult of
+          Right runNixOsTestExpr ->
+            assertEqual
+              "Extracts primary bindings from runNixOSTest application shapes without crashing."
+              (Just (Map.fromList [("name", "\"example\"")]))
+              (extractPrimaryNixBindings runNixOsTestExpr)
+          Left parseError -> assertFailure ("Failed to parse runNixOSTest fixture: " ++ parseError)
     ]
 metadataAndDiscoveryDebugTests :: Test
 metadataAndDiscoveryDebugTests =
