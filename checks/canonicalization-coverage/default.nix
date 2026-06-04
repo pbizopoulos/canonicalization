@@ -18,33 +18,19 @@ pkgs.runCommand checkName
     src = ../.. + "/packages/${packageName}";
   }
   ''
-    coverage_dir="$PWD/coverage"
-    hpcdir="$PWD/hpc"
     export HOME="$PWD"
-    packageName="${packageName}"
-    mkdir -p "$coverage_dir/html" "$hpcdir"
-    cat > "$PWD/TestMain.hs" <<EOF
+    mkdir -p coverage/html hpc
+    cat > TestMain.hs <<EOF
     module TestMain (main) where
     import qualified Main as PackageMain
     main :: IO ()
     main = PackageMain.runPackageTests
     EOF
-    "${debugGhc}/bin/ghc" \
-      -fhpc \
-      -hpcdir "$hpcdir" \
-      -main-is TestMain.main \
-      -i"$src" \
-      -outputdir "$PWD" \
-      -odir "$PWD" \
-      -hidir "$PWD" \
-      -o "$PWD/$packageName" \
-      "$PWD/TestMain.hs" \
-      "$src/Main.hs"
-    HPCTIXFILE="$coverage_dir/$packageName.tix" "$PWD/$packageName"
-    "${debugGhc}/bin/hpc" markup "$coverage_dir/$packageName.tix" \
-      --hpcdir="$hpcdir" \
-      --destdir="$coverage_dir/html"
-    "${debugGhc}/bin/hpc" report "$coverage_dir/$packageName.tix" \
-      --hpcdir="$hpcdir" | tee "$coverage_dir/summary.txt"
+    ghc -fhpc -hpcdir hpc -main-is TestMain.main \
+      -i"$src" -outputdir . -odir . -hidir . \
+      -o "${packageName}" TestMain.hs "$src/Main.hs"
+    HPCTIXFILE="coverage/${packageName}.tix" "./${packageName}"
+    hpc markup "coverage/${packageName}.tix" --hpcdir=hpc --destdir=coverage/html
+    hpc report "coverage/${packageName}.tix" --hpcdir=hpc | tee coverage/summary.txt
     touch "$out"
   ''
