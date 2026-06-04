@@ -39,7 +39,7 @@ import Nix.Pretty (prettyNix)
 import Nix.Utils (Path (Path))
 import Prettyprinter (defaultLayoutOptions, layoutPretty)
 import Prettyprinter.Render.Text (renderStrict)
-import System.Directory (canonicalizePath, doesDirectoryExist, doesFileExist, findExecutable, getHomeDirectory, listDirectory, removeFile, setCurrentDirectory)
+import System.Directory (canonicalizePath, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, doesPathExist, findExecutable, getCurrentDirectory, getHomeDirectory, listDirectory, removeFile, setCurrentDirectory)
 import System.Environment (getArgs, lookupEnv)
 import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitFailure)
 import System.FilePath ((<.>), (</>))
@@ -415,12 +415,23 @@ runCli commandLineArgs =
     ["describe-repository"] -> runInGitRepositoryRoot "." runDescribeRepositoryMode
     ["describe-repository", repositoryDirectory] -> runInGitRepositoryRoot repositoryDirectory runDescribeRepositoryMode
     ["check-gitmodules"] -> runCheckGitSubmodulesMode
-    _ -> do
-      putStrLn "Usage: canonicalization check-repository [git-directory]"
-      putStrLn "       canonicalization describe-repository [git-directory]"
-      putStrLn "       canonicalization describe-repository --json [git-directory]"
-      putStrLn "       canonicalization check-gitmodules"
-      exitFailure
+    createPackageArgs ->
+      case parseCreatePackageArgs createPackageArgs of
+        Just (repositoryDirectory, packageKindName, packageName) ->
+          runInGitRepositoryRoot repositoryDirectory (runCreatePackageMode packageKindName packageName)
+        Nothing -> do
+          putStrLn "Usage: canonicalization check-repository [git-directory]"
+          putStrLn "       canonicalization describe-repository [git-directory]"
+          putStrLn "       canonicalization describe-repository --json [git-directory]"
+          putStrLn "       canonicalization create-package [git-directory] <package-type> <package-name>"
+          putStrLn "       canonicalization check-gitmodules"
+          exitFailure
+parseCreatePackageArgs :: [String] -> Maybe (FilePath, String, FilePath)
+parseCreatePackageArgs commandLineArgs =
+  case commandLineArgs of
+    ["create-package", packageKindName, packageName] -> Just (".", packageKindName, packageName)
+    ["create-package", repositoryDirectory, packageKindName, packageName] -> Just (repositoryDirectory, packageKindName, packageName)
+    _ -> Nothing
 runInGitRepositoryRoot :: FilePath -> IO a -> IO a
 runInGitRepositoryRoot repositoryDirectory action = do
   isDirectory <- doesDirectoryExist repositoryDirectory
@@ -440,12 +451,34 @@ runInGitRepositoryRoot repositoryDirectory action = do
   unless (canonicalInputDirectory == canonicalRepositoryRoot) $ do
     putStrLn ("not a git repository root directory: " ++ repositoryDirectory)
     exitFailure
+  previousDirectory <- getCurrentDirectory
   setCurrentDirectory canonicalInputDirectory
-  action
+  action `finally` setCurrentDirectory previousDirectory
 trimString :: String -> String
 trimString = T.unpack . T.strip . T.pack
 removeSuffix :: (Eq a) => [a] -> [a] -> Maybe [a]
 removeSuffix suffix value = reverse <$> stripPrefix (reverse suffix) (reverse value)
+runCreatePackageMode :: String -> FilePath -> IO ()
+runCreatePackageMode packageKindName packageName =
+  case parseSupportedCreatePackageKind packageKindName of
+    Nothing -> do
+      putStrLn ("unsupported package type: " ++ packageKindName)
+      putStrLn ("supported package types: " ++ intercalate ", " supportedCreatePackageKindNames)
+      exitFailure
+    Just packageKind ->
+      case validateCreatePackageName packageName of
+        Just validationError -> do
+          putStrLn validationError
+          exitFailure
+        Nothing -> do
+          createPackageResult <- createPackageInCurrentRepository packageKind packageName
+          case createPackageResult of
+            Left createPackageError -> do
+              putStrLn createPackageError
+              exitFailure
+            Right createdFilePaths -> do
+              putStrLn ("created package packages/" ++ packageName ++ " (" ++ renderPackageKind packageKind ++ ")")
+              putStrLn ("created " ++ show (length createdFilePaths) ++ " files")
 runCheckRepositoryMode :: IO ()
 runCheckRepositoryMode = do
   repositoryStructureIssues <- checkRepositoryStructure
@@ -626,6 +659,124 @@ renderPackageKind packageKind =
     LatexPackage -> "latex"
     BinaryReleasePackage -> "binary-release"
     UnknownPackage -> "unknown"
+supportedCreatePackageKinds :: [(String, PackageKind)]
+supportedCreatePackageKinds =
+  [ ("haskell", HaskellPackage),
+    ("rust", RustPackage),
+    ("html", HtmlPackage),
+    ("python", PythonPackage),
+    ("python-latex", PythonLatexPackage),
+    ("c", CPackage),
+    ("latex", LatexPackage)
+  ]
+supportedCreatePackageKindNames :: [String]
+supportedCreatePackageKindNames = map fst supportedCreatePackageKinds
+parseSupportedCreatePackageKind :: String -> Maybe PackageKind
+parseSupportedCreatePackageKind packageKindName = lookup packageKindName supportedCreatePackageKinds
+validateCreatePackageName :: FilePath -> Maybe String
+validateCreatePackageName packageName
+  | null packageName = Just "package name must not be empty"
+  | packageName `elem` [".", ".."] = Just "package name must not be '.' or '..'"
+  | any isPathSeparator packageName = Just "package name must not contain path separators"
+  | not (all isAllowedPackageNameCharacter packageName) = Just "package name must contain only letters, digits, '.', '-', or '_'"
+  | otherwise = Nothing
+  where
+    isAllowedPackageNameCharacter character = isAlphaNum character || character `elem` ("._-" :: String)
+    isPathSeparator character = character == '/' || character == '\\'
+type ScaffoldFile :: Type
+data ScaffoldFile = ScaffoldFile
+  { scaffoldFileRelativePath :: FilePath,
+    scaffoldFileContents :: T.Text
+  }
+createPackageInCurrentRepository :: PackageKind -> FilePath -> IO (Either String [FilePath])
+createPackageInCurrentRepository packageKind packageName = do
+  let packageRootDirectory = "packages" </> packageName
+      scaffoldFiles = renderScaffoldFiles packageKind packageName
+  if null scaffoldFiles
+    then pure (Left ("unsupported package type: " ++ renderPackageKind packageKind))
+    else do
+      packageRootExists <- doesPathExist packageRootDirectory
+      if packageRootExists
+        then pure (Left ("package already exists: " ++ packageRootDirectory))
+        else do
+          createDirectoryIfMissing True packageRootDirectory
+          forM_ scaffoldFiles $ \scaffoldFile -> do
+            let relativePath = scaffoldFileRelativePath scaffoldFile
+                absolutePath = packageRootDirectory </> relativePath
+            createDirectoryIfMissing True (takeDirectory absolutePath)
+            TIO.writeFile absolutePath (scaffoldFileContents scaffoldFile)
+          pure (Right [packageRootDirectory </> scaffoldFileRelativePath scaffoldFile | scaffoldFile <- scaffoldFiles])
+renderScaffoldFiles :: PackageKind -> FilePath -> [ScaffoldFile]
+renderScaffoldFiles packageKind packageName =
+  case packageKind of
+    HaskellPackage ->
+      [ ScaffoldFile ".gitignore" haskellGitignoreSource,
+        ScaffoldFile "default.nix" haskellTemplateBaselineNixSource,
+        ScaffoldFile "Main.hs" haskellMainSource,
+        ScaffoldFile (packageName <.> "cabal") (renderScaffoldHaskellCabal packageName)
+      ]
+    RustPackage ->
+      [ ScaffoldFile ".gitignore" rustGitignoreSource,
+        ScaffoldFile "default.nix" rustTemplateBaselineNixSource,
+        ScaffoldFile "Cargo.toml" (renderScaffoldCargoToml packageName),
+        ScaffoldFile "src/main.rs" rustMainSource
+      ]
+    HtmlPackage ->
+      [ ScaffoldFile ".gitignore" htmlGitignoreSource,
+        ScaffoldFile "default.nix" htmlTemplateBaselineNixSource,
+        ScaffoldFile "index.html" htmlIndexSource,
+        ScaffoldFile "script.js" htmlScriptSource,
+        ScaffoldFile "style.css" htmlStyleSource
+      ]
+    PythonLatexPackage ->
+      [ ScaffoldFile ".gitignore" pythonLatexGitignoreSource,
+        ScaffoldFile "default.nix" pythonLatexTemplateBaselineNixSource,
+        ScaffoldFile "main.py" pythonLatexMainSource,
+        ScaffoldFile "ms.tex" latexMsTexSource,
+        ScaffoldFile "ms.bib" latexMsBibSource
+      ]
+    PythonPackage ->
+      [ ScaffoldFile ".gitignore" pythonGitignoreSource,
+        ScaffoldFile "default.nix" pythonTemplateBaselineNixSource,
+        ScaffoldFile "main.py" pythonMainSource
+      ]
+    CPackage ->
+      [ ScaffoldFile ".gitignore" cGitignoreSource,
+        ScaffoldFile "default.nix" cTemplateBaselineNixSource,
+        ScaffoldFile "main.c" cMainSource
+      ]
+    LatexPackage ->
+      [ ScaffoldFile ".gitignore" latexGitignoreSource,
+        ScaffoldFile "default.nix" latexTemplateBaselineNixSource,
+        ScaffoldFile "ms.tex" latexMsTexSource,
+        ScaffoldFile "ms.bib" latexMsBibSource
+      ]
+    _ -> []
+renderScaffoldCargoToml :: FilePath -> T.Text
+renderScaffoldCargoToml packageName =
+  T.unlines
+    [ line
+    | sourceLine <- T.lines removeEmptyLinesCargoTomlFixture,
+      let line =
+            case sourceLine of
+              "name = \"remove-empty-lines\"" -> T.pack ("name = \"" ++ packageName ++ "\"")
+              "description = \"A CLI tool to remove empty lines from text files.\"" -> "description = \"Generated Rust package.\""
+              otherLine -> otherLine,
+      line /= "repository = \"https://github.com/pbizopoulos/canonicalization\"",
+      line /= "readme = \"../../README\"",
+      line /= "keywords = [\"cleanup\", \"formatter\"]",
+      line /= "categories = [\"development-tools\"]"
+    ]
+renderScaffoldHaskellCabal :: FilePath -> T.Text
+renderScaffoldHaskellCabal packageName =
+  T.unlines
+    [ case sourceLine of
+        "name:          haskell-template" -> T.pack ("name:          " ++ packageName)
+        "synopsis:      Hello World Haskell" -> "synopsis:      Generated Haskell package"
+        "executable haskell-template" -> T.pack ("executable " ++ packageName)
+        otherLine -> otherLine
+    | sourceLine <- T.lines haskellCabalBaseline
+    ]
 type GitSubmoduleRepository :: Type
 data GitSubmoduleRepository = GitSubmoduleRepository
   { gitSubmoduleRepositoryHost :: String,
@@ -2065,7 +2216,8 @@ hUnitDebugTests =
     [ templateInferenceDebugTests,
       checkTemplateDebugTests,
       metadataAndDiscoveryDebugTests,
-      repositoryPolicyDebugTests
+      repositoryPolicyDebugTests,
+      createPackageDebugTests
     ]
 templateInferenceDebugTests :: Test
 templateInferenceDebugTests =
@@ -2534,6 +2686,159 @@ repositoryPolicyDebugTests =
           False
           (gitSubmoduleRepositoryIsCompatible (buildGitSubmoduleRepository "/home/user" "github.com/pbizopoulos/canonicalization/subdir"))
     ]
+createPackageDebugTests :: Test
+createPackageDebugTests =
+  TestList
+    [ TestCase $ do
+        assertEqual
+          "Parses create-package arguments with the current repository default."
+          (Just (".", "python", "demo"))
+          (parseCreatePackageArgs ["create-package", "python", "demo"]),
+      TestCase $ do
+        assertEqual
+          "Parses create-package arguments with an explicit repository."
+          (Just ("repo", "rust", "demo"))
+          (parseCreatePackageArgs ["create-package", "repo", "rust", "demo"]),
+      TestCase $ do
+        assertEqual
+          "Rejects unsupported create-package argument arity."
+          Nothing
+          (parseCreatePackageArgs ["create-package", "python"]),
+      TestCase $ do
+        assertEqual
+          "Parses supported create-package kinds."
+          (Just PythonLatexPackage)
+          (parseSupportedCreatePackageKind "python-latex"),
+      TestCase $ do
+        assertEqual
+          "Rejects unsupported create-package kinds."
+          Nothing
+          (parseSupportedCreatePackageKind "terraform"),
+      TestCase $ do
+        assertEqual
+          "Rejects create-package names with path separators."
+          (Just "package name must not contain path separators")
+          (validateCreatePackageName "bad/name"),
+      TestCase $ do
+        assertEqual
+          "Generates the expected Python scaffold file set."
+          ["packages/demo/.gitignore", "packages/demo/default.nix", "packages/demo/main.py"]
+          [ "packages/demo" </> scaffoldFileRelativePath scaffoldFile
+          | scaffoldFile <- renderScaffoldFiles PythonPackage "demo"
+          ],
+      TestCase $ do
+        assertEqual
+          "Generates the expected Rust scaffold file set."
+          ["packages/demo/.gitignore", "packages/demo/default.nix", "packages/demo/Cargo.toml", "packages/demo/src/main.rs"]
+          [ "packages/demo" </> scaffoldFileRelativePath scaffoldFile
+          | scaffoldFile <- renderScaffoldFiles RustPackage "demo"
+          ],
+      TestCase $ do
+        assertEqual
+          "Rewrites scaffold Cargo.toml metadata to the requested package name."
+          ( T.unlines
+              [ "[[bin]]",
+                "name = \"demo\"",
+                "path = \"src/main.rs\"",
+                "",
+                "[dependencies]",
+                "ignore = \"0.4\"",
+                "anyhow = \"1.0\"",
+                "content_inspector = \"0.2\"",
+                "tempfile = \"3.8\"",
+                "",
+                "[lints.clippy]",
+                "all = { level = \"deny\", priority = -1 }",
+                "pedantic = { level = \"deny\", priority = -1 }",
+                "nursery = { level = \"deny\", priority = -1 }",
+                "cargo = { level = \"deny\", priority = -1 }",
+                "",
+                "[lints.rust]",
+                "unsafe_code = \"forbid\"",
+                "",
+                "[package]",
+                "name = \"demo\"",
+                "version = \"0.1.0\"",
+                "edition = \"2021\"",
+                "description = \"Generated Rust package.\"",
+                "license = \"MIT\"",
+                ""
+              ]
+          )
+          (renderScaffoldCargoToml "demo"),
+      TestCase $ do
+        assertEqual
+          "Rewrites scaffold cabal metadata to the requested package name."
+          ( T.unlines
+              [ "name:          demo",
+                "version:       0.0.0",
+                "synopsis:      Generated Haskell package",
+                "cabal-version: >=1.10",
+                "build-type:    Simple",
+                "executable demo",
+                "  main-is:       Main.hs",
+                "  build-depends:",
+                "      aeson",
+                "    , base",
+                "    , bytestring",
+                "    , HUnit",
+                "  ghc-options:   -O2 -Weverything -Werror -threaded",
+                ""
+              ]
+          )
+          (renderScaffoldHaskellCabal "demo"),
+      TestCase $ do
+        let pythonScaffoldFiles = renderScaffoldFiles PythonPackage "demo"
+        assertEqual
+          "Uses the embedded Python baseline for scaffold default.nix."
+          (Just pythonTemplateBaselineNixSource)
+          (listToMaybe [scaffoldFileContents scaffoldFile | scaffoldFile <- pythonScaffoldFiles, scaffoldFileRelativePath scaffoldFile == "default.nix"]),
+      TestCase $
+        withTemporaryPackageRepository "python-create-package" $ \tempRepository -> do
+          withCurrentWorkingDirectory tempRepository $ do
+            createPackageResult <- createPackageInCurrentRepository PythonPackage "demo"
+            assertEqual
+              "Creates a Python package scaffold in the current repository."
+              (Right ["packages/demo/.gitignore", "packages/demo/default.nix", "packages/demo/main.py"])
+              createPackageResult
+            packagePaths <- collectRepositoryPaths "packages"
+            assertBool
+              "Creates a recognizable Python package structure."
+              ("packages/demo/main.py" `elem` packagePaths),
+      TestCase $
+        withTemporaryPackageRepository "existing-create-package" $ \tempRepository -> do
+          withCurrentWorkingDirectory tempRepository $ do
+            createDirectoryIfMissing True ("packages" </> "demo")
+            createPackageResult <- createPackageInCurrentRepository RustPackage "demo"
+            assertEqual
+              "Fails fast when the target package already exists."
+              (Left "package already exists: packages/demo")
+              createPackageResult,
+      TestCase $
+        withTemporaryPackageRepository "haskell-create-package" $ \tempRepository -> do
+          withCurrentWorkingDirectory tempRepository $ do
+            _ <- createPackageInCurrentRepository HaskellPackage "demo"
+            repositoryPaths <- collectRepositoryPaths "."
+            let relativePaths = sort [path | path <- repositoryPaths, path /= "."]
+                leafPaths = Set.fromList (filter (isLeafPath relativePaths) relativePaths)
+                packageInfo = buildPackageInfo leafPaths ("packages" </> "demo")
+            assertEqual
+              "Creates a Haskell package structure that is recognized by package detection."
+              HaskellPackage
+              (detectedPackageKind packageInfo)
+    ]
+withTemporaryPackageRepository :: String -> (FilePath -> IO a) -> IO a
+withTemporaryPackageRepository templateName action = do
+  (temporaryPath, temporaryHandle) <- openTempFile "/tmp" templateName
+  hClose temporaryHandle
+  removeFile temporaryPath
+  createDirectoryIfMissing True temporaryPath
+  action temporaryPath
+withCurrentWorkingDirectory :: FilePath -> IO a -> IO a
+withCurrentWorkingDirectory workingDirectory action = do
+  previousDirectory <- getCurrentDirectory
+  setCurrentDirectory workingDirectory
+  action `finally` setCurrentDirectory previousDirectory
 rustNixFixture :: String
 rustNixFixture =
   "{ pkgs ? import <nixpkgs> { }, }:\n"
@@ -2698,6 +3003,481 @@ exampleCargoTomlFixture =
       "keywords = [\"check\", \"lint\", \"fixture\"]",
       "categories = [\"development-tools\"]",
       ""
+    ]
+pythonGitignoreSource :: T.Text
+pythonGitignoreSource =
+  T.unlines
+    [ "__pycache__/",
+      ".mypy_cache/",
+      ".ruff_cache/",
+      "coverage/",
+      "tmp/"
+    ]
+pythonLatexGitignoreSource :: T.Text
+pythonLatexGitignoreSource = T.unlines ["tmp/"]
+rustGitignoreSource :: T.Text
+rustGitignoreSource =
+  T.unlines
+    [ "coverage/",
+      "target/"
+    ]
+haskellGitignoreSource :: T.Text
+haskellGitignoreSource =
+  T.unlines
+    [ "coverage/",
+      ".direnv/",
+      "tmp/"
+    ]
+htmlGitignoreSource :: T.Text
+htmlGitignoreSource = T.unlines [".direnv/"]
+cGitignoreSource :: T.Text
+cGitignoreSource = T.unlines ["*.o"]
+latexGitignoreSource :: T.Text
+latexGitignoreSource =
+  T.unlines
+    [ "*.aux",
+      "*.log",
+      "*.pdf"
+    ]
+pythonMainSource :: T.Text
+pythonMainSource =
+  T.unlines
+    [ "#!/usr/bin/env python3",
+      "\"\"\"Canonicalize labels into a stable, human-readable summary.\"\"\"",
+      "",
+      "from __future__ import annotations",
+      "",
+      "import os",
+      "import re",
+      "import unittest",
+      "",
+      "DEFAULT_LABELS = [",
+      "    \"Hello, World!\",",
+      "    \"hello_world\",",
+      "    \"HELLO   WORLD\",",
+      "]",
+      "",
+      "",
+      "def canonicalize_label(label: str) -> str:",
+      "    \"\"\"Collapse arbitrary label spellings to lowercase kebab-case.\"\"\"",
+      "    normalized = re.sub(r\"[^0-9A-Za-z]+\", \"-\", label.casefold()).strip(\"-\")",
+      "    return re.sub(r\"-{2,}\", \"-\", normalized)",
+      "",
+      "",
+      "def render_message(labels: list[str] | None = None) -> str:",
+      "    \"\"\"Render a deterministic message from labels.\"\"\"",
+      "    source_labels = DEFAULT_LABELS if labels is None else labels",
+      "    canonical_labels = []",
+      "    seen: set[str] = set()",
+      "    for label in source_labels:",
+      "        canonical = canonicalize_label(label)",
+      "        if canonical and canonical not in seen:",
+      "            seen.add(canonical)",
+      "            canonical_labels.append(canonical)",
+      "    if not canonical_labels:",
+      "        return \"No canonical labels\"",
+      "    return \", \".join(canonical_labels)",
+      "",
+      "",
+      "class MainTests(unittest.TestCase):",
+      "    \"\"\"Behavior tests for the sample package.\"\"\"",
+      "",
+      "    def test_render_message_uses_canonical_labels(self) -> None:",
+      "        self.assertEqual(render_message(), \"hello-world\")",
+      "",
+      "    def test_render_message_reports_empty_result(self) -> None:",
+      "        self.assertEqual(render_message([\"...\", \"---\"]), \"No canonical labels\")",
+      "",
+      "",
+      "def run_tests() -> None:",
+      "    \"\"\"Run the unittest suite.\"\"\"",
+      "    result = unittest.TextTestRunner(verbosity=2).run(",
+      "        unittest.defaultTestLoader.loadTestsFromTestCase(MainTests)",
+      "    )",
+      "    if not result.wasSuccessful():",
+      "        raise SystemExit(1)",
+      "",
+      "",
+      "def main() -> None:",
+      "    \"\"\"Run main.\"\"\"",
+      "    if os.getenv(\"DEBUG\") == \"1\":",
+      "        run_tests()",
+      "    else:",
+      "        print(render_message())  # noqa: T201",
+      "",
+      "",
+      "if __name__ == \"__main__\":",
+      "    main()"
+    ]
+pythonLatexMainSource :: T.Text
+pythonLatexMainSource =
+  T.unlines
+    [ "#!/usr/bin/env python3",
+      "\"\"\"Generate Python-produced artifacts for a LaTeX build.\"\"\"",
+      "",
+      "from __future__ import annotations",
+      "",
+      "import os",
+      "import tempfile",
+      "import unittest",
+      "from pathlib import Path",
+      "",
+      "import matplotlib as mpl",
+      "",
+      "mpl.use(\"Agg\")",
+      "import matplotlib.pyplot as plt",
+      "import pandas as pd",
+      "",
+      "DEFAULT_SAMPLES = [2.0, 3.5, 5.0, 9.5, 12.0]",
+      "",
+      "",
+      "def summarize_samples(samples: list[float]) -> list[tuple[str, float]]:",
+      "    \"\"\"Return stable summary statistics for a non-empty sample list.\"\"\"",
+      "    if not samples:",
+      "        raise ValueError(\"samples must not be empty\")",
+      "    total = float(sum(samples))",
+      "    count = float(len(samples))",
+      "    mean = total / count",
+      "    return [",
+      "        (\"count\", count),",
+      "        (\"total\", total),",
+      "        (\"mean\", mean),",
+      "        (\"min\", float(min(samples))),",
+      "        (\"max\", float(max(samples))),",
+      "    ]",
+      "",
+      "",
+      "def render_table(samples: list[float]) -> str:",
+      "    \"\"\"Render a simple deterministic table artifact.\"\"\"",
+      "    frame = pd.DataFrame(summarize_samples(samples), columns=[\"Metric\", \"Value\"])",
+      "    lines = [\"% generated table\"]",
+      "    lines.extend(f\"{row.Metric}: {row.Value:.2f}\" for row in frame.itertuples(index=False))",
+      "    return \"\\n\".join(lines)",
+      "",
+      "",
+      "def create_workspace_artifacts(workspace: Path) -> None:",
+      "    \"\"\"Generate the figure and table consumed by the LaTeX document.\"\"\"",
+      "    workspace.mkdir(parents=True, exist_ok=True)",
+      "    figure_path = workspace / \"figure.png\"",
+      "    table_path = workspace / \"table.tex\"",
+      "    figure, axis = plt.subplots(figsize=(5, 3))",
+      "    axis.plot(range(1, len(DEFAULT_SAMPLES) + 1), DEFAULT_SAMPLES, marker=\"o\")",
+      "    axis.set_xlabel(\"Sample index\")",
+      "    axis.set_ylabel(\"Value\")",
+      "    axis.set_title(\"Python-generated figure\")",
+      "    figure.tight_layout()",
+      "    figure.savefig(figure_path, dpi=200)",
+      "    plt.close(figure)",
+      "    table_path.write_text(render_table(DEFAULT_SAMPLES), encoding=\"utf-8\")",
+      "",
+      "",
+      "class ArtifactTests(unittest.TestCase):",
+      "    \"\"\"Behavior tests for generated artifacts.\"\"\"",
+      "",
+      "    def test_workspace_artifacts_are_created(self) -> None:",
+      "        with tempfile.TemporaryDirectory() as tmpdir:",
+      "            workspace = Path(tmpdir) / \"tmp\"",
+      "            create_workspace_artifacts(workspace)",
+      "            self.assertTrue((workspace / \"figure.png\").exists())",
+      "            self.assertTrue((workspace / \"table.tex\").exists())",
+      "",
+      "",
+      "def run_tests() -> None:",
+      "    \"\"\"Run the unittest suite.\"\"\"",
+      "    result = unittest.TextTestRunner(verbosity=2).run(",
+      "        unittest.defaultTestLoader.loadTestsFromTestCase(ArtifactTests)",
+      "    )",
+      "    if not result.wasSuccessful():",
+      "        raise SystemExit(1)",
+      "",
+      "",
+      "def main() -> None:",
+      "    \"\"\"Generate the build workspace artifacts for LaTeX compilation.\"\"\"",
+      "    if os.getenv(\"DEBUG\") == \"1\":",
+      "        run_tests()",
+      "    workspace = Path.cwd().resolve() / \"tmp\"",
+      "    create_workspace_artifacts(workspace)",
+      "",
+      "",
+      "if __name__ == \"__main__\":",
+      "    main()"
+    ]
+haskellMainSource :: T.Text
+haskellMainSource =
+  T.unlines
+    [ "{-# LANGUAGE Trustworthy #-}",
+      "{-# OPTIONS_GHC -Wno-unsafe #-}",
+      "module Main (main) where",
+      "import System.Environment (getArgs, lookupEnv)",
+      "import System.Exit (exitFailure)",
+      "import Test.HUnit (Counts (errors, failures), Test (TestCase, TestList), assertEqual, runTestTT)",
+      "",
+      "renderMessage :: String",
+      "renderMessage = \"Hello World Haskell\"",
+      "",
+      "runDebugTests :: IO ()",
+      "runDebugTests = do",
+      "  counts <- runTestTT hUnitDebugTests",
+      "  if errors counts == 0 && failures counts == 0",
+      "    then putStrLn \"test ... ok\"",
+      "    else exitFailure",
+      "",
+      "hUnitDebugTests :: Test",
+      "hUnitDebugTests =",
+      "  TestList",
+      "    [ TestCase $ do",
+      "        assertEqual \"renders the sample message\" \"Hello World Haskell\" renderMessage",
+      "    ]",
+      "",
+      "main :: IO ()",
+      "main = do",
+      "  _ <- getArgs",
+      "  debugMode <- lookupEnv \"DEBUG\"",
+      "  case debugMode of",
+      "    Just \"1\" -> runDebugTests",
+      "    _ -> putStrLn renderMessage"
+    ]
+rustMainSource :: T.Text
+rustMainSource =
+  T.unlines
+    [ "#![allow(clippy::multiple_crate_versions)]",
+      "use anyhow::{Context, Result};",
+      "use ignore::WalkBuilder;",
+      "use std::fs;",
+      "use std::io::{BufRead, BufReader, Write};",
+      "use std::path::Path;",
+      "fn main() -> Result<()> {",
+      "    let input_paths: Vec<String> = std::env::args().skip(1).collect();",
+      "    if input_paths.is_empty() {",
+      "        process_root_path(Path::new(\".\"));",
+      "    } else {",
+      "        for input_path in input_paths {",
+      "            process_root_path(Path::new(&input_path));",
+      "        }",
+      "    }",
+      "    Ok(())",
+      "}",
+      "fn process_root_path(root: &Path) {",
+      "    let walker = WalkBuilder::new(root).require_git(false).build();",
+      "    for result in walker {",
+      "        match result {",
+      "            Ok(entry) => {",
+      "                let path = entry.path();",
+      "                if path.is_file() {",
+      "                    if let Err(e) = remove_empty_lines(path) {",
+      "                        let path_display = path.display();",
+      "                        eprintln!(\"Error processing {path_display}: {e}\");",
+      "                    }",
+      "                }",
+      "            }",
+      "            Err(err) => eprintln!(\"Error walking path: {err}\"),",
+      "        }",
+      "    }",
+      "}",
+      "fn remove_empty_lines(path: &Path) -> Result<()> {",
+      "    let path_display = path.display();",
+      "    let data = fs::read(path).with_context(|| format!(\"Failed to read file: {path_display}\"))?;",
+      "    if content_inspector::inspect(&data).is_binary() {",
+      "        return Ok(());",
+      "    }",
+      "    let output = strip_empty_lines_from_bytes(&data)?;",
+      "    if output != data {",
+      "        fs::write(path, output).with_context(|| format!(\"Failed to write file: {path_display}\"))?;",
+      "    }",
+      "    Ok(())",
+      "}",
+      "fn strip_empty_lines_from_bytes(data: &[u8]) -> Result<Vec<u8>> {",
+      "    let reader = BufReader::new(data);",
+      "    let mut output = Vec::new();",
+      "    for line_result in reader.lines() {",
+      "        let line = line_result?;",
+      "        if !line.trim().is_empty() {",
+      "            writeln!(output, \"{line}\")?;",
+      "        }",
+      "    }",
+      "    Ok(output)",
+      "}",
+      "#[cfg(test)]",
+      "mod tests {",
+      "    use super::*;",
+      "    use quickcheck::{Arbitrary, Gen, QuickCheck, TestResult};",
+      "    use std::env;",
+      "    #[derive(Clone, Debug)]",
+      "    struct LogicalLine(String);",
+      "    impl Arbitrary for LogicalLine {",
+      "        fn arbitrary(g: &mut Gen) -> Self {",
+      "            let line = String::arbitrary(g)",
+      "                .chars()",
+      "                .filter(|character| *character != '\\n' && *character != '\\r')",
+      "                .collect();",
+      "            Self(line)",
+      "        }",
+      "    }",
+      "    fn render_lines(lines: &[LogicalLine]) -> Vec<u8> {",
+      "        let mut rendered = Vec::new();",
+      "        for line in lines {",
+      "            rendered.extend_from_slice(line.0.as_bytes());",
+      "            rendered.push(b'\\n');",
+      "        }",
+      "        rendered",
+      "    }",
+      "    fn expected_non_empty_lines(lines: &[LogicalLine]) -> Vec<u8> {",
+      "        let mut rendered = Vec::new();",
+      "        for line in lines {",
+      "            if !line.0.trim().is_empty() {",
+      "                rendered.extend_from_slice(line.0.as_bytes());",
+      "                rendered.push(b'\\n');",
+      "            }",
+      "        }",
+      "        rendered",
+      "    }",
+      "    #[test]",
+      "    fn test_process_root_path_removes_empty_lines_from_text_files() -> Result<()> {",
+      "        use tempfile::tempdir;",
+      "        let dir = tempdir()?;",
+      "        let root = dir.path();",
+      "        let file1_path = root.join(\"test.txt\");",
+      "        fs::write(&file1_path, \"line1\\n\\nline2\\n   \\nline3\\n\")?;",
+      "        process_root_path(root);",
+      "        let content1 = fs::read_to_string(&file1_path)?;",
+      "        assert_eq!(content1, \"line1\\nline2\\nline3\\n\");",
+      "        Ok(())",
+      "    }",
+      "    #[test]",
+      "    fn test_process_root_path_respects_gitignore_and_skips_binary_files() -> Result<()> {",
+      "        use tempfile::tempdir;",
+      "        let dir = tempdir()?;",
+      "        let root = dir.path();",
+      "        let gitignore_path = root.join(\".gitignore\");",
+      "        fs::write(&gitignore_path, \"ignored.txt\\n\")?;",
+      "        let ignored_path = root.join(\"ignored.txt\");",
+      "        fs::write(&ignored_path, \"should be ignored\\n\\n\")?;",
+      "        let binary_path = root.join(\"binary.bin\");",
+      "        fs::write(&binary_path, [0, 15, 255, 0, 1, 2, 3])?;",
+      "        process_root_path(root);",
+      "        let content_ignored = fs::read_to_string(&ignored_path)?;",
+      "        assert_eq!(content_ignored, \"should be ignored\\n\\n\");",
+      "        let content_binary = fs::read(&binary_path)?;",
+      "        assert_eq!(content_binary, vec![0, 15, 255, 0, 1, 2, 3]);",
+      "        Ok(())",
+      "    }",
+      "    #[test]",
+      "    fn test_main_processes_current_directory_when_no_args() -> Result<()> {",
+      "        use tempfile::tempdir;",
+      "        let dir = tempdir()?;",
+      "        let root = dir.path();",
+      "        let file_path = root.join(\"test.txt\");",
+      "        fs::write(&file_path, \"line1\\n\\nline2\\n\")?;",
+      "        let previous_dir = env::current_dir()?;",
+      "        env::set_current_dir(root)?;",
+      "        let result = main();",
+      "        env::set_current_dir(previous_dir)?;",
+      "        result?;",
+      "        let content = fs::read_to_string(&file_path)?;",
+      "        assert_eq!(content, \"line1\\nline2\\n\");",
+      "        Ok(())",
+      "    }",
+      "    #[test]",
+      "    fn quickcheck_strip_empty_lines_matches_filtered_sequence() {",
+      "        fn property(lines: Vec<LogicalLine>) -> TestResult {",
+      "            let input = render_lines(&lines);",
+      "            match strip_empty_lines_from_bytes(&input) {",
+      "                Ok(actual) => TestResult::from_bool(actual == expected_non_empty_lines(&lines)),",
+      "                Err(_) => TestResult::error(\"strip_empty_lines_from_bytes returned an error\"),",
+      "            }",
+      "        }",
+      "        QuickCheck::new()",
+      "            .tests(100)",
+      "            .quickcheck(property as fn(Vec<LogicalLine>) -> TestResult);",
+      "    }",
+      "    #[test]",
+      "    fn quickcheck_strip_empty_lines_is_idempotent() {",
+      "        fn property(lines: Vec<LogicalLine>) -> TestResult {",
+      "            let input = render_lines(&lines);",
+      "            match strip_empty_lines_from_bytes(&input) {",
+      "                Ok(first_pass) => match strip_empty_lines_from_bytes(&first_pass) {",
+      "                    Ok(second_pass) => TestResult::from_bool(first_pass == second_pass),",
+      "                    Err(_) => {",
+      "                        TestResult::error(\"second strip_empty_lines_from_bytes returned an error\")",
+      "                    }",
+      "                },",
+      "                Err(_) => TestResult::error(\"first strip_empty_lines_from_bytes returned an error\"),",
+      "            }",
+      "        }",
+      "        QuickCheck::new()",
+      "            .tests(100)",
+      "            .quickcheck(property as fn(Vec<LogicalLine>) -> TestResult);",
+      "    }",
+      "}"
+    ]
+htmlIndexSource :: T.Text
+htmlIndexSource =
+  T.unlines
+    [ "<!doctype html>",
+      "<html lang=\"en\">",
+      "  <head>",
+      "    <meta charset=\"utf-8\" />",
+      "    <title>Hello World</title>",
+      "    <link href=\"style.css\" rel=\"stylesheet\" />",
+      "  </head>",
+      "  <body>",
+      "    <h1>Hello World!</h1>",
+      "    <script src=\"script.js\"></script>",
+      "  </body>",
+      "</html>"
+    ]
+htmlScriptSource :: T.Text
+htmlScriptSource = T.unlines ["console.log(\"Hello World!\");"]
+htmlStyleSource :: T.Text
+htmlStyleSource =
+  T.unlines
+    [ "body {",
+      "\tfont-family: sans-serif;",
+      "\ttext-align: center;",
+      "\tpadding-top: 50px;",
+      "}"
+    ]
+cMainSource :: T.Text
+cMainSource =
+  T.unlines
+    [ "#include <assert.h>",
+      "#include <stdio.h>",
+      "#include <stdlib.h>",
+      "#include <string.h>",
+      "static void run_tests(void);",
+      "static void run_tests(void) {",
+      "  assert(1 + 1 == 2);",
+      "  printf(\"test ... ok\\n\");",
+      "}",
+      "int main(void) {",
+      "  const char *debug = getenv(\"DEBUG\");",
+      "  if (debug && strcmp(debug, \"1\") == 0) {",
+      "    run_tests();",
+      "  } else {",
+      "    printf(\"Hello World\\n\");",
+      "  }",
+      "  return 0;",
+      "}"
+    ]
+latexMsTexSource :: T.Text
+latexMsTexSource =
+  T.unlines
+    [ "\\documentclass{article}",
+      "\\usepackage{url}",
+      "\\begin{document}",
+      "Hello World! \\cite{nixos}",
+      "\\bibliographystyle{plain}",
+      "\\bibliography{ms}",
+      "\\end{document}"
+    ]
+latexMsBibSource :: T.Text
+latexMsBibSource =
+  T.unlines
+    [ "@misc{nixos,",
+      "  title = {NixOS},",
+      "  howpublished = {\\url{https://nixos.org}},",
+      "  year = {2026}",
+      "}"
     ]
 removeEmptyLinesCargoTomlFixture :: T.Text
 removeEmptyLinesCargoTomlFixture =
