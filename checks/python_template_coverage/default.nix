@@ -9,12 +9,10 @@ let
   packageName = pkgs.lib.removeSuffix "_coverage" checkName;
   pythonEnv = packageDrv.python.withPackages (
     _:
-    pkgs.lib.unique (
-      packageDrv.propagatedBuildInputs
-      ++ [
-        packageDrv.python.pkgs.coverage
-      ]
-    )
+    packageDrv.propagatedBuildInputs
+    ++ [
+      packageDrv.python.pkgs.coverage
+    ]
   );
 in
 pkgs.runCommand checkName

@@ -9,12 +9,10 @@ let
   packageName = pkgs.lib.removeSuffix "_profile" checkName;
   pythonEnv = packageDrv.python.withPackages (
     _:
-    pkgs.lib.unique (
-      packageDrv.propagatedBuildInputs
-      ++ [
-        packageDrv.python.pkgs.pyinstrument
-      ]
-    )
+    packageDrv.propagatedBuildInputs
+    ++ [
+      packageDrv.python.pkgs.pyinstrument
+    ]
   );
 in
 pkgs.runCommand checkName

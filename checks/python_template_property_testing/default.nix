@@ -9,12 +9,10 @@ let
   packageName = pkgs.lib.removeSuffix "_property_testing" checkName;
   pythonEnv = packageDrv.python.withPackages (
     _:
-    pkgs.lib.unique (
-      packageDrv.propagatedBuildInputs
-      ++ [
-        packageDrv.python.pkgs.hypothesis
-      ]
-    )
+    packageDrv.propagatedBuildInputs
+    ++ [
+      packageDrv.python.pkgs.hypothesis
+    ]
   );
 in
 pkgs.runCommand checkName
