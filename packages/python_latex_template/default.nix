@@ -3,7 +3,6 @@
 }:
 let
   python = pkgs.python3;
-  pythonEnv = python.withPackages (_: runtimePythonDeps);
   runtimePythonDeps = [
     python.pkgs.matplotlib
     python.pkgs.pandas
@@ -19,7 +18,7 @@ python.pkgs.buildPythonPackage rec {
     #!${pkgs.bash}/bin/bash
     set -euo pipefail
     mkdir -p tmp
-    ${pythonEnv}/bin/python3 "$datadir/main.py"
+    ${python.withPackages (_: runtimePythonDeps)}/bin/python3 "$datadir/main.py"
     cp "$datadir"/ms.{tex,bib} tmp/
     ${pkgs.texliveFull}/bin/latexmk -cd -pdf tmp/ms.tex
     EOF

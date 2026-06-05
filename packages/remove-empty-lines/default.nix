@@ -1,11 +1,7 @@
 {
   pkgs ? import <nixpkgs> { },
 }:
-let
-  pname = baseNameOf ./.;
-in
-pkgs.rustPlatform.buildRustPackage {
-  inherit pname;
+pkgs.rustPlatform.buildRustPackage rec {
   cargoHash = "sha256-4Tpc7xOULVqqUzlg2G581bdTxP6SaHR7n9vdq8rqxX0=";
   doInstallCheck = pkgs.stdenv.isLinux;
   env = {
@@ -26,6 +22,7 @@ pkgs.rustPlatform.buildRustPackage {
     pkgs.rustc
     pkgs.stdenv.cc
   ];
+  pname = baseNameOf ./.;
   src = ./.;
   strictDeps = true;
   version = "0.0.0";
