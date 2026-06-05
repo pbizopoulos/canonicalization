@@ -2,11 +2,8 @@
   inputs,
   pkgs ? import <nixpkgs> { },
 }:
-let
-  packageName = baseNameOf ./.;
-in
-pkgs.writeShellApplication {
-  name = packageName;
+pkgs.writeShellApplication rec {
+  name = baseNameOf ./.;
   runtimeInputs = [
     pkgs.jq
     pkgs.openssh
@@ -31,8 +28,8 @@ pkgs.writeShellApplication {
     workdir=$(mktemp -d)
     cp -r ${../..}/. "$workdir/"
     chmod -R u+w "$workdir"
-    rm -rf "$workdir/packages/${packageName}/.terraform" "$workdir/packages/${packageName}/.terraform.lock.hcl"
-    tofu -chdir="$workdir/packages/${packageName}" init -reconfigure
-    tofu -chdir="$workdir/packages/${packageName}" apply
+    rm -rf "$workdir/packages/${name}/.terraform" "$workdir/packages/${name}/.terraform.lock.hcl"
+    tofu -chdir="$workdir/packages/${name}" init -reconfigure
+    tofu -chdir="$workdir/packages/${name}" apply
   '';
 }
