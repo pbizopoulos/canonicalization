@@ -574,18 +574,36 @@ runCreateRepositoryMode packageKindName packageName requestedCheckKinds =
               putStrLn ("created " ++ show (length createdFilePaths) ++ " files")
 runCheckRepositoryMode :: IO ()
 runCheckRepositoryMode = do
+  _ <- ensureRepositoryCompliance
+  pure ()
+collectRepositoryCompliance :: IO (Either (String, [String]) RepositoryComplianceSuccess)
+collectRepositoryCompliance = do
   repositoryStructureIssues <- checkRepositoryStructure
-  unless (null repositoryStructureIssues) $ do
-    reportCheckRepositoryFailures "directory-structure" repositoryStructureIssues
-    exitFailure
-  packageNames <- listPackageNames
-  packageChecks <- forM packageNames (checkPackage [])
-  checkNames <- listCheckNames
-  checkComplianceIssues <- concat <$> forM checkNames checkCheck
-  let fileComplianceIssues = concatMap packageCheckIssues packageChecks ++ checkComplianceIssues
-  unless (null fileComplianceIssues) $ do
-    reportCheckRepositoryFailures "file-compliance" fileComplianceIssues
-    exitFailure
+  if not (null repositoryStructureIssues)
+    then pure (Left ("directory-structure", repositoryStructureIssues))
+    else do
+      packageNames <- listPackageNames
+      packageChecks <- forM packageNames (checkPackage [])
+      checkNames <- listCheckNames
+      checkComplianceIssues <- concat <$> forM checkNames checkCheck
+      let fileComplianceIssues = concatMap packageCheckIssues packageChecks ++ checkComplianceIssues
+      if not (null fileComplianceIssues)
+        then pure (Left ("file-compliance", fileComplianceIssues))
+        else
+          pure
+            ( Right
+                RepositoryComplianceSuccess
+                  { repositoryCompliancePackageNames = packageNames,
+                    repositoryComplianceCheckNames = checkNames
+                  }
+            )
+ensureRepositoryCompliance :: IO RepositoryComplianceSuccess
+ensureRepositoryCompliance = do
+  collectRepositoryCompliance >>= \case
+    Left (checkPhaseName, checkPhaseIssues) -> do
+      reportCheckRepositoryFailures checkPhaseName checkPhaseIssues
+      exitFailure
+    Right repositoryComplianceSuccess -> pure repositoryComplianceSuccess
 reportCheckRepositoryFailures :: String -> [String] -> IO ()
 reportCheckRepositoryFailures checkPhaseName checkPhaseIssues = do
   putStrLn ("check-repository failed at phase: " ++ checkPhaseName)
@@ -616,6 +634,12 @@ data RepositoryPackageChecksSummary = RepositoryPackageChecksSummary
     repositoryPackageHasMutationTestingCheck :: Bool
   }
   deriving stock (Eq, Show)
+type RepositoryComplianceSuccess :: Type
+data RepositoryComplianceSuccess = RepositoryComplianceSuccess
+  { repositoryCompliancePackageNames :: [FilePath],
+    repositoryComplianceCheckNames :: [FilePath]
+  }
+  deriving stock (Eq, Show)
 type RepositoryPackageSummary :: Type
 data RepositoryPackageSummary = RepositoryPackageSummary
   { repositoryPackageName :: FilePath,
@@ -627,15 +651,13 @@ data RepositoryPackageSummary = RepositoryPackageSummary
   }
 runDescribeRepositoryMode :: IO ()
 runDescribeRepositoryMode = do
-  packageNames <- listPackageNames
-  checkNames <- listCheckNames
+  RepositoryComplianceSuccess packageNames checkNames <- ensureRepositoryCompliance
   let repositoryCheckNames = Set.fromList checkNames
   packageSummaries <- forM packageNames (summarizeRepositoryPackage repositoryCheckNames)
   putStr (renderRepositoryPackageSummaries packageSummaries)
 runDescribeRepositoryJsonMode :: IO ()
 runDescribeRepositoryJsonMode = do
-  packageNames <- listPackageNames
-  checkNames <- listCheckNames
+  RepositoryComplianceSuccess packageNames checkNames <- ensureRepositoryCompliance
   let repositoryCheckNames = Set.fromList checkNames
   packageSummaries <- forM packageNames (summarizeRepositoryPackage repositoryCheckNames)
   putStr (renderRepositoryPackageSummariesJson packageSummaries)
@@ -2924,7 +2946,47 @@ repositoryPolicyDebugTests =
         assertEqual
           "Rejects non go-style .gitmodules path with extra segments."
           False
-          (gitSubmoduleRepositoryIsCompatible (buildGitSubmoduleRepository "/home/user" "github.com/pbizopoulos/canonicalization/subdir"))
+          (gitSubmoduleRepositoryIsCompatible (buildGitSubmoduleRepository "/home/user" "github.com/pbizopoulos/canonicalization/subdir")),
+      TestCase $
+        withTemporaryPackageRepository "compliant-repository-validation" $ \tempRepository -> do
+          withCurrentWorkingDirectory tempRepository $ do
+            _ <- createPackageInCurrentRepository HaskellPackage "demo"
+            repositoryComplianceResult <- collectRepositoryCompliance
+            assertEqual
+              "Collects package names for compliant repositories."
+              ( Right
+                  RepositoryComplianceSuccess
+                    { repositoryCompliancePackageNames = ["demo"],
+                      repositoryComplianceCheckNames = []
+                    }
+              )
+              repositoryComplianceResult,
+      TestCase $
+        withTemporaryPackageRepository "structure-repository-validation" $ \tempRepository -> do
+          withCurrentWorkingDirectory tempRepository $ do
+            createDirectoryIfMissing True "unexpected"
+            TIO.writeFile ("unexpected" </> "file.txt") "bad"
+            repositoryComplianceResult <- collectRepositoryCompliance
+            case repositoryComplianceResult of
+              Left ("directory-structure", repositoryStructureIssues) ->
+                assertBool
+                  "Reports structure violations for non-canonical paths."
+                  ("unexpected/file.txt: is not allowed" `elem` repositoryStructureIssues)
+              otherResult ->
+                assertFailure ("Expected directory-structure failure, got: " ++ show otherResult),
+      TestCase $
+        withTemporaryPackageRepository "file-compliance-repository-validation" $ \tempRepository -> do
+          withCurrentWorkingDirectory tempRepository $ do
+            _ <- createPackageInCurrentRepository PythonPackage "demo"
+            TIO.writeFile ("packages" </> "demo" </> "default.nix") "not valid nix template"
+            repositoryComplianceResult <- collectRepositoryCompliance
+            case repositoryComplianceResult of
+              Left ("file-compliance", fileComplianceIssues) ->
+                assertBool
+                  "Reports file-compliance violations for malformed package files."
+                  (any ("packages/demo/default.nix:" `isPrefixOf`) fileComplianceIssues)
+              otherResult ->
+                assertFailure ("Expected file-compliance failure, got: " ++ show otherResult)
     ]
 createPackageDebugTests :: Test
 createPackageDebugTests =
