@@ -4,11 +4,11 @@
   ...
 }:
 let
-  inherit (inputs.self.packages.${pkgs.stdenv.system}.${packageName}) cargoDeps;
+  inherit (packageDrv) cargoDeps;
   checkName = builtins.baseNameOf ./.;
+  packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${packageName};
   packageName = pkgs.lib.removeSuffix "-coverage" checkName;
-  rustBaseInputs =
-    inputs.self.packages.${pkgs.stdenv.system}.${packageName}.passthru.rustCheckNativeBuildInputs;
+  rustBaseInputs = packageDrv.passthru.rustCheckNativeBuildInputs;
 in
 pkgs.runCommand "${checkName}"
   {
@@ -21,11 +21,12 @@ pkgs.runCommand "${checkName}"
   ''
     export LLVM_COV='${pkgs.lib.getExe' pkgs.llvmPackages.llvm "llvm-cov"}'
     export LLVM_PROFDATA='${pkgs.lib.getExe' pkgs.llvmPackages.llvm "llvm-profdata"}'
-    cp -R --no-preserve=mode "$src" "$PWD/workspace"
-    install -Dm644 "${cargoDeps}/.cargo/config.toml" "$PWD/workspace/.cargo/config.toml"
-    substituteInPlace "$PWD/workspace/.cargo/config.toml" \
+    workspace="$PWD/workspace"
+    cp -R --no-preserve=mode "$src" "$workspace"
+    install -Dm644 "${cargoDeps}/.cargo/config.toml" "$workspace/.cargo/config.toml"
+    substituteInPlace "$workspace/.cargo/config.toml" \
       --replace-fail "@vendor@" "${cargoDeps}"
-    cd "$PWD/workspace"
+    cd "$workspace"
     cargo llvm-cov
     touch "$out"
   ''

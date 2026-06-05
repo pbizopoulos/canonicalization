@@ -4,11 +4,11 @@
   ...
 }:
 let
-  inherit (inputs.self.packages.${pkgs.stdenv.system}.${packageName}) cargoDeps;
+  inherit (packageDrv) cargoDeps;
   checkName = builtins.baseNameOf ./.;
+  packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${packageName};
   packageName = pkgs.lib.removeSuffix "-mutation-testing" checkName;
-  rustBaseInputs =
-    inputs.self.packages.${pkgs.stdenv.system}.${packageName}.passthru.rustCheckNativeBuildInputs;
+  rustBaseInputs = packageDrv.passthru.rustCheckNativeBuildInputs;
 in
 pkgs.runCommand "${checkName}"
   {
@@ -18,11 +18,12 @@ pkgs.runCommand "${checkName}"
     src = ../.. + "/packages/${packageName}";
   }
   ''
-    cp -R --no-preserve=mode "$src" "$PWD/workspace"
-    install -Dm644 "${cargoDeps}/.cargo/config.toml" "$PWD/workspace/.cargo/config.toml"
-    substituteInPlace "$PWD/workspace/.cargo/config.toml" \
+    workspace="$PWD/workspace"
+    cp -R --no-preserve=mode "$src" "$workspace"
+    install -Dm644 "${cargoDeps}/.cargo/config.toml" "$workspace/.cargo/config.toml"
+    substituteInPlace "$workspace/.cargo/config.toml" \
       --replace-fail "@vendor@" "${cargoDeps}"
-    cd "$PWD/workspace"
+    cd "$workspace"
     cargo mutants || mutation_status=$?
     if [ "''${mutation_status:-0}" != 0 ] && [ "''${mutation_status:-0}" != 2 ]; then
       exit "$mutation_status"

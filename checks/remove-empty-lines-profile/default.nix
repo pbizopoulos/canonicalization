@@ -5,22 +5,23 @@
 }:
 let
   checkName = builtins.baseNameOf ./.;
+  packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${packageName};
   packageName = pkgs.lib.removeSuffix "-profile" checkName;
 in
 pkgs.runCommand "${checkName}"
   {
     nativeBuildInputs = [
-      inputs.self.packages.${pkgs.stdenv.system}.${packageName}
+      packageDrv
       pkgs.perf
     ];
     src = ../.. + "/packages/${packageName}";
   }
   ''
-    temp_dir="$PWD/workspace"
-    mkdir -p "$temp_dir"
-    printf 'line1\n\nline2\n' > "$temp_dir/test.txt"
+    workspace="$PWD/workspace"
+    mkdir -p "$workspace"
+    printf 'line1\n\nline2\n' > "$workspace/test.txt"
     run_cmd() {
-      remove-empty-lines "$temp_dir"
+      remove-empty-lines "$workspace"
     }
     if perf stat -e cpu-clock true >/dev/null 2>&1; then
       perf record --no-buildid-mmap --call-graph dwarf -e cpu-clock -o perf.data -- \
