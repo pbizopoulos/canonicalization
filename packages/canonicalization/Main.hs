@@ -1022,7 +1022,7 @@ renderScaffoldHaskellCabal packageName =
   T.unlines
     [ case sourceLine of
         "name:          haskell-template" -> T.pack ("name:          " ++ packageName)
-        "synopsis:      Hello World Haskell" -> "synopsis:      Generated Haskell package"
+        "synopsis:      Canonical Haskell package template" -> "synopsis:      Generated Haskell package"
         "executable haskell-template" -> T.pack ("executable " ++ packageName)
         otherLine -> otherLine
     | sourceLine <- T.lines haskellCabalBaseline
@@ -1979,35 +1979,50 @@ checkCabalFile packageName = do
                       ++ packageName
                       ++ "/"
                       ++ packageName
-                      ++ ".cabal: only build-depends may differ from the internal Haskell cabal baseline"
+                      ++ ".cabal: only build-depends and package metadata fields synopsis/description may differ from the internal Haskell cabal baseline"
                   )
           ]
 normalizeCabalForBaselineComparison :: FilePath -> T.Text -> T.Text
 normalizeCabalForBaselineComparison packageName cabalContents =
-  let step (insideBuildDependsSection, normalizedLinesSoFar) sourceLine =
+  let step (insideBuildDependsSection, insideIgnoredMetadataField, normalizedLinesSoFar) sourceLine =
         let trimmedLine = T.strip sourceLine
             normalizedLine = normalizeCabalLineForBaselineComparison packageName trimmedLine
          in if insideBuildDependsSection
               then
                 if T.null trimmedLine
-                  then (True, normalizedLinesSoFar)
+                  then (True, False, normalizedLinesSoFar)
                   else case T.breakOn ":" trimmedLine of
-                    (_, "") -> (True, normalizedLinesSoFar)
-                    _ -> (False, normalizedLinesSoFar ++ [normalizedLine])
+                    (_, "") -> (True, False, normalizedLinesSoFar)
+                    _ -> (False, False, normalizedLinesSoFar ++ [normalizedLine])
               else
-                if "build-depends:" `T.isPrefixOf` trimmedLine
-                  then (True, normalizedLinesSoFar)
+                if insideIgnoredMetadataField && isCabalIndentedContinuationLine sourceLine
+                  then (False, True, normalizedLinesSoFar)
                   else
-                    if T.null trimmedLine
-                      then (False, normalizedLinesSoFar)
-                      else (False, normalizedLinesSoFar ++ [normalizedLine])
-      (_, normalizedLines) = foldl' step (False, []) (T.lines cabalContents)
+                    if "build-depends:" `T.isPrefixOf` trimmedLine
+                      then (True, False, normalizedLinesSoFar)
+                      else
+                        if T.null trimmedLine
+                          then (False, False, normalizedLinesSoFar)
+                          else
+                            if isCabalSynopsisField trimmedLine || isCabalDescriptionField trimmedLine
+                              then (False, True, normalizedLinesSoFar)
+                              else (False, False, normalizedLinesSoFar ++ [normalizedLine])
+      (_, _, normalizedLines) = foldl' step (False, False, []) (T.lines cabalContents)
    in T.unlines normalizedLines
 normalizeCabalLineForBaselineComparison :: FilePath -> T.Text -> T.Text
 normalizeCabalLineForBaselineComparison packageName trimmedLine
   | "name:" `T.isPrefixOf` trimmedLine = "name:          " <> T.pack packageName
   | "executable " `T.isPrefixOf` trimmedLine = "executable " <> T.pack packageName
   | otherwise = trimmedLine
+isCabalSynopsisField :: T.Text -> Bool
+isCabalSynopsisField trimmedLine = "synopsis:" `T.isPrefixOf` trimmedLine
+isCabalDescriptionField :: T.Text -> Bool
+isCabalDescriptionField trimmedLine = "description:" `T.isPrefixOf` trimmedLine
+isCabalIndentedContinuationLine :: T.Text -> Bool
+isCabalIndentedContinuationLine sourceLine =
+  case T.uncons sourceLine of
+    Just (firstCharacter, _) -> firstCharacter == ' ' || firstCharacter == '\t'
+    Nothing -> False
 lookupCabalField :: T.Text -> T.Text -> Maybe T.Text
 lookupCabalField cabalField cabalContents =
   let fieldPrefix = cabalField <> ":"
@@ -2664,6 +2679,39 @@ metadataAndDiscoveryDebugTests =
           ),
       TestCase $ do
         assertEqual
+          "Normalizes Cabal while ignoring synopsis and description metadata."
+          "name:          demo\nexecutable demo\n"
+          ( T.unpack
+              ( normalizeCabalForBaselineComparison
+                  "demo"
+                  ( T.unlines
+                      [ "name: old-name",
+                        "synopsis: custom synopsis",
+                        "description: custom description",
+                        "executable old-name"
+                      ]
+                  )
+              )
+          ),
+      TestCase $ do
+        assertEqual
+          "Normalizes Cabal while ignoring multiline description metadata."
+          "name:          demo\nexecutable demo\n"
+          ( T.unpack
+              ( normalizeCabalForBaselineComparison
+                  "demo"
+                  ( T.unlines
+                      [ "name: old-name",
+                        "description:",
+                        "  line one",
+                        "  line two",
+                        "executable old-name"
+                      ]
+                  )
+              )
+          ),
+      TestCase $ do
+        assertEqual
           "Looks up Cabal fields."
           (Just "canonicalization")
           (lookupCabalField "name" (T.pack "name: canonicalization\nversion: 0.0.0\n")),
@@ -2675,7 +2723,7 @@ metadataAndDiscoveryDebugTests =
       TestCase $ do
         assertEqual
           "Extracts Haskell package metadata using name and synopsis."
-          (Just ("haskell-template", Just "Hello World Haskell"))
+          (Just ("haskell-template", Just "Canonical Haskell package template"))
           (extractHaskellPackageMetadata "canonicalization" haskellCabalBaseline),
       TestCase $ do
         assertEqual
@@ -3738,7 +3786,7 @@ haskellCabalBaseline =
   T.unlines
     [ "name:          haskell-template",
       "version:       0.0.0",
-      "synopsis:      Hello World Haskell",
+      "synopsis:      Canonical Haskell package template",
       "cabal-version: >=1.10",
       "build-type:    Simple",
       "executable haskell-template",

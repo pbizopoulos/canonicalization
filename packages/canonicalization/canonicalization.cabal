@@ -1,6 +1,8 @@
 name:          canonicalization
 version:       0.0.0
-synopsis:      Hello World Haskell
+synopsis:      Canonical repository checks and scaffolding CLI
+description:
+  CLI for describing, checking, and scaffolding canonical repository packages and checks.
 cabal-version: >=1.10
 build-type:    Simple
 executable canonicalization
