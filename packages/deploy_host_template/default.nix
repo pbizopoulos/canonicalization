@@ -3,11 +3,7 @@
   pkgs ? import <nixpkgs> { },
 }:
 let
-  installationScript = inputs.agenix-shell.lib.installationScript pkgs.stdenv.system {
-    secrets.secrets.file = ../../secrets/secrets.age;
-  };
   packageName = baseNameOf ./.;
-  repoSrc = ../..;
 in
 pkgs.writeShellApplication {
   name = packageName;
@@ -23,11 +19,17 @@ pkgs.writeShellApplication {
   ];
   text = ''
     # shellcheck disable=SC1091
-    source ${pkgs.lib.getExe installationScript}
+    source ${
+      pkgs.lib.getExe (
+        inputs.agenix-shell.lib.installationScript pkgs.stdenv.system {
+          secrets.secrets.file = ../../secrets/secrets.age;
+        }
+      )
+    }
     # shellcheck disable=SC2086,SC2163,SC2154
     export $secrets
     workdir=$(mktemp -d)
-    cp -r ${repoSrc}/. "$workdir/"
+    cp -r ${../..}/. "$workdir/"
     chmod -R u+w "$workdir"
     rm -rf "$workdir/packages/${packageName}/.terraform" "$workdir/packages/${packageName}/.terraform.lock.hcl"
     tofu -chdir="$workdir/packages/${packageName}" init -reconfigure
