@@ -3,9 +3,6 @@
   pkgs ? import <nixpkgs> { },
 }:
 let
-  installationScript = inputs.agenix-shell.lib.installationScript pkgs.stdenv.system {
-    secrets.secrets.file = ../../secrets/secrets.age;
-  };
   python = pkgs.python312;
 in
 python.pkgs.buildPythonPackage rec {
@@ -27,7 +24,13 @@ python.pkgs.buildPythonPackage rec {
   ];
   pyproject = false;
   shellHook = ''
-    source ${pkgs.lib.getExe installationScript}
+    source ${
+      pkgs.lib.getExe (
+        inputs.agenix-shell.lib.installationScript pkgs.stdenv.system {
+          secrets.secrets.file = ../../secrets/secrets.age;
+        }
+      )
+    }
     export $secrets
   '';
   src = ./.;
