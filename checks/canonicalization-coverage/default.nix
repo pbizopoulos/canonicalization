@@ -19,18 +19,20 @@ pkgs.runCommand checkName
   }
   ''
     export HOME="$PWD"
-    mkdir -p coverage/html hpc
+    workspace="$PWD/workspace"
+    mkdir -p "$workspace/coverage/html" "$workspace/hpc"
+    cd "$workspace"
     cat > TestMain.hs <<EOF
     module TestMain (main) where
     import qualified Main as PackageMain
     main :: IO ()
     main = PackageMain.runPackageTests
     EOF
-    ghc -fhpc -hpcdir hpc -main-is TestMain.main \
-      -i"$src" -outputdir . -odir . -hidir . \
+    ghc -fhpc -hpcdir "$workspace/hpc" -main-is TestMain.main \
+      -i"$src" -outputdir "$workspace" -odir "$workspace" -hidir "$workspace" \
       -o "${packageName}" TestMain.hs "$src/Main.hs"
-    HPCTIXFILE="coverage/${packageName}.tix" "./${packageName}"
-    hpc markup "coverage/${packageName}.tix" --hpcdir=hpc --destdir=coverage/html
-    hpc report "coverage/${packageName}.tix" --hpcdir=hpc | tee coverage/summary.txt
+    HPCTIXFILE="$workspace/coverage/${packageName}.tix" "./${packageName}"
+    hpc markup "$workspace/coverage/${packageName}.tix" --hpcdir="$workspace/hpc" --destdir="$workspace/coverage/html"
+    hpc report "$workspace/coverage/${packageName}.tix" --hpcdir="$workspace/hpc" | tee "$workspace/coverage/summary.txt"
     touch "$out"
   ''

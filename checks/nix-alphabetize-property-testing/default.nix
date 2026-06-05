@@ -19,8 +19,11 @@ pkgs.runCommand "${checkName}"
   }
   ''
     export HOME="$PWD"
+    workspace="$PWD/workspace"
     packageName="${packageName}"
-    cat > "$PWD/TestMain.hs" <<EOF
+    mkdir -p "$workspace"
+    cd "$workspace"
+    cat > TestMain.hs <<EOF
     module TestMain (main) where
     import qualified Main as PackageMain
     main :: IO ()
@@ -30,12 +33,12 @@ pkgs.runCommand "${checkName}"
       -O2 \
       -main-is TestMain.main \
       -i"$src" \
-      -outputdir "$PWD" \
-      -odir "$PWD" \
-      -hidir "$PWD" \
-      -o "$PWD/$packageName" \
-      "$PWD/TestMain.hs" \
+      -outputdir "$workspace" \
+      -odir "$workspace" \
+      -hidir "$workspace" \
+      -o "$workspace/$packageName" \
+      "$workspace/TestMain.hs" \
       "$src/Main.hs"
-    "$PWD/$packageName"
+    "$workspace/$packageName"
     touch "$out"
   ''
