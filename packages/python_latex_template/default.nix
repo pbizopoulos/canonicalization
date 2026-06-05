@@ -31,6 +31,7 @@ python.pkgs.buildPythonPackage rec {
   pname = baseNameOf ./.;
   propagatedBuildInputs = runtimePythonDeps ++ [
     python.pkgs.hypothesis
+    python.pkgs.pytest
   ];
   pyproject = false;
   src = ./.;

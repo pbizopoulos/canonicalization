@@ -19,6 +19,7 @@ python.pkgs.buildPythonPackage rec {
   pname = baseNameOf ./.;
   propagatedBuildInputs = [
     python.pkgs.hypothesis
+    python.pkgs.pytest
   ];
   pyproject = false;
   shellHook = ''

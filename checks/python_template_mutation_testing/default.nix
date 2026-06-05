@@ -29,7 +29,7 @@ pkgs.runCommand "${checkName}"
     module-path = "main.py"
     timeout = 10.0
     excluded-modules = []
-    test-command = "python3 -m unittest -v main"
+    test-command = "python3 -m pytest -v main.py"
     [cosmic-ray.distributor]
     name = "local"
     EOF

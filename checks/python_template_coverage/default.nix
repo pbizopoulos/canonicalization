@@ -29,7 +29,7 @@ pkgs.runCommand checkName
     mkdir -p "$coverageDir"
     cp -R --no-preserve=mode "$src" "$workspace"
     cd "$workspace"
-    python -m coverage run -m unittest main.py
+    python -m coverage run -m pytest main.py
     python -m coverage report | tee "$coverageDir/summary.txt"
     python -m coverage html -d "$coverageDir/html"
     touch "$out"
