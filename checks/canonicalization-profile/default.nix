@@ -23,7 +23,7 @@ pkgs.runCommand checkName
     packageName="${packageName}"
     mkdir -p "$workspace"
     cd "$workspace"
-    cat > "$PWD/TestMain.hs" <<EOF
+    cat > "$workspace/TestMain.hs" <<EOF
     module TestMain (main) where
     import qualified Main as PackageMain
     main :: IO ()
@@ -36,13 +36,13 @@ pkgs.runCommand checkName
       -O2 \
       -main-is TestMain.main \
       -i"$src" \
-      -outputdir "$PWD" \
-      -odir "$PWD" \
-      -hidir "$PWD" \
-      -o "$PWD/$packageName" \
-      "$PWD/TestMain.hs" \
+      -outputdir "$workspace" \
+      -odir "$workspace" \
+      -hidir "$workspace" \
+      -o "$workspace/$packageName" \
+      "$workspace/TestMain.hs" \
       "$src/Main.hs"
-    "$PWD/$packageName" +RTS -p -RTS
-    cat "$PWD/$packageName.prof"
+    "$workspace/$packageName" +RTS -p -RTS
+    cat "$workspace/$packageName.prof"
     touch "$out"
   ''

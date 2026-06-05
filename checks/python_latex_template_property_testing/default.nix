@@ -27,6 +27,8 @@ pkgs.runCommand checkName
   ''
     export HOME="$(mktemp -d)"
     export PYTHONWARNINGS=error
-    PYTHONPATH="$src" python -m unittest -v main.PropertyTests
+    workspace="$PWD/workspace"
+    cp -R --no-preserve=mode "$src" "$workspace"
+    PYTHONPATH="$workspace" python -m unittest -v main.PropertyTests
     touch "$out"
   ''
