@@ -112,9 +112,15 @@ defaultNixTemplateSpecs =
         defaultNixTemplateBaselineSource = Just pythonLatexTemplateBaselineNixSource
       },
     DefaultNixTemplateSpec
+      { defaultNixTemplateName = "python_pypi_application_template",
+        defaultNixTemplateMatches = matchesPythonPypiApplicationTemplate,
+        defaultNixTemplateAllowedDifferenceKeys = Set.fromList ["installCheckPhase", "meta", "nativeBuildInputs", "propagatedBuildInputs", "src", "version"],
+        defaultNixTemplateBaselineSource = Just pythonPypiApplicationTemplateBaselineNixSource
+      },
+    DefaultNixTemplateSpec
       { defaultNixTemplateName = "python_pypi_template",
         defaultNixTemplateMatches = matchesPythonPypiTemplate,
-        defaultNixTemplateAllowedDifferenceKeys = Set.fromList ["nativeBuildInputs", "propagatedBuildInputs", "src", "version"],
+        defaultNixTemplateAllowedDifferenceKeys = Set.fromList ["format", "installCheckPhase", "meta", "nativeBuildInputs", "propagatedBuildInputs", "src", "version"],
         defaultNixTemplateBaselineSource = Just pythonPypiTemplateBaselineNixSource
       },
     DefaultNixTemplateSpec
@@ -180,6 +186,13 @@ matchesPythonLatexTemplate packageName nixSource
       hasFiguresDirectory <- doesDirectoryExist (packageDirectory </> "figures")
       pure (hasManuscriptTexFile || hasRefsBibFile || hasFiguresDirectory)
   | otherwise = pure False
+matchesPythonPypiApplicationTemplate :: FilePath -> String -> IO Bool
+matchesPythonPypiApplicationTemplate _ nixSource =
+  pure
+    ( "buildPythonApplication" `isInfixOf` nixSource
+        && not ("src = ./.;" `isInfixOf` nixSource)
+        && ("fetchPypi" `isInfixOf` nixSource || "fetchurl" `isInfixOf` nixSource)
+    )
 matchesPythonPypiTemplate :: FilePath -> String -> IO Bool
 matchesPythonPypiTemplate _ nixSource =
   pure
@@ -239,6 +252,13 @@ checkDefaultNixTemplateSpecs =
         checkDefaultNixTemplateMatches = matchesPythonPropertyTestingCheck,
         checkDefaultNixTemplateAllowedDifferenceKeys = Set.empty,
         checkDefaultNixTemplateBaselineSource = pythonPropertyTestingCheckBaselineNixSource,
+        checkDefaultNixTemplateComparisonMode = ExactCheckTemplate
+      },
+    CheckDefaultNixTemplateSpec
+      { checkDefaultNixTemplateName = "python_mutation_testing_check",
+        checkDefaultNixTemplateMatches = matchesPythonMutationTestingCheck,
+        checkDefaultNixTemplateAllowedDifferenceKeys = Set.empty,
+        checkDefaultNixTemplateBaselineSource = pythonMutationTestingCheckBaselineNixSource,
         checkDefaultNixTemplateComparisonMode = ExactCheckTemplate
       },
     CheckDefaultNixTemplateSpec
@@ -338,6 +358,12 @@ matchesPythonPropertyTestingCheck checkName nixSource =
   pure
     ( isJust (removeSuffix "_property_testing" checkName)
         && "python -m unittest -v main.PropertyTests" `isInfixOf` nixSource
+    )
+matchesPythonMutationTestingCheck :: FilePath -> String -> IO Bool
+matchesPythonMutationTestingCheck checkName nixSource =
+  pure
+    ( isJust (removeSuffix "_mutation_testing" checkName)
+        && "cosmic-ray" `isInfixOf` nixSource
     )
 matchesRustCoverageCheck :: FilePath -> String -> IO Bool
 matchesRustCoverageCheck checkName nixSource =
@@ -1239,7 +1265,7 @@ detectPackageKindForPackage packageName = do
           Nothing -> False
           Just packageDefaultNixSource ->
             let packageDefaultNixSourceString = T.unpack packageDefaultNixSource
-             in "buildPythonPackage" `isInfixOf` packageDefaultNixSourceString
+             in ("buildPythonPackage" `isInfixOf` packageDefaultNixSourceString || "buildPythonApplication" `isInfixOf` packageDefaultNixSourceString)
                   && not ("src = ./.;" `isInfixOf` packageDefaultNixSourceString)
                   && ("fetchPypi" `isInfixOf` packageDefaultNixSourceString || "fetchurl" `isInfixOf` packageDefaultNixSourceString)
   let packageKind
@@ -3789,6 +3815,37 @@ pythonPypiTemplateBaselineNixSource =
       "  version = \"0.0.0\";",
       "}"
     ]
+pythonPypiApplicationTemplateBaselineNixSource :: T.Text
+pythonPypiApplicationTemplateBaselineNixSource =
+  T.unlines
+    [ "{",
+      "  inputs,",
+      "  pkgs ? import <nixpkgs> { },",
+      "}:",
+      "let",
+      "  python = pkgs.python312;",
+      "in",
+      "python.pkgs.buildPythonApplication rec {",
+      "  format = \"wheel\";",
+      "  meta.mainProgram = pname;",
+      "  pname = baseNameOf ./.;",
+      "  propagatedBuildInputs = [];",
+      "  pythonImportsCheck = [",
+      "    pname",
+      "  ];",
+      "  src = python.pkgs.fetchPypi rec {",
+      "    inherit",
+      "      format",
+      "      pname",
+      "      version",
+      "      ;",
+      "    dist = python;",
+      "    python = \"py3\";",
+      "    sha256 = \"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\";",
+      "  };",
+      "  version = \"0.0.0\";",
+      "}"
+    ]
 binaryReleaseTemplateBaselineNixSource :: T.Text
 binaryReleaseTemplateBaselineNixSource =
   T.unlines
@@ -4111,6 +4168,50 @@ pythonPropertyTestingCheckBaselineNixSource =
       "    workspace=\"$PWD/workspace\"",
       "    cp -R --no-preserve=mode \"$src\" \"$workspace\"",
       "    PYTHONPATH=\"$workspace\" python -m unittest -v main.PropertyTests",
+      "    touch \"$out\"",
+      "  ''"
+    ]
+pythonMutationTestingCheckBaselineNixSource :: T.Text
+pythonMutationTestingCheckBaselineNixSource =
+  T.unlines
+    [ "{",
+      "  inputs,",
+      "  pkgs,",
+      "  ...",
+      "}:",
+      "let",
+      "  checkName = builtins.baseNameOf ./.;",
+      "  packageName = pkgs.lib.removeSuffix \"_mutation_testing\" checkName;",
+      "in",
+      "pkgs.runCommand \"${checkName}\"",
+      "  {",
+      "    nativeBuildInputs = [",
+      "      (pkgs.python312.withPackages (",
+      "        _: inputs.self.packages.${pkgs.stdenv.system}.${packageName}.propagatedBuildInputs",
+      "      ))",
+      "      inputs.self.packages.${pkgs.stdenv.system}.cosmic_ray",
+      "    ];",
+      "    src = ../../packages/${packageName};",
+      "  }",
+      "  ''",
+      "    export HOME=\"$PWD\"",
+      "    workspace=\"$PWD/workspace\"",
+      "    rm -rf \"$workspace\"",
+      "    mkdir -p \"$workspace\"",
+      "    cp -R --no-preserve=mode \"$src\"/. \"$workspace\"",
+      "    cd \"$workspace\"",
+      "    cat > cosmic-ray.toml <<'EOF'",
+      "    [cosmic-ray]",
+      "    module-path = \"main.py\"",
+      "    timeout = 10.0",
+      "    excluded-modules = []",
+      "    test-command = \"python3 -m unittest -v main\"",
+      "    [cosmic-ray.distributor]",
+      "    name = \"local\"",
+      "    EOF",
+      "    cosmic-ray init cosmic-ray.toml cosmic-ray.sqlite",
+      "    cosmic-ray exec cosmic-ray.toml cosmic-ray.sqlite",
+      "    cr-report cosmic-ray.sqlite",
       "    touch \"$out\"",
       "  ''"
     ]
