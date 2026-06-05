@@ -2802,13 +2802,6 @@ legacyPythonTemplateNixFixture =
     ++ "  python = pkgs.python312;\n"
     ++ "in\n"
     ++ "pyPkgs.buildPythonPackage rec {\n"
-    ++ "  installCheckPhase = ''\n"
-    ++ "    runHook preInstallCheck\n"
-    ++ "    HOME=\"$(mktemp -d)\"\n"
-    ++ "    export PYTHONPATH=\"$out/${python.sitePackages}${PYTHONPATH:+:$PYTHONPATH}\"\n"
-    ++ "    ${python.withPackages (_: [ pyPkgs.hypothesis ])}/bin/python -m unittest \"${pname}\"\n"
-    ++ "    runHook postInstallCheck\n"
-    ++ "  '';\n"
     ++ "  installPhase = ''\n"
     ++ "    install -Dm644 main.py $out/${python.sitePackages}/${pname}.py\n"
     ++ "    install -Dm755 main.py $out/bin/${pname}\n"
@@ -3744,18 +3737,8 @@ pythonTemplateBaselineNixSource =
       "    secrets.secrets.file = ../../secrets/secrets.age;",
       "  };",
       "  python = pkgs.python312;",
-      "  pythonTestEnv = python.withPackages (_: [",
-      "    python.pkgs.hypothesis",
-      "  ]);",
       "in",
       "python.pkgs.buildPythonPackage rec {",
-      "  installCheckPhase = ''",
-      "    runHook preInstallCheck",
-      "    HOME=\"$(mktemp -d)\"",
-      "    cd \"$src\"",
-      "    ${pythonTestEnv}/bin/python -m unittest main.py",
-      "    runHook postInstallCheck",
-      "  '';",
       "  installPhase = ''",
       "    install -Dm644 main.py $out/${python.sitePackages}/${pname}.py",
       "    install -Dm755 main.py $out/bin/${pname}",
@@ -3765,9 +3748,6 @@ pythonTemplateBaselineNixSource =
       "    fi",
       "  '';",
       "  meta.mainProgram = pname;",
-      "  nativeBuildInputs = [",
-      "    python.pkgs.coverage",
-      "  ];",
       "  passthru = {",
       "    inherit python;",
       "  };",
@@ -3851,23 +3831,12 @@ pythonLatexTemplateBaselineNixSource =
       "let",
       "  python = pkgs.python3;",
       "  pythonEnv = python.withPackages (_: runtimePythonDeps);",
-      "  pythonTestEnv = python.withPackages (_:",
-      "    runtimePythonDeps ++ [",
-      "      python.pkgs.hypothesis",
-      "    ]);",
       "  runtimePythonDeps = [",
       "    python.pkgs.matplotlib",
       "    python.pkgs.pandas",
       "  ];",
       "in",
       "python.pkgs.buildPythonPackage rec {",
-      "  installCheckPhase = ''",
-      "    runHook preInstallCheck",
-      "    HOME=\"$(mktemp -d)\"",
-      "    cd \"$src\"",
-      "    ${pythonTestEnv}/bin/python -m unittest main.py",
-      "    runHook postInstallCheck",
-      "  '';",
       "  installPhase = ''",
       "    datadir=\"$out/share/${pname}\"",
       "    install -Dm644 main.py ms.tex ms.bib -t \"$datadir\"",

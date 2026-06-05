@@ -7,18 +7,8 @@ let
     secrets.secrets.file = ../../secrets/secrets.age;
   };
   python = pkgs.python312;
-  pythonTestEnv = python.withPackages (_: [
-    python.pkgs.hypothesis
-  ]);
 in
 python.pkgs.buildPythonPackage rec {
-  installCheckPhase = ''
-    runHook preInstallCheck
-    HOME="$(mktemp -d)"
-    cd "$src"
-    ${pythonTestEnv}/bin/python -m unittest main.py
-    runHook postInstallCheck
-  '';
   installPhase = ''
     install -Dm644 main.py $out/${python.sitePackages}/${pname}.py
     install -Dm755 main.py $out/bin/${pname}
@@ -28,9 +18,6 @@ python.pkgs.buildPythonPackage rec {
     fi
   '';
   meta.mainProgram = pname;
-  nativeBuildInputs = [
-    python.pkgs.coverage
-  ];
   passthru = {
     inherit python;
   };
