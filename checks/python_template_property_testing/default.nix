@@ -7,12 +7,11 @@ let
   checkName = builtins.baseNameOf ./.;
   packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${packageName};
   packageName = pkgs.lib.removeSuffix "_property_testing" checkName;
-  packagePythonDeps = packageDrv.propagatedBuildInputs or [ ];
   python = packageDrv.python or pkgs.python3;
   pythonEnv = python.withPackages (
     _:
     pkgs.lib.unique (
-      packagePythonDeps
+      (packageDrv.propagatedBuildInputs or [ ])
       ++ [
         python.pkgs.hypothesis
       ]
