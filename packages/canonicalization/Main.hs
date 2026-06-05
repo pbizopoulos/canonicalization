@@ -3741,10 +3741,11 @@ pythonTemplateBaselineNixSource =
       "    fi",
       "  '';",
       "  meta.mainProgram = pname;",
-      "  passthru = {",
-      "    inherit python;",
-      "  };",
+      "  passthru.python = python;",
       "  pname = baseNameOf ./.;",
+      "  propagatedBuildInputs = [",
+      "    python.pkgs.hypothesis",
+      "  ];",
       "  pyproject = false;",
       "  shellHook = ''",
       "    source ${",
@@ -3759,7 +3760,8 @@ pythonTemplateBaselineNixSource =
       "  src = ./.;",
       "  strictDeps = true;",
       "  version = \"0.0.0\";",
-      "}"
+      "}",
+      ""
     ]
 pythonPypiTemplateBaselineNixSource :: T.Text
 pythonPypiTemplateBaselineNixSource =
