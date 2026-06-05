@@ -10,7 +10,7 @@ let
   pythonEnv = packageDrv.python.withPackages (
     _:
     pkgs.lib.unique (
-      (packageDrv.propagatedBuildInputs or [ ])
+      packageDrv.propagatedBuildInputs
       ++ [
         packageDrv.python.pkgs.pyinstrument
       ]
