@@ -133,7 +133,7 @@ defaultNixTemplateSpecs =
     DefaultNixTemplateSpec
       { defaultNixTemplateName = "python_template",
         defaultNixTemplateMatches = \_ nixSource -> pure ("buildPythonPackage" `isInfixOf` nixSource),
-        defaultNixTemplateAllowedDifferenceKeys = Set.fromList ["propagatedBuildInputs", "shellHook", "version"],
+        defaultNixTemplateAllowedDifferenceKeys = Set.fromList ["meta", "propagatedBuildInputs", "shellHook", "version"],
         defaultNixTemplateBaselineSource = Just pythonTemplateBaselineNixSource
       },
     DefaultNixTemplateSpec
@@ -143,7 +143,7 @@ defaultNixTemplateSpecs =
             ( "writeShellApplication" `isInfixOf` nixSource
                 && ("opentofu" `isInfixOf` nixSource || "agenix-shell" `isInfixOf` nixSource)
             ),
-        defaultNixTemplateAllowedDifferenceKeys = defaultAllowedNixDifferenceKeys,
+        defaultNixTemplateAllowedDifferenceKeys = Set.insert "meta" defaultAllowedNixDifferenceKeys,
         defaultNixTemplateBaselineSource = Just deployHostTemplateBaselineNixSource
       },
     DefaultNixTemplateSpec
