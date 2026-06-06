@@ -1729,7 +1729,9 @@ discoverHaskellUnitTestNamesFromSource haskellSource =
 isMeaningfulTestLabel :: String -> Bool
 isMeaningfulTestLabel label =
   let trimmedLabel = trimString label
-   in not (null trimmedLabel) && any isAlphaNum trimmedLabel
+   in case trimmedLabel of
+        firstCharacter : _ -> isAlphaNum firstCharacter && any isAlphaNum trimmedLabel
+        [] -> False
 extractHUnitTildeTestLabel :: String -> Maybe String
 extractHUnitTildeTestLabel sourceLine =
   case breakOnSubstring "~:" sourceLine of
@@ -2652,6 +2654,28 @@ metadataAndDiscoveryDebugTests =
                     "      \"format one\"",
                     "      input",
                     "      output"
+                  ]
+              )
+          ),
+      TestCase $ do
+        assertEqual
+          "Ignores quoted fixture lines that only mimic HUnit labels."
+          ["alpha test", "format one"]
+          ( discoverHaskellUnitTestNamesFromSource
+              ( unlines
+                  [ "suite = TestList",
+                    "  [ \"alpha test\" ~: assertEqual \"x\" 1 1",
+                    "  , makeFormattingTest",
+                    "      \"format one\"",
+                    "      input",
+                    "      output",
+                    "",
+                    "fixture = unlines",
+                    "  [ \"  , makeFormattingTest\",",
+                    "    \"      \\\"fake label\\\"\",",
+                    "    \"      input\",",
+                    "    \"      output\"",
+                    "  ]"
                   ]
               )
           ),
