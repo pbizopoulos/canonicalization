@@ -62,6 +62,7 @@ defaultAllowedNixDifferenceKeys =
       "nativeCheckInputs",
       "nativeInstallCheckInputs",
       "postInstall",
+      "meta.description",
       "propagatedBuildInputs",
       "runtimeInputs",
       "version"
@@ -101,7 +102,7 @@ defaultNixTemplateSpecs =
       },
     DefaultNixTemplateSpec
       { defaultNixTemplateName = "html_template",
-        defaultNixTemplateMatches = \_ nixSource -> pure ("writeShellScriptBin" `isInfixOf` nixSource),
+        defaultNixTemplateMatches = \_ nixSource -> pure ("writeShellApplication" `isInfixOf` nixSource && "http-server" `isInfixOf` nixSource),
         defaultNixTemplateAllowedDifferenceKeys = Set.insert "text" defaultAllowedNixDifferenceKeys,
         defaultNixTemplateBaselineSource = Just htmlTemplateBaselineNixSource
       },
@@ -644,7 +645,6 @@ type RepositoryPackageSummary :: Type
 data RepositoryPackageSummary = RepositoryPackageSummary
   { repositoryPackageName :: FilePath,
     repositoryPackageType :: String,
-    repositoryPackageTitle :: String,
     repositoryPackageDescription :: Maybe String,
     repositoryPackageTestNames :: [String],
     repositoryPackageChecks :: RepositoryPackageChecksSummary
@@ -664,7 +664,6 @@ runDescribeRepositoryJsonMode = do
 summarizeRepositoryPackage :: Set.Set FilePath -> FilePath -> IO RepositoryPackageSummary
 summarizeRepositoryPackage repositoryCheckNames packageName = do
   packageKind <- detectPackageKindForPackage packageName
-  repositoryPackageTitleValue <- loadRepositoryPackageTitle packageName packageKind
   repositoryPackageDescriptionValue <- loadRepositoryPackageDescription packageName packageKind
   repositoryPackageTestNamesValue <- discoverRepositoryPackageTestNames packageName packageKind
   let repositoryPackageChecksValue = summarizeRepositoryPackageChecks repositoryCheckNames packageKind packageName
@@ -672,7 +671,6 @@ summarizeRepositoryPackage repositoryCheckNames packageName = do
     RepositoryPackageSummary
       { repositoryPackageName = packageName,
         repositoryPackageType = renderPackageKind packageKind,
-        repositoryPackageTitle = repositoryPackageTitleValue,
         repositoryPackageDescription = repositoryPackageDescriptionValue,
         repositoryPackageTestNames = repositoryPackageTestNamesValue,
         repositoryPackageChecks = repositoryPackageChecksValue
@@ -686,43 +684,79 @@ summarizeRepositoryPackageChecks repositoryCheckNames packageKind packageName =
       repositoryPackageHasPropertyTestingCheck = maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName RepositoryPropertyTestingCheck),
       repositoryPackageHasMutationTestingCheck = maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName RepositoryMutationTestingCheck)
     }
-loadRepositoryPackageTitle :: FilePath -> PackageKind -> IO String
-loadRepositoryPackageTitle packageName packageKind = do
-  maybePackageMetadata <- loadRepositoryPackageMetadata packageName packageKind
-  pure (maybe packageName fst maybePackageMetadata)
 loadRepositoryPackageDescription :: FilePath -> PackageKind -> IO (Maybe String)
 loadRepositoryPackageDescription packageName packageKind = do
-  maybePackageMetadata <- loadRepositoryPackageMetadata packageName packageKind
-  pure (snd =<< maybePackageMetadata)
-loadRepositoryPackageMetadata :: FilePath -> PackageKind -> IO (Maybe (String, Maybe String))
-loadRepositoryPackageMetadata packageName packageKind =
   case packageKind of
-    HaskellPackage -> loadHaskellPackageMetadata packageName
-    RustPackage -> loadRustPackageMetadata packageName
-    _ -> pure (Just (packageName, Nothing))
-loadHaskellPackageMetadata :: FilePath -> IO (Maybe (String, Maybe String))
-loadHaskellPackageMetadata packageName = do
+    HaskellPackage -> loadHaskellPackageDescription packageName
+    RustPackage -> loadRustPackageDescription packageName
+    PythonPackage -> loadPythonPackageDescription packageName
+    PythonLatexPackage -> loadPythonPackageDescription packageName
+    PythonPypiPackage -> loadPythonPackageDescription packageName
+    _ -> loadDefaultNixPackageDescription packageName
+loadHaskellPackageDescription :: FilePath -> IO (Maybe String)
+loadHaskellPackageDescription packageName = do
   let cabalFilePath = "packages" </> packageName </> packageName <.> "cabal"
   maybeCabalContents <- readTextFileIfExists cabalFilePath
-  pure (extractHaskellPackageMetadata packageName =<< maybeCabalContents)
-extractHaskellPackageMetadata :: FilePath -> T.Text -> Maybe (String, Maybe String)
-extractHaskellPackageMetadata packageName cabalContents =
-  let packageTitle = T.unpack <$> lookupCabalField "name" cabalContents
-      packageDescription =
-        (T.unpack <$> lookupCabalField "description" cabalContents)
-          <|> (T.unpack <$> lookupCabalField "synopsis" cabalContents)
-   in Just (fromMaybe packageName packageTitle, packageDescription)
-loadRustPackageMetadata :: FilePath -> IO (Maybe (String, Maybe String))
-loadRustPackageMetadata packageName = do
+  pure (extractHaskellPackageDescription =<< maybeCabalContents)
+extractHaskellPackageDescription :: T.Text -> Maybe String
+extractHaskellPackageDescription cabalContents =
+  (T.unpack <$> lookupCabalField "description" cabalContents)
+    <|> (T.unpack <$> lookupCabalField "synopsis" cabalContents)
+loadRustPackageDescription :: FilePath -> IO (Maybe String)
+loadRustPackageDescription packageName = do
   let cargoTomlPath = "packages" </> packageName </> "Cargo.toml"
   maybeCargoTomlContents <- readTextFileIfExists cargoTomlPath
-  pure (extractRustPackageMetadata packageName =<< maybeCargoTomlContents)
-extractRustPackageMetadata :: FilePath -> T.Text -> Maybe (String, Maybe String)
-extractRustPackageMetadata packageName cargoTomlContents =
+  pure (extractRustPackageDescription =<< maybeCargoTomlContents)
+extractRustPackageDescription :: T.Text -> Maybe String
+extractRustPackageDescription cargoTomlContents =
   let packageSection = extractTomlSection "package" cargoTomlContents
-      packageTitle = T.unpack <$> lookupTomlString "name" packageSection
-      packageDescription = T.unpack <$> lookupTomlString "description" packageSection
-   in Just (fromMaybe packageName packageTitle, packageDescription)
+   in T.unpack <$> lookupTomlString "description" packageSection
+loadPythonPackageDescription :: FilePath -> IO (Maybe String)
+loadPythonPackageDescription packageName = do
+  let pyprojectTomlPath = "packages" </> packageName </> "pyproject.toml"
+      defaultNixPath = "packages" </> packageName </> "default.nix"
+  maybePyprojectTomlContents <- readTextFileIfExists pyprojectTomlPath
+  maybeDefaultNixContents <- readTextFileIfExists defaultNixPath
+  let maybePyprojectDescription = maybePyprojectTomlContents >>= extractPythonPackageDescriptionFromPyprojectToml
+      maybeDefaultNixDescription = maybeDefaultNixContents >>= extractDefaultNixPackageDescription
+  pure (maybePyprojectDescription <|> maybeDefaultNixDescription)
+loadDefaultNixPackageDescription :: FilePath -> IO (Maybe String)
+loadDefaultNixPackageDescription packageName = do
+  let defaultNixPath = "packages" </> packageName </> "default.nix"
+  maybeDefaultNixContents <- readTextFileIfExists defaultNixPath
+  pure (extractDefaultNixPackageDescription =<< maybeDefaultNixContents)
+extractPythonPackageDescriptionFromPyprojectToml :: T.Text -> Maybe String
+extractPythonPackageDescriptionFromPyprojectToml pyprojectTomlContents =
+  let projectSection = extractTomlSection "project" pyprojectTomlContents
+      poetrySection = extractTomlSection "tool.poetry" pyprojectTomlContents
+   in T.unpack <$> lookupTomlString "description" projectSection
+        <|> T.unpack <$> lookupTomlString "description" poetrySection
+extractDefaultNixPackageDescription :: T.Text -> Maybe String
+extractDefaultNixPackageDescription defaultNixContents =
+  go False (T.lines defaultNixContents)
+  where
+    go _ [] = Nothing
+    go insideMetaBlock (sourceLine : remainingLines) =
+      case extractQuotedNixAssignmentValue "meta.description =" sourceLine of
+        Just description -> Just (T.unpack description)
+        Nothing ->
+          if insideMetaBlock
+            then case extractQuotedNixAssignmentValue "description =" sourceLine of
+              Just description -> Just (T.unpack description)
+              Nothing ->
+                if "};" `T.isPrefixOf` T.strip sourceLine
+                  then go False remainingLines
+                  else go insideMetaBlock remainingLines
+            else
+              if "meta = {" `T.isPrefixOf` T.strip sourceLine
+                then go True remainingLines
+                else go insideMetaBlock remainingLines
+extractQuotedNixAssignmentValue :: T.Text -> T.Text -> Maybe T.Text
+extractQuotedNixAssignmentValue assignmentPrefix sourceLine = do
+  quotedValue <- T.stripPrefix assignmentPrefix (T.strip sourceLine)
+  valueWithoutSemicolon <- T.stripSuffix ";" (T.strip quotedValue)
+  valueWithoutPrefix <- T.stripPrefix "\"" valueWithoutSemicolon
+  T.stripSuffix "\"" valueWithoutPrefix
 discoverRepositoryPackageTestNames :: FilePath -> PackageKind -> IO [String]
 discoverRepositoryPackageTestNames packageName packageKind =
   case packageKind of
@@ -739,7 +773,6 @@ renderRepositoryPackageSummary packageSummary =
   unlines
     ( [ "package: " ++ repositoryPackageName packageSummary,
         "packageType: " ++ repositoryPackageType packageSummary,
-        "title: " ++ repositoryPackageTitle packageSummary,
         "description: " ++ fromMaybe "(none)" (repositoryPackageDescription packageSummary),
         "checks:",
         "  check: " ++ renderBooleanText (repositoryPackageHasCheck (repositoryPackageChecks packageSummary)),
@@ -768,7 +801,6 @@ renderRepositoryPackageSummaryJson packageSummary =
     [ "    {",
       "      \"name\": " ++ renderJsonString (repositoryPackageName packageSummary) ++ ",",
       "      \"packageType\": " ++ renderJsonString (repositoryPackageType packageSummary) ++ ",",
-      "      \"title\": " ++ renderJsonString (repositoryPackageTitle packageSummary) ++ ",",
       "      \"description\": " ++ renderJsonMaybeString (repositoryPackageDescription packageSummary) ++ ",",
       "      \"checks\": " ++ renderRepositoryPackageChecksJson (repositoryPackageChecks packageSummary) ++ ",",
       "      \"tests\": " ++ renderRepositoryPackageTestNames (repositoryPackageTestNames packageSummary),
@@ -1542,7 +1574,9 @@ checkDefaultNixConventions packageName packageKind = do
     Just defaultNixText ->
       let defaultNixSource = T.unpack defaultNixText
           hasLegacyMainProgram = "\n  mainProgram = pname;" `isInfixOf` defaultNixSource
-          hasMetaMainProgram = "meta.mainProgram = pname;" `isInfixOf` defaultNixSource
+          hasMetaMainProgram =
+            "meta.mainProgram = pname;" `isInfixOf` defaultNixSource
+              || ("meta = {" `isInfixOf` defaultNixSource && "mainProgram = pname;" `isInfixOf` defaultNixSource)
           hasExternalFetchUrlSource = "src = pkgs.fetchurl" `isInfixOf` defaultNixSource
           hasLocalSource = "src = ./.;" `isInfixOf` defaultNixSource
           hasPlaceholderVersion = "version = \"0.0.0\";" `isInfixOf` defaultNixSource
@@ -1753,7 +1787,7 @@ extractMakeFormattingTestLabels = go False
   where
     go _ [] = []
     go awaitingMakeFormattingTestLabel (line : rest)
-      | "makeFormattingTest" `isInfixOf` line = go True rest
+      | isMakeFormattingTestInvocationLine line = go True rest
       | awaitingMakeFormattingTestLabel =
           let trimmed = dropWhile (== ' ') line
            in if null trimmed
@@ -1762,6 +1796,9 @@ extractMakeFormattingTestLabels = go False
                   Just label -> label : go False rest
                   Nothing -> go False rest
       | otherwise = go False rest
+    isMakeFormattingTestInvocationLine line =
+      let trimmed = dropWhile (== ' ') line
+       in ", makeFormattingTest" `isPrefixOf` trimmed || "makeFormattingTest" `isPrefixOf` trimmed
 firstQuotedToken :: String -> Maybe String
 firstQuotedToken inputText =
   let firstTokenAfter quoteCharacter =
@@ -2046,11 +2083,19 @@ isCabalIndentedContinuationLine sourceLine =
 lookupCabalField :: T.Text -> T.Text -> Maybe T.Text
 lookupCabalField cabalField cabalContents =
   let fieldPrefix = cabalField <> ":"
-      maybeMatchingFieldLine = listToMaybe [T.strip cabalLine | cabalLine <- T.lines cabalContents, fieldPrefix `T.isPrefixOf` T.strip cabalLine]
-   in do
-        matchingLine <- maybeMatchingFieldLine
-        fieldValue <- T.stripPrefix fieldPrefix matchingLine
-        pure (T.strip fieldValue)
+      go [] = Nothing
+      go (sourceLine : remainingLines)
+        | fieldPrefix `T.isPrefixOf` T.strip sourceLine =
+            let strippedValue = T.strip (T.drop (T.length fieldPrefix) (T.strip sourceLine))
+             in Just $
+                  if T.null strippedValue
+                    then T.intercalate "\n" (map T.strip (takeWhile isCabalIndentedContinuationLine remainingLines))
+                    else stripCabalQuotedValue strippedValue
+        | otherwise = go remainingLines
+   in go (T.lines cabalContents)
+stripCabalQuotedValue :: T.Text -> T.Text
+stripCabalQuotedValue quotedValue =
+  fromMaybe quotedValue (T.stripPrefix "\"" quotedValue >>= T.stripSuffix "\"")
 comparePackageDefaultNixWithTemplate :: FilePath -> FilePath -> FilePath -> Set.Set T.Text -> Maybe T.Text -> IO [String]
 comparePackageDefaultNixWithTemplate _packageName =
   compareNixFileWithTemplate
@@ -2742,14 +2787,49 @@ metadataAndDiscoveryDebugTests =
           (lookupCabalField "license" (T.pack "name: canonicalization\n")),
       TestCase $ do
         assertEqual
-          "Extracts Haskell package metadata using name and synopsis."
-          (Just ("haskell-template", Just "Canonical Haskell package template"))
-          (extractHaskellPackageMetadata "canonicalization" haskellCabalBaseline),
+          "Extracts Haskell package description using cabal fields."
+          (Just "Canonical Haskell package template")
+          (extractHaskellPackageDescription haskellCabalBaseline),
       TestCase $ do
         assertEqual
-          "Extracts Rust package metadata using Cargo package fields."
-          (Just ("remove-empty-lines", Just "A CLI tool to remove empty lines from text files."))
-          (extractRustPackageMetadata "remove-empty-lines" removeEmptyLinesCargoTomlFixture),
+          "Extracts multiline Cabal descriptions."
+          (Just "Line one.\nLine two.")
+          ( lookupCabalField
+              "description"
+              ( T.unlines
+                  [ "name: demo",
+                    "description:",
+                    "  Line one.",
+                    "  Line two.",
+                    ""
+                  ]
+              )
+          ),
+      TestCase $ do
+        assertEqual
+          "Extracts Rust package description using Cargo package fields."
+          (Just "A CLI tool to remove empty lines from text files.")
+          (extractRustPackageDescription removeEmptyLinesCargoTomlFixture),
+      TestCase $ do
+        assertEqual
+          "Extracts Python package description using pyproject.toml."
+          (Just "Example Python package.")
+          (extractPythonPackageDescriptionFromPyprojectToml pyprojectTomlDescriptionFixture),
+      TestCase $ do
+        assertEqual
+          "Extracts Nix package descriptions from meta.description."
+          (Just "A Python template package.")
+          (extractDefaultNixPackageDescription pythonTemplateDefaultNixFixture),
+      TestCase $ do
+        assertEqual
+          "Extracts C template descriptions from nested meta blocks."
+          (Just "A C template package.")
+          (extractDefaultNixPackageDescription cTemplateDefaultNixFixture),
+      TestCase $ do
+        assertEqual
+          "Extracts Python and LaTeX template descriptions from nested meta blocks."
+          (Just "A Python and LaTeX template package.")
+          (extractDefaultNixPackageDescription pythonLatexTemplateDefaultNixFixture),
       TestCase $ do
         assertEqual
           "Summarizes repository checks for Python packages."
@@ -3281,9 +3361,16 @@ latexNixFixture =
 htmlNixFixture :: String
 htmlNixFixture =
   "{ pkgs ? import <nixpkgs> { }, }:\n"
-    ++ "pkgs.writeShellScriptBin \"x\" ''\n"
-    ++ "  echo hi\n"
-    ++ "''\n"
+    ++ "pkgs.writeShellApplication rec {\n"
+    ++ "  meta.description = \"An HTML, CSS, and JavaScript template package.\";\n"
+    ++ "  name = baseNameOf ./.;\n"
+    ++ "  runtimeInputs = [\n"
+    ++ "    pkgs.http-server\n"
+    ++ "  ];\n"
+    ++ "  text = ''\n"
+    ++ "    exec ${pkgs.http-server}/bin/http-server ${./.} \"$@\"\n"
+    ++ "  '';\n"
+    ++ "}\n"
 cPackageVmCheckFixture :: String
 cPackageVmCheckFixture =
   "{ inputs, pkgs, ... }:\n"
@@ -4031,6 +4118,42 @@ removeEmptyLinesCargoTomlFixture =
       "categories = [\"development-tools\"]",
       ""
     ]
+pyprojectTomlDescriptionFixture :: T.Text
+pyprojectTomlDescriptionFixture =
+  T.unlines
+    [ "[project]",
+      "name = \"example-package\"",
+      "description = \"Example Python package.\"",
+      "version = \"0.1.0\"",
+      ""
+    ]
+pythonTemplateDefaultNixFixture :: T.Text
+pythonTemplateDefaultNixFixture =
+  T.unlines
+    [ "python.pkgs.buildPythonPackage rec {",
+      "  meta.description = \"A Python template package.\";",
+      "}"
+    ]
+cTemplateDefaultNixFixture :: T.Text
+cTemplateDefaultNixFixture =
+  T.unlines
+    [ "pkgs.stdenv.mkDerivation rec {",
+      "  meta = {",
+      "    description = \"A C template package.\";",
+      "    mainProgram = pname;",
+      "  };",
+      "}"
+    ]
+pythonLatexTemplateDefaultNixFixture :: T.Text
+pythonLatexTemplateDefaultNixFixture =
+  T.unlines
+    [ "python.pkgs.buildPythonPackage rec {",
+      "  meta = {",
+      "    description = \"A Python and LaTeX template package.\";",
+      "    mainProgram = pname;",
+      "  };",
+      "}"
+    ]
 rustCargoTomlBaseline :: T.Text
 rustCargoTomlBaseline =
   T.unlines
@@ -4146,9 +4269,16 @@ htmlTemplateBaselineNixSource =
     [ "{",
       "  pkgs ? import <nixpkgs> { },",
       "}:",
-      "pkgs.writeShellScriptBin (baseNameOf ./.) ''",
-      "  exec ${pkgs.http-server}/bin/http-server ${./.} \"$@\"",
-      "''",
+      "pkgs.writeShellApplication rec {",
+      "  meta.description = \"An HTML, CSS, and JavaScript template package.\";",
+      "  name = baseNameOf ./.;",
+      "  runtimeInputs = [",
+      "    pkgs.http-server",
+      "  ];",
+      "  text = ''",
+      "    exec ${pkgs.http-server}/bin/http-server ${./.} \"$@\"",
+      "  '';",
+      "}",
       ""
     ]
 cTemplateBaselineNixSource :: T.Text
@@ -4285,7 +4415,10 @@ cTemplateBaselineNixSource =
       "  installPhase = ''",
       "    install -Dm755 ${pname} $out/bin/${pname}",
       "  '';",
-      "  meta.mainProgram = pname;",
+      "  meta = {",
+      "    description = \"A C template package.\";",
+      "    mainProgram = pname;",
+      "  };",
       "  nativeCheckInputs = [",
       "    pkgs.clang-tools",
       "    pkgs.cppcheck",
@@ -4310,6 +4443,7 @@ latexTemplateBaselineNixSource =
       "  installPhase = ''",
       "    install -Dm644 ms.pdf $out/ms.pdf",
       "  '';",
+      "  meta.description = \"A LaTeX template package.\";",
       "  nativeBuildInputs = [",
       "    pkgs.texliveFull",
       "  ];",
@@ -4328,6 +4462,7 @@ deployHostTemplateBaselineNixSource =
       "  pkgs ? import <nixpkgs> { },",
       "}:",
       "pkgs.writeShellApplication rec {",
+      "  meta.description = \"A Terraform template package for deploying a host.\";",
       "  name = baseNameOf ./.;",
       "  runtimeInputs = [",
       "    pkgs.jq",
@@ -4379,7 +4514,10 @@ pythonTemplateBaselineNixSource =
       "      cp -r prm/ $out/bin/",
       "    fi",
       "  '';",
-      "  meta.mainProgram = pname;",
+      "  meta = {",
+      "    description = \"A Python template package.\";",
+      "    mainProgram = pname;",
+      "  };",
       "  passthru.python = python;",
       "  pname = baseNameOf ./.;",
       "  propagatedBuildInputs = [",
@@ -4522,7 +4660,10 @@ pythonLatexTemplateBaselineNixSource =
       "    EOF",
       "    chmod +x \"$out/bin/${pname}\"",
       "  '';",
-      "  meta.mainProgram = pname;",
+      "  meta = {",
+      "    description = \"A Python and LaTeX template package.\";",
+      "    mainProgram = pname;",
+      "  };",
       "  passthru = {",
       "    inherit python;",
       "  };",
@@ -5070,7 +5211,10 @@ uncommentTemplateBaselineNixSource =
       "    install -Dm755 ${pname} $out/bin/${pname}",
       "    runHook postInstall",
       "  '';",
-      "  meta.mainProgram = pname;",
+      "  meta = {",
+      "    description = \"A fast Rust-based CLI tool for removing comments from source code.\";",
+      "    mainProgram = pname;",
+      "  };",
       "  nativeBuildInputs = [",
       "    pkgs.autoPatchelfHook",
       "  ];",

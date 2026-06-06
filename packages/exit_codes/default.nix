@@ -6,6 +6,7 @@ let
 in
 python.pkgs.buildPythonPackage rec {
   format = "wheel";
+  meta.description = "Platform-independent exit codes.";
   pname = baseNameOf ./.;
   propagatedBuildInputs = [ ];
   pythonImportsCheck = [

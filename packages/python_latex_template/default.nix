@@ -24,7 +24,10 @@ python.pkgs.buildPythonPackage rec {
     EOF
     chmod +x "$out/bin/${pname}"
   '';
-  meta.mainProgram = pname;
+  meta = {
+    description = "A Python and LaTeX template package.";
+    mainProgram = pname;
+  };
   passthru = {
     inherit python;
   };

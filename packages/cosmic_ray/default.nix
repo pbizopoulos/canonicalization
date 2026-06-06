@@ -14,7 +14,10 @@ python.pkgs.buildPythonApplication rec {
     "$out/bin/cosmic-ray" --help 2>&1 | grep -F "cosmic-ray"
     runHook postInstallCheck
   '';
-  meta.mainProgram = "cosmic-ray";
+  meta = {
+    description = "Mutation testing for Python.";
+    mainProgram = "cosmic-ray";
+  };
   pname = baseNameOf ./.;
   propagatedBuildInputs = [
     inputs.self.packages.${pkgs.stdenv.system}.exit_codes

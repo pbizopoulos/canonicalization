@@ -6,6 +6,7 @@ let
 in
 python.pkgs.buildPythonPackage rec {
   format = "setuptools";
+  meta.description = "Library for quick CLI prompts, input, and menus.";
   pname = baseNameOf ./.;
   propagatedBuildInputs = [ ];
   pythonImportsCheck = [

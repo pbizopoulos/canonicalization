@@ -15,7 +15,10 @@ pkgs.stdenv.mkDerivation rec {
     install -Dm755 ${pname} $out/bin/${pname}
     runHook postInstall
   '';
-  meta.mainProgram = pname;
+  meta = {
+    description = "A fast Rust-based CLI tool for removing comments from source code.";
+    mainProgram = pname;
+  };
   nativeBuildInputs = [
     pkgs.autoPatchelfHook
   ];

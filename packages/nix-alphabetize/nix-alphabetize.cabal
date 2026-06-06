@@ -1,6 +1,7 @@
 name:          nix-alphabetize
 version:       0.0.0
-synopsis:      Hello World Haskell
+synopsis:      Alphabetize Nix expressions.
+description:   Alphabetize Nix expressions and normalize their structure.
 cabal-version: >=1.10
 build-type:    Simple
 executable nix-alphabetize

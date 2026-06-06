@@ -129,7 +129,10 @@ pkgs.stdenv.mkDerivation rec {
   installPhase = ''
     install -Dm755 ${pname} $out/bin/${pname}
   '';
-  meta.mainProgram = pname;
+  meta = {
+    description = "A C template package.";
+    mainProgram = pname;
+  };
   nativeCheckInputs = [
     pkgs.clang-tools
     pkgs.cppcheck

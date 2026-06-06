@@ -8,6 +8,7 @@ pkgs.stdenv.mkDerivation rec {
   installPhase = ''
     install -Dm644 ms.pdf $out/ms.pdf
   '';
+  meta.description = "A LaTeX template package.";
   nativeBuildInputs = [
     pkgs.texliveFull
   ];

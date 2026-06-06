@@ -146,6 +146,11 @@ let
           includes = [
             "*"
           ];
+          options = [
+            "--config"
+            "/dev/null"
+            "--no-gitignore"
+          ];
         };
       };
       global.excludes = [

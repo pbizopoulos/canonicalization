@@ -14,7 +14,10 @@ python.pkgs.buildPythonPackage rec {
       cp -r prm/ $out/bin/
     fi
   '';
-  meta.mainProgram = pname;
+  meta = {
+    description = "A Python template package.";
+    mainProgram = pname;
+  };
   passthru.python = python;
   pname = baseNameOf ./.;
   propagatedBuildInputs = [
