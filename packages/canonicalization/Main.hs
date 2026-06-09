@@ -134,7 +134,7 @@ defaultNixTemplateSpecs =
     DefaultNixTemplateSpec
       { defaultNixTemplateName = "python_template",
         defaultNixTemplateMatches = \_ nixSource -> pure ("buildPythonPackage" `isInfixOf` nixSource),
-        defaultNixTemplateAllowedDifferenceKeys = Set.fromList ["meta", "propagatedBuildInputs", "shellHook", "version"],
+        defaultNixTemplateAllowedDifferenceKeys = Set.fromList ["meta", "propagatedBuildInputs", "python", "shellHook", "version"],
         defaultNixTemplateBaselineSource = Just pythonTemplateBaselineNixSource
       },
     DefaultNixTemplateSpec
@@ -1071,6 +1071,8 @@ renderScaffoldFiles packageKind packageName packageDescription =
     _ -> []
 defaultPythonTemplateDescription :: String
 defaultPythonTemplateDescription = "A Python template package."
+defaultPythonPackageAttribute :: String
+defaultPythonPackageAttribute = "python312"
 escapeNixDoubleQuotedString :: String -> String
 escapeNixDoubleQuotedString = concatMap escapeChar
   where
@@ -1085,7 +1087,7 @@ renderPythonTemplateBaselineNixSource packageDescription =
       "  pkgs ? import <nixpkgs> { },",
       "}:",
       "let",
-      "  python = pkgs.python312;",
+      T.pack ("  python = pkgs." ++ defaultPythonPackageAttribute ++ ";"),
       "in",
       "python.pkgs.buildPythonPackage rec {",
       "  installPhase = ''",
@@ -2680,11 +2682,71 @@ checkTemplateDebugTests =
             "demo"
             tempPath
             "packages/python_template/default.nix"
-            (Set.fromList ["meta", "propagatedBuildInputs", "shellHook", "version"])
+            (Set.fromList ["meta", "propagatedBuildInputs", "python", "shellHook", "version"])
             (Just pythonTemplateBaselineNixSource)
         removeFileIfExists tempPath
         assertEqual
           "Allows Python package descriptions to differ from the template baseline."
+          []
+          issues,
+      TestCase $ do
+        let customPythonVersionSource =
+              T.unlines
+                [ "{",
+                  "  inputs,",
+                  "  pkgs ? import <nixpkgs> { },",
+                  "}:",
+                  "let",
+                  "  python = pkgs.python311;",
+                  "in",
+                  "python.pkgs.buildPythonPackage rec {",
+                  "  installPhase = ''",
+                  "    install -Dm644 main.py $out/${python.sitePackages}/${pname}.py",
+                  "    install -Dm755 main.py $out/bin/${pname}",
+                  "    if [ -d prm ]; then",
+                  "      cp -r prm/ $out/${python.sitePackages}/",
+                  "      cp -r prm/ $out/bin/",
+                  "    fi",
+                  "  '';",
+                  "  meta = {",
+                  "    description = \"Custom Python package.\";",
+                  "    mainProgram = pname;",
+                  "  };",
+                  "  passthru.python = python;",
+                  "  pname = baseNameOf ./.;",
+                  "  propagatedBuildInputs = [",
+                  "    python.pkgs.hypothesis",
+                  "  ];",
+                  "  pyproject = false;",
+                  "  shellHook = ''",
+                  "    source ${",
+                  "      pkgs.lib.getExe (",
+                  "        inputs.agenix-shell.lib.installationScript pkgs.stdenv.system {",
+                  "          secrets.secrets.file = ../../secrets/secrets.age;",
+                  "        }",
+                  "      )",
+                  "    }",
+                  "    export $secrets",
+                  "  '';",
+                  "  src = ./.;",
+                  "  strictDeps = true;",
+                  "  version = \"0.0.0\";",
+                  "}",
+                  ""
+                ]
+        (tempPath, tempHandle) <- openTempFile "/tmp" "python-template-custom-version.nix"
+        TIO.hPutStr tempHandle customPythonVersionSource
+        hClose tempHandle
+        issues <-
+          comparePackageDefaultNixWithTemplate
+            "demo"
+            tempPath
+            "packages/python_template/default.nix"
+            (Set.fromList ["meta", "propagatedBuildInputs", "python", "shellHook", "version"])
+            (Just pythonTemplateBaselineNixSource)
+        removeFileIfExists tempPath
+        assertEqual
+          "Allows Python package interpreter selection to differ from the template baseline."
           []
           issues,
       TestCase $ do
