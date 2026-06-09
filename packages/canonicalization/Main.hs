@@ -62,6 +62,7 @@ defaultAllowedNixDifferenceKeys =
       "nativeCheckInputs",
       "nativeInstallCheckInputs",
       "postInstall",
+      "meta",
       "meta.description",
       "propagatedBuildInputs",
       "runtimeInputs",
@@ -133,7 +134,7 @@ defaultNixTemplateSpecs =
     DefaultNixTemplateSpec
       { defaultNixTemplateName = "python_template",
         defaultNixTemplateMatches = \_ nixSource -> pure ("buildPythonPackage" `isInfixOf` nixSource),
-        defaultNixTemplateAllowedDifferenceKeys = Set.fromList ["meta.description", "propagatedBuildInputs", "shellHook", "version"],
+        defaultNixTemplateAllowedDifferenceKeys = Set.fromList ["meta", "propagatedBuildInputs", "shellHook", "version"],
         defaultNixTemplateBaselineSource = Just pythonTemplateBaselineNixSource
       },
     DefaultNixTemplateSpec
@@ -2441,9 +2442,25 @@ collectNixSetBindingGroupsFromBinding (NamedVar _ bindingValue _) = fromMaybe []
 collectNixSetBindingGroupsFromBinding (Inherit maybeBoundNixExpr _ _) = maybe [] (fromMaybe [] . collectNixSetBindingGroups) maybeBoundNixExpr
 extractNamedNixBindings :: [Binding NExprLoc] -> [(T.Text, T.Text)]
 extractNamedNixBindings bindings =
-  [ (T.intercalate "." (mapMaybe nixKeyNameText (NE.toList keyPath)), renderNixExpr bindingValue)
+  [ (T.intercalate "." (mapMaybe nixKeyNameText (NE.toList keyPath)), normalizeRenderedNixBindingValue (T.intercalate "." (mapMaybe nixKeyNameText (NE.toList keyPath))) (renderNixExpr bindingValue))
   | NamedVar keyPath bindingValue _ <- bindings
   ]
+normalizeRenderedNixBindingValue :: T.Text -> T.Text -> T.Text
+normalizeRenderedNixBindingValue bindingKey renderedBindingValue
+  | bindingKey == "meta" = stripMetaDescriptionAssignment (T.pack (compactTextToSingleLine renderedBindingValue))
+  | otherwise = T.pack (compactTextToSingleLine renderedBindingValue)
+stripMetaDescriptionAssignment :: T.Text -> T.Text
+stripMetaDescriptionAssignment renderedMetaValue =
+  let trimmedValue = T.strip renderedMetaValue
+      attrsetValue = fromMaybe trimmedValue (T.stripPrefix "meta = " trimmedValue)
+   in case T.stripPrefix "{ description = " attrsetValue of
+        Just descriptionPrefixRest ->
+          case T.breakOn "; " descriptionPrefixRest of
+            (descriptionValue, remainder) ->
+              if not (T.null descriptionValue) && not (T.null remainder)
+                then "{ " <> T.drop 2 remainder
+                else renderedMetaValue
+        Nothing -> renderedMetaValue
 runPackageTests :: IO ()
 runPackageTests = do
   hUnitCounts <- runTestTT hUnitDebugTests
@@ -2654,6 +2671,22 @@ checkTemplateDebugTests =
               )
           (Left parseError, _) -> assertFailure ("Failed to parse legacy Python template fixture: " ++ parseError)
           (_, Left parseError) -> assertFailure ("Failed to parse Python template baseline fixture: " ++ parseError),
+      TestCase $ do
+        (tempPath, tempHandle) <- openTempFile "/tmp" "python-template-custom-description.nix"
+        TIO.hPutStr tempHandle (renderPythonTemplateBaselineNixSource "Custom Python package")
+        hClose tempHandle
+        issues <-
+          comparePackageDefaultNixWithTemplate
+            "demo"
+            tempPath
+            "packages/python_template/default.nix"
+            (Set.fromList ["meta", "propagatedBuildInputs", "shellHook", "version"])
+            (Just pythonTemplateBaselineNixSource)
+        removeFileIfExists tempPath
+        assertEqual
+          "Allows Python package descriptions to differ from the template baseline."
+          []
+          issues,
       TestCase $ do
         runNixOsTestParseResult <-
           parseNixExprFromText
