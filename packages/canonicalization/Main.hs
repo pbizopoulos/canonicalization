@@ -457,28 +457,40 @@ runCli commandLineArgs =
               putStrLn "Usage: canonicalization check-repository [git-directory]"
               putStrLn "       canonicalization describe-repository [git-directory]"
               putStrLn "       canonicalization describe-repository --json [git-directory]"
-              putStrLn "       canonicalization create-package [git-directory] <package-type> <package-name>"
+              putStrLn "       canonicalization create-package [git-directory] <package-type> <package-name> [description]"
               putStrLn "       canonicalization create-repository [git-directory] <package-type> <package-name> [--check] [--coverage] [--profile] [--property-testing] [--mutation-testing]"
               putStrLn "       canonicalization check-gitmodules"
               exitFailure
             _ ->
               case parseCreatePackageArgs createRepositoryArgs of
-                Just (repositoryDirectory, packageKindName, packageName) ->
-                  runInGitRepositoryRoot repositoryDirectory (runCreatePackageMode packageKindName packageName)
+                Just (repositoryDirectory, packageKindName, packageName, packageDescription) ->
+                  runInGitRepositoryRoot repositoryDirectory (runCreatePackageMode packageKindName packageName packageDescription)
                 Nothing -> do
                   putStrLn "Usage: canonicalization check-repository [git-directory]"
                   putStrLn "       canonicalization describe-repository [git-directory]"
                   putStrLn "       canonicalization describe-repository --json [git-directory]"
-                  putStrLn "       canonicalization create-package [git-directory] <package-type> <package-name>"
+                  putStrLn "       canonicalization create-package [git-directory] <package-type> <package-name> [description]"
                   putStrLn "       canonicalization create-repository [git-directory] <package-type> <package-name> [--check] [--coverage] [--profile] [--property-testing] [--mutation-testing]"
                   putStrLn "       canonicalization check-gitmodules"
                   exitFailure
-parseCreatePackageArgs :: [String] -> Maybe (FilePath, String, FilePath)
+parseCreatePackageArgs :: [String] -> Maybe (FilePath, String, FilePath, Maybe String)
 parseCreatePackageArgs commandLineArgs =
   case commandLineArgs of
-    ["create-package", packageKindName, packageName] -> Just (".", packageKindName, packageName)
-    ["create-package", repositoryDirectory, packageKindName, packageName] -> Just (repositoryDirectory, packageKindName, packageName)
+    "create-package" : firstArgument : secondArgument : remainingArguments
+      | isSupportedCreatePackageKind firstArgument ->
+          Just (".", firstArgument, secondArgument, packageDescriptionFromArguments remainingArguments)
+      | isSupportedCreatePackageKind secondArgument ->
+          case remainingArguments of
+            packageName : packageDescriptionArguments ->
+              Just (firstArgument, secondArgument, packageName, packageDescriptionFromArguments packageDescriptionArguments)
+            [] -> Nothing
     _ -> Nothing
+packageDescriptionFromArguments :: [String] -> Maybe String
+packageDescriptionFromArguments [] = Nothing
+packageDescriptionFromArguments packageDescriptionArguments = Just (unwords packageDescriptionArguments)
+isSupportedCreatePackageKind :: String -> Bool
+isSupportedCreatePackageKind packageKindName =
+  isJust (parseSupportedCreatePackageKind packageKindName)
 parseCreateRepositoryArgs :: [String] -> Maybe (FilePath, String, FilePath, Set.Set RepositoryCheckKind)
 parseCreateRepositoryArgs commandLineArgs = do
   (repositoryDirectory, packageKindName, packageName, flagArguments) <-
@@ -531,8 +543,8 @@ trimString :: String -> String
 trimString = T.unpack . T.strip . T.pack
 removeSuffix :: (Eq a) => [a] -> [a] -> Maybe [a]
 removeSuffix suffix value = reverse <$> stripPrefix (reverse suffix) (reverse value)
-runCreatePackageMode :: String -> FilePath -> IO ()
-runCreatePackageMode packageKindName packageName =
+runCreatePackageMode :: String -> FilePath -> Maybe String -> IO ()
+runCreatePackageMode packageKindName packageName packageDescription =
   case parseSupportedCreatePackageKind packageKindName of
     Nothing -> do
       putStrLn ("unsupported package type: " ++ packageKindName)
@@ -544,7 +556,7 @@ runCreatePackageMode packageKindName packageName =
           putStrLn validationError
           exitFailure
         Nothing -> do
-          createPackageResult <- createPackageInCurrentRepository packageKind packageName
+          createPackageResult <- createPackageInCurrentRepository packageKind packageName packageDescription
           case createPackageResult of
             Left createPackageError -> do
               putStrLn createPackageError
@@ -888,10 +900,10 @@ data RepositoryScaffoldFile = RepositoryScaffoldFile
   { repositoryScaffoldFilePath :: FilePath,
     repositoryScaffoldFileContents :: T.Text
   }
-createPackageInCurrentRepository :: PackageKind -> FilePath -> IO (Either String [FilePath])
-createPackageInCurrentRepository packageKind packageName = do
+createPackageInCurrentRepository :: PackageKind -> FilePath -> Maybe String -> IO (Either String [FilePath])
+createPackageInCurrentRepository packageKind packageName packageDescription = do
   let packageRootDirectory = "packages" </> packageName
-      scaffoldFiles = renderScaffoldFiles packageKind packageName
+      scaffoldFiles = renderScaffoldFiles packageKind packageName packageDescription
   if null scaffoldFiles
     then pure (Left ("unsupported package type: " ++ renderPackageKind packageKind))
     else do
@@ -916,7 +928,7 @@ createRepositoryInCurrentRepository packageKind packageName requestedCheckKinds 
             [ RepositoryScaffoldFile
                 (packageRootDirectory </> scaffoldFileRelativePath scaffoldFile)
                 (scaffoldFileContents scaffoldFile)
-            | scaffoldFile <- renderScaffoldFiles packageKind packageName
+            | scaffoldFile <- renderScaffoldFiles packageKind packageName Nothing
             ]
           checkScaffoldFiles = renderRepositoryCheckScaffoldFiles packageKind packageName requestedCheckKinds
           scaffoldFiles = packageScaffoldFiles ++ checkScaffoldFiles
@@ -1010,8 +1022,8 @@ renderRepositoryCheckFlag repositoryCheckKind =
     RepositoryProfileCheck -> "--profile"
     RepositoryPropertyTestingCheck -> "--property-testing"
     RepositoryMutationTestingCheck -> "--mutation-testing"
-renderScaffoldFiles :: PackageKind -> FilePath -> [ScaffoldFile]
-renderScaffoldFiles packageKind packageName =
+renderScaffoldFiles :: PackageKind -> FilePath -> Maybe String -> [ScaffoldFile]
+renderScaffoldFiles packageKind packageName packageDescription =
   case packageKind of
     HaskellPackage ->
       [ ScaffoldFile ".gitignore" haskellGitignoreSource,
@@ -1041,7 +1053,7 @@ renderScaffoldFiles packageKind packageName =
       ]
     PythonPackage ->
       [ ScaffoldFile ".gitignore" pythonGitignoreSource,
-        ScaffoldFile "default.nix" pythonTemplateBaselineNixSource,
+        ScaffoldFile "default.nix" (renderPythonTemplateBaselineNixSource (fromMaybe defaultPythonTemplateDescription packageDescription)),
         ScaffoldFile "main.py" pythonMainSource
       ]
     CPackage ->
@@ -1056,6 +1068,62 @@ renderScaffoldFiles packageKind packageName =
         ScaffoldFile "ms.bib" latexMsBibSource
       ]
     _ -> []
+defaultPythonTemplateDescription :: String
+defaultPythonTemplateDescription = "A Python template package."
+escapeNixDoubleQuotedString :: String -> String
+escapeNixDoubleQuotedString = concatMap escapeChar
+  where
+    escapeChar '"' = "\\\""
+    escapeChar '\\' = "\\\\"
+    escapeChar otherChar = [otherChar]
+renderPythonTemplateBaselineNixSource :: String -> T.Text
+renderPythonTemplateBaselineNixSource packageDescription =
+  T.unlines
+    [ "{",
+      "  inputs,",
+      "  pkgs ? import <nixpkgs> { },",
+      "}:",
+      "let",
+      "  python = pkgs.python312;",
+      "in",
+      "python.pkgs.buildPythonPackage rec {",
+      "  installPhase = ''",
+      "    install -Dm644 main.py $out/${python.sitePackages}/${pname}.py",
+      "    install -Dm755 main.py $out/bin/${pname}",
+      "    if [ -d prm ]; then",
+      "      cp -r prm/ $out/${python.sitePackages}/",
+      "      cp -r prm/ $out/bin/",
+      "    fi",
+      "  '';",
+      "  meta = {",
+      T.pack ("    description = \"" ++ escapeNixDoubleQuotedString packageDescription ++ "\";"),
+      "    mainProgram = pname;",
+      "  };",
+      "  passthru.python = python;",
+      "  pname = baseNameOf ./.;",
+      "  propagatedBuildInputs = [",
+      "    python.pkgs.hypothesis",
+      "  ];",
+      "  pyproject = false;",
+      "  shellHook = ''",
+      "    source ${",
+      "      pkgs.lib.getExe (",
+      "        inputs.agenix-shell.lib.installationScript pkgs.stdenv.system {",
+      "          secrets.secrets.file = ../../secrets/secrets.age;",
+      "        }",
+      "      )",
+      "    }",
+      "    export $secrets",
+      "  '';",
+      "  src = ./.;",
+      "  strictDeps = true;",
+      "  version = \"0.0.0\";",
+      "}",
+      ""
+    ]
+pythonTemplateBaselineNixSource :: T.Text
+pythonTemplateBaselineNixSource =
+  renderPythonTemplateBaselineNixSource defaultPythonTemplateDescription
 renderScaffoldCargoToml :: FilePath -> T.Text
 renderScaffoldCargoToml packageName =
   T.unlines
@@ -3052,7 +3120,7 @@ repositoryPolicyDebugTests =
       TestCase $
         withTemporaryPackageRepository "compliant-repository-validation" $ \tempRepository -> do
           withCurrentWorkingDirectory tempRepository $ do
-            _ <- createPackageInCurrentRepository HaskellPackage "demo"
+            _ <- createPackageInCurrentRepository HaskellPackage "demo" Nothing
             repositoryComplianceResult <- collectRepositoryCompliance
             assertEqual
               "Collects package names for compliant repositories."
@@ -3079,7 +3147,7 @@ repositoryPolicyDebugTests =
       TestCase $
         withTemporaryPackageRepository "file-compliance-repository-validation" $ \tempRepository -> do
           withCurrentWorkingDirectory tempRepository $ do
-            _ <- createPackageInCurrentRepository PythonPackage "demo"
+            _ <- createPackageInCurrentRepository PythonPackage "demo" Nothing
             TIO.writeFile ("packages" </> "demo" </> "default.nix") "not valid nix template"
             repositoryComplianceResult <- collectRepositoryCompliance
             case repositoryComplianceResult of
@@ -3096,8 +3164,13 @@ createPackageDebugTests =
     [ TestCase $ do
         assertEqual
           "Parses create-package arguments with the current repository default."
-          (Just (".", "python", "demo"))
+          (Just (".", "python", "demo", Nothing))
           (parseCreatePackageArgs ["create-package", "python", "demo"]),
+      TestCase $ do
+        assertEqual
+          "Parses create-package arguments with an explicit description."
+          (Just (".", "python", "demo", Just "Custom Python package"))
+          (parseCreatePackageArgs ["create-package", "python", "demo", "Custom", "Python", "package"]),
       TestCase $ do
         assertEqual
           "Parses create-repository arguments with the current repository default."
@@ -3111,7 +3184,7 @@ createPackageDebugTests =
       TestCase $ do
         assertEqual
           "Parses create-package arguments with an explicit repository."
-          (Just ("repo", "rust", "demo"))
+          (Just ("repo", "rust", "demo", Nothing))
           (parseCreatePackageArgs ["create-package", "repo", "rust", "demo"]),
       TestCase $ do
         assertEqual
@@ -3143,14 +3216,14 @@ createPackageDebugTests =
           "Generates the expected Python scaffold file set."
           ["packages/demo/.gitignore", "packages/demo/default.nix", "packages/demo/main.py"]
           [ "packages/demo" </> scaffoldFileRelativePath scaffoldFile
-          | scaffoldFile <- renderScaffoldFiles PythonPackage "demo"
+          | scaffoldFile <- renderScaffoldFiles PythonPackage "demo" Nothing
           ],
       TestCase $ do
         assertEqual
           "Generates the expected Rust scaffold file set."
           ["packages/demo/.gitignore", "packages/demo/default.nix", "packages/demo/Cargo.toml", "packages/demo/src/main.rs"]
           [ "packages/demo" </> scaffoldFileRelativePath scaffoldFile
-          | scaffoldFile <- renderScaffoldFiles RustPackage "demo"
+          | scaffoldFile <- renderScaffoldFiles RustPackage "demo" Nothing
           ],
       TestCase $ do
         assertEqual
@@ -3207,10 +3280,16 @@ createPackageDebugTests =
           )
           (renderScaffoldHaskellCabal "demo"),
       TestCase $ do
-        let pythonScaffoldFiles = renderScaffoldFiles PythonPackage "demo"
+        let pythonScaffoldFiles = renderScaffoldFiles PythonPackage "demo" Nothing
         assertEqual
           "Uses the embedded Python baseline for scaffold default.nix."
           (Just pythonTemplateBaselineNixSource)
+          (listToMaybe [scaffoldFileContents scaffoldFile | scaffoldFile <- pythonScaffoldFiles, scaffoldFileRelativePath scaffoldFile == "default.nix"]),
+      TestCase $ do
+        let pythonScaffoldFiles = renderScaffoldFiles PythonPackage "demo" (Just "Custom Python package")
+        assertEqual
+          "Lets package authors override the Python scaffold description."
+          (Just (renderPythonTemplateBaselineNixSource "Custom Python package"))
           (listToMaybe [scaffoldFileContents scaffoldFile | scaffoldFile <- pythonScaffoldFiles, scaffoldFileRelativePath scaffoldFile == "default.nix"]),
       TestCase $ do
         assertEqual
@@ -3225,7 +3304,7 @@ createPackageDebugTests =
       TestCase $
         withTemporaryPackageRepository "python-create-package" $ \tempRepository -> do
           withCurrentWorkingDirectory tempRepository $ do
-            createPackageResult <- createPackageInCurrentRepository PythonPackage "demo"
+            createPackageResult <- createPackageInCurrentRepository PythonPackage "demo" Nothing
             assertEqual
               "Creates a Python package scaffold in the current repository."
               (Right ["packages/demo/.gitignore", "packages/demo/default.nix", "packages/demo/main.py"])
@@ -3238,7 +3317,7 @@ createPackageDebugTests =
         withTemporaryPackageRepository "existing-create-package" $ \tempRepository -> do
           withCurrentWorkingDirectory tempRepository $ do
             createDirectoryIfMissing True ("packages" </> "demo")
-            createPackageResult <- createPackageInCurrentRepository RustPackage "demo"
+            createPackageResult <- createPackageInCurrentRepository RustPackage "demo" Nothing
             assertEqual
               "Fails fast when the target package already exists."
               (Left "package already exists: packages/demo")
@@ -3246,7 +3325,7 @@ createPackageDebugTests =
       TestCase $
         withTemporaryPackageRepository "haskell-create-package" $ \tempRepository -> do
           withCurrentWorkingDirectory tempRepository $ do
-            _ <- createPackageInCurrentRepository HaskellPackage "demo"
+            _ <- createPackageInCurrentRepository HaskellPackage "demo" Nothing
             repositoryPaths <- collectRepositoryPaths "."
             let relativePaths = sort [path | path <- repositoryPaths, path /= "."]
                 leafPaths = Set.fromList (filter (isLeafPath relativePaths) relativePaths)
@@ -4516,51 +4595,6 @@ deployHostTemplateBaselineNixSource =
       "    tofu -chdir=\"$workdir/packages/${name}\" init -reconfigure",
       "    tofu -chdir=\"$workdir/packages/${name}\" apply",
       "  '';",
-      "}",
-      ""
-    ]
-pythonTemplateBaselineNixSource :: T.Text
-pythonTemplateBaselineNixSource =
-  T.unlines
-    [ "{",
-      "  inputs,",
-      "  pkgs ? import <nixpkgs> { },",
-      "}:",
-      "let",
-      "  python = pkgs.python312;",
-      "in",
-      "python.pkgs.buildPythonPackage rec {",
-      "  installPhase = ''",
-      "    install -Dm644 main.py $out/${python.sitePackages}/${pname}.py",
-      "    install -Dm755 main.py $out/bin/${pname}",
-      "    if [ -d prm ]; then",
-      "      cp -r prm/ $out/${python.sitePackages}/",
-      "      cp -r prm/ $out/bin/",
-      "    fi",
-      "  '';",
-      "  meta = {",
-      "    description = \"A Python template package.\";",
-      "    mainProgram = pname;",
-      "  };",
-      "  passthru.python = python;",
-      "  pname = baseNameOf ./.;",
-      "  propagatedBuildInputs = [",
-      "    python.pkgs.hypothesis",
-      "  ];",
-      "  pyproject = false;",
-      "  shellHook = ''",
-      "    source ${",
-      "      pkgs.lib.getExe (",
-      "        inputs.agenix-shell.lib.installationScript pkgs.stdenv.system {",
-      "          secrets.secrets.file = ../../secrets/secrets.age;",
-      "        }",
-      "      )",
-      "    }",
-      "    export $secrets",
-      "  '';",
-      "  src = ./.;",
-      "  strictDeps = true;",
-      "  version = \"0.0.0\";",
       "}",
       ""
     ]
