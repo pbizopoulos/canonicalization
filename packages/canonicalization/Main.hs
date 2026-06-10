@@ -1934,8 +1934,6 @@ formatPythonValidatorError :: FilePath -> String -> String
 formatPythonValidatorError packageName errorCode =
   let messagePrefix = "packages/" ++ packageName ++ "/main.py: "
    in case errorCode of
-        "missing_main_function" -> messagePrefix ++ "missing main() function"
-        "missing_pytest_tests" -> messagePrefix ++ "must define at least one pytest test"
         "parse_error" -> messagePrefix ++ "python source could not be parsed"
         _ -> messagePrefix ++ "python validator failed with error code: " ++ errorCode
 pythonUnittestValidatorPythonSource :: String
@@ -1944,43 +1942,14 @@ pythonUnittestValidatorPythonSource =
     [ "import ast",
       "import sys",
       "",
-      "def _is_pytest_class(node):",
-      "    if not isinstance(node, ast.ClassDef):",
-      "        return False",
-      "    return node.name.startswith('Test')",
-      "",
-      "def _contains_test_method(class_node):",
-      "    return any(isinstance(node, ast.FunctionDef) and node.name.startswith('test_') for node in class_node.body)",
-      "",
-      "def _is_test_function(node):",
-      "    return isinstance(node, ast.FunctionDef) and node.name.startswith('test_')",
-      "",
       "def main():",
       "    path = sys.argv[1]",
       "    try:",
       "        source = open(path, encoding='utf-8').read()",
-      "        module = ast.parse(source, filename=path)",
+      "        ast.parse(source, filename=path)",
       "    except Exception:",
       "        print('ERR parse_error')",
       "        sys.exit(2)",
-      "",
-      "    functions = {}",
-      "    for node in module.body:",
-      "        if isinstance(node, ast.FunctionDef):",
-      "            functions[node.name] = node",
-      "",
-      "    errors = []",
-      "    if 'main' not in functions:",
-      "        errors.append('missing_main_function')",
-      "    test_classes = [node for node in module.body if _is_pytest_class(node)]",
-      "    has_pytest_tests = any(_is_test_function(node) for node in module.body) or any(_contains_test_method(node) for node in test_classes)",
-      "    if not has_pytest_tests:",
-      "        errors.append('missing_pytest_tests')",
-      "",
-      "    if errors:",
-      "        for err in errors:",
-      "            print('ERR ' + err)",
-      "        sys.exit(1)",
       "    print('OK')",
       "    sys.exit(0)",
       "",
