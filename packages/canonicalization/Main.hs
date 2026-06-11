@@ -347,7 +347,7 @@ matchesPythonCoverageCheck :: FilePath -> String -> IO Bool
 matchesPythonCoverageCheck checkName nixSource =
   pure
     ( isJust (removeSuffix "_coverage" checkName)
-        && "--cov=." `isInfixOf` nixSource
+        && "--cov=\"$src\"" `isInfixOf` nixSource
     )
 matchesPythonProfileCheck :: FilePath -> String -> IO Bool
 matchesPythonProfileCheck checkName nixSource =
@@ -4970,12 +4970,9 @@ pythonCoverageCheckBaselineNixSource =
       "  }",
       "  ''",
       "    export HOME=\"$(mktemp -d)\"",
-      "    workspace=\"$PWD/workspace\"",
       "    coverageDir=\"$PWD/coverage\"",
       "    mkdir -p \"$coverageDir\"",
-      "    cp -R --no-preserve=mode \"$src\" \"$workspace\"",
-      "    cd \"$workspace\"",
-      "    python -m pytest --cov=. --cov-report term --cov-report \"html:$coverageDir/html\" main.py",
+      "    python -m pytest --cov=\"$src\" --cov-report term --cov-report \"html:$coverageDir/html\" \"$src/main.py\"",
       "    touch \"$out\"",
       "  ''"
     ]

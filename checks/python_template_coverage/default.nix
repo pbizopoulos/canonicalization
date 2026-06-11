@@ -24,11 +24,8 @@ pkgs.runCommand checkName
   }
   ''
     export HOME="$(mktemp -d)"
-    workspace="$PWD/workspace"
     coverageDir="$PWD/coverage"
     mkdir -p "$coverageDir"
-    cp -R --no-preserve=mode "$src" "$workspace"
-    cd "$workspace"
-    python -m pytest --cov=. --cov-report term --cov-report "html:$coverageDir/html" main.py
+    python -m pytest --cov="$src" --cov-report term --cov-report "html:$coverageDir/html" "$src/main.py"
     touch "$out"
   ''
