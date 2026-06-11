@@ -11,7 +11,7 @@ let
     _:
     packageDrv.propagatedBuildInputs
     ++ [
-      packageDrv.python.pkgs.coverage
+      packageDrv.python.pkgs.pytest-cov
     ]
   );
 in
@@ -29,8 +29,6 @@ pkgs.runCommand checkName
     mkdir -p "$coverageDir"
     cp -R --no-preserve=mode "$src" "$workspace"
     cd "$workspace"
-    python -m coverage run -m pytest main.py
-    python -m coverage report | tee "$coverageDir/summary.txt"
-    python -m coverage html -d "$coverageDir/html"
+    python -m pytest --cov=. --cov-report term --cov-report "html:$coverageDir/html" main.py
     touch "$out"
   ''
