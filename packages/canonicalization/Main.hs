@@ -2139,8 +2139,14 @@ stripCabalQuotedValue :: T.Text -> T.Text
 stripCabalQuotedValue quotedValue =
   fromMaybe quotedValue (T.stripPrefix "\"" quotedValue >>= T.stripSuffix "\"")
 comparePackageDefaultNixWithTemplate :: FilePath -> FilePath -> FilePath -> Set.Set T.Text -> Maybe T.Text -> IO [String]
-comparePackageDefaultNixWithTemplate _packageName =
-  compareNixFileWithTemplate
+comparePackageDefaultNixWithTemplate packageName subjectNixPath templateDefaultNixPath allowedNixDifferenceKeys maybeTemplateDefaultNixSourceOverride = do
+  packageKind <- detectPackageKindForPackage packageName
+  let ignoredTopLevelFunctionParams :: Set.Set T.Text
+      ignoredTopLevelFunctionParams =
+        case packageKind of
+          CPackage -> Set.singleton "inputs"
+          _ -> Set.empty
+  compareNixFileWithTemplate ignoredTopLevelFunctionParams subjectNixPath templateDefaultNixPath allowedNixDifferenceKeys maybeTemplateDefaultNixSourceOverride
 compareCheckDefaultNixWithTemplate :: FilePath -> T.Text -> IO [String]
 compareCheckDefaultNixWithTemplate checkDefaultNixPath templateDefaultNixSource = do
   checkDefaultNixSource <- TIO.readFile checkDefaultNixPath
@@ -2215,8 +2221,8 @@ validateCPackageVmCheckSource packageKind checkName checkDefaultNixPath checkDef
             then Nothing
             else Just (checkDefaultNixPath ++ ": generic C VM checks must install or override the same-name package from inputs.self.packages")
         ]
-compareNixFileWithTemplate :: FilePath -> FilePath -> Set.Set T.Text -> Maybe T.Text -> IO [String]
-compareNixFileWithTemplate subjectNixPath templateDefaultNixPath allowedNixDifferenceKeys maybeTemplateDefaultNixSourceOverride = do
+compareNixFileWithTemplate :: Set.Set T.Text -> FilePath -> FilePath -> Set.Set T.Text -> Maybe T.Text -> IO [String]
+compareNixFileWithTemplate ignoredTopLevelFunctionParams subjectNixPath templateDefaultNixPath allowedNixDifferenceKeys maybeTemplateDefaultNixSourceOverride = do
   subjectNixParseResult <- parseNixExprFromFile subjectNixPath
   templateDefaultNixParseResult <-
     case maybeTemplateDefaultNixSourceOverride of
@@ -2228,8 +2234,8 @@ compareNixFileWithTemplate subjectNixPath templateDefaultNixPath allowedNixDiffe
     (_, Left parseError) ->
       pure [templateDefaultNixPath ++ ": parse error: " ++ show parseError]
     (Right subjectNixExpr, Right templateDefaultNixExpr) ->
-      let normalizedSubjectNixExpr = normalizeNixExpr allowedNixDifferenceKeys subjectNixExpr
-          normalizedTemplateDefaultNixExpr = normalizeNixExpr allowedNixDifferenceKeys templateDefaultNixExpr
+      let normalizedSubjectNixExpr = normalizeNixExpr ignoredTopLevelFunctionParams allowedNixDifferenceKeys subjectNixExpr
+          normalizedTemplateDefaultNixExpr = normalizeNixExpr ignoredTopLevelFunctionParams allowedNixDifferenceKeys templateDefaultNixExpr
        in pure $
             formatNixTemplateDifferences
               subjectNixPath
@@ -2262,15 +2268,21 @@ inferCheckDefaultNixTemplateName checkName nixSource = do
     matched <- checkDefaultNixTemplateMatches checkDefaultNixTemplateSpec checkName nixSource
     pure (if matched then Just (checkDefaultNixTemplateName checkDefaultNixTemplateSpec) else Nothing)
   pure (listToMaybe (catMaybes maybeMatchedCheckDefaultNixTemplateNames))
-normalizeNixExpr :: Set.Set T.Text -> NExprLoc -> NExprLoc
-normalizeNixExpr allowedNixDifferenceKeys (Fix (Compose (AnnUnit nixExprSpan expressionFunctor))) =
+normalizeNixExpr :: Set.Set T.Text -> Set.Set T.Text -> NExprLoc -> NExprLoc
+normalizeNixExpr ignoredTopLevelFunctionParams allowedNixDifferenceKeys (Fix (Compose (AnnUnit nixExprSpan expressionFunctor))) =
   let rebuiltExpressionFunctor = case expressionFunctor of
         NSet isRecursive bindings -> NSet isRecursive (normalizeNixBindings allowedNixDifferenceKeys bindings)
-        NLet bindings body -> NLet (normalizeNixBindings allowedNixDifferenceKeys bindings) (normalizeNixExpr allowedNixDifferenceKeys body)
-        NAbs (ParamSet paramsEllipsis paramsAt params) body -> NAbs (ParamSet paramsEllipsis paramsAt (sortNixParams params)) (normalizeNixExpr allowedNixDifferenceKeys body)
-        NAbs (Param paramName) body -> NAbs (Param paramName) (normalizeNixExpr allowedNixDifferenceKeys body)
-        otherNixExpr -> fmap (normalizeNixExpr allowedNixDifferenceKeys) otherNixExpr
+        NLet bindings body -> NLet (normalizeNixBindings allowedNixDifferenceKeys bindings) (normalizeNixExpr ignoredTopLevelFunctionParams allowedNixDifferenceKeys body)
+        NAbs (ParamSet paramsEllipsis paramsAt params) body ->
+          NAbs
+            (ParamSet paramsEllipsis paramsAt (sortNixParams (filterIgnoredNixParams ignoredTopLevelFunctionParams params)))
+            (normalizeNixExpr Set.empty allowedNixDifferenceKeys body)
+        NAbs (Param paramName) body -> NAbs (Param paramName) (normalizeNixExpr Set.empty allowedNixDifferenceKeys body)
+        otherNixExpr -> fmap (normalizeNixExpr Set.empty allowedNixDifferenceKeys) otherNixExpr
    in Fix (Compose (AnnUnit nixExprSpan rebuiltExpressionFunctor))
+filterIgnoredNixParams :: Set.Set T.Text -> [(VarName, Maybe NExprLoc)] -> [(VarName, Maybe NExprLoc)]
+filterIgnoredNixParams ignoredTopLevelFunctionParams =
+  filter (\(VarName paramName, _) -> not (Set.member paramName ignoredTopLevelFunctionParams))
 sortNixParams :: [(VarName, Maybe NExprLoc)] -> [(VarName, Maybe NExprLoc)]
 sortNixParams = sortBy (\(VarName leftName, _) (VarName rightName, _) -> compare leftName rightName)
 normalizeNixBindings :: Set.Set T.Text -> [Binding NExprLoc] -> [Binding NExprLoc]
@@ -2278,8 +2290,8 @@ normalizeNixBindings allowedNixDifferenceKeys bindings =
   [normalizeNixBinding allowedNixDifferenceKeys binding | binding <- bindings, not (isAllowedNixDifferenceBinding allowedNixDifferenceKeys binding)]
 normalizeNixBinding :: Set.Set T.Text -> Binding NExprLoc -> Binding NExprLoc
 normalizeNixBinding allowedNixDifferenceKeys = \case
-  NamedVar keyPath bindingValue sourcePosition -> NamedVar keyPath (normalizeNixExpr allowedNixDifferenceKeys bindingValue) sourcePosition
-  Inherit maybeBoundNixExpr inheritedNames sourcePosition -> Inherit (normalizeNixExpr allowedNixDifferenceKeys <$> maybeBoundNixExpr) inheritedNames sourcePosition
+  NamedVar keyPath bindingValue sourcePosition -> NamedVar keyPath (normalizeNixExpr Set.empty allowedNixDifferenceKeys bindingValue) sourcePosition
+  Inherit maybeBoundNixExpr inheritedNames sourcePosition -> Inherit (normalizeNixExpr Set.empty allowedNixDifferenceKeys <$> maybeBoundNixExpr) inheritedNames sourcePosition
 isAllowedNixDifferenceBinding :: Set.Set T.Text -> Binding NExprLoc -> Bool
 isAllowedNixDifferenceBinding allowedNixDifferenceKeys = \case
   NamedVar (bindingKey :| _) _ _ ->
