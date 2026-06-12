@@ -55,6 +55,7 @@ defaultAllowedNixDifferenceKeys =
   Set.fromList
     [ "buildInputs",
       "cargoHash",
+      "doInstallCheck",
       "executableHaskellDepends",
       "executableToolDepends",
       "installCheckPhase",
@@ -62,6 +63,7 @@ defaultAllowedNixDifferenceKeys =
       "nativeCheckInputs",
       "nativeInstallCheckInputs",
       "postInstall",
+      "postInstallCheck",
       "meta",
       "meta.description",
       "propagatedBuildInputs",
