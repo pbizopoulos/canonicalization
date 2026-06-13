@@ -575,9 +575,9 @@ collectRepositoryCompliance = do
   if not (null repositoryStructureIssues)
     then pure (Left ("directory-structure", repositoryStructureIssues))
     else do
-      packageNames <- listPackageNames
+      packageNames <- listSubdirectoryNames "packages"
       packageChecks <- forM packageNames (checkPackage [])
-      checkNames <- listCheckNames
+      checkNames <- listSubdirectoryNames "checks"
       checkComplianceIssues <- concat <$> forM checkNames checkCheck
       let fileComplianceIssues = concatMap packageCheckIssues packageChecks ++ checkComplianceIssues
       if not (null fileComplianceIssues)
@@ -610,8 +610,20 @@ reportCheckRepositoryFailures checkPhaseName checkPhaseIssues = do
     _ -> pure ()
 runCheckGitSubmodulesMode :: IO ()
 runCheckGitSubmodulesMode = do
-  gitSubmoduleRepositories <- loadHomeGitSubmoduleRepositories
-  let invalidGitSubmodulePathEntries = [gitSubmoduleRepositoryPathEntry gitSubmoduleRepository | gitSubmoduleRepository <- gitSubmoduleRepositories, not (gitSubmoduleRepositoryIsCompatible gitSubmoduleRepository)]
+  homeDirectory <- getHomeDirectory
+  let gitSubmodulesFilePath = homeDirectory </> ".gitmodules"
+  fileExists <- doesFileExist gitSubmodulesFilePath
+  unless fileExists $ do
+    putStrLn ("missing file: " ++ gitSubmodulesFilePath)
+    exitFailure
+  gitSubmodulesContents <- T.unpack <$> TIO.readFile gitSubmodulesFilePath
+  let gitSubmodulePathEntries = parseGitSubmodulePathEntries gitSubmodulesContents
+      gitSubmoduleRepositories = map (buildGitSubmoduleRepository homeDirectory) gitSubmodulePathEntries
+      invalidGitSubmodulePathEntries =
+        [ gitSubmoduleRepositoryPathEntry gitSubmoduleRepository
+        | gitSubmoduleRepository <- gitSubmoduleRepositories,
+          not (gitSubmoduleRepositoryIsCompatible gitSubmoduleRepository)
+        ]
   if null invalidGitSubmodulePathEntries
     then putStrLn "all .gitmodules path entries comply with go-style naming (<host>/<owner>/<repo>)"
     else do
@@ -1117,17 +1129,6 @@ data GitSubmoduleRepository = GitSubmoduleRepository
     gitSubmoduleRepositoryPath :: FilePath,
     gitSubmoduleRepositoryIsCompatible :: Bool
   }
-loadHomeGitSubmoduleRepositories :: IO [GitSubmoduleRepository]
-loadHomeGitSubmoduleRepositories = do
-  homeDirectory <- getHomeDirectory
-  let gitSubmodulesFilePath = homeDirectory </> ".gitmodules"
-  fileExists <- doesFileExist gitSubmodulesFilePath
-  unless fileExists $ do
-    putStrLn ("missing file: " ++ gitSubmodulesFilePath)
-    exitFailure
-  gitSubmodulesContents <- T.unpack <$> TIO.readFile gitSubmodulesFilePath
-  let gitSubmodulePathEntries = parseGitSubmodulePathEntries gitSubmodulesContents
-  pure (map (buildGitSubmoduleRepository homeDirectory) gitSubmodulePathEntries)
 buildGitSubmoduleRepository :: FilePath -> FilePath -> GitSubmoduleRepository
 buildGitSubmoduleRepository homeDirectory gitSubmodulePathEntry =
   let localGitSubmoduleRepositoryPath = homeDirectory </> gitSubmodulePathEntry
@@ -1356,10 +1357,6 @@ hostRootPathFromRepositoryPath repositoryPath =
   case splitDirectories repositoryPath of
     "hosts" : hostDirectoryName : _ -> Just ("hosts" </> hostDirectoryName)
     _ -> Nothing
-listPackageNames :: IO [FilePath]
-listPackageNames = listSubdirectoryNames "packages"
-listCheckNames :: IO [FilePath]
-listCheckNames = listSubdirectoryNames "checks"
 listSubdirectoryNames :: FilePath -> IO [FilePath]
 listSubdirectoryNames parentDirectory = do
   parentDirectoryExists <- doesDirectoryExist parentDirectory
