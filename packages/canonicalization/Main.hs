@@ -470,20 +470,14 @@ parseCreatePackageArgs :: [String] -> Maybe (FilePath, String, FilePath, Maybe S
 parseCreatePackageArgs commandLineArgs =
   case commandLineArgs of
     "create-package" : firstArgument : secondArgument : remainingArguments
-      | isSupportedCreatePackageKind firstArgument ->
-          Just (".", firstArgument, secondArgument, packageDescriptionFromArguments remainingArguments)
-      | isSupportedCreatePackageKind secondArgument ->
+      | isJust (parseSupportedCreatePackageKind firstArgument) ->
+          Just (".", firstArgument, secondArgument, case remainingArguments of [] -> Nothing; args -> Just (unwords args))
+      | isJust (parseSupportedCreatePackageKind secondArgument) ->
           case remainingArguments of
             packageName : packageDescriptionArguments ->
-              Just (firstArgument, secondArgument, packageName, packageDescriptionFromArguments packageDescriptionArguments)
+              Just (firstArgument, secondArgument, packageName, case packageDescriptionArguments of [] -> Nothing; args -> Just (unwords args))
             [] -> Nothing
     _ -> Nothing
-packageDescriptionFromArguments :: [String] -> Maybe String
-packageDescriptionFromArguments [] = Nothing
-packageDescriptionFromArguments packageDescriptionArguments = Just (unwords packageDescriptionArguments)
-isSupportedCreatePackageKind :: String -> Bool
-isSupportedCreatePackageKind packageKindName =
-  isJust (parseSupportedCreatePackageKind packageKindName)
 parseCreateRepositoryArgs :: [String] -> Maybe (FilePath, String, FilePath, Set.Set RepositoryCheckKind)
 parseCreateRepositoryArgs commandLineArgs = do
   (repositoryDirectory, packageKindName, packageName, flagArguments) <-
@@ -802,9 +796,9 @@ renderRepositoryPackageSummaryJson packageSummary =
     [ "    {",
       "      \"name\": " ++ renderJsonString (repositoryPackageName packageSummary) ++ ",",
       "      \"packageType\": " ++ renderJsonString (repositoryPackageType packageSummary) ++ ",",
-      "      \"description\": " ++ renderJsonMaybeString (repositoryPackageDescription packageSummary) ++ ",",
+      "      \"description\": " ++ maybe "null" renderJsonString (repositoryPackageDescription packageSummary) ++ ",",
       "      \"checks\": " ++ renderRepositoryPackageChecksJson (repositoryPackageChecks packageSummary) ++ ",",
-      "      \"tests\": " ++ renderRepositoryPackageTestNames (repositoryPackageTestNames packageSummary),
+      "      \"tests\": " ++ "[" ++ intercalate ", " (map renderJsonString (repositoryPackageTestNames packageSummary)) ++ "]",
       "    }"
     ]
 renderRepositoryPackageChecksJson :: RepositoryPackageChecksSummary -> String
@@ -819,12 +813,6 @@ renderRepositoryPackageChecksJson repositoryPackageChecksSummary =
         "\"mutation-testing\": " ++ bool "false" "true" (repositoryPackageHasMutationTestingCheck repositoryPackageChecksSummary)
       ]
     ++ " }"
-renderRepositoryPackageTestNames :: [String] -> String
-renderRepositoryPackageTestNames testNames =
-  "[" ++ intercalate ", " (map renderJsonString testNames) ++ "]"
-renderJsonMaybeString :: Maybe String -> String
-renderJsonMaybeString Nothing = "null"
-renderJsonMaybeString (Just value) = renderJsonString value
 renderJsonString :: String -> String
 renderJsonString value =
   "\"" ++ concatMap escapeCharacter value ++ "\""
