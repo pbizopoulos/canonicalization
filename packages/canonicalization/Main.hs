@@ -645,7 +645,29 @@ runDescribeRepositoryMode = do
   RepositoryComplianceSuccess packageNames checkNames <- ensureRepositoryCompliance
   let repositoryCheckNames = Set.fromList checkNames
   packageSummaries <- forM packageNames (summarizeRepositoryPackage repositoryCheckNames)
-  putStr (intercalate "\n\n" (map renderRepositoryPackageSummary packageSummaries) ++ if null packageSummaries then "" else "\n")
+  putStr
+    ( intercalate
+        "\n\n"
+        [ unlines
+            ( [ "package: " ++ repositoryPackageName packageSummary,
+                "packageType: " ++ repositoryPackageType packageSummary,
+                "description: " ++ fromMaybe "(none)" (repositoryPackageDescription packageSummary),
+                "checks:",
+                "  check: " ++ bool "false" "true" (repositoryPackageHasCheck (repositoryPackageChecks packageSummary)),
+                "  coverage: " ++ bool "false" "true" (repositoryPackageHasCoverageCheck (repositoryPackageChecks packageSummary)),
+                "  profile: " ++ bool "false" "true" (repositoryPackageHasProfileCheck (repositoryPackageChecks packageSummary)),
+                "  property-testing: " ++ bool "false" "true" (repositoryPackageHasPropertyTestingCheck (repositoryPackageChecks packageSummary)),
+                "  mutation-testing: " ++ bool "false" "true" (repositoryPackageHasMutationTestingCheck (repositoryPackageChecks packageSummary)),
+                "tests:"
+              ]
+                ++ case repositoryPackageTestNames packageSummary of
+                  [] -> ["  (none)"]
+                  testNames -> ["  - " ++ testName | testName <- testNames]
+            )
+        | packageSummary <- packageSummaries
+        ]
+        ++ if null packageSummaries then "" else "\n"
+    )
 runDescribeRepositoryJsonMode :: IO ()
 runDescribeRepositoryJsonMode = do
   RepositoryComplianceSuccess packageNames checkNames <- ensureRepositoryCompliance
@@ -654,7 +676,19 @@ runDescribeRepositoryJsonMode = do
   putStr
     ( "{\n"
         ++ "  \"packages\": [\n"
-        ++ intercalate ",\n" (map renderRepositoryPackageSummaryJson packageSummaries)
+        ++ intercalate
+          ",\n"
+          [ unlines
+              [ "    {",
+                "      \"name\": " ++ renderJsonString (repositoryPackageName packageSummary) ++ ",",
+                "      \"packageType\": " ++ renderJsonString (repositoryPackageType packageSummary) ++ ",",
+                "      \"description\": " ++ maybe "null" renderJsonString (repositoryPackageDescription packageSummary) ++ ",",
+                "      \"checks\": " ++ renderRepositoryPackageChecksJson (repositoryPackageChecks packageSummary) ++ ",",
+                "      \"tests\": " ++ "[" ++ intercalate ", " (map renderJsonString (repositoryPackageTestNames packageSummary)) ++ "]",
+                "    }"
+              ]
+          | packageSummary <- packageSummaries
+          ]
         ++ "\n"
         ++ "  ]\n"
         ++ "}\n"
@@ -662,8 +696,45 @@ runDescribeRepositoryJsonMode = do
 summarizeRepositoryPackage :: Set.Set FilePath -> FilePath -> IO RepositoryPackageSummary
 summarizeRepositoryPackage repositoryCheckNames packageName = do
   packageKind <- detectPackageKindForPackage packageName
-  repositoryPackageDescriptionValue <- loadRepositoryPackageDescription packageName packageKind
-  repositoryPackageTestNamesValue <- discoverRepositoryPackageTestNames packageName packageKind
+  let loadPythonLikePackageDescription = do
+        maybePyprojectTomlContents <- readTextFileIfExists ("packages" </> packageName </> "pyproject.toml")
+        maybeDefaultNixContents <- readTextFileIfExists ("packages" </> packageName </> "default.nix")
+        let maybePyprojectDescription = maybePyprojectTomlContents >>= extractPythonPackageDescriptionFromPyprojectToml
+            maybeDefaultNixDescription = maybeDefaultNixContents >>= extractDefaultNixPackageDescription
+        pure (maybePyprojectDescription <|> maybeDefaultNixDescription)
+      loadDefaultNixPackageDescription = do
+        maybeDefaultNixContents <- readTextFileIfExists ("packages" </> packageName </> "default.nix")
+        pure (extractDefaultNixPackageDescription =<< maybeDefaultNixContents)
+      loadHaskellPackageDescription = do
+        maybeCabalContents <- readTextFileIfExists ("packages" </> packageName </> packageName <.> "cabal")
+        pure (extractHaskellPackageDescription =<< maybeCabalContents)
+      loadRustPackageDescription = do
+        maybeCargoTomlContents <- readTextFileIfExists ("packages" </> packageName </> "Cargo.toml")
+        pure (extractRustPackageDescription =<< maybeCargoTomlContents)
+      repositoryPackageDescriptionAction =
+        if packageKind `elem` [PythonPackage, PythonLatexPackage, PythonPypiPackage]
+          then loadPythonLikePackageDescription
+          else case packageKind of
+            HaskellPackage -> loadHaskellPackageDescription
+            RustPackage -> loadRustPackageDescription
+            _ -> loadDefaultNixPackageDescription
+      repositoryPackageTestNamesAction =
+        case packageKind of
+          HaskellPackage -> do
+            maybeMainHaskellSourceText <- readTextFileIfExists ("packages" </> packageName </> "Main.hs")
+            pure (maybe [] (discoverHaskellUnitTestNamesFromSource . T.unpack) maybeMainHaskellSourceText)
+          RustPackage -> do
+            maybeMainRustSourceText <- readTextFileIfExists ("packages" </> packageName </> "src/main.rs")
+            pure (maybe [] (discoverRustUnitTestNamesFromSource . T.unpack) maybeMainRustSourceText)
+          PythonPackage -> do
+            maybeMainPythonSourceText <- readTextFileIfExists ("packages" </> packageName </> "main.py")
+            pure (maybe [] (discoverPythonUnitTestNamesFromSource . T.unpack) maybeMainPythonSourceText)
+          PythonLatexPackage -> do
+            maybeMainPythonSourceText <- readTextFileIfExists ("packages" </> packageName </> "main.py")
+            pure (maybe [] (discoverPythonUnitTestNamesFromSource . T.unpack) maybeMainPythonSourceText)
+          _ -> pure []
+  repositoryPackageDescriptionValue <- repositoryPackageDescriptionAction
+  repositoryPackageTestNamesValue <- repositoryPackageTestNamesAction
   let repositoryPackageChecksValue = summarizeRepositoryPackageChecks repositoryCheckNames packageKind packageName
   pure
     RepositoryPackageSummary
@@ -682,47 +753,14 @@ summarizeRepositoryPackageChecks repositoryCheckNames packageKind packageName =
       repositoryPackageHasPropertyTestingCheck = maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName RepositoryPropertyTestingCheck),
       repositoryPackageHasMutationTestingCheck = maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName RepositoryMutationTestingCheck)
     }
-loadRepositoryPackageDescription :: FilePath -> PackageKind -> IO (Maybe String)
-loadRepositoryPackageDescription packageName packageKind = do
-  case packageKind of
-    HaskellPackage -> loadHaskellPackageDescription packageName
-    RustPackage -> loadRustPackageDescription packageName
-    PythonPackage -> loadPythonPackageDescription packageName
-    PythonLatexPackage -> loadPythonPackageDescription packageName
-    PythonPypiPackage -> loadPythonPackageDescription packageName
-    _ -> loadDefaultNixPackageDescription packageName
-loadHaskellPackageDescription :: FilePath -> IO (Maybe String)
-loadHaskellPackageDescription packageName = do
-  let cabalFilePath = "packages" </> packageName </> packageName <.> "cabal"
-  maybeCabalContents <- readTextFileIfExists cabalFilePath
-  pure (extractHaskellPackageDescription =<< maybeCabalContents)
 extractHaskellPackageDescription :: T.Text -> Maybe String
 extractHaskellPackageDescription cabalContents =
   (T.unpack <$> lookupCabalField "description" cabalContents)
     <|> (T.unpack <$> lookupCabalField "synopsis" cabalContents)
-loadRustPackageDescription :: FilePath -> IO (Maybe String)
-loadRustPackageDescription packageName = do
-  let cargoTomlPath = "packages" </> packageName </> "Cargo.toml"
-  maybeCargoTomlContents <- readTextFileIfExists cargoTomlPath
-  pure (extractRustPackageDescription =<< maybeCargoTomlContents)
 extractRustPackageDescription :: T.Text -> Maybe String
 extractRustPackageDescription cargoTomlContents =
   let packageSection = extractTomlSection "package" cargoTomlContents
    in T.unpack <$> lookupTomlString "description" packageSection
-loadPythonPackageDescription :: FilePath -> IO (Maybe String)
-loadPythonPackageDescription packageName = do
-  let pyprojectTomlPath = "packages" </> packageName </> "pyproject.toml"
-      defaultNixPath = "packages" </> packageName </> "default.nix"
-  maybePyprojectTomlContents <- readTextFileIfExists pyprojectTomlPath
-  maybeDefaultNixContents <- readTextFileIfExists defaultNixPath
-  let maybePyprojectDescription = maybePyprojectTomlContents >>= extractPythonPackageDescriptionFromPyprojectToml
-      maybeDefaultNixDescription = maybeDefaultNixContents >>= extractDefaultNixPackageDescription
-  pure (maybePyprojectDescription <|> maybeDefaultNixDescription)
-loadDefaultNixPackageDescription :: FilePath -> IO (Maybe String)
-loadDefaultNixPackageDescription packageName = do
-  let defaultNixPath = "packages" </> packageName </> "default.nix"
-  maybeDefaultNixContents <- readTextFileIfExists defaultNixPath
-  pure (extractDefaultNixPackageDescription =<< maybeDefaultNixContents)
 extractPythonPackageDescriptionFromPyprojectToml :: T.Text -> Maybe String
 extractPythonPackageDescriptionFromPyprojectToml pyprojectTomlContents =
   let projectSection = extractTomlSection "project" pyprojectTomlContents
@@ -755,43 +793,6 @@ extractQuotedNixAssignmentValue assignmentPrefix sourceLine = do
   valueWithoutSemicolon <- T.stripSuffix ";" (T.strip quotedValue)
   valueWithoutPrefix <- T.stripPrefix "\"" valueWithoutSemicolon
   T.stripSuffix "\"" valueWithoutPrefix
-discoverRepositoryPackageTestNames :: FilePath -> PackageKind -> IO [String]
-discoverRepositoryPackageTestNames packageName packageKind =
-  case packageKind of
-    HaskellPackage -> discoverHaskellUnitTestNames packageName packageKind
-    RustPackage -> discoverRustUnitTestNames packageName packageKind
-    PythonPackage -> discoverPythonUnitTestNames packageName packageKind
-    PythonLatexPackage -> discoverPythonUnitTestNames packageName packageKind
-    _ -> pure []
-renderRepositoryPackageSummary :: RepositoryPackageSummary -> String
-renderRepositoryPackageSummary packageSummary =
-  unlines
-    ( [ "package: " ++ repositoryPackageName packageSummary,
-        "packageType: " ++ repositoryPackageType packageSummary,
-        "description: " ++ fromMaybe "(none)" (repositoryPackageDescription packageSummary),
-        "checks:",
-        "  check: " ++ bool "false" "true" (repositoryPackageHasCheck (repositoryPackageChecks packageSummary)),
-        "  coverage: " ++ bool "false" "true" (repositoryPackageHasCoverageCheck (repositoryPackageChecks packageSummary)),
-        "  profile: " ++ bool "false" "true" (repositoryPackageHasProfileCheck (repositoryPackageChecks packageSummary)),
-        "  property-testing: " ++ bool "false" "true" (repositoryPackageHasPropertyTestingCheck (repositoryPackageChecks packageSummary)),
-        "  mutation-testing: " ++ bool "false" "true" (repositoryPackageHasMutationTestingCheck (repositoryPackageChecks packageSummary)),
-        "tests:"
-      ]
-        ++ case repositoryPackageTestNames packageSummary of
-          [] -> ["  (none)"]
-          testNames -> ["  - " ++ testName | testName <- testNames]
-    )
-renderRepositoryPackageSummaryJson :: RepositoryPackageSummary -> String
-renderRepositoryPackageSummaryJson packageSummary =
-  unlines
-    [ "    {",
-      "      \"name\": " ++ renderJsonString (repositoryPackageName packageSummary) ++ ",",
-      "      \"packageType\": " ++ renderJsonString (repositoryPackageType packageSummary) ++ ",",
-      "      \"description\": " ++ maybe "null" renderJsonString (repositoryPackageDescription packageSummary) ++ ",",
-      "      \"checks\": " ++ renderRepositoryPackageChecksJson (repositoryPackageChecks packageSummary) ++ ",",
-      "      \"tests\": " ++ "[" ++ intercalate ", " (map renderJsonString (repositoryPackageTestNames packageSummary)) ++ "]",
-      "    }"
-    ]
 renderRepositoryPackageChecksJson :: RepositoryPackageChecksSummary -> String
 renderRepositoryPackageChecksJson repositoryPackageChecksSummary =
   "{ "
