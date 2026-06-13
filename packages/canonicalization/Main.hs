@@ -490,20 +490,21 @@ parseCreateRepositoryArgs commandLineArgs = do
       "create-repository" : repositoryDirectory : packageKindName : packageName : remainingArgs ->
         Just (repositoryDirectory, packageKindName, packageName, remainingArgs)
       _ -> Nothing
-  requestedCheckKinds <- parseRepositoryCheckFlags flagArguments
+  requestedCheckKinds <-
+    Set.fromList
+      <$> mapM
+        ( \repositoryCheckFlag ->
+            lookup
+              repositoryCheckFlag
+              [ ("--check", RepositoryDefaultCheck),
+                ("--coverage", RepositoryCoverageCheck),
+                ("--profile", RepositoryProfileCheck),
+                ("--property-testing", RepositoryPropertyTestingCheck),
+                ("--mutation-testing", RepositoryMutationTestingCheck)
+              ]
+        )
+        flagArguments
   pure (repositoryDirectory, packageKindName, packageName, requestedCheckKinds)
-parseRepositoryCheckFlags :: [String] -> Maybe (Set.Set RepositoryCheckKind)
-parseRepositoryCheckFlags flagArguments =
-  Set.fromList <$> mapM parseRepositoryCheckFlag flagArguments
-parseRepositoryCheckFlag :: String -> Maybe RepositoryCheckKind
-parseRepositoryCheckFlag repositoryCheckFlag =
-  case repositoryCheckFlag of
-    "--check" -> Just RepositoryDefaultCheck
-    "--coverage" -> Just RepositoryCoverageCheck
-    "--profile" -> Just RepositoryProfileCheck
-    "--property-testing" -> Just RepositoryPropertyTestingCheck
-    "--mutation-testing" -> Just RepositoryMutationTestingCheck
-    _ -> Nothing
 runInGitRepositoryRoot :: FilePath -> IO a -> IO a
 runInGitRepositoryRoot repositoryDirectory action = do
   isDirectory <- doesDirectoryExist repositoryDirectory
@@ -531,7 +532,7 @@ runCreatePackageMode packageKindName packageName packageDescription =
   case parseSupportedCreatePackageKind packageKindName of
     Nothing -> do
       putStrLn ("unsupported package type: " ++ packageKindName)
-      putStrLn ("supported package types: " ++ intercalate ", " supportedCreatePackageKindNames)
+      putStrLn ("supported package types: " ++ intercalate ", " (map fst supportedCreatePackageKinds))
       exitFailure
     Just packageKind ->
       case validateCreatePackageName packageName of
@@ -552,7 +553,7 @@ runCreateRepositoryMode packageKindName packageName requestedCheckKinds =
   case parseSupportedCreatePackageKind packageKindName of
     Nothing -> do
       putStrLn ("unsupported package type: " ++ packageKindName)
-      putStrLn ("supported package types: " ++ intercalate ", " supportedCreatePackageKindNames)
+      putStrLn ("supported package types: " ++ intercalate ", " (map fst supportedCreatePackageKinds))
       exitFailure
     Just packageKind ->
       case validateCreatePackageName packageName of
@@ -833,8 +834,6 @@ supportedCreatePackageKinds =
     ("c", CPackage),
     ("latex", LatexPackage)
   ]
-supportedCreatePackageKindNames :: [String]
-supportedCreatePackageKindNames = map fst supportedCreatePackageKinds
 parseSupportedCreatePackageKind :: String -> Maybe PackageKind
 parseSupportedCreatePackageKind packageKindName = lookup packageKindName supportedCreatePackageKinds
 validateCreatePackageName :: FilePath -> Maybe String
