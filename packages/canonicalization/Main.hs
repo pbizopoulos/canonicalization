@@ -11,6 +11,7 @@ module Main (main, runPackageTests) where
 import Control.Applicative ((<|>))
 import Control.Exception (finally)
 import Control.Monad (filterM, forM, forM_, unless, when)
+import Data.Bool (bool)
 import Data.Char (isAlphaNum)
 import Data.Fix (Fix (Fix))
 import Data.Functor.Compose (Compose (Compose))
@@ -325,71 +326,71 @@ checkDefaultNixTemplateSpecByName checkDefaultNixTemplateNameToFind = find ((== 
 matchesHaskellCoverageCheck :: FilePath -> String -> IO Bool
 matchesHaskellCoverageCheck checkName nixSource =
   pure
-    ( isJust (removeSuffix "-coverage" checkName)
+    ( "-coverage" `isSuffixOf` checkName
         && "ghcWithPackages" `isInfixOf` nixSource
         && "-fhpc" `isInfixOf` nixSource
     )
 matchesHaskellProfileCheck :: FilePath -> String -> IO Bool
 matchesHaskellProfileCheck checkName nixSource =
   pure
-    ( isJust (removeSuffix "-profile" checkName)
+    ( "-profile" `isSuffixOf` checkName
         && "ghcWithPackages" `isInfixOf` nixSource
         && "-fprof-auto" `isInfixOf` nixSource
     )
 matchesHaskellPropertyTestingCheck :: FilePath -> String -> IO Bool
 matchesHaskellPropertyTestingCheck checkName nixSource =
   pure
-    ( isJust (removeSuffix "-property-testing" checkName)
+    ( "-property-testing" `isSuffixOf` checkName
         && "ghcWithPackages" `isInfixOf` nixSource
         && "runPackageTests" `isInfixOf` nixSource
     )
 matchesPythonCoverageCheck :: FilePath -> String -> IO Bool
 matchesPythonCoverageCheck checkName nixSource =
   pure
-    ( isJust (removeSuffix "_coverage" checkName)
+    ( "_coverage" `isSuffixOf` checkName
         && "--cov=\"$src\"" `isInfixOf` nixSource
     )
 matchesPythonProfileCheck :: FilePath -> String -> IO Bool
 matchesPythonProfileCheck checkName nixSource =
   pure
-    ( isJust (removeSuffix "_profile" checkName)
+    ( "_profile" `isSuffixOf` checkName
         && "pyinstrument" `isInfixOf` nixSource
     )
 matchesPythonPropertyTestingCheck :: FilePath -> String -> IO Bool
 matchesPythonPropertyTestingCheck checkName nixSource =
   pure
-    ( isJust (removeSuffix "_property_testing" checkName)
+    ( "_property_testing" `isSuffixOf` checkName
         && "python -m pytest -v main.py -k property" `isInfixOf` nixSource
     )
 matchesPythonMutationTestingCheck :: FilePath -> String -> IO Bool
 matchesPythonMutationTestingCheck checkName nixSource =
   pure
-    ( isJust (removeSuffix "_mutation_testing" checkName)
+    ( "_mutation_testing" `isSuffixOf` checkName
         && "cosmic-ray" `isInfixOf` nixSource
     )
 matchesRustCoverageCheck :: FilePath -> String -> IO Bool
 matchesRustCoverageCheck checkName nixSource =
   pure
-    ( isJust (removeSuffix "-coverage" checkName)
+    ( "-coverage" `isSuffixOf` checkName
         && "cargo llvm-cov" `isInfixOf` nixSource
     )
 matchesRustProfileCheck :: FilePath -> String -> IO Bool
 matchesRustProfileCheck checkName nixSource =
   pure
-    ( isJust (removeSuffix "-profile" checkName)
+    ( "-profile" `isSuffixOf` checkName
         && "pkgs.perf" `isInfixOf` nixSource
         && "perf record" `isInfixOf` nixSource
     )
 matchesRustPropertyTestingCheck :: FilePath -> String -> IO Bool
 matchesRustPropertyTestingCheck checkName nixSource =
   pure
-    ( isJust (removeSuffix "-property-testing" checkName)
+    ( "-property-testing" `isSuffixOf` checkName
         && "cargo test --locked" `isInfixOf` nixSource
     )
 matchesRustMutationTestingCheck :: FilePath -> String -> IO Bool
 matchesRustMutationTestingCheck checkName nixSource =
   pure
-    ( isJust (removeSuffix "-mutation-testing" checkName)
+    ( "-mutation-testing" `isSuffixOf` checkName
         && "cargo mutants" `isInfixOf` nixSource
     )
 matchesCPackageVmCheck :: FilePath -> String -> IO Bool
@@ -407,18 +408,9 @@ data CheckOutcome = CheckPassed | CheckFailed | CheckSkipped | CheckIncompatible
 checkOutcomeFromIssues :: [a] -> CheckOutcome
 checkOutcomeFromIssues = \case [] -> CheckPassed; _ -> CheckFailed
 type PackageTest :: Type
-data PackageTest = PackageTest
-  { packageTestName :: String,
-    packageTestOutcome :: CheckOutcome,
-    packageTestCases :: [PackageTestCase]
-  }
+data PackageTest = PackageTest String CheckOutcome [PackageTestCase]
 type PackageTestCase :: Type
-data PackageTestCase
-  = PackageTestCase
-  { packageTestCaseName :: String,
-    packageTestCaseOutcome :: CheckOutcome,
-    packageTestCaseIssues :: [String]
-  }
+data PackageTestCase = PackageTestCase String CheckOutcome [String]
 type PackageCheck :: Type
 data PackageCheck = PackageCheck
   { packageCheckName :: String,
@@ -525,7 +517,7 @@ runInGitRepositoryRoot repositoryDirectory action = do
     putStrLn ("not a directory: " ++ repositoryDirectory)
     exitFailure
   (insideWorkTreeExit, insideWorkTreeStdout, _insideWorkTreeStderr) <- readProcessWithExitCode "git" ["-C", repositoryDirectory, "rev-parse", "--is-inside-work-tree"] ""
-  unless (insideWorkTreeExit == ExitSuccess && trimString insideWorkTreeStdout == "true") $ do
+  unless (insideWorkTreeExit == ExitSuccess && T.unpack (T.strip (T.pack insideWorkTreeStdout)) == "true") $ do
     putStrLn ("not a git directory: " ++ repositoryDirectory)
     exitFailure
   (repositoryRootExit, repositoryRootStdout, _repositoryRootStderr) <- readProcessWithExitCode "git" ["-C", repositoryDirectory, "rev-parse", "--show-toplevel"] ""
@@ -533,17 +525,13 @@ runInGitRepositoryRoot repositoryDirectory action = do
     putStrLn ("not a git directory: " ++ repositoryDirectory)
     exitFailure
   canonicalInputDirectory <- canonicalizePath repositoryDirectory
-  canonicalRepositoryRoot <- canonicalizePath (trimString repositoryRootStdout)
+  canonicalRepositoryRoot <- canonicalizePath (T.unpack (T.strip (T.pack repositoryRootStdout)))
   unless (canonicalInputDirectory == canonicalRepositoryRoot) $ do
     putStrLn ("not a git repository root directory: " ++ repositoryDirectory)
     exitFailure
   previousDirectory <- getCurrentDirectory
   setCurrentDirectory canonicalInputDirectory
   action `finally` setCurrentDirectory previousDirectory
-trimString :: String -> String
-trimString = T.unpack . T.strip . T.pack
-removeSuffix :: (Eq a) => [a] -> [a] -> Maybe [a]
-removeSuffix suffix value = reverse <$> stripPrefix (reverse suffix) (reverse value)
 runCreatePackageMode :: String -> FilePath -> Maybe String -> IO ()
 runCreatePackageMode packageKindName packageName packageDescription =
   case parseSupportedCreatePackageKind packageKindName of
@@ -788,11 +776,11 @@ renderRepositoryPackageSummary packageSummary =
         "packageType: " ++ repositoryPackageType packageSummary,
         "description: " ++ fromMaybe "(none)" (repositoryPackageDescription packageSummary),
         "checks:",
-        "  check: " ++ renderBooleanText (repositoryPackageHasCheck (repositoryPackageChecks packageSummary)),
-        "  coverage: " ++ renderBooleanText (repositoryPackageHasCoverageCheck (repositoryPackageChecks packageSummary)),
-        "  profile: " ++ renderBooleanText (repositoryPackageHasProfileCheck (repositoryPackageChecks packageSummary)),
-        "  property-testing: " ++ renderBooleanText (repositoryPackageHasPropertyTestingCheck (repositoryPackageChecks packageSummary)),
-        "  mutation-testing: " ++ renderBooleanText (repositoryPackageHasMutationTestingCheck (repositoryPackageChecks packageSummary)),
+        "  check: " ++ bool "false" "true" (repositoryPackageHasCheck (repositoryPackageChecks packageSummary)),
+        "  coverage: " ++ bool "false" "true" (repositoryPackageHasCoverageCheck (repositoryPackageChecks packageSummary)),
+        "  profile: " ++ bool "false" "true" (repositoryPackageHasProfileCheck (repositoryPackageChecks packageSummary)),
+        "  property-testing: " ++ bool "false" "true" (repositoryPackageHasPropertyTestingCheck (repositoryPackageChecks packageSummary)),
+        "  mutation-testing: " ++ bool "false" "true" (repositoryPackageHasMutationTestingCheck (repositoryPackageChecks packageSummary)),
         "tests:"
       ]
         ++ renderRepositoryPackageTestLines (repositoryPackageTestNames packageSummary)
@@ -824,20 +812,16 @@ renderRepositoryPackageChecksJson repositoryPackageChecksSummary =
   "{ "
     ++ intercalate
       ", "
-      [ "\"check\": " ++ renderJsonBool (repositoryPackageHasCheck repositoryPackageChecksSummary),
-        "\"coverage\": " ++ renderJsonBool (repositoryPackageHasCoverageCheck repositoryPackageChecksSummary),
-        "\"profile\": " ++ renderJsonBool (repositoryPackageHasProfileCheck repositoryPackageChecksSummary),
-        "\"property-testing\": " ++ renderJsonBool (repositoryPackageHasPropertyTestingCheck repositoryPackageChecksSummary),
-        "\"mutation-testing\": " ++ renderJsonBool (repositoryPackageHasMutationTestingCheck repositoryPackageChecksSummary)
+      [ "\"check\": " ++ bool "false" "true" (repositoryPackageHasCheck repositoryPackageChecksSummary),
+        "\"coverage\": " ++ bool "false" "true" (repositoryPackageHasCoverageCheck repositoryPackageChecksSummary),
+        "\"profile\": " ++ bool "false" "true" (repositoryPackageHasProfileCheck repositoryPackageChecksSummary),
+        "\"property-testing\": " ++ bool "false" "true" (repositoryPackageHasPropertyTestingCheck repositoryPackageChecksSummary),
+        "\"mutation-testing\": " ++ bool "false" "true" (repositoryPackageHasMutationTestingCheck repositoryPackageChecksSummary)
       ]
     ++ " }"
 renderRepositoryPackageTestNames :: [String] -> String
 renderRepositoryPackageTestNames testNames =
   "[" ++ intercalate ", " (map renderJsonString testNames) ++ "]"
-renderBooleanText :: Bool -> String
-renderBooleanText booleanValue = if booleanValue then "true" else "false"
-renderJsonBool :: Bool -> String
-renderJsonBool = renderBooleanText
 renderJsonMaybeString :: Maybe String -> String
 renderJsonMaybeString Nothing = "null"
 renderJsonMaybeString (Just value) = renderJsonString value
@@ -1198,13 +1182,13 @@ buildGitSubmoduleRepository homeDirectory gitSubmodulePathEntry =
 parseGitSubmodulePathEntries :: String -> [FilePath]
 parseGitSubmodulePathEntries gitSubmodulesContents =
   nub
-    [ trimString rawPathEntry
+    [ T.unpack (T.strip (T.pack rawPathEntry))
     | gitSubmodulesLine <- lines gitSubmodulesContents,
-      let trimmedLine = trimString gitSubmodulesLine,
+      let trimmedLine = T.unpack (T.strip (T.pack gitSubmodulesLine)),
       "path" `isPrefixOf` trimmedLine,
       "=" `isInfixOf` trimmedLine,
       let rawPathEntry = drop 1 (dropWhile (/= '=') trimmedLine),
-      not (null (trimString rawPathEntry))
+      not (null (T.unpack (T.strip (T.pack rawPathEntry))))
     ]
 checkRepositoryStructure :: IO [String]
 checkRepositoryStructure = do
@@ -1271,7 +1255,7 @@ checkRepositoryStructure = do
       disallowedPathIssues =
         [ path ++ ": is not allowed"
         | path <- Set.toList leafPaths,
-          not (any (`pathMatchesRegex` path) allowedPathRegexes)
+          not (any (path =~) allowedPathRegexes)
         ]
   pure (missingPackageDefaultNixIssues ++ missingHostConfigurationIssues ++ missingCabalForMainHaskellIssues ++ misnamedCabalFileIssues ++ ambiguousPackageMarkerIssues ++ disallowedPathIssues)
 type PackageKind :: Type
@@ -1390,8 +1374,6 @@ isLeafPath :: [FilePath] -> FilePath -> Bool
 isLeafPath repositoryPaths candidatePath =
   let childPaths = [path | path <- repositoryPaths, takeDirectory path == candidatePath]
    in null childPaths
-pathMatchesRegex :: String -> FilePath -> Bool
-pathMatchesRegex regexPattern path = path =~ regexPattern
 packageRootPathFromRepositoryPath :: FilePath -> Maybe FilePath
 packageRootPathFromRepositoryPath repositoryPath =
   case splitDirectories repositoryPath of
@@ -1551,15 +1533,6 @@ checkPackage allRepositoryStructureIssues packageName = do
             ]
           ]
       packageTests = basePackageTests ++ languageSpecificPackageTests
-      _packageTestSelectorReferences =
-        [ ( packageTestName packageTest,
-            packageTestOutcome packageTest,
-            [ (packageTestCaseName packageTestCase, packageTestCaseOutcome packageTestCase, packageTestCaseIssues packageTestCase)
-            | packageTestCase <- packageTestCases packageTest
-            ]
-          )
-        | packageTest <- packageTests
-        ]
       packageIssues =
         packageStructureIssues
           ++ defaultNixTemplateIssues
@@ -1799,7 +1772,7 @@ discoverHaskellUnitTestNamesFromSource haskellSource =
    in sort (Set.toList (Set.fromList meaningfulHaskellUnitTestNames))
 isMeaningfulTestLabel :: String -> Bool
 isMeaningfulTestLabel label =
-  let trimmedLabel = trimString label
+  let trimmedLabel = T.unpack (T.strip (T.pack label))
    in case trimmedLabel of
         firstCharacter : _ -> isAlphaNum firstCharacter && any isAlphaNum trimmedLabel
         [] -> False
@@ -2463,7 +2436,8 @@ isQuickCheckSuccess QC.Success {} = True
 isQuickCheckSuccess _ = False
 prop_trimStringIdempotent :: String -> Bool
 prop_trimStringIdempotent inputText =
-  trimString (trimString inputText) == trimString inputText
+  let trim = T.unpack . T.strip . T.pack
+   in trim (trim inputText) == trim inputText
 prop_parseGitSubmodulePathEntriesPreservesFirstOccurrences :: QC.Property
 prop_parseGitSubmodulePathEntriesPreservesFirstOccurrences =
   QC.forAll gitSubmodulePathEntriesGen $ \gitSubmodulePathEntries ->
@@ -3151,15 +3125,21 @@ repositoryPolicyDebugTests =
           "allowedPathRegexesForPackageKind includes expected Haskell paths."
           True
           ( let regexes = allowedPathRegexesForPackageKind "packages/demo" "demo" HaskellPackage
-             in any (`pathMatchesRegex` "packages/demo/Main.hs") regexes
-                  && any (`pathMatchesRegex` "packages/demo/demo.cabal") regexes
+                mainHsPath :: String
+                mainHsPath = "packages/demo/Main.hs"
+                cabalPath :: String
+                cabalPath = "packages/demo/demo.cabal"
+             in any (mainHsPath =~) regexes
+                  && any (cabalPath =~) regexes
           ),
       TestCase $ do
         assertEqual
           "allowedPathRegexesForPackageKind includes Terraform lockfile pattern."
           True
           ( let regexes = allowedPathRegexesForPackageKind "packages/demo" "demo" TerraformPackage
-             in any (`pathMatchesRegex` "packages/demo/.terraform.lock.hcl") regexes
+                terraformLockPath :: String
+                terraformLockPath = "packages/demo/.terraform.lock.hcl"
+             in any (terraformLockPath =~) regexes
           ),
       TestCase $ do
         assertEqual
