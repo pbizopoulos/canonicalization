@@ -10,7 +10,7 @@
 module Main (main, runPackageTests) where
 import Control.Applicative ((<|>))
 import Control.Exception (finally)
-import Control.Monad (filterM, forM, forM_, unless, when)
+import Control.Monad (filterM, forM, forM_, unless, void, when)
 import Data.Bool (bool)
 import Data.Char (isAlphaNum)
 import Data.Fix (Fix (Fix))
@@ -433,8 +433,8 @@ main = do
 runCli :: [String] -> IO ()
 runCli commandLineArgs =
   case commandLineArgs of
-    ["check-repository"] -> runInGitRepositoryRoot "." runCheckRepositoryMode
-    ["check-repository", repositoryDirectory] -> runInGitRepositoryRoot repositoryDirectory runCheckRepositoryMode
+    ["check-repository"] -> runInGitRepositoryRoot "." (void ensureRepositoryCompliance)
+    ["check-repository", repositoryDirectory] -> runInGitRepositoryRoot repositoryDirectory (void ensureRepositoryCompliance)
     ["describe-repository", "--json"] -> runInGitRepositoryRoot "." runDescribeRepositoryJsonMode
     ["describe-repository", "--json", repositoryDirectory] -> runInGitRepositoryRoot repositoryDirectory runDescribeRepositoryJsonMode
     ["describe-repository"] -> runInGitRepositoryRoot "." runDescribeRepositoryMode
@@ -568,10 +568,6 @@ runCreateRepositoryMode packageKindName packageName requestedCheckKinds =
             Right createdFilePaths -> do
               putStrLn ("created repository scaffold for packages/" ++ packageName ++ " (" ++ renderPackageKind packageKind ++ ")")
               putStrLn ("created " ++ show (length createdFilePaths) ++ " files")
-runCheckRepositoryMode :: IO ()
-runCheckRepositoryMode = do
-  _ <- ensureRepositoryCompliance
-  pure ()
 collectRepositoryCompliance :: IO (Either (String, [String]) RepositoryComplianceSuccess)
 collectRepositoryCompliance = do
   repositoryStructureIssues <- checkRepositoryStructure
@@ -649,13 +645,20 @@ runDescribeRepositoryMode = do
   RepositoryComplianceSuccess packageNames checkNames <- ensureRepositoryCompliance
   let repositoryCheckNames = Set.fromList checkNames
   packageSummaries <- forM packageNames (summarizeRepositoryPackage repositoryCheckNames)
-  putStr (renderRepositoryPackageSummaries packageSummaries)
+  putStr (intercalate "\n\n" (map renderRepositoryPackageSummary packageSummaries) ++ if null packageSummaries then "" else "\n")
 runDescribeRepositoryJsonMode :: IO ()
 runDescribeRepositoryJsonMode = do
   RepositoryComplianceSuccess packageNames checkNames <- ensureRepositoryCompliance
   let repositoryCheckNames = Set.fromList checkNames
   packageSummaries <- forM packageNames (summarizeRepositoryPackage repositoryCheckNames)
-  putStr (renderRepositoryPackageSummariesJson packageSummaries)
+  putStr
+    ( "{\n"
+        ++ "  \"packages\": [\n"
+        ++ intercalate ",\n" (map renderRepositoryPackageSummaryJson packageSummaries)
+        ++ "\n"
+        ++ "  ]\n"
+        ++ "}\n"
+    )
 summarizeRepositoryPackage :: Set.Set FilePath -> FilePath -> IO RepositoryPackageSummary
 summarizeRepositoryPackage repositoryCheckNames packageName = do
   packageKind <- detectPackageKindForPackage packageName
@@ -760,9 +763,6 @@ discoverRepositoryPackageTestNames packageName packageKind =
     PythonPackage -> discoverPythonUnitTestNames packageName packageKind
     PythonLatexPackage -> discoverPythonUnitTestNames packageName packageKind
     _ -> pure []
-renderRepositoryPackageSummaries :: [RepositoryPackageSummary] -> String
-renderRepositoryPackageSummaries packageSummaries =
-  intercalate "\n\n" (map renderRepositoryPackageSummary packageSummaries) ++ if null packageSummaries then "" else "\n"
 renderRepositoryPackageSummary :: RepositoryPackageSummary -> String
 renderRepositoryPackageSummary packageSummary =
   unlines
@@ -777,19 +777,10 @@ renderRepositoryPackageSummary packageSummary =
         "  mutation-testing: " ++ bool "false" "true" (repositoryPackageHasMutationTestingCheck (repositoryPackageChecks packageSummary)),
         "tests:"
       ]
-        ++ renderRepositoryPackageTestLines (repositoryPackageTestNames packageSummary)
+        ++ case repositoryPackageTestNames packageSummary of
+          [] -> ["  (none)"]
+          testNames -> ["  - " ++ testName | testName <- testNames]
     )
-renderRepositoryPackageTestLines :: [String] -> [String]
-renderRepositoryPackageTestLines [] = ["  (none)"]
-renderRepositoryPackageTestLines testNames = ["  - " ++ testName | testName <- testNames]
-renderRepositoryPackageSummariesJson :: [RepositoryPackageSummary] -> String
-renderRepositoryPackageSummariesJson packageSummaries =
-  "{\n"
-    ++ "  \"packages\": [\n"
-    ++ intercalate ",\n" (map renderRepositoryPackageSummaryJson packageSummaries)
-    ++ "\n"
-    ++ "  ]\n"
-    ++ "}\n"
 renderRepositoryPackageSummaryJson :: RepositoryPackageSummary -> String
 renderRepositoryPackageSummaryJson packageSummary =
   unlines
@@ -930,7 +921,16 @@ validateRepositoryCheckSelection packageKind requestedCheckKinds =
             ( "unsupported checks for package type "
                 ++ renderPackageKind packageKind
                 ++ ": "
-                ++ intercalate ", " (map renderRepositoryCheckFlag unsupportedCheckKinds)
+                ++ intercalate
+                  ", "
+                  [ case repositoryCheckKind of
+                      RepositoryDefaultCheck -> "--check"
+                      RepositoryCoverageCheck -> "--coverage"
+                      RepositoryProfileCheck -> "--profile"
+                      RepositoryPropertyTestingCheck -> "--property-testing"
+                      RepositoryMutationTestingCheck -> "--mutation-testing"
+                  | repositoryCheckKind <- unsupportedCheckKinds
+                  ]
             )
 renderRepositoryCheckScaffoldFiles :: PackageKind -> FilePath -> Set.Set RepositoryCheckKind -> [RepositoryScaffoldFile]
 renderRepositoryCheckScaffoldFiles packageKind packageName requestedCheckKinds =
@@ -987,14 +987,6 @@ repositoryCheckBaselineSource packageKind repositoryCheckKind =
     (HtmlPackage, RepositoryDefaultCheck) -> Just htmlTemplateCheckBaselineNixSource
     (CPackage, RepositoryDefaultCheck) -> Just cTemplateCheckBaselineNixSource
     _ -> Nothing
-renderRepositoryCheckFlag :: RepositoryCheckKind -> String
-renderRepositoryCheckFlag repositoryCheckKind =
-  case repositoryCheckKind of
-    RepositoryDefaultCheck -> "--check"
-    RepositoryCoverageCheck -> "--coverage"
-    RepositoryProfileCheck -> "--profile"
-    RepositoryPropertyTestingCheck -> "--property-testing"
-    RepositoryMutationTestingCheck -> "--mutation-testing"
 renderScaffoldFiles :: PackageKind -> FilePath -> Maybe String -> [ScaffoldFile]
 renderScaffoldFiles packageKind packageName packageDescription =
   case packageKind of
