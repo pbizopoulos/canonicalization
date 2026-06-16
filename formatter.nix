@@ -149,7 +149,6 @@ let
           options = [
             "--config"
             "/dev/null"
-            "--no-gitignore"
           ];
         };
       };

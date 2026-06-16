@@ -3,7 +3,7 @@
   pkgs ? import <nixpkgs> { },
 }:
 let
-  python = pkgs.python312;
+  python = pkgs.python3;
 in
 python.pkgs.buildPythonPackage rec {
   installPhase = ''
