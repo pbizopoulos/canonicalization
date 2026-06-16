@@ -4731,7 +4731,6 @@ pythonLatexTemplateBaselineNixSource =
       "python.pkgs.buildPythonPackage rec {",
       "  buildPhase = ''",
       "    mkdir -p tmp",
-      "    export MPLCONFIGDIR=\"$PWD/tmp/matplotlib\"",
       "    ${pythonEnv}/bin/python3 main.py",
       "    cp ms.{tex,bib} tmp/",
       "    ${pkgs.texliveFull}/bin/latexmk -cd -pdf tmp/ms.tex",
