@@ -10,7 +10,7 @@
 module Main (main, runPackageTests) where
 import Control.Applicative ((<|>))
 import Control.Exception (finally)
-import Control.Monad (filterM, forM, forM_, unless, void, when)
+import Control.Monad (filterM, forM, forM_, unless, when)
 import Data.Bool (bool)
 import Data.Char (isAlphaNum)
 import Data.Fix (Fix (Fix))
@@ -399,22 +399,32 @@ defaultCanonicalizationSettings =
   CanonicalizationSettings
     { canonicalizationPythonPackageAttribute = defaultPythonPackageAttribute
     }
-loadCanonicalizationSettings :: IO CanonicalizationSettings
-loadCanonicalizationSettings = pure defaultCanonicalizationSettings
 main :: IO ()
 main = do
-  canonicalizationSettings <- loadCanonicalizationSettings
+  let canonicalizationSettings = defaultCanonicalizationSettings
   commandLineArgs <- getArgs
   runCli canonicalizationSettings commandLineArgs
 runCli :: CanonicalizationSettings -> [String] -> IO ()
 runCli canonicalizationSettings commandLineArgs =
   case commandLineArgs of
-    ["check-repository"] -> runInGitRepositoryRoot "." (void (ensureRepositoryComplianceWith canonicalizationSettings))
-    ["check-repository", repositoryDirectory] -> runInGitRepositoryRoot repositoryDirectory (void (ensureRepositoryComplianceWith canonicalizationSettings))
-    ["describe-repository", "--json"] -> runInGitRepositoryRoot "." runDescribeRepositoryJsonMode
-    ["describe-repository", "--json", repositoryDirectory] -> runInGitRepositoryRoot repositoryDirectory runDescribeRepositoryJsonMode
-    ["describe-repository"] -> runInGitRepositoryRoot "." runDescribeRepositoryMode
-    ["describe-repository", repositoryDirectory] -> runInGitRepositoryRoot repositoryDirectory runDescribeRepositoryMode
+    ["check-repository"] ->
+      runInGitRepositoryRoot "." $
+        collectRepositoryComplianceWith canonicalizationSettings >>= \case
+          Left (checkPhaseName, checkPhaseIssues) -> do
+            reportCheckRepositoryFailures checkPhaseName checkPhaseIssues
+            exitFailure
+          Right _ -> pure ()
+    ["check-repository", repositoryDirectory] ->
+      runInGitRepositoryRoot repositoryDirectory $
+        collectRepositoryComplianceWith canonicalizationSettings >>= \case
+          Left (checkPhaseName, checkPhaseIssues) -> do
+            reportCheckRepositoryFailures checkPhaseName checkPhaseIssues
+            exitFailure
+          Right _ -> pure ()
+    ["describe-repository", "--json"] -> runInGitRepositoryRoot "." (runDescribeRepositoryJsonModeWith defaultCanonicalizationSettings)
+    ["describe-repository", "--json", repositoryDirectory] -> runInGitRepositoryRoot repositoryDirectory (runDescribeRepositoryJsonModeWith defaultCanonicalizationSettings)
+    ["describe-repository"] -> runInGitRepositoryRoot "." (runDescribeRepositoryModeWith defaultCanonicalizationSettings)
+    ["describe-repository", repositoryDirectory] -> runInGitRepositoryRoot repositoryDirectory (runDescribeRepositoryModeWith defaultCanonicalizationSettings)
     ["check-gitmodules"] -> runCheckGitSubmodulesMode
     createRepositoryArgs ->
       case parseCreateRepositoryArgs createRepositoryArgs of
@@ -563,15 +573,6 @@ collectRepositoryComplianceWith canonicalizationSettings = do
                     repositoryComplianceCheckNames = checkNames
                   }
             )
-ensureRepositoryCompliance :: IO RepositoryComplianceSuccess
-ensureRepositoryCompliance = ensureRepositoryComplianceWith defaultCanonicalizationSettings
-ensureRepositoryComplianceWith :: CanonicalizationSettings -> IO RepositoryComplianceSuccess
-ensureRepositoryComplianceWith canonicalizationSettings = do
-  collectRepositoryComplianceWith canonicalizationSettings >>= \case
-    Left (checkPhaseName, checkPhaseIssues) -> do
-      reportCheckRepositoryFailures checkPhaseName checkPhaseIssues
-      exitFailure
-    Right repositoryComplianceSuccess -> pure repositoryComplianceSuccess
 reportCheckRepositoryFailures :: String -> [String] -> IO ()
 reportCheckRepositoryFailures checkPhaseName checkPhaseIssues = do
   putStrLn ("check-repository failed at phase: " ++ checkPhaseName)
@@ -628,19 +629,26 @@ data RepositoryPackageSummary = RepositoryPackageSummary
     repositoryPackageTestNames :: [String],
     repositoryPackageChecks :: RepositoryPackageChecksSummary
   }
-runDescribeRepositoryMode :: IO ()
-runDescribeRepositoryMode = do
-  packageSummaries <- collectRepositoryPackageSummaries
-  putStr (renderRepositoryPackageSummariesText packageSummaries)
-runDescribeRepositoryJsonMode :: IO ()
-runDescribeRepositoryJsonMode = do
-  packageSummaries <- collectRepositoryPackageSummaries
-  putStr (renderRepositoryPackageSummariesJson packageSummaries)
-collectRepositoryPackageSummaries :: IO [RepositoryPackageSummary]
-collectRepositoryPackageSummaries = do
-  RepositoryComplianceSuccess packageNames checkNames <- ensureRepositoryCompliance
-  let repositoryCheckNames = Set.fromList checkNames
-  forM packageNames (summarizeRepositoryPackage repositoryCheckNames)
+runDescribeRepositoryModeWith :: CanonicalizationSettings -> IO ()
+runDescribeRepositoryModeWith canonicalizationSettings =
+  collectRepositoryComplianceWith canonicalizationSettings >>= \case
+    Left (checkPhaseName, checkPhaseIssues) -> do
+      reportCheckRepositoryFailures checkPhaseName checkPhaseIssues
+      exitFailure
+    Right (RepositoryComplianceSuccess packageNames checkNames) -> do
+      let repositoryCheckNames = Set.fromList checkNames
+      packageSummaries <- forM packageNames (summarizeRepositoryPackage repositoryCheckNames)
+      putStr (renderRepositoryPackageSummariesText packageSummaries)
+runDescribeRepositoryJsonModeWith :: CanonicalizationSettings -> IO ()
+runDescribeRepositoryJsonModeWith canonicalizationSettings =
+  collectRepositoryComplianceWith canonicalizationSettings >>= \case
+    Left (checkPhaseName, checkPhaseIssues) -> do
+      reportCheckRepositoryFailures checkPhaseName checkPhaseIssues
+      exitFailure
+    Right (RepositoryComplianceSuccess packageNames checkNames) -> do
+      let repositoryCheckNames = Set.fromList checkNames
+      packageSummaries <- forM packageNames (summarizeRepositoryPackage repositoryCheckNames)
+      putStr (renderRepositoryPackageSummariesJson packageSummaries)
 renderRepositoryPackageSummariesText :: [RepositoryPackageSummary] -> String
 renderRepositoryPackageSummariesText packageSummaries =
   intercalate
