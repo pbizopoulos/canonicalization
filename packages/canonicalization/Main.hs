@@ -400,10 +400,7 @@ defaultCanonicalizationSettings =
     { canonicalizationPythonPackageAttribute = defaultPythonPackageAttribute
     }
 main :: IO ()
-main = do
-  let canonicalizationSettings = defaultCanonicalizationSettings
-  commandLineArgs <- getArgs
-  runCli canonicalizationSettings commandLineArgs
+main = getArgs >>= runCli defaultCanonicalizationSettings
 runCli :: CanonicalizationSettings -> [String] -> IO ()
 runCli canonicalizationSettings commandLineArgs =
   case commandLineArgs of
@@ -421,10 +418,10 @@ runCli canonicalizationSettings commandLineArgs =
             reportCheckRepositoryFailures checkPhaseName checkPhaseIssues
             exitFailure
           Right _ -> pure ()
-    ["describe-repository", "--json"] -> runInGitRepositoryRoot "." (runDescribeRepositoryJsonModeWith defaultCanonicalizationSettings)
-    ["describe-repository", "--json", repositoryDirectory] -> runInGitRepositoryRoot repositoryDirectory (runDescribeRepositoryJsonModeWith defaultCanonicalizationSettings)
-    ["describe-repository"] -> runInGitRepositoryRoot "." (runDescribeRepositoryModeWith defaultCanonicalizationSettings)
-    ["describe-repository", repositoryDirectory] -> runInGitRepositoryRoot repositoryDirectory (runDescribeRepositoryModeWith defaultCanonicalizationSettings)
+    ["describe-repository", "--json"] -> runInGitRepositoryRoot "." (runDescribeRepositoryJsonModeWith canonicalizationSettings)
+    ["describe-repository", "--json", repositoryDirectory] -> runInGitRepositoryRoot repositoryDirectory (runDescribeRepositoryJsonModeWith canonicalizationSettings)
+    ["describe-repository"] -> runInGitRepositoryRoot "." (runDescribeRepositoryModeWith canonicalizationSettings)
+    ["describe-repository", repositoryDirectory] -> runInGitRepositoryRoot repositoryDirectory (runDescribeRepositoryModeWith canonicalizationSettings)
     ["check-gitmodules"] -> runCheckGitSubmodulesMode
     createRepositoryArgs ->
       case parseCreateRepositoryArgs createRepositoryArgs of
@@ -653,32 +650,30 @@ renderRepositoryPackageSummariesText :: [RepositoryPackageSummary] -> String
 renderRepositoryPackageSummariesText packageSummaries =
   intercalate
     "\n\n"
-    [ unlines (renderRepositoryPackageSummaryTextLines packageSummary)
+    [ unlines
+        ( let packageChecks = repositoryPackageChecks packageSummary
+           in [ "package: " ++ repositoryPackageName packageSummary,
+                "packageType: " ++ repositoryPackageType packageSummary,
+                "description: " ++ fromMaybe "(none)" (repositoryPackageDescription packageSummary),
+                "checks:"
+              ]
+                ++ [ "  " ++ checkName ++ ": " ++ bool "false" "true" isEnabled
+                   | (checkName, isEnabled) <-
+                       [ ("check", repositoryPackageHasCheck packageChecks),
+                         ("coverage", repositoryPackageHasCoverageCheck packageChecks),
+                         ("profile", repositoryPackageHasProfileCheck packageChecks),
+                         ("property-testing", repositoryPackageHasPropertyTestingCheck packageChecks),
+                         ("mutation-testing", repositoryPackageHasMutationTestingCheck packageChecks)
+                       ]
+                   ]
+                ++ ["tests:"]
+                ++ case repositoryPackageTestNames packageSummary of
+                  [] -> ["  (none)"]
+                  testNames -> ["  - " ++ testName | testName <- testNames]
+        )
     | packageSummary <- packageSummaries
     ]
     ++ if null packageSummaries then "" else "\n"
-renderRepositoryPackageSummaryTextLines :: RepositoryPackageSummary -> [String]
-renderRepositoryPackageSummaryTextLines packageSummary =
-  [ "package: " ++ repositoryPackageName packageSummary,
-    "packageType: " ++ repositoryPackageType packageSummary,
-    "description: " ++ fromMaybe "(none)" (repositoryPackageDescription packageSummary),
-    "checks:"
-  ]
-    ++ [ "  " ++ checkName ++ ": " ++ bool "false" "true" isEnabled
-       | (checkName, isEnabled) <-
-           [ ("check", repositoryPackageHasCheck packageChecks),
-             ("coverage", repositoryPackageHasCoverageCheck packageChecks),
-             ("profile", repositoryPackageHasProfileCheck packageChecks),
-             ("property-testing", repositoryPackageHasPropertyTestingCheck packageChecks),
-             ("mutation-testing", repositoryPackageHasMutationTestingCheck packageChecks)
-           ]
-       ]
-    ++ ["tests:"]
-    ++ case repositoryPackageTestNames packageSummary of
-      [] -> ["  (none)"]
-      testNames -> ["  - " ++ testName | testName <- testNames]
-  where
-    packageChecks = repositoryPackageChecks packageSummary
 renderRepositoryPackageSummariesJson :: [RepositoryPackageSummary] -> String
 renderRepositoryPackageSummariesJson packageSummaries =
   "{\n"
@@ -748,7 +743,14 @@ summarizeRepositoryPackage repositoryCheckNames packageName = do
           maybeMainRustSourceText <- readTextFileIfExists (packageRoot </> "src/main.rs")
           pure (maybe [] (discoverRustUnitTestNamesFromSource . T.unpack) maybeMainRustSourceText)
         _ -> pure []
-  let repositoryPackageChecksValue = summarizeRepositoryPackageChecks repositoryCheckNames packageKind packageName
+  let repositoryPackageChecksValue =
+        RepositoryPackageChecksSummary
+          { repositoryPackageHasCheck = maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName RepositoryDefaultCheck),
+            repositoryPackageHasCoverageCheck = maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName RepositoryCoverageCheck),
+            repositoryPackageHasProfileCheck = maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName RepositoryProfileCheck),
+            repositoryPackageHasPropertyTestingCheck = maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName RepositoryPropertyTestingCheck),
+            repositoryPackageHasMutationTestingCheck = maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName RepositoryMutationTestingCheck)
+          }
   pure
     RepositoryPackageSummary
       { repositoryPackageName = packageName,
