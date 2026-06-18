@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# ruff: noqa: S101
 """Generate Python-produced artifacts for a LaTeX build."""
 
 from __future__ import annotations
@@ -122,7 +121,9 @@ def test_summarize_samples_contains_expected_metrics() -> None:
         "min": 2.0,
         "max": 12.0,
     }
-    assert summary == expected
+    if summary != expected:
+        msg = "summary statistics should remain stable"
+        raise AssertionError(msg)
 
 
 def test_create_table_contains_expected_metrics() -> None:
@@ -142,7 +143,9 @@ def test_create_table_contains_expected_metrics() -> None:
             "\\end{tabular}",
         ]
         for fragment in expected_fragments:
-            assert fragment in table
+            if fragment not in table:
+                msg = "table output should contain expected fragments"
+                raise AssertionError(msg)
 
 
 def test_create_figure_writes_non_empty_png() -> None:
@@ -150,8 +153,12 @@ def test_create_figure_writes_non_empty_png() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         figure_path = Path(tmpdir) / "figure.png"
         create_figure(figure_path, DEFAULT_SAMPLES)
-        assert figure_path.exists()
-        assert figure_path.stat().st_size > 0
+        if not figure_path.exists():
+            msg = "figure generation should create a PNG"
+            raise AssertionError(msg)
+        if figure_path.stat().st_size <= 0:
+            msg = "PNG should not be empty"
+            raise AssertionError(msg)
 
 
 def test_main_generates_workspace_artifacts_in_current_directory() -> None:
@@ -161,8 +168,12 @@ def test_main_generates_workspace_artifacts_in_current_directory() -> None:
         with mock.patch("pathlib.Path.cwd", return_value=fake_cwd):
             main()
         workspace = fake_cwd.resolve() / "tmp"
-        assert (workspace / "figure.png").exists()
-        assert (workspace / "table.tex").exists()
+        if not (workspace / "figure.png").exists():
+            msg = "figure.png should exist"
+            raise AssertionError(msg)
+        if not (workspace / "table.tex").exists():
+            msg = "table.tex should exist"
+            raise AssertionError(msg)
 
 
 @given(  # type: ignore[untyped-decorator]
@@ -182,14 +193,20 @@ def test_property_summary_is_permutation_invariant(samples: list[float]) -> None
     """Aggregate statistics should not depend on sample ordering."""
     forward = summarize_samples(samples)
     backward = summarize_samples(list(reversed(samples)))
-    assert len(forward) == len(backward)
+    if len(forward) != len(backward):
+        msg = "summary lengths should match"
+        raise AssertionError(msg)
     for (left_metric, left_value), (right_metric, right_value) in zip(
         forward,
         backward,
         strict=True,
     ):
-        assert left_metric == right_metric
-        assert math.isclose(left_value, right_value, rel_tol=1e-9, abs_tol=1e-9)
+        if left_metric != right_metric:
+            msg = "metrics should match"
+            raise AssertionError(msg)
+        if not math.isclose(left_value, right_value, rel_tol=1e-9, abs_tol=1e-9):
+            msg = "summary values should match within tolerance"
+            raise AssertionError(msg)
 
 
 @given(st.text())  # type: ignore[untyped-decorator]
@@ -197,7 +214,9 @@ def test_property_latex_escape_prefixes_special_characters(text: str) -> None:
     """Escaped output should prefix special characters that need escaping."""
     escaped = latex_escape(text)
     for character in "&%$#_":
-        assert re.search(rf"(?<!\\){re.escape(character)}", escaped) is None
+        if re.search(rf"(?<!\\){re.escape(character)}", escaped) is not None:
+            msg = "special characters should be escaped"
+            raise AssertionError(msg)
 
 
 @given(  # type: ignore[untyped-decorator]
@@ -221,9 +240,15 @@ def test_property_workspace_artifacts_created_for_nested_paths(
         create_workspace_artifacts(workspace)
         figure_path = workspace / "figure.png"
         table_path = workspace / "table.tex"
-        assert figure_path.exists()
-        assert figure_path.stat().st_size > 0
-        assert table_path.exists()
+        if not figure_path.exists():
+            msg = "figure.png should exist"
+            raise AssertionError(msg)
+        if figure_path.stat().st_size <= 0:
+            msg = "PNG should not be empty"
+            raise AssertionError(msg)
+        if not table_path.exists():
+            msg = "table.tex should exist"
+            raise AssertionError(msg)
 
 
 if __name__ == "__main__":

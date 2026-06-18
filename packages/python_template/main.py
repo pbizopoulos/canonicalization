@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# ruff: noqa: S101
 """Canonicalize labels into a stable, human-readable summary."""
 
 from __future__ import annotations
@@ -60,17 +59,23 @@ def test_canonicalize_label_examples() -> None:
         "HELLO   WORLD",
     ]
     canonical = [canonicalize_label(example) for example in examples]
-    assert canonical == ["hello-world", "hello-world", "hello-world"]
+    if canonical != ["hello-world", "hello-world", "hello-world"]:
+        msg = "canonical spellings should match"
+        raise AssertionError(msg)
 
 
 def test_render_message_uses_canonical_unique_labels() -> None:
     """The default message should summarize unique canonical labels."""
-    assert render_message() == "hello-world, python-template"
+    if render_message() != "hello-world, python-template":
+        msg = "default message should summarize unique canonical labels"
+        raise AssertionError(msg)
 
 
 def test_render_message_reports_empty_result_when_no_labels_survive() -> None:
     """Empty canonical labels should produce the fallback message."""
-    assert render_message(["...", "   ", "---"]) == "No canonical labels"
+    if render_message(["...", "   ", "---"]) != "No canonical labels":
+        msg = "empty canonical labels should produce the fallback message"
+        raise AssertionError(msg)
 
 
 def test_unique_canonical_labels_keeps_first_surviving_occurrence() -> None:
@@ -83,7 +88,11 @@ def test_unique_canonical_labels_keeps_first_surviving_occurrence() -> None:
         "Python-Template",
         "HELLO   WORLD",
     ]
-    assert unique_canonical_labels(labels) == ["hello-world", "python-template"]
+    if unique_canonical_labels(labels) != ["hello-world", "python-template"]:
+        msg = "deduplication should keep first surviving canonical labels in order"
+        raise AssertionError(
+            msg,
+        )
 
 
 def test_main_prints_message() -> None:
@@ -91,30 +100,38 @@ def test_main_prints_message() -> None:
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
         main()
-    assert output.getvalue().strip() == "hello-world, python-template"
+    if output.getvalue().strip() != "hello-world, python-template":
+        msg = "main() should emit the canonical label summary"
+        raise AssertionError(msg)
 
 
 @given(st.text())  # type: ignore[untyped-decorator]
 def test_property_canonicalization_is_idempotent(label: str) -> None:
     """Canonicalizing twice should not change the result."""
     canonical = canonicalize_label(label)
-    assert canonicalize_label(canonical) == canonical
+    if canonicalize_label(canonical) != canonical:
+        msg = "canonicalization should be idempotent"
+        raise AssertionError(msg)
 
 
 @given(st.text())  # type: ignore[untyped-decorator]
 def test_property_canonicalization_uses_restricted_character_set(label: str) -> None:
     """Canonical labels should only contain lowercase ASCII, digits, and hyphens."""
     canonical = canonicalize_label(label)
-    assert not canonical or (
-        re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", canonical) is not None
-    )
+    if canonical and re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", canonical) is None:
+        msg = "canonical labels must use lowercase ASCII, digits, and hyphens"
+        raise AssertionError(
+            msg,
+        )
 
 
 @given(st.lists(st.text(), max_size=25))  # type: ignore[untyped-decorator]
 def test_property_unique_canonical_labels_is_idempotent(labels: list[str]) -> None:
     """Deduplicating canonical labels twice should be stable."""
     canonical_labels = unique_canonical_labels(labels)
-    assert unique_canonical_labels(canonical_labels) == canonical_labels
+    if unique_canonical_labels(canonical_labels) != canonical_labels:
+        msg = "deduplicating canonical labels twice should be stable"
+        raise AssertionError(msg)
 
 
 if __name__ == "__main__":
