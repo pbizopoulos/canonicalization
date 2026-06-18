@@ -117,13 +117,13 @@ defaultNixTemplateSpecs =
     DefaultNixTemplateSpec
       { defaultNixTemplateName = "python_pypi_application_template",
         defaultNixTemplateMatches = matchesPythonPypiApplicationTemplate,
-        defaultNixTemplateAllowedDifferenceKeys = Set.fromList ["installCheckPhase", "meta", "nativeBuildInputs", "propagatedBuildInputs", "src", "version"],
+        defaultNixTemplateAllowedDifferenceKeys = Set.fromList ["installCheckPhase", "meta", "nativeBuildInputs", "propagatedBuildInputs", "python", "src", "version"],
         defaultNixTemplateBaselineSource = Just pythonPypiApplicationTemplateBaselineNixSource
       },
     DefaultNixTemplateSpec
       { defaultNixTemplateName = "python_pypi_template",
         defaultNixTemplateMatches = matchesPythonPypiTemplate,
-        defaultNixTemplateAllowedDifferenceKeys = Set.fromList ["format", "installCheckPhase", "meta", "nativeBuildInputs", "propagatedBuildInputs", "src", "version"],
+        defaultNixTemplateAllowedDifferenceKeys = Set.fromList ["format", "installCheckPhase", "meta", "nativeBuildInputs", "propagatedBuildInputs", "python", "src", "version"],
         defaultNixTemplateBaselineSource = Just pythonPypiTemplateBaselineNixSource
       },
     DefaultNixTemplateSpec
@@ -426,15 +426,27 @@ data RepositoryCheckKind
   | RepositoryPropertyTestingCheck
   | RepositoryMutationTestingCheck
   deriving stock (Eq, Ord, Show)
+type CanonicalizationSettings :: Type
+newtype CanonicalizationSettings = CanonicalizationSettings
+  { canonicalizationPythonPackageAttribute :: String
+  }
+defaultCanonicalizationSettings :: CanonicalizationSettings
+defaultCanonicalizationSettings =
+  CanonicalizationSettings
+    { canonicalizationPythonPackageAttribute = defaultPythonPackageAttribute
+    }
+loadCanonicalizationSettings :: IO CanonicalizationSettings
+loadCanonicalizationSettings = pure defaultCanonicalizationSettings
 main :: IO ()
 main = do
+  canonicalizationSettings <- loadCanonicalizationSettings
   commandLineArgs <- getArgs
-  runCli commandLineArgs
-runCli :: [String] -> IO ()
-runCli commandLineArgs =
+  runCli canonicalizationSettings commandLineArgs
+runCli :: CanonicalizationSettings -> [String] -> IO ()
+runCli canonicalizationSettings commandLineArgs =
   case commandLineArgs of
-    ["check-repository"] -> runInGitRepositoryRoot "." (void ensureRepositoryCompliance)
-    ["check-repository", repositoryDirectory] -> runInGitRepositoryRoot repositoryDirectory (void ensureRepositoryCompliance)
+    ["check-repository"] -> runInGitRepositoryRoot "." (void (ensureRepositoryComplianceWith canonicalizationSettings))
+    ["check-repository", repositoryDirectory] -> runInGitRepositoryRoot repositoryDirectory (void (ensureRepositoryComplianceWith canonicalizationSettings))
     ["describe-repository", "--json"] -> runInGitRepositoryRoot "." runDescribeRepositoryJsonMode
     ["describe-repository", "--json", repositoryDirectory] -> runInGitRepositoryRoot repositoryDirectory runDescribeRepositoryJsonMode
     ["describe-repository"] -> runInGitRepositoryRoot "." runDescribeRepositoryMode
@@ -443,7 +455,7 @@ runCli commandLineArgs =
     createRepositoryArgs ->
       case parseCreateRepositoryArgs createRepositoryArgs of
         Just (repositoryDirectory, packageKindName, packageName, requestedCheckKinds) ->
-          runInGitRepositoryRoot repositoryDirectory (runCreateRepositoryMode packageKindName packageName requestedCheckKinds)
+          runInGitRepositoryRoot repositoryDirectory (runCreateRepositoryMode canonicalizationSettings packageKindName packageName requestedCheckKinds)
         Nothing ->
           case createRepositoryArgs of
             "create-repository" : _ -> do
@@ -457,7 +469,7 @@ runCli commandLineArgs =
             _ ->
               case parseCreatePackageArgs createRepositoryArgs of
                 Just (repositoryDirectory, packageKindName, packageName, packageDescription) ->
-                  runInGitRepositoryRoot repositoryDirectory (runCreatePackageMode packageKindName packageName packageDescription)
+                  runInGitRepositoryRoot repositoryDirectory (runCreatePackageMode canonicalizationSettings packageKindName packageName packageDescription)
                 Nothing -> do
                   putStrLn "Usage: canonicalization check-repository [git-directory]"
                   putStrLn "       canonicalization describe-repository [git-directory]"
@@ -527,8 +539,8 @@ runInGitRepositoryRoot repositoryDirectory action = do
   previousDirectory <- getCurrentDirectory
   setCurrentDirectory canonicalInputDirectory
   action `finally` setCurrentDirectory previousDirectory
-runCreatePackageMode :: String -> FilePath -> Maybe String -> IO ()
-runCreatePackageMode packageKindName packageName packageDescription =
+runCreatePackageMode :: CanonicalizationSettings -> String -> FilePath -> Maybe String -> IO ()
+runCreatePackageMode canonicalizationSettings packageKindName packageName packageDescription =
   case parseSupportedCreatePackageKind packageKindName of
     Nothing -> do
       putStrLn ("unsupported package type: " ++ packageKindName)
@@ -540,7 +552,7 @@ runCreatePackageMode packageKindName packageName packageDescription =
           putStrLn validationError
           exitFailure
         Nothing -> do
-          createPackageResult <- createPackageInCurrentRepository packageKind packageName packageDescription
+          createPackageResult <- createPackageInCurrentRepositoryWith canonicalizationSettings packageKind packageName packageDescription
           case createPackageResult of
             Left createPackageError -> do
               putStrLn createPackageError
@@ -548,8 +560,8 @@ runCreatePackageMode packageKindName packageName packageDescription =
             Right createdFilePaths -> do
               putStrLn ("created package packages/" ++ packageName ++ " (" ++ renderPackageKind packageKind ++ ")")
               putStrLn ("created " ++ show (length createdFilePaths) ++ " files")
-runCreateRepositoryMode :: String -> FilePath -> Set.Set RepositoryCheckKind -> IO ()
-runCreateRepositoryMode packageKindName packageName requestedCheckKinds =
+runCreateRepositoryMode :: CanonicalizationSettings -> String -> FilePath -> Set.Set RepositoryCheckKind -> IO ()
+runCreateRepositoryMode canonicalizationSettings packageKindName packageName requestedCheckKinds =
   case parseSupportedCreatePackageKind packageKindName of
     Nothing -> do
       putStrLn ("unsupported package type: " ++ packageKindName)
@@ -561,7 +573,7 @@ runCreateRepositoryMode packageKindName packageName requestedCheckKinds =
           putStrLn validationError
           exitFailure
         Nothing -> do
-          createRepositoryResult <- createRepositoryInCurrentRepository packageKind packageName requestedCheckKinds
+          createRepositoryResult <- createRepositoryInCurrentRepositoryWith canonicalizationSettings packageKind packageName requestedCheckKinds
           case createRepositoryResult of
             Left createRepositoryError -> do
               putStrLn createRepositoryError
@@ -570,15 +582,17 @@ runCreateRepositoryMode packageKindName packageName requestedCheckKinds =
               putStrLn ("created repository scaffold for packages/" ++ packageName ++ " (" ++ renderPackageKind packageKind ++ ")")
               putStrLn ("created " ++ show (length createdFilePaths) ++ " files")
 collectRepositoryCompliance :: IO (Either (String, [String]) RepositoryComplianceSuccess)
-collectRepositoryCompliance = do
+collectRepositoryCompliance = collectRepositoryComplianceWith defaultCanonicalizationSettings
+collectRepositoryComplianceWith :: CanonicalizationSettings -> IO (Either (String, [String]) RepositoryComplianceSuccess)
+collectRepositoryComplianceWith canonicalizationSettings = do
   repositoryStructureIssues <- checkRepositoryStructure
   if not (null repositoryStructureIssues)
     then pure (Left ("directory-structure", repositoryStructureIssues))
     else do
       packageNames <- listSubdirectoryNames "packages"
-      packageChecks <- forM packageNames (checkPackage [])
+      packageChecks <- forM packageNames (checkPackageWith canonicalizationSettings [])
       checkNames <- listSubdirectoryNames "checks"
-      checkComplianceIssues <- concat <$> forM checkNames checkCheck
+      checkComplianceIssues <- concat <$> forM checkNames (checkCheckWith canonicalizationSettings)
       let fileComplianceIssues = concatMap packageCheckIssues packageChecks ++ checkComplianceIssues
       if not (null fileComplianceIssues)
         then pure (Left ("file-compliance", fileComplianceIssues))
@@ -591,8 +605,10 @@ collectRepositoryCompliance = do
                   }
             )
 ensureRepositoryCompliance :: IO RepositoryComplianceSuccess
-ensureRepositoryCompliance = do
-  collectRepositoryCompliance >>= \case
+ensureRepositoryCompliance = ensureRepositoryComplianceWith defaultCanonicalizationSettings
+ensureRepositoryComplianceWith :: CanonicalizationSettings -> IO RepositoryComplianceSuccess
+ensureRepositoryComplianceWith canonicalizationSettings = do
+  collectRepositoryComplianceWith canonicalizationSettings >>= \case
     Left (checkPhaseName, checkPhaseIssues) -> do
       reportCheckRepositoryFailures checkPhaseName checkPhaseIssues
       exitFailure
@@ -869,9 +885,11 @@ data RepositoryScaffoldFile = RepositoryScaffoldFile
     repositoryScaffoldFileContents :: T.Text
   }
 createPackageInCurrentRepository :: PackageKind -> FilePath -> Maybe String -> IO (Either String [FilePath])
-createPackageInCurrentRepository packageKind packageName packageDescription = do
+createPackageInCurrentRepository = createPackageInCurrentRepositoryWith defaultCanonicalizationSettings
+createPackageInCurrentRepositoryWith :: CanonicalizationSettings -> PackageKind -> FilePath -> Maybe String -> IO (Either String [FilePath])
+createPackageInCurrentRepositoryWith canonicalizationSettings packageKind packageName packageDescription = do
   let packageRootDirectory = "packages" </> packageName
-      scaffoldFiles = renderScaffoldFiles packageKind packageName packageDescription
+      scaffoldFiles = renderScaffoldFilesWith canonicalizationSettings packageKind packageName packageDescription
   if null scaffoldFiles
     then pure (Left ("unsupported package type: " ++ renderPackageKind packageKind))
     else do
@@ -887,7 +905,9 @@ createPackageInCurrentRepository packageKind packageName packageDescription = do
             TIO.writeFile absolutePath (scaffoldFileContents scaffoldFile)
           pure (Right [packageRootDirectory </> scaffoldFileRelativePath scaffoldFile | scaffoldFile <- scaffoldFiles])
 createRepositoryInCurrentRepository :: PackageKind -> FilePath -> Set.Set RepositoryCheckKind -> IO (Either String [FilePath])
-createRepositoryInCurrentRepository packageKind packageName requestedCheckKinds =
+createRepositoryInCurrentRepository = createRepositoryInCurrentRepositoryWith defaultCanonicalizationSettings
+createRepositoryInCurrentRepositoryWith :: CanonicalizationSettings -> PackageKind -> FilePath -> Set.Set RepositoryCheckKind -> IO (Either String [FilePath])
+createRepositoryInCurrentRepositoryWith canonicalizationSettings packageKind packageName requestedCheckKinds =
   case validateRepositoryCheckSelection packageKind requestedCheckKinds of
     Just validationError -> pure (Left validationError)
     Nothing -> do
@@ -896,9 +916,9 @@ createRepositoryInCurrentRepository packageKind packageName requestedCheckKinds 
             [ RepositoryScaffoldFile
                 (packageRootDirectory </> scaffoldFileRelativePath scaffoldFile)
                 (scaffoldFileContents scaffoldFile)
-            | scaffoldFile <- renderScaffoldFiles packageKind packageName Nothing
+            | scaffoldFile <- renderScaffoldFilesWith canonicalizationSettings packageKind packageName Nothing
             ]
-          checkScaffoldFiles = renderRepositoryCheckScaffoldFiles packageKind packageName requestedCheckKinds
+          checkScaffoldFiles = renderRepositoryCheckScaffoldFilesWith canonicalizationSettings packageKind packageName requestedCheckKinds
           scaffoldFiles = packageScaffoldFiles ++ checkScaffoldFiles
           scaffoldPaths = map repositoryScaffoldFilePath scaffoldFiles
       existingPaths <- filterM doesPathExist (packageRootDirectory : scaffoldPaths)
@@ -936,12 +956,12 @@ validateRepositoryCheckSelection packageKind requestedCheckKinds =
                   | repositoryCheckKind <- unsupportedCheckKinds
                   ]
             )
-renderRepositoryCheckScaffoldFiles :: PackageKind -> FilePath -> Set.Set RepositoryCheckKind -> [RepositoryScaffoldFile]
-renderRepositoryCheckScaffoldFiles packageKind packageName requestedCheckKinds =
+renderRepositoryCheckScaffoldFilesWith :: CanonicalizationSettings -> PackageKind -> FilePath -> Set.Set RepositoryCheckKind -> [RepositoryScaffoldFile]
+renderRepositoryCheckScaffoldFilesWith canonicalizationSettings packageKind packageName requestedCheckKinds =
   catMaybes
     [ do
         checkName <- repositoryCheckNameForKind packageKind packageName requestedCheckKind
-        checkDefaultNixSource <- repositoryCheckBaselineSource packageKind requestedCheckKind
+        checkDefaultNixSource <- repositoryCheckBaselineSourceWith canonicalizationSettings packageKind requestedCheckKind
         pure
           ( RepositoryScaffoldFile
               ("checks" </> checkName </> "default.nix")
@@ -970,8 +990,8 @@ repositoryCheckNameForKind packageKind packageName repositoryCheckKind =
     (HtmlPackage, RepositoryDefaultCheck) -> Just packageName
     (CPackage, RepositoryDefaultCheck) -> Just packageName
     _ -> Nothing
-repositoryCheckBaselineSource :: PackageKind -> RepositoryCheckKind -> Maybe T.Text
-repositoryCheckBaselineSource packageKind repositoryCheckKind =
+repositoryCheckBaselineSourceWith :: CanonicalizationSettings -> PackageKind -> RepositoryCheckKind -> Maybe T.Text
+repositoryCheckBaselineSourceWith canonicalizationSettings packageKind repositoryCheckKind =
   case (packageKind, repositoryCheckKind) of
     (HaskellPackage, RepositoryCoverageCheck) -> Just haskellCoverageCheckBaselineNixSource
     (HaskellPackage, RepositoryProfileCheck) -> Just haskellProfileCheckBaselineNixSource
@@ -983,16 +1003,18 @@ repositoryCheckBaselineSource packageKind repositoryCheckKind =
     (PythonPackage, RepositoryCoverageCheck) -> Just pythonCoverageCheckBaselineNixSource
     (PythonPackage, RepositoryProfileCheck) -> Just pythonProfileCheckBaselineNixSource
     (PythonPackage, RepositoryPropertyTestingCheck) -> Just pythonPropertyTestingCheckBaselineNixSource
-    (PythonPackage, RepositoryMutationTestingCheck) -> Just pythonMutationTestingCheckBaselineNixSource
+    (PythonPackage, RepositoryMutationTestingCheck) -> Just (pythonMutationTestingCheckBaselineNixSourceWith (canonicalizationPythonPackageAttribute canonicalizationSettings))
     (PythonLatexPackage, RepositoryCoverageCheck) -> Just pythonCoverageCheckBaselineNixSource
     (PythonLatexPackage, RepositoryProfileCheck) -> Just pythonProfileCheckBaselineNixSource
     (PythonLatexPackage, RepositoryPropertyTestingCheck) -> Just pythonPropertyTestingCheckBaselineNixSource
-    (PythonLatexPackage, RepositoryMutationTestingCheck) -> Just pythonMutationTestingCheckBaselineNixSource
+    (PythonLatexPackage, RepositoryMutationTestingCheck) -> Just (pythonMutationTestingCheckBaselineNixSourceWith (canonicalizationPythonPackageAttribute canonicalizationSettings))
     (HtmlPackage, RepositoryDefaultCheck) -> Just htmlTemplateCheckBaselineNixSource
     (CPackage, RepositoryDefaultCheck) -> Just cTemplateCheckBaselineNixSource
     _ -> Nothing
 renderScaffoldFiles :: PackageKind -> FilePath -> Maybe String -> [ScaffoldFile]
-renderScaffoldFiles packageKind packageName packageDescription =
+renderScaffoldFiles = renderScaffoldFilesWith defaultCanonicalizationSettings
+renderScaffoldFilesWith :: CanonicalizationSettings -> PackageKind -> FilePath -> Maybe String -> [ScaffoldFile]
+renderScaffoldFilesWith canonicalizationSettings packageKind packageName packageDescription =
   case packageKind of
     HaskellPackage ->
       [ ScaffoldFile ".gitignore" haskellGitignoreSource,
@@ -1022,7 +1044,7 @@ renderScaffoldFiles packageKind packageName packageDescription =
       ]
     PythonPackage ->
       [ ScaffoldFile ".gitignore" pythonGitignoreSource,
-        ScaffoldFile "default.nix" (renderPythonTemplateBaselineNixSource (fromMaybe defaultPythonTemplateDescription packageDescription)),
+        ScaffoldFile "default.nix" (renderPythonTemplateBaselineNixSourceWith (fromMaybe defaultPythonTemplateDescription packageDescription) (canonicalizationPythonPackageAttribute canonicalizationSettings)),
         ScaffoldFile "main.py" pythonMainSource
       ]
     CPackage ->
@@ -1047,15 +1069,15 @@ escapeNixDoubleQuotedString = concatMap escapeChar
     escapeChar '"' = "\\\""
     escapeChar '\\' = "\\\\"
     escapeChar otherChar = [otherChar]
-renderPythonTemplateBaselineNixSource :: String -> T.Text
-renderPythonTemplateBaselineNixSource packageDescription =
+renderPythonTemplateBaselineNixSourceWith :: String -> String -> T.Text
+renderPythonTemplateBaselineNixSourceWith packageDescription pythonPackageAttribute =
   T.unlines
     [ "{",
       "  inputs,",
       "  pkgs ? import <nixpkgs> { },",
       "}:",
       "let",
-      T.pack ("  python = pkgs." ++ defaultPythonPackageAttribute ++ ";"),
+      T.pack ("  python = pkgs." ++ pythonPackageAttribute ++ ";"),
       "in",
       "python.pkgs.buildPythonPackage rec {",
       "  installPhase = ''",
@@ -1094,7 +1116,7 @@ renderPythonTemplateBaselineNixSource packageDescription =
     ]
 pythonTemplateBaselineNixSource :: T.Text
 pythonTemplateBaselineNixSource =
-  renderPythonTemplateBaselineNixSource defaultPythonTemplateDescription
+  renderPythonTemplateBaselineNixSourceWith defaultPythonTemplateDescription defaultPythonPackageAttribute
 renderScaffoldCargoToml :: FilePath -> T.Text
 renderScaffoldCargoToml packageName =
   T.unlines
@@ -1366,8 +1388,8 @@ listSubdirectoryNames parentDirectory = do
       childNames <- listDirectory parentDirectory
       childIsDirectoryFlags <- forM childNames $ \childName -> doesDirectoryExist (parentDirectory </> childName)
       pure $ sort [childName | (childName, isDirectory) <- zip childNames childIsDirectoryFlags, isDirectory]
-checkPackage :: [String] -> FilePath -> IO PackageCheck
-checkPackage allRepositoryStructureIssues packageName = do
+checkPackageWith :: CanonicalizationSettings -> [String] -> FilePath -> IO PackageCheck
+checkPackageWith canonicalizationSettings allRepositoryStructureIssues packageName = do
   let packageDefaultNixPath = "packages" </> packageName </> "default.nix"
       packageStructureIssues =
         [ issue
@@ -1405,7 +1427,16 @@ checkPackage allRepositoryStructureIssues packageName = do
                             if packageName == "c_template" && matchedDefaultNixTemplateName == "c_template"
                               then defaultAllowedNixDifferenceKeys
                               else defaultNixTemplateAllowedDifferenceKeys defaultNixTemplateSpec
-                      defaultNixTemplateComparisonIssues <- comparePackageDefaultNixWithTemplate packageName packageDefaultNixPath ("packages" </> matchedDefaultNixTemplateName </> "default.nix") allowedNixDifferenceKeysForPackage (Just defaultNixTemplateSource)
+                          templateDefaultNixSourceOverride =
+                            case matchedDefaultNixTemplateName of
+                              "python_template" ->
+                                Just (renderPythonTemplateBaselineNixSourceWith defaultPythonTemplateDescription (canonicalizationPythonPackageAttribute canonicalizationSettings))
+                              "python_pypi_template" ->
+                                Just (pythonPypiTemplateBaselineNixSourceWith (canonicalizationPythonPackageAttribute canonicalizationSettings))
+                              "python_pypi_application_template" ->
+                                Just (pythonPypiApplicationTemplateBaselineNixSourceWith (canonicalizationPythonPackageAttribute canonicalizationSettings))
+                              _ -> Just defaultNixTemplateSource
+                      defaultNixTemplateComparisonIssues <- comparePackageDefaultNixWithTemplate packageName packageDefaultNixPath ("packages" </> matchedDefaultNixTemplateName </> "default.nix") allowedNixDifferenceKeysForPackage templateDefaultNixSourceOverride
                       pure (defaultNixTemplateComparisonIssues, Just matchedDefaultNixTemplateName)
                   Nothing ->
                     pure
@@ -1518,8 +1549,8 @@ checkPackage allRepositoryStructureIssues packageName = do
         packageCheckTests = packageTests,
         packageCheckIssues = packageIssues
       }
-checkCheck :: FilePath -> IO [String]
-checkCheck checkName = do
+checkCheckWith :: CanonicalizationSettings -> FilePath -> IO [String]
+checkCheckWith canonicalizationSettings checkName = do
   let checkDefaultNixPath = "checks" </> checkName </> "default.nix"
   maybeCheckDefaultNixText <- readTextFileIfExists checkDefaultNixPath
   case maybeCheckDefaultNixText of
@@ -1538,9 +1569,11 @@ checkCheck checkName = do
                 [ "checks/" ++ checkName ++ "/default.nix: unsupported check template " ++ matchedCheckDefaultNixTemplateName
                 ]
             Just checkDefaultNixTemplateSpec ->
-              validateCheckDefaultNix
+              validateCheckDefaultNixWith
+                canonicalizationSettings
                 checkName
                 checkDefaultNixPath
+                matchedCheckDefaultNixTemplateName
                 checkDefaultNixTemplateSpec
 detectPackageKindForPackage :: FilePath -> IO PackageKind
 detectPackageKindForPackage packageName = do
@@ -2092,8 +2125,8 @@ comparePackageDefaultNixWithTemplate packageName subjectNixPath templateDefaultN
 compareCheckDefaultNixWithTemplate :: FilePath -> T.Text -> IO [String]
 compareCheckDefaultNixWithTemplate checkDefaultNixPath templateDefaultNixSource = do
   checkDefaultNixSource <- TIO.readFile checkDefaultNixPath
-  let normalizedCheckDefaultNix = T.strip checkDefaultNixSource
-      normalizedTemplateDefaultNix = T.strip templateDefaultNixSource
+  let normalizedCheckDefaultNix = normalizePythonPackageAttributeReferences (T.strip checkDefaultNixSource)
+      normalizedTemplateDefaultNix = normalizePythonPackageAttributeReferences (T.strip templateDefaultNixSource)
   pure $
     if normalizedCheckDefaultNix == normalizedTemplateDefaultNix
       then []
@@ -2115,13 +2148,31 @@ compareCheckDefaultNixWithTemplate checkDefaultNixPath templateDefaultNixSource 
                 ++ ": differs from embedded check template\n"
                 ++ intercalate "\n" mismatchDetails
             ]
-validateCheckDefaultNix :: FilePath -> FilePath -> CheckDefaultNixTemplateSpec -> IO [String]
-validateCheckDefaultNix checkName checkDefaultNixPath checkDefaultNixTemplateSpec =
+normalizePythonPackageAttributeReferences :: T.Text -> T.Text
+normalizePythonPackageAttributeReferences =
+  T.pack . go . T.unpack
+  where
+    go [] = []
+    go textValue@(sourceChar : remainingChars) =
+      case stripPrefix "pkgs.python" textValue of
+        Just remainder ->
+          let (pythonVersionDigits, remainderAfterVersion) = span (`elem` ['0' .. '9']) remainder
+           in if null pythonVersionDigits
+                then sourceChar : go remainingChars
+                else "pkgs.python3" ++ go remainderAfterVersion
+        Nothing -> sourceChar : go remainingChars
+validateCheckDefaultNixWith :: CanonicalizationSettings -> FilePath -> FilePath -> FilePath -> CheckDefaultNixTemplateSpec -> IO [String]
+validateCheckDefaultNixWith canonicalizationSettings checkName checkDefaultNixPath checkTemplateName checkDefaultNixTemplateSpec =
   case checkDefaultNixTemplateComparisonMode checkDefaultNixTemplateSpec of
     ExactCheckTemplate ->
       compareCheckDefaultNixWithTemplate
         checkDefaultNixPath
-        (checkDefaultNixTemplateBaselineSource checkDefaultNixTemplateSpec)
+        ( case checkTemplateName of
+            "python_mutation_testing_check" ->
+              pythonMutationTestingCheckBaselineNixSourceWith (canonicalizationPythonPackageAttribute canonicalizationSettings)
+            _ ->
+              checkDefaultNixTemplateBaselineSource checkDefaultNixTemplateSpec
+        )
     StructuralCPackageVmCheck ->
       validateCPackageVmCheck checkName checkDefaultNixPath
 validateCPackageVmCheck :: FilePath -> FilePath -> IO [String]
@@ -2599,7 +2650,7 @@ checkTemplateDebugTests =
           (_, Left parseError) -> assertFailure ("Failed to parse Python template baseline fixture: " ++ parseError),
       TestCase $ do
         (tempPath, tempHandle) <- openTempFile "/tmp" "python-template-custom-description.nix"
-        TIO.hPutStr tempHandle (renderPythonTemplateBaselineNixSource "Custom Python package")
+        TIO.hPutStr tempHandle (renderPythonTemplateBaselineNixSourceWith "Custom Python package" defaultPythonPackageAttribute)
         hClose tempHandle
         issues <-
           comparePackageDefaultNixWithTemplate
@@ -2611,6 +2662,31 @@ checkTemplateDebugTests =
         removeFileIfExists tempPath
         assertEqual
           "Allows Python package descriptions to differ from the template baseline."
+          []
+          issues,
+      TestCase $ do
+        assertBool
+          "Renders the Python template with an alternate interpreter binding."
+          ("pkgs.python311" `isInfixOf` T.unpack (renderPythonTemplateBaselineNixSourceWith "Custom Python package" "python311")),
+      TestCase $ do
+        assertBool
+          "Renders the Python PyPI template with an alternate interpreter binding."
+          ("pkgs.python311" `isInfixOf` T.unpack (pythonPypiTemplateBaselineNixSourceWith "python311")),
+      TestCase $ do
+        assertBool
+          "Renders the Python mutation-testing check with an alternate interpreter binding."
+          ("pkgs.python311.withPackages" `isInfixOf` T.unpack (pythonMutationTestingCheckBaselineNixSourceWith "python311")),
+      TestCase $ do
+        (tempPath, tempHandle) <- openTempFile "/tmp" "python-mutation-check-custom-version.nix"
+        TIO.hPutStr tempHandle (pythonMutationTestingCheckBaselineNixSourceWith "python311")
+        hClose tempHandle
+        issues <-
+          compareCheckDefaultNixWithTemplate
+            tempPath
+            pythonMutationTestingCheckBaselineNixSource
+        removeFileIfExists tempPath
+        assertEqual
+          "Allows Python mutation-testing checks to use a different interpreter attribute."
           []
           issues,
       TestCase $ do
@@ -3314,7 +3390,7 @@ createPackageDebugTests =
         let pythonScaffoldFiles = renderScaffoldFiles PythonPackage "demo" (Just "Custom Python package")
         assertEqual
           "Lets package authors override the Python scaffold description."
-          (Just (renderPythonTemplateBaselineNixSource "Custom Python package"))
+          (Just (renderPythonTemplateBaselineNixSourceWith "Custom Python package" defaultPythonPackageAttribute))
           (listToMaybe [scaffoldFileContents scaffoldFile | scaffoldFile <- pythonScaffoldFiles, scaffoldFileRelativePath scaffoldFile == "default.nix"]),
       TestCase $ do
         assertEqual
@@ -4624,13 +4700,15 @@ deployHostTemplateBaselineNixSource =
       ""
     ]
 pythonPypiTemplateBaselineNixSource :: T.Text
-pythonPypiTemplateBaselineNixSource =
+pythonPypiTemplateBaselineNixSource = pythonPypiTemplateBaselineNixSourceWith defaultPythonPackageAttribute
+pythonPypiTemplateBaselineNixSourceWith :: String -> T.Text
+pythonPypiTemplateBaselineNixSourceWith pythonPackageAttribute =
   T.unlines
     [ "{",
       "  pkgs ? import <nixpkgs> { },",
       "}:",
       "let",
-      "  python = pkgs.python312;",
+      T.pack ("  python = pkgs." ++ pythonPackageAttribute ++ ";"),
       "in",
       "python.pkgs.buildPythonPackage rec {",
       "  format = \"wheel\";",
@@ -4653,14 +4731,16 @@ pythonPypiTemplateBaselineNixSource =
       "}"
     ]
 pythonPypiApplicationTemplateBaselineNixSource :: T.Text
-pythonPypiApplicationTemplateBaselineNixSource =
+pythonPypiApplicationTemplateBaselineNixSource = pythonPypiApplicationTemplateBaselineNixSourceWith defaultPythonPackageAttribute
+pythonPypiApplicationTemplateBaselineNixSourceWith :: String -> T.Text
+pythonPypiApplicationTemplateBaselineNixSourceWith pythonPackageAttribute =
   T.unlines
     [ "{",
       "  inputs,",
       "  pkgs ? import <nixpkgs> { },",
       "}:",
       "let",
-      "  python = pkgs.python312;",
+      T.pack ("  python = pkgs." ++ pythonPackageAttribute ++ ";"),
       "in",
       "python.pkgs.buildPythonApplication rec {",
       "  format = \"wheel\";",
@@ -5010,7 +5090,9 @@ pythonPropertyTestingCheckBaselineNixSource =
       "  ''"
     ]
 pythonMutationTestingCheckBaselineNixSource :: T.Text
-pythonMutationTestingCheckBaselineNixSource =
+pythonMutationTestingCheckBaselineNixSource = pythonMutationTestingCheckBaselineNixSourceWith defaultPythonPackageAttribute
+pythonMutationTestingCheckBaselineNixSourceWith :: String -> T.Text
+pythonMutationTestingCheckBaselineNixSourceWith pythonPackageAttribute =
   T.unlines
     [ "{",
       "  inputs,",
@@ -5024,7 +5106,7 @@ pythonMutationTestingCheckBaselineNixSource =
       "pkgs.runCommand \"${checkName}\"",
       "  {",
       "    nativeBuildInputs = [",
-      "      (pkgs.python312.withPackages (",
+      T.pack ("      (pkgs." ++ pythonPackageAttribute ++ ".withPackages ("),
       "        _: inputs.self.packages.${pkgs.stdenv.system}.${packageName}.propagatedBuildInputs",
       "      ))",
       "      inputs.self.packages.${pkgs.stdenv.system}.cosmic_ray",
