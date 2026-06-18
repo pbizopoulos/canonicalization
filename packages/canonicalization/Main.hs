@@ -705,27 +705,15 @@ summarizeRepositoryPackage :: Set.Set FilePath -> FilePath -> IO RepositoryPacka
 summarizeRepositoryPackage repositoryCheckNames packageName = do
   packageKind <- detectPackageKindForPackage packageName
   let packageRoot = "packages" </> packageName
-  repositoryPackageDescriptionValue <- readRepositoryPackageDescription packageKind packageRoot packageName
-  repositoryPackageTestNamesValue <- readRepositoryPackageTestNames packageKind packageRoot
-  let repositoryPackageChecksValue = summarizeRepositoryPackageChecks repositoryCheckNames packageKind packageName
-  pure
-    RepositoryPackageSummary
-      { repositoryPackageName = packageName,
-        repositoryPackageType = renderPackageKind packageKind,
-        repositoryPackageDescription = repositoryPackageDescriptionValue,
-        repositoryPackageTestNames = repositoryPackageTestNamesValue,
-        repositoryPackageChecks = repositoryPackageChecksValue
-      }
-readRepositoryPackageDescription :: PackageKind -> FilePath -> FilePath -> IO (Maybe String)
-readRepositoryPackageDescription packageKind packageRoot packageName
-  | isPythonPackageKind packageKind || packageKind == PythonPypiPackage = do
-      maybePyprojectTomlContents <- readTextFileIfExists (packageRoot </> "pyproject.toml")
-      maybeDefaultNixContents <- readTextFileIfExists (packageRoot </> "default.nix")
-      let maybePyprojectDescription = maybePyprojectTomlContents >>= extractPythonPackageDescriptionFromPyprojectToml
-          maybeDefaultNixDescription = maybeDefaultNixContents >>= extractDefaultNixPackageDescription
-      pure (maybePyprojectDescription <|> maybeDefaultNixDescription)
-  | otherwise =
-      case packageKind of
+  repositoryPackageDescriptionValue <-
+    if isPythonPackageKind packageKind || packageKind == PythonPypiPackage
+      then do
+        maybePyprojectTomlContents <- readTextFileIfExists (packageRoot </> "pyproject.toml")
+        maybeDefaultNixContents <- readTextFileIfExists (packageRoot </> "default.nix")
+        let maybePyprojectDescription = maybePyprojectTomlContents >>= extractPythonPackageDescriptionFromPyprojectToml
+            maybeDefaultNixDescription = maybeDefaultNixContents >>= extractDefaultNixPackageDescription
+        pure (maybePyprojectDescription <|> maybeDefaultNixDescription)
+      else case packageKind of
         HaskellPackage -> do
           maybeCabalContents <- readTextFileIfExists (packageRoot </> (packageName <.> "cabal"))
           pure (extractHaskellPackageDescription =<< maybeCabalContents)
@@ -735,13 +723,12 @@ readRepositoryPackageDescription packageKind packageRoot packageName
         _ -> do
           maybeDefaultNixContents <- readTextFileIfExists (packageRoot </> "default.nix")
           pure (extractDefaultNixPackageDescription =<< maybeDefaultNixContents)
-readRepositoryPackageTestNames :: PackageKind -> FilePath -> IO [String]
-readRepositoryPackageTestNames packageKind packageRoot
-  | isPythonPackageKind packageKind = do
-      maybeMainPythonSourceText <- readTextFileIfExists (packageRoot </> "main.py")
-      pure (maybe [] (discoverPythonUnitTestNamesFromSource . T.unpack) maybeMainPythonSourceText)
-  | otherwise =
-      case packageKind of
+  repositoryPackageTestNamesValue <-
+    if isPythonPackageKind packageKind
+      then do
+        maybeMainPythonSourceText <- readTextFileIfExists (packageRoot </> "main.py")
+        pure (maybe [] (discoverPythonUnitTestNamesFromSource . T.unpack) maybeMainPythonSourceText)
+      else case packageKind of
         HaskellPackage -> do
           maybeMainHaskellSourceText <- readTextFileIfExists (packageRoot </> "Main.hs")
           pure (maybe [] (discoverHaskellUnitTestNamesFromSource . T.unpack) maybeMainHaskellSourceText)
@@ -749,18 +736,24 @@ readRepositoryPackageTestNames packageKind packageRoot
           maybeMainRustSourceText <- readTextFileIfExists (packageRoot </> "src/main.rs")
           pure (maybe [] (discoverRustUnitTestNamesFromSource . T.unpack) maybeMainRustSourceText)
         _ -> pure []
+  let repositoryPackageChecksValue = summarizeRepositoryPackageChecks repositoryCheckNames packageKind packageName
+  pure
+    RepositoryPackageSummary
+      { repositoryPackageName = packageName,
+        repositoryPackageType = renderPackageKind packageKind,
+        repositoryPackageDescription = repositoryPackageDescriptionValue,
+        repositoryPackageTestNames = repositoryPackageTestNamesValue,
+        repositoryPackageChecks = repositoryPackageChecksValue
+      }
 summarizeRepositoryPackageChecks :: Set.Set FilePath -> PackageKind -> FilePath -> RepositoryPackageChecksSummary
 summarizeRepositoryPackageChecks repositoryCheckNames packageKind packageName =
   RepositoryPackageChecksSummary
-    { repositoryPackageHasCheck = repositoryPackageHasCheckForKind repositoryCheckNames packageKind packageName RepositoryDefaultCheck,
-      repositoryPackageHasCoverageCheck = repositoryPackageHasCheckForKind repositoryCheckNames packageKind packageName RepositoryCoverageCheck,
-      repositoryPackageHasProfileCheck = repositoryPackageHasCheckForKind repositoryCheckNames packageKind packageName RepositoryProfileCheck,
-      repositoryPackageHasPropertyTestingCheck = repositoryPackageHasCheckForKind repositoryCheckNames packageKind packageName RepositoryPropertyTestingCheck,
-      repositoryPackageHasMutationTestingCheck = repositoryPackageHasCheckForKind repositoryCheckNames packageKind packageName RepositoryMutationTestingCheck
+    { repositoryPackageHasCheck = maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName RepositoryDefaultCheck),
+      repositoryPackageHasCoverageCheck = maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName RepositoryCoverageCheck),
+      repositoryPackageHasProfileCheck = maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName RepositoryProfileCheck),
+      repositoryPackageHasPropertyTestingCheck = maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName RepositoryPropertyTestingCheck),
+      repositoryPackageHasMutationTestingCheck = maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName RepositoryMutationTestingCheck)
     }
-repositoryPackageHasCheckForKind :: Set.Set FilePath -> PackageKind -> FilePath -> RepositoryCheckKind -> Bool
-repositoryPackageHasCheckForKind repositoryCheckNames packageKind packageName repositoryCheckKind =
-  maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName repositoryCheckKind)
 extractHaskellPackageDescription :: T.Text -> Maybe String
 extractHaskellPackageDescription cabalContents =
   (T.unpack <$> lookupCabalField "description" cabalContents)
