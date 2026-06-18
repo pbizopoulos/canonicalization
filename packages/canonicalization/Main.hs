@@ -314,6 +314,13 @@ checkDefaultNixTemplateSpecs =
         checkDefaultNixTemplateComparisonMode = StructuralCPackageVmCheck
       },
     CheckDefaultNixTemplateSpec
+      { checkDefaultNixTemplateName = "default_vm_with_disko_check",
+        checkDefaultNixTemplateMatches = matchesDefaultVmWithDiskoCheck,
+        checkDefaultNixTemplateAllowedDifferenceKeys = Set.empty,
+        checkDefaultNixTemplateBaselineSource = defaultVmWithDiskoCheckBaselineNixSource,
+        checkDefaultNixTemplateComparisonMode = ExactCheckTemplate
+      },
+    CheckDefaultNixTemplateSpec
       { checkDefaultNixTemplateName = "host_default_check",
         checkDefaultNixTemplateMatches = \checkName _ -> pure (checkName == "host_default"),
         checkDefaultNixTemplateAllowedDifferenceKeys = Set.empty,
@@ -397,6 +404,13 @@ matchesCPackageVmCheck :: FilePath -> String -> IO Bool
 matchesCPackageVmCheck checkName nixSource = do
   packageKind <- detectPackageKindForPackage checkName
   pure (isCPackageVmCheckShape packageKind nixSource)
+matchesDefaultVmWithDiskoCheck :: FilePath -> String -> IO Bool
+matchesDefaultVmWithDiskoCheck checkName nixSource =
+  pure
+    ( "VmWithDisko" `isSuffixOf` checkName
+        && "pkgs.runCommand" `isInfixOf` nixSource
+        && "config.system.build.vmWithDisko" `isInfixOf` nixSource
+    )
 isCPackageVmCheckShape :: PackageKind -> String -> Bool
 isCPackageVmCheckShape packageKind nixSource =
   packageKind == CPackage
@@ -2614,6 +2628,12 @@ templateInferenceDebugTests =
         assertEqual
           "Infers the Rust mutation-testing check template."
           (Just "rust_mutation_testing_check")
+          inferred,
+      TestCase $ do
+        inferred <- inferCheckDefaultNixTemplateName "laptopVmWithDisko" (T.unpack defaultVmWithDiskoCheckBaselineNixSource)
+        assertEqual
+          "Infers the generic VM-with-disko check template."
+          (Just "default_vm_with_disko_check")
           inferred
     ]
 checkTemplateDebugTests :: Test
@@ -5339,6 +5359,23 @@ hostDefaultCheckBaselineNixSource =
       "  ''",
       "    touch \"$out\"",
       "  ''"
+    ]
+defaultVmWithDiskoCheckBaselineNixSource :: T.Text
+defaultVmWithDiskoCheckBaselineNixSource =
+  T.unlines
+    [ "{",
+      "  inputs,",
+      "  pkgs,",
+      "  ...",
+      "}:",
+      "let",
+      "  host = pkgs.lib.removeSuffix \"VmWithDisko\" (builtins.baseNameOf ./.);",
+      "in",
+      "pkgs.runCommand (builtins.baseNameOf ./.) {",
+      "  buildInputs = [",
+      "    inputs.self.nixosConfigurations.${host}.config.system.build.vmWithDisko",
+      "  ];",
+      "} \"touch $out\""
     ]
 uncommentTemplateBaselineNixSource :: T.Text
 uncommentTemplateBaselineNixSource =

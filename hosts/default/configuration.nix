@@ -80,7 +80,16 @@ in
       "nix-command"
     ];
   };
-  nixpkgs.hostPlatform = "x86_64-linux";
+  nixpkgs = {
+    hostPlatform = "x86_64-linux";
+    overlays = [
+      (_: prev: {
+        vmTools = prev.vmTools.override {
+          kernelImage = "bzImage";
+        };
+      })
+    ];
+  };
   preservation = {
     enable = true;
     preserveAt."/persistent" = {
@@ -116,7 +125,6 @@ in
     "systemd-machine-id-commit.service"
   ];
   users = {
-    allowNoPasswordLogin = false;
     mutableUsers = false;
     users.nixos = {
       extraGroups = [
