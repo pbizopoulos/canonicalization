@@ -112,7 +112,6 @@ let
             "*.nix"
           ];
         };
-        nixfmt.priority = 1;
         remove-empty-lines = {
           command = inputs.self.packages.${pkgs.stdenv.system}.remove-empty-lines;
           includes = [
@@ -126,7 +125,6 @@ let
         ruff-format.options = [
           "--cache-dir=/tmp/.ruff_cache"
         ];
-        rustfmt.priority = 1;
         shfmt.options = [
           "--posix"
         ];
@@ -135,7 +133,6 @@ let
           includes = [
             "*.py"
           ];
-          priority = 1;
         };
         uncomment = {
           command = inputs.self.packages.${pkgs.stdenv.system}.uncomment;
