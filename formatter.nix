@@ -146,10 +146,6 @@ let
           includes = [
             "*"
           ];
-          options = [
-            "--config"
-            "/dev/null"
-          ];
         };
       };
       global.excludes = [
