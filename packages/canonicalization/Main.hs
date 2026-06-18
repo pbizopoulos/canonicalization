@@ -403,38 +403,85 @@ main :: IO ()
 main = getArgs >>= runCli defaultCanonicalizationSettings
 runCli :: CanonicalizationSettings -> [String] -> IO ()
 runCli canonicalizationSettings commandLineArgs =
-  case commandLineArgs of
-    ["check-repository"] ->
-      runInGitRepositoryRoot "." $
+  let describeRepository render =
         collectRepositoryComplianceWith canonicalizationSettings >>= \case
           Left (checkPhaseName, checkPhaseIssues) -> do
             reportCheckRepositoryFailures checkPhaseName checkPhaseIssues
             exitFailure
-          Right _ -> pure ()
-    ["check-repository", repositoryDirectory] ->
-      runInGitRepositoryRoot repositoryDirectory $
-        collectRepositoryComplianceWith canonicalizationSettings >>= \case
-          Left (checkPhaseName, checkPhaseIssues) -> do
-            reportCheckRepositoryFailures checkPhaseName checkPhaseIssues
-            exitFailure
-          Right _ -> pure ()
-    ["describe-repository", "--json"] -> runInGitRepositoryRoot "." (runDescribeRepositoryJsonModeWith canonicalizationSettings)
-    ["describe-repository", "--json", repositoryDirectory] -> runInGitRepositoryRoot repositoryDirectory (runDescribeRepositoryJsonModeWith canonicalizationSettings)
-    ["describe-repository"] -> runInGitRepositoryRoot "." (runDescribeRepositoryModeWith canonicalizationSettings)
-    ["describe-repository", repositoryDirectory] -> runInGitRepositoryRoot repositoryDirectory (runDescribeRepositoryModeWith canonicalizationSettings)
-    ["check-gitmodules"] -> runCheckGitSubmodulesMode
-    createRepositoryArgs ->
-      case parseCreateRepositoryArgs createRepositoryArgs of
-        Just (repositoryDirectory, packageKindName, packageName, requestedCheckKinds) ->
-          runInGitRepositoryRoot repositoryDirectory (runCreateRepositoryMode canonicalizationSettings packageKindName packageName requestedCheckKinds)
-        Nothing ->
-          case createRepositoryArgs of
-            "create-repository" : _ -> printUsageAndExit
-            _ ->
-              case parseCreatePackageArgs createRepositoryArgs of
-                Just (repositoryDirectory, packageKindName, packageName, packageDescription) ->
-                  runInGitRepositoryRoot repositoryDirectory (runCreatePackageMode canonicalizationSettings packageKindName packageName packageDescription)
-                Nothing -> printUsageAndExit
+          Right (RepositoryComplianceSuccess packageNames checkNames) -> do
+            let repositoryCheckNames = Set.fromList checkNames
+            packageSummaries <- forM packageNames (summarizeRepositoryPackage repositoryCheckNames)
+            putStr (render packageSummaries)
+   in case commandLineArgs of
+        ["check-repository"] ->
+          runInGitRepositoryRoot "." $
+            collectRepositoryComplianceWith canonicalizationSettings >>= \case
+              Left (checkPhaseName, checkPhaseIssues) -> do
+                reportCheckRepositoryFailures checkPhaseName checkPhaseIssues
+                exitFailure
+              Right _ -> pure ()
+        ["check-repository", repositoryDirectory] ->
+          runInGitRepositoryRoot repositoryDirectory $
+            collectRepositoryComplianceWith canonicalizationSettings >>= \case
+              Left (checkPhaseName, checkPhaseIssues) -> do
+                reportCheckRepositoryFailures checkPhaseName checkPhaseIssues
+                exitFailure
+              Right _ -> pure ()
+        ["describe-repository"] -> runInGitRepositoryRoot "." (describeRepository renderRepositoryPackageSummariesText)
+        ["describe-repository", repositoryDirectory] -> runInGitRepositoryRoot repositoryDirectory (describeRepository renderRepositoryPackageSummariesText)
+        ["describe-repository", "--json"] -> runInGitRepositoryRoot "." (describeRepository renderRepositoryPackageSummariesJson)
+        ["describe-repository", "--json", repositoryDirectory] -> runInGitRepositoryRoot repositoryDirectory (describeRepository renderRepositoryPackageSummariesJson)
+        ["check-gitmodules"] -> runCheckGitSubmodulesMode
+        createRepositoryArgs ->
+          case parseCreateRepositoryArgs createRepositoryArgs of
+            Just (repositoryDirectory, packageKindName, packageName, requestedCheckKinds) ->
+              runInGitRepositoryRoot repositoryDirectory $
+                case parseSupportedCreatePackageKind packageKindName of
+                  Nothing -> do
+                    putStrLn ("unsupported package type: " ++ packageKindName)
+                    putStrLn ("supported package types: " ++ intercalate ", " (map fst supportedCreatePackageKinds))
+                    exitFailure
+                  Just packageKind ->
+                    case validateCreatePackageName packageName of
+                      Just validationError -> do
+                        putStrLn validationError
+                        exitFailure
+                      Nothing -> do
+                        createResult <- createRepositoryInCurrentRepositoryWith canonicalizationSettings packageKind packageName requestedCheckKinds
+                        case createResult of
+                          Left createError -> do
+                            putStrLn createError
+                            exitFailure
+                          Right createdFilePaths -> do
+                            putStrLn ("created repository scaffold for packages/" ++ packageName ++ " (" ++ renderPackageKind packageKind ++ ")")
+                            putStrLn ("created " ++ show (length createdFilePaths) ++ " files")
+            Nothing ->
+              case createRepositoryArgs of
+                "create-repository" : _ -> printUsageAndExit
+                _ ->
+                  case parseCreatePackageArgs createRepositoryArgs of
+                    Just (repositoryDirectory, packageKindName, packageName, packageDescription) ->
+                      runInGitRepositoryRoot repositoryDirectory $
+                        case parseSupportedCreatePackageKind packageKindName of
+                          Nothing -> do
+                            putStrLn ("unsupported package type: " ++ packageKindName)
+                            putStrLn ("supported package types: " ++ intercalate ", " (map fst supportedCreatePackageKinds))
+                            exitFailure
+                          Just packageKind ->
+                            case validateCreatePackageName packageName of
+                              Just validationError -> do
+                                putStrLn validationError
+                                exitFailure
+                              Nothing -> do
+                                createResult <- createPackageInCurrentRepositoryWith canonicalizationSettings packageKind packageName packageDescription
+                                case createResult of
+                                  Left createError -> do
+                                    putStrLn createError
+                                    exitFailure
+                                  Right createdFilePaths -> do
+                                    putStrLn ("created package packages/" ++ packageName ++ " (" ++ renderPackageKind packageKind ++ ")")
+                                    putStrLn ("created " ++ show (length createdFilePaths) ++ " files")
+                    Nothing -> printUsageAndExit
 printUsageAndExit :: IO a
 printUsageAndExit = do
   putStrLn "Usage: canonicalization check-repository [git-directory]"
@@ -505,50 +552,6 @@ runInGitRepositoryRoot repositoryDirectory action = do
   previousDirectory <- getCurrentDirectory
   setCurrentDirectory canonicalInputDirectory
   action `finally` setCurrentDirectory previousDirectory
-runCreatePackageMode :: CanonicalizationSettings -> String -> FilePath -> Maybe String -> IO ()
-runCreatePackageMode canonicalizationSettings packageKindName packageName packageDescription =
-  case parseSupportedCreatePackageKind packageKindName of
-    Nothing -> do
-      putStrLn ("unsupported package type: " ++ packageKindName)
-      putStrLn ("supported package types: " ++ intercalate ", " (map fst supportedCreatePackageKinds))
-      exitFailure
-    Just packageKind ->
-      case validateCreatePackageName packageName of
-        Just validationError -> do
-          putStrLn validationError
-          exitFailure
-        Nothing -> do
-          createResult <- createPackageInCurrentRepositoryWith canonicalizationSettings packageKind packageName packageDescription
-          case createResult of
-            Left createError -> do
-              putStrLn createError
-              exitFailure
-            Right createdFilePaths -> do
-              putStrLn ("created package packages/" ++ packageName ++ " (" ++ renderPackageKind packageKind ++ ")")
-              putStrLn ("created " ++ show (length createdFilePaths) ++ " files")
-runCreateRepositoryMode :: CanonicalizationSettings -> String -> FilePath -> Set.Set RepositoryCheckKind -> IO ()
-runCreateRepositoryMode canonicalizationSettings packageKindName packageName requestedCheckKinds =
-  case parseSupportedCreatePackageKind packageKindName of
-    Nothing -> do
-      putStrLn ("unsupported package type: " ++ packageKindName)
-      putStrLn ("supported package types: " ++ intercalate ", " (map fst supportedCreatePackageKinds))
-      exitFailure
-    Just packageKind ->
-      case validateCreatePackageName packageName of
-        Just validationError -> do
-          putStrLn validationError
-          exitFailure
-        Nothing -> do
-          createResult <- createRepositoryInCurrentRepositoryWith canonicalizationSettings packageKind packageName requestedCheckKinds
-          case createResult of
-            Left createError -> do
-              putStrLn createError
-              exitFailure
-            Right createdFilePaths -> do
-              putStrLn ("created repository scaffold for packages/" ++ packageName ++ " (" ++ renderPackageKind packageKind ++ ")")
-              putStrLn ("created " ++ show (length createdFilePaths) ++ " files")
-collectRepositoryCompliance :: IO (Either (String, [String]) RepositoryComplianceSuccess)
-collectRepositoryCompliance = collectRepositoryComplianceWith defaultCanonicalizationSettings
 collectRepositoryComplianceWith :: CanonicalizationSettings -> IO (Either (String, [String]) RepositoryComplianceSuccess)
 collectRepositoryComplianceWith canonicalizationSettings = do
   repositoryStructureIssues <- checkRepositoryStructure
@@ -626,26 +629,6 @@ data RepositoryPackageSummary = RepositoryPackageSummary
     repositoryPackageTestNames :: [String],
     repositoryPackageChecks :: RepositoryPackageChecksSummary
   }
-runDescribeRepositoryModeWith :: CanonicalizationSettings -> IO ()
-runDescribeRepositoryModeWith canonicalizationSettings =
-  collectRepositoryComplianceWith canonicalizationSettings >>= \case
-    Left (checkPhaseName, checkPhaseIssues) -> do
-      reportCheckRepositoryFailures checkPhaseName checkPhaseIssues
-      exitFailure
-    Right (RepositoryComplianceSuccess packageNames checkNames) -> do
-      let repositoryCheckNames = Set.fromList checkNames
-      packageSummaries <- forM packageNames (summarizeRepositoryPackage repositoryCheckNames)
-      putStr (renderRepositoryPackageSummariesText packageSummaries)
-runDescribeRepositoryJsonModeWith :: CanonicalizationSettings -> IO ()
-runDescribeRepositoryJsonModeWith canonicalizationSettings =
-  collectRepositoryComplianceWith canonicalizationSettings >>= \case
-    Left (checkPhaseName, checkPhaseIssues) -> do
-      reportCheckRepositoryFailures checkPhaseName checkPhaseIssues
-      exitFailure
-    Right (RepositoryComplianceSuccess packageNames checkNames) -> do
-      let repositoryCheckNames = Set.fromList checkNames
-      packageSummaries <- forM packageNames (summarizeRepositoryPackage repositoryCheckNames)
-      putStr (renderRepositoryPackageSummariesJson packageSummaries)
 renderRepositoryPackageSummariesText :: [RepositoryPackageSummary] -> String
 renderRepositoryPackageSummariesText packageSummaries =
   intercalate
@@ -866,8 +849,6 @@ data RepositoryScaffoldFile = RepositoryScaffoldFile
   { repositoryScaffoldFilePath :: FilePath,
     repositoryScaffoldFileContents :: T.Text
   }
-createPackageInCurrentRepository :: PackageKind -> FilePath -> Maybe String -> IO (Either String [FilePath])
-createPackageInCurrentRepository = createPackageInCurrentRepositoryWith defaultCanonicalizationSettings
 createPackageInCurrentRepositoryWith :: CanonicalizationSettings -> PackageKind -> FilePath -> Maybe String -> IO (Either String [FilePath])
 createPackageInCurrentRepositoryWith canonicalizationSettings packageKind packageName packageDescription = do
   let packageRootDirectory = "packages" </> packageName
@@ -886,8 +867,6 @@ createPackageInCurrentRepositoryWith canonicalizationSettings packageKind packag
             createDirectoryIfMissing True (takeDirectory absolutePath)
             TIO.writeFile absolutePath (scaffoldFileContents scaffoldFile)
           pure (Right [packageRootDirectory </> scaffoldFileRelativePath scaffoldFile | scaffoldFile <- scaffoldFiles])
-createRepositoryInCurrentRepository :: PackageKind -> FilePath -> Set.Set RepositoryCheckKind -> IO (Either String [FilePath])
-createRepositoryInCurrentRepository = createRepositoryInCurrentRepositoryWith defaultCanonicalizationSettings
 createRepositoryInCurrentRepositoryWith :: CanonicalizationSettings -> PackageKind -> FilePath -> Set.Set RepositoryCheckKind -> IO (Either String [FilePath])
 createRepositoryInCurrentRepositoryWith canonicalizationSettings packageKind packageName requestedCheckKinds =
   case validateRepositoryCheckSelection packageKind requestedCheckKinds of
@@ -993,8 +972,6 @@ repositoryCheckBaselineSourceWith canonicalizationSettings packageKind repositor
     (HtmlPackage, RepositoryDefaultCheck) -> Just htmlTemplateCheckBaselineNixSource
     (CPackage, RepositoryDefaultCheck) -> Just cTemplateCheckBaselineNixSource
     _ -> Nothing
-renderScaffoldFiles :: PackageKind -> FilePath -> Maybe String -> [ScaffoldFile]
-renderScaffoldFiles = renderScaffoldFilesWith defaultCanonicalizationSettings
 renderScaffoldFilesWith :: CanonicalizationSettings -> PackageKind -> FilePath -> Maybe String -> [ScaffoldFile]
 renderScaffoldFilesWith canonicalizationSettings packageKind packageName packageDescription =
   case packageKind of
@@ -3209,8 +3186,8 @@ repositoryPolicyDebugTests =
       TestCase $
         withTemporaryPackageRepository "compliant-repository-validation" $ \tempRepository -> do
           withCurrentWorkingDirectory tempRepository $ do
-            _ <- createPackageInCurrentRepository HaskellPackage "demo" Nothing
-            repositoryComplianceResult <- collectRepositoryCompliance
+            _ <- createPackageInCurrentRepositoryWith defaultCanonicalizationSettings HaskellPackage "demo" Nothing
+            repositoryComplianceResult <- collectRepositoryComplianceWith defaultCanonicalizationSettings
             assertEqual
               "Collects package names for compliant repositories."
               ( Right
@@ -3225,7 +3202,7 @@ repositoryPolicyDebugTests =
           withCurrentWorkingDirectory tempRepository $ do
             createDirectoryIfMissing True "unexpected"
             TIO.writeFile ("unexpected" </> "file.txt") "bad"
-            repositoryComplianceResult <- collectRepositoryCompliance
+            repositoryComplianceResult <- collectRepositoryComplianceWith defaultCanonicalizationSettings
             case repositoryComplianceResult of
               Left ("directory-structure", repositoryStructureIssues) ->
                 assertBool
@@ -3236,9 +3213,9 @@ repositoryPolicyDebugTests =
       TestCase $
         withTemporaryPackageRepository "file-compliance-repository-validation" $ \tempRepository -> do
           withCurrentWorkingDirectory tempRepository $ do
-            _ <- createPackageInCurrentRepository PythonPackage "demo" Nothing
+            _ <- createPackageInCurrentRepositoryWith defaultCanonicalizationSettings PythonPackage "demo" Nothing
             TIO.writeFile ("packages" </> "demo" </> "default.nix") "not valid nix template"
-            repositoryComplianceResult <- collectRepositoryCompliance
+            repositoryComplianceResult <- collectRepositoryComplianceWith defaultCanonicalizationSettings
             case repositoryComplianceResult of
               Left ("file-compliance", fileComplianceIssues) ->
                 assertBool
@@ -3305,14 +3282,14 @@ createPackageDebugTests =
           "Generates the expected Python scaffold file set."
           ["packages/demo/.gitignore", "packages/demo/default.nix", "packages/demo/main.py"]
           [ "packages/demo" </> scaffoldFileRelativePath scaffoldFile
-          | scaffoldFile <- renderScaffoldFiles PythonPackage "demo" Nothing
+          | scaffoldFile <- renderScaffoldFilesWith defaultCanonicalizationSettings PythonPackage "demo" Nothing
           ],
       TestCase $ do
         assertEqual
           "Generates the expected Rust scaffold file set."
           ["packages/demo/.gitignore", "packages/demo/default.nix", "packages/demo/Cargo.toml", "packages/demo/src/main.rs"]
           [ "packages/demo" </> scaffoldFileRelativePath scaffoldFile
-          | scaffoldFile <- renderScaffoldFiles RustPackage "demo" Nothing
+          | scaffoldFile <- renderScaffoldFilesWith defaultCanonicalizationSettings RustPackage "demo" Nothing
           ],
       TestCase $ do
         assertEqual
@@ -3369,13 +3346,13 @@ createPackageDebugTests =
           )
           (renderScaffoldHaskellCabal "demo"),
       TestCase $ do
-        let pythonScaffoldFiles = renderScaffoldFiles PythonPackage "demo" Nothing
+        let pythonScaffoldFiles = renderScaffoldFilesWith defaultCanonicalizationSettings PythonPackage "demo" Nothing
         assertEqual
           "Uses the embedded Python baseline for scaffold default.nix."
           (Just pythonTemplateBaselineNixSource)
           (listToMaybe [scaffoldFileContents scaffoldFile | scaffoldFile <- pythonScaffoldFiles, scaffoldFileRelativePath scaffoldFile == "default.nix"]),
       TestCase $ do
-        let pythonScaffoldFiles = renderScaffoldFiles PythonPackage "demo" (Just "Custom Python package")
+        let pythonScaffoldFiles = renderScaffoldFilesWith defaultCanonicalizationSettings PythonPackage "demo" (Just "Custom Python package")
         assertEqual
           "Lets package authors override the Python scaffold description."
           (Just (renderPythonTemplateBaselineNixSourceWith "Custom Python package" defaultPythonPackageAttribute))
@@ -3393,7 +3370,7 @@ createPackageDebugTests =
       TestCase $
         withTemporaryPackageRepository "python-create-package" $ \tempRepository -> do
           withCurrentWorkingDirectory tempRepository $ do
-            createPackageResult <- createPackageInCurrentRepository PythonPackage "demo" Nothing
+            createPackageResult <- createPackageInCurrentRepositoryWith defaultCanonicalizationSettings PythonPackage "demo" Nothing
             assertEqual
               "Creates a Python package scaffold in the current repository."
               (Right ["packages/demo/.gitignore", "packages/demo/default.nix", "packages/demo/main.py"])
@@ -3406,7 +3383,7 @@ createPackageDebugTests =
         withTemporaryPackageRepository "existing-create-package" $ \tempRepository -> do
           withCurrentWorkingDirectory tempRepository $ do
             createDirectoryIfMissing True ("packages" </> "demo")
-            createPackageResult <- createPackageInCurrentRepository RustPackage "demo" Nothing
+            createPackageResult <- createPackageInCurrentRepositoryWith defaultCanonicalizationSettings RustPackage "demo" Nothing
             assertEqual
               "Fails fast when the target package already exists."
               (Left "package already exists: packages/demo")
@@ -3414,7 +3391,7 @@ createPackageDebugTests =
       TestCase $
         withTemporaryPackageRepository "haskell-create-package" $ \tempRepository -> do
           withCurrentWorkingDirectory tempRepository $ do
-            _ <- createPackageInCurrentRepository HaskellPackage "demo" Nothing
+            _ <- createPackageInCurrentRepositoryWith defaultCanonicalizationSettings HaskellPackage "demo" Nothing
             repositoryPaths <- collectRepositoryPaths "."
             let relativePaths = sort [path | path <- repositoryPaths, path /= "."]
                 leafPaths = Set.fromList (filter (isLeafPath relativePaths) relativePaths)
@@ -3427,7 +3404,8 @@ createPackageDebugTests =
         withTemporaryPackageRepository "python-create-repository" $ \tempRepository -> do
           withCurrentWorkingDirectory tempRepository $ do
             createRepositoryResult <-
-              createRepositoryInCurrentRepository
+              createRepositoryInCurrentRepositoryWith
+                defaultCanonicalizationSettings
                 PythonPackage
                 "demo"
                 (Set.fromList [RepositoryCoverageCheck, RepositoryMutationTestingCheck])
