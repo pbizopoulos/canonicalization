@@ -500,27 +500,37 @@ runInGitRepositoryRoot repositoryDirectory action = do
   action `finally` setCurrentDirectory previousDirectory
 runCreatePackageMode :: CanonicalizationSettings -> String -> FilePath -> Maybe String -> IO ()
 runCreatePackageMode canonicalizationSettings packageKindName packageName packageDescription =
-  case parseSupportedCreatePackageKind packageKindName of
-    Nothing -> do
-      putStrLn ("unsupported package type: " ++ packageKindName)
-      putStrLn ("supported package types: " ++ intercalate ", " (map fst supportedCreatePackageKinds))
-      exitFailure
-    Just packageKind ->
-      case validateCreatePackageName packageName of
-        Just validationError -> do
-          putStrLn validationError
-          exitFailure
-        Nothing -> do
-          createPackageResult <- createPackageInCurrentRepositoryWith canonicalizationSettings packageKind packageName packageDescription
-          case createPackageResult of
-            Left createPackageError -> do
-              putStrLn createPackageError
-              exitFailure
-            Right createdFilePaths -> do
-              putStrLn ("created package packages/" ++ packageName ++ " (" ++ renderPackageKind packageKind ++ ")")
-              putStrLn ("created " ++ show (length createdFilePaths) ++ " files")
+  runValidatedCreateMode
+    packageKindName
+    packageName
+    canonicalizationSettings
+    packageDescription
+    createPackageInCurrentRepositoryWith
+    ( \packageKind createdFilePaths ->
+        putStrLn ("created package packages/" ++ packageName ++ " (" ++ renderPackageKind packageKind ++ ")")
+          >> putStrLn ("created " ++ show (length createdFilePaths) ++ " files")
+    )
 runCreateRepositoryMode :: CanonicalizationSettings -> String -> FilePath -> Set.Set RepositoryCheckKind -> IO ()
 runCreateRepositoryMode canonicalizationSettings packageKindName packageName requestedCheckKinds =
+  runValidatedCreateMode
+    packageKindName
+    packageName
+    canonicalizationSettings
+    requestedCheckKinds
+    createRepositoryInCurrentRepositoryWith
+    ( \packageKind createdFilePaths ->
+        putStrLn ("created repository scaffold for packages/" ++ packageName ++ " (" ++ renderPackageKind packageKind ++ ")")
+          >> putStrLn ("created " ++ show (length createdFilePaths) ++ " files")
+    )
+runValidatedCreateMode ::
+  String ->
+  FilePath ->
+  CanonicalizationSettings ->
+  a ->
+  (CanonicalizationSettings -> PackageKind -> FilePath -> a -> IO (Either String [FilePath])) ->
+  (PackageKind -> [FilePath] -> IO ()) ->
+  IO ()
+runValidatedCreateMode packageKindName packageName canonicalizationSettings modeInput createAction onSuccess =
   case parseSupportedCreatePackageKind packageKindName of
     Nothing -> do
       putStrLn ("unsupported package type: " ++ packageKindName)
@@ -532,14 +542,12 @@ runCreateRepositoryMode canonicalizationSettings packageKindName packageName req
           putStrLn validationError
           exitFailure
         Nothing -> do
-          createRepositoryResult <- createRepositoryInCurrentRepositoryWith canonicalizationSettings packageKind packageName requestedCheckKinds
-          case createRepositoryResult of
-            Left createRepositoryError -> do
-              putStrLn createRepositoryError
+          createResult <- createAction canonicalizationSettings packageKind packageName modeInput
+          case createResult of
+            Left createError -> do
+              putStrLn createError
               exitFailure
-            Right createdFilePaths -> do
-              putStrLn ("created repository scaffold for packages/" ++ packageName ++ " (" ++ renderPackageKind packageKind ++ ")")
-              putStrLn ("created " ++ show (length createdFilePaths) ++ " files")
+            Right createdFilePaths -> onSuccess packageKind createdFilePaths
 collectRepositoryCompliance :: IO (Either (String, [String]) RepositoryComplianceSuccess)
 collectRepositoryCompliance = collectRepositoryComplianceWith defaultCanonicalizationSettings
 collectRepositoryComplianceWith :: CanonicalizationSettings -> IO (Either (String, [String]) RepositoryComplianceSuccess)
@@ -630,103 +638,83 @@ data RepositoryPackageSummary = RepositoryPackageSummary
   }
 runDescribeRepositoryMode :: IO ()
 runDescribeRepositoryMode = do
-  RepositoryComplianceSuccess packageNames checkNames <- ensureRepositoryCompliance
-  let repositoryCheckNames = Set.fromList checkNames
-  packageSummaries <- forM packageNames (summarizeRepositoryPackage repositoryCheckNames)
-  putStr
-    ( intercalate
-        "\n\n"
-        [ unlines
-            ( [ "package: " ++ repositoryPackageName packageSummary,
-                "packageType: " ++ repositoryPackageType packageSummary,
-                "description: " ++ fromMaybe "(none)" (repositoryPackageDescription packageSummary),
-                "checks:",
-                "  check: " ++ bool "false" "true" (repositoryPackageHasCheck (repositoryPackageChecks packageSummary)),
-                "  coverage: " ++ bool "false" "true" (repositoryPackageHasCoverageCheck (repositoryPackageChecks packageSummary)),
-                "  profile: " ++ bool "false" "true" (repositoryPackageHasProfileCheck (repositoryPackageChecks packageSummary)),
-                "  property-testing: " ++ bool "false" "true" (repositoryPackageHasPropertyTestingCheck (repositoryPackageChecks packageSummary)),
-                "  mutation-testing: " ++ bool "false" "true" (repositoryPackageHasMutationTestingCheck (repositoryPackageChecks packageSummary)),
-                "tests:"
-              ]
-                ++ case repositoryPackageTestNames packageSummary of
-                  [] -> ["  (none)"]
-                  testNames -> ["  - " ++ testName | testName <- testNames]
-            )
-        | packageSummary <- packageSummaries
-        ]
-        ++ if null packageSummaries then "" else "\n"
-    )
+  packageSummaries <- collectRepositoryPackageSummaries
+  putStr (renderRepositoryPackageSummariesText packageSummaries)
 runDescribeRepositoryJsonMode :: IO ()
 runDescribeRepositoryJsonMode = do
+  packageSummaries <- collectRepositoryPackageSummaries
+  putStr (renderRepositoryPackageSummariesJson packageSummaries)
+collectRepositoryPackageSummaries :: IO [RepositoryPackageSummary]
+collectRepositoryPackageSummaries = do
   RepositoryComplianceSuccess packageNames checkNames <- ensureRepositoryCompliance
   let repositoryCheckNames = Set.fromList checkNames
-  packageSummaries <- forM packageNames (summarizeRepositoryPackage repositoryCheckNames)
-  putStr
-    ( "{\n"
-        ++ "  \"packages\": [\n"
-        ++ intercalate
-          ",\n"
-          [ let packageChecks = repositoryPackageChecks packageSummary
-             in unlines
-                  [ "    {",
-                    "      \"name\": " ++ renderJsonString (repositoryPackageName packageSummary) ++ ",",
-                    "      \"packageType\": " ++ renderJsonString (repositoryPackageType packageSummary) ++ ",",
-                    "      \"description\": " ++ maybe "null" renderJsonString (repositoryPackageDescription packageSummary) ++ ",",
-                    "      \"checks\": "
-                      ++ "{ "
-                      ++ intercalate
-                        ", "
-                        [ "\"check\": " ++ bool "false" "true" (repositoryPackageHasCheck packageChecks),
-                          "\"coverage\": " ++ bool "false" "true" (repositoryPackageHasCoverageCheck packageChecks),
-                          "\"profile\": " ++ bool "false" "true" (repositoryPackageHasProfileCheck packageChecks),
-                          "\"property-testing\": " ++ bool "false" "true" (repositoryPackageHasPropertyTestingCheck packageChecks),
-                          "\"mutation-testing\": " ++ bool "false" "true" (repositoryPackageHasMutationTestingCheck packageChecks)
-                        ]
-                      ++ " }",
-                    "      \"tests\": " ++ "[" ++ intercalate ", " (map renderJsonString (repositoryPackageTestNames packageSummary)) ++ "]",
-                    "    }"
-                  ]
-          | packageSummary <- packageSummaries
-          ]
-        ++ "\n"
-        ++ "  ]\n"
-        ++ "}\n"
-    )
+  forM packageNames (summarizeRepositoryPackage repositoryCheckNames)
+renderRepositoryPackageSummariesText :: [RepositoryPackageSummary] -> String
+renderRepositoryPackageSummariesText packageSummaries =
+  intercalate
+    "\n\n"
+    [ unlines (renderRepositoryPackageSummaryTextLines packageSummary)
+    | packageSummary <- packageSummaries
+    ]
+    ++ if null packageSummaries then "" else "\n"
+renderRepositoryPackageSummaryTextLines :: RepositoryPackageSummary -> [String]
+renderRepositoryPackageSummaryTextLines packageSummary =
+  [ "package: " ++ repositoryPackageName packageSummary,
+    "packageType: " ++ repositoryPackageType packageSummary,
+    "description: " ++ fromMaybe "(none)" (repositoryPackageDescription packageSummary),
+    "checks:"
+  ]
+    ++ [ "  " ++ checkName ++ ": " ++ bool "false" "true" isEnabled
+       | (checkName, isEnabled) <- repositoryPackageCheckFlagValues packageChecks
+       ]
+    ++ ["tests:"]
+    ++ case repositoryPackageTestNames packageSummary of
+      [] -> ["  (none)"]
+      testNames -> ["  - " ++ testName | testName <- testNames]
+  where
+    packageChecks = repositoryPackageChecks packageSummary
+repositoryPackageCheckFlagValues :: RepositoryPackageChecksSummary -> [(String, Bool)]
+repositoryPackageCheckFlagValues packageChecks =
+  [ ("check", repositoryPackageHasCheck packageChecks),
+    ("coverage", repositoryPackageHasCoverageCheck packageChecks),
+    ("profile", repositoryPackageHasProfileCheck packageChecks),
+    ("property-testing", repositoryPackageHasPropertyTestingCheck packageChecks),
+    ("mutation-testing", repositoryPackageHasMutationTestingCheck packageChecks)
+  ]
+renderRepositoryPackageSummariesJson :: [RepositoryPackageSummary] -> String
+renderRepositoryPackageSummariesJson packageSummaries =
+  "{\n"
+    ++ "  \"packages\": [\n"
+    ++ intercalate ",\n" [renderRepositoryPackageSummaryJson packageSummary | packageSummary <- packageSummaries]
+    ++ "\n"
+    ++ "  ]\n"
+    ++ "}\n"
+renderRepositoryPackageSummaryJson :: RepositoryPackageSummary -> String
+renderRepositoryPackageSummaryJson packageSummary =
+  unlines
+    [ "    {",
+      "      \"name\": " ++ renderJsonString (repositoryPackageName packageSummary) ++ ",",
+      "      \"packageType\": " ++ renderJsonString (repositoryPackageType packageSummary) ++ ",",
+      "      \"description\": " ++ maybe "null" renderJsonString (repositoryPackageDescription packageSummary) ++ ",",
+      "      \"checks\": " ++ renderRepositoryPackageChecksJson (repositoryPackageChecks packageSummary) ++ ",",
+      "      \"tests\": " ++ "[" ++ intercalate ", " (map renderJsonString (repositoryPackageTestNames packageSummary)) ++ "]",
+      "    }"
+    ]
+renderRepositoryPackageChecksJson :: RepositoryPackageChecksSummary -> String
+renderRepositoryPackageChecksJson packageChecks =
+  "{ "
+    ++ intercalate
+      ", "
+      [ "\"" ++ checkName ++ "\": " ++ bool "false" "true" isEnabled
+      | (checkName, isEnabled) <- repositoryPackageCheckFlagValues packageChecks
+      ]
+    ++ " }"
 summarizeRepositoryPackage :: Set.Set FilePath -> FilePath -> IO RepositoryPackageSummary
 summarizeRepositoryPackage repositoryCheckNames packageName = do
   packageKind <- detectPackageKindForPackage packageName
   let packageRoot = "packages" </> packageName
-  repositoryPackageDescriptionValue <-
-    if packageKind `elem` [PythonPackage, PythonLatexPackage, PythonPypiPackage]
-      then do
-        maybePyprojectTomlContents <- readTextFileIfExists (packageRoot </> "pyproject.toml")
-        maybeDefaultNixContents <- readTextFileIfExists (packageRoot </> "default.nix")
-        let maybePyprojectDescription = maybePyprojectTomlContents >>= extractPythonPackageDescriptionFromPyprojectToml
-            maybeDefaultNixDescription = maybeDefaultNixContents >>= extractDefaultNixPackageDescription
-        pure (maybePyprojectDescription <|> maybeDefaultNixDescription)
-      else case packageKind of
-        HaskellPackage -> do
-          maybeCabalContents <- readTextFileIfExists (packageRoot </> (packageName <.> "cabal"))
-          pure (extractHaskellPackageDescription =<< maybeCabalContents)
-        RustPackage -> do
-          maybeCargoTomlContents <- readTextFileIfExists (packageRoot </> "Cargo.toml")
-          pure (extractRustPackageDescription =<< maybeCargoTomlContents)
-        _ -> do
-          maybeDefaultNixContents <- readTextFileIfExists (packageRoot </> "default.nix")
-          pure (extractDefaultNixPackageDescription =<< maybeDefaultNixContents)
-  repositoryPackageTestNamesValue <-
-    if packageKind `elem` [PythonPackage, PythonLatexPackage]
-      then do
-        maybeMainPythonSourceText <- readTextFileIfExists (packageRoot </> "main.py")
-        pure (maybe [] (discoverPythonUnitTestNamesFromSource . T.unpack) maybeMainPythonSourceText)
-      else case packageKind of
-        HaskellPackage -> do
-          maybeMainHaskellSourceText <- readTextFileIfExists (packageRoot </> "Main.hs")
-          pure (maybe [] (discoverHaskellUnitTestNamesFromSource . T.unpack) maybeMainHaskellSourceText)
-        RustPackage -> do
-          maybeMainRustSourceText <- readTextFileIfExists (packageRoot </> "src/main.rs")
-          pure (maybe [] (discoverRustUnitTestNamesFromSource . T.unpack) maybeMainRustSourceText)
-        _ -> pure []
+  repositoryPackageDescriptionValue <- readRepositoryPackageDescription packageKind packageRoot packageName
+  repositoryPackageTestNamesValue <- readRepositoryPackageTestNames packageKind packageRoot
   let repositoryPackageChecksValue = summarizeRepositoryPackageChecks repositoryCheckNames packageKind packageName
   pure
     RepositoryPackageSummary
@@ -736,15 +724,51 @@ summarizeRepositoryPackage repositoryCheckNames packageName = do
         repositoryPackageTestNames = repositoryPackageTestNamesValue,
         repositoryPackageChecks = repositoryPackageChecksValue
       }
+readRepositoryPackageDescription :: PackageKind -> FilePath -> FilePath -> IO (Maybe String)
+readRepositoryPackageDescription packageKind packageRoot packageName
+  | packageKind `elem` [PythonPackage, PythonLatexPackage, PythonPypiPackage] = do
+      maybePyprojectTomlContents <- readTextFileIfExists (packageRoot </> "pyproject.toml")
+      maybeDefaultNixContents <- readTextFileIfExists (packageRoot </> "default.nix")
+      let maybePyprojectDescription = maybePyprojectTomlContents >>= extractPythonPackageDescriptionFromPyprojectToml
+          maybeDefaultNixDescription = maybeDefaultNixContents >>= extractDefaultNixPackageDescription
+      pure (maybePyprojectDescription <|> maybeDefaultNixDescription)
+  | otherwise =
+      case packageKind of
+        HaskellPackage -> do
+          maybeCabalContents <- readTextFileIfExists (packageRoot </> (packageName <.> "cabal"))
+          pure (extractHaskellPackageDescription =<< maybeCabalContents)
+        RustPackage -> do
+          maybeCargoTomlContents <- readTextFileIfExists (packageRoot </> "Cargo.toml")
+          pure (extractRustPackageDescription =<< maybeCargoTomlContents)
+        _ -> do
+          maybeDefaultNixContents <- readTextFileIfExists (packageRoot </> "default.nix")
+          pure (extractDefaultNixPackageDescription =<< maybeDefaultNixContents)
+readRepositoryPackageTestNames :: PackageKind -> FilePath -> IO [String]
+readRepositoryPackageTestNames packageKind packageRoot
+  | packageKind `elem` [PythonPackage, PythonLatexPackage] = do
+      maybeMainPythonSourceText <- readTextFileIfExists (packageRoot </> "main.py")
+      pure (maybe [] (discoverPythonUnitTestNamesFromSource . T.unpack) maybeMainPythonSourceText)
+  | otherwise =
+      case packageKind of
+        HaskellPackage -> do
+          maybeMainHaskellSourceText <- readTextFileIfExists (packageRoot </> "Main.hs")
+          pure (maybe [] (discoverHaskellUnitTestNamesFromSource . T.unpack) maybeMainHaskellSourceText)
+        RustPackage -> do
+          maybeMainRustSourceText <- readTextFileIfExists (packageRoot </> "src/main.rs")
+          pure (maybe [] (discoverRustUnitTestNamesFromSource . T.unpack) maybeMainRustSourceText)
+        _ -> pure []
 summarizeRepositoryPackageChecks :: Set.Set FilePath -> PackageKind -> FilePath -> RepositoryPackageChecksSummary
 summarizeRepositoryPackageChecks repositoryCheckNames packageKind packageName =
   RepositoryPackageChecksSummary
-    { repositoryPackageHasCheck = maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName RepositoryDefaultCheck),
-      repositoryPackageHasCoverageCheck = maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName RepositoryCoverageCheck),
-      repositoryPackageHasProfileCheck = maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName RepositoryProfileCheck),
-      repositoryPackageHasPropertyTestingCheck = maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName RepositoryPropertyTestingCheck),
-      repositoryPackageHasMutationTestingCheck = maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName RepositoryMutationTestingCheck)
+    { repositoryPackageHasCheck = repositoryPackageHasCheckForKind repositoryCheckNames packageKind packageName RepositoryDefaultCheck,
+      repositoryPackageHasCoverageCheck = repositoryPackageHasCheckForKind repositoryCheckNames packageKind packageName RepositoryCoverageCheck,
+      repositoryPackageHasProfileCheck = repositoryPackageHasCheckForKind repositoryCheckNames packageKind packageName RepositoryProfileCheck,
+      repositoryPackageHasPropertyTestingCheck = repositoryPackageHasCheckForKind repositoryCheckNames packageKind packageName RepositoryPropertyTestingCheck,
+      repositoryPackageHasMutationTestingCheck = repositoryPackageHasCheckForKind repositoryCheckNames packageKind packageName RepositoryMutationTestingCheck
     }
+repositoryPackageHasCheckForKind :: Set.Set FilePath -> PackageKind -> FilePath -> RepositoryCheckKind -> Bool
+repositoryPackageHasCheckForKind repositoryCheckNames packageKind packageName repositoryCheckKind =
+  maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName repositoryCheckKind)
 extractHaskellPackageDescription :: T.Text -> Maybe String
 extractHaskellPackageDescription cabalContents =
   (T.unpack <$> lookupCabalField "description" cabalContents)
