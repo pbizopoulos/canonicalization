@@ -87,14 +87,12 @@ let
           includes = [
             "*.nix"
           ];
-          priority = 0;
         };
         clippy = {
           command = "${clippy-script}/bin/clippy";
           includes = [
             "*.rs"
           ];
-          priority = 0;
         };
         mypy = {
           command = pkgs.mypy;
@@ -113,7 +111,6 @@ let
           includes = [
             "*.nix"
           ];
-          priority = 0;
         };
         nixfmt.priority = 1;
         remove-empty-lines = {
@@ -121,7 +118,6 @@ let
           includes = [
             "*"
           ];
-          priority = 0;
         };
         ruff-check.options = [
           "--cache-dir=/tmp/.ruff_cache"
