@@ -2984,6 +2984,74 @@ metadataAndDiscoveryDebugTests =
           (extractDefaultNixPackageDescription pythonLatexTemplateDefaultNixFixture),
       TestCase $ do
         assertEqual
+          "Extracts quoted Nix assignment values."
+          (Just "A package description.")
+          (extractQuotedNixAssignmentValue "description =" "description = \"A package description.\";"),
+      TestCase $ do
+        assertEqual
+          "Rejects non-matching quoted Nix assignments."
+          Nothing
+          (extractQuotedNixAssignmentValue "description =" "meta.description = \"A package description.\";"),
+      TestCase $ do
+        assertEqual
+          "Escapes JSON control characters."
+          "\"\\\"\\\\\\n\\r\\t\""
+          (renderJsonString ['"', '\\', '\n', '\r', '\t']),
+      TestCase $ do
+        let packageSummaries =
+              [ RepositoryPackageSummary
+                  { repositoryPackageName = "demo",
+                    repositoryPackageType = "python",
+                    repositoryPackageDescription = Just "Demo package",
+                    repositoryPackageTestNames = ["test_example"],
+                    repositoryPackageChecks =
+                      RepositoryPackageChecksSummary
+                        { repositoryPackageHasCheck = True,
+                          repositoryPackageHasCoverageCheck = False,
+                          repositoryPackageHasProfileCheck = False,
+                          repositoryPackageHasPropertyTestingCheck = True,
+                          repositoryPackageHasMutationTestingCheck = False
+                        }
+                  },
+                RepositoryPackageSummary
+                  { repositoryPackageName = "empty",
+                    repositoryPackageType = "rust",
+                    repositoryPackageDescription = Nothing,
+                    repositoryPackageTestNames = [],
+                    repositoryPackageChecks =
+                      RepositoryPackageChecksSummary
+                        { repositoryPackageHasCheck = False,
+                          repositoryPackageHasCoverageCheck = False,
+                          repositoryPackageHasProfileCheck = False,
+                          repositoryPackageHasPropertyTestingCheck = False,
+                          repositoryPackageHasMutationTestingCheck = False
+                        }
+                  }
+              ]
+            renderedText = renderRepositoryPackageSummariesText packageSummaries
+            renderedJson = renderRepositoryPackageSummariesJson packageSummaries
+        assertEqual
+          "Renders textual package summaries including missing descriptions and tests."
+          True
+          ( "package: demo" `isInfixOf` renderedText
+              && "checks:" `isInfixOf` renderedText
+              && "  check: true" `isInfixOf` renderedText
+              && "  mutation-testing: false" `isInfixOf` renderedText
+              && "package: empty" `isInfixOf` renderedText
+              && "description: (none)" `isInfixOf` renderedText
+              && "  (none)" `isInfixOf` renderedText
+          )
+        assertEqual
+          "Renders JSON package summaries including empty test lists and null descriptions."
+          True
+          ( "\"name\": \"demo\"" `isInfixOf` renderedJson
+              && "\"description\": \"Demo package\"" `isInfixOf` renderedJson
+              && "\"property-testing\": true" `isInfixOf` renderedJson
+              && "\"description\": null" `isInfixOf` renderedJson
+              && "\"tests\": []" `isInfixOf` renderedJson
+          ),
+      TestCase $ do
+        assertEqual
           "Summarizes repository checks for Python packages."
           ( RepositoryPackageChecksSummary
               { repositoryPackageHasCheck = False,
