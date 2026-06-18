@@ -363,7 +363,7 @@ matchesDefaultVmWithDiskoCheck :: FilePath -> String -> IO Bool
 matchesDefaultVmWithDiskoCheck = matchesCheckNameSuffixAndSourceContains "VmWithDisko" ["pkgs.runCommand", "config.system.build.vmWithDisko"]
 isCPackageVmCheckShape :: PackageKind -> String -> Bool
 isCPackageVmCheckShape packageKind nixSource =
-  isCPackageKind packageKind
+  packageKind == CPackage
     && "pkgs.testers.runNixOSTest" `isInfixOf` nixSource
     && "nodes.machine" `isInfixOf` nixSource
     && "testScript = ''" `isInfixOf` nixSource
@@ -657,7 +657,13 @@ renderRepositoryPackageSummaryTextLines packageSummary =
     "checks:"
   ]
     ++ [ "  " ++ checkName ++ ": " ++ bool "false" "true" isEnabled
-       | (checkName, isEnabled) <- repositoryPackageCheckFlagValues packageChecks
+       | (checkName, isEnabled) <-
+           [ ("check", repositoryPackageHasCheck packageChecks),
+             ("coverage", repositoryPackageHasCoverageCheck packageChecks),
+             ("profile", repositoryPackageHasProfileCheck packageChecks),
+             ("property-testing", repositoryPackageHasPropertyTestingCheck packageChecks),
+             ("mutation-testing", repositoryPackageHasMutationTestingCheck packageChecks)
+           ]
        ]
     ++ ["tests:"]
     ++ case repositoryPackageTestNames packageSummary of
@@ -665,14 +671,6 @@ renderRepositoryPackageSummaryTextLines packageSummary =
       testNames -> ["  - " ++ testName | testName <- testNames]
   where
     packageChecks = repositoryPackageChecks packageSummary
-repositoryPackageCheckFlagValues :: RepositoryPackageChecksSummary -> [(String, Bool)]
-repositoryPackageCheckFlagValues packageChecks =
-  [ ("check", repositoryPackageHasCheck packageChecks),
-    ("coverage", repositoryPackageHasCoverageCheck packageChecks),
-    ("profile", repositoryPackageHasProfileCheck packageChecks),
-    ("property-testing", repositoryPackageHasPropertyTestingCheck packageChecks),
-    ("mutation-testing", repositoryPackageHasMutationTestingCheck packageChecks)
-  ]
 renderRepositoryPackageSummariesJson :: [RepositoryPackageSummary] -> String
 renderRepositoryPackageSummariesJson packageSummaries =
   "{\n"
@@ -698,7 +696,13 @@ renderRepositoryPackageChecksJson packageChecks =
     ++ intercalate
       ", "
       [ "\"" ++ checkName ++ "\": " ++ bool "false" "true" isEnabled
-      | (checkName, isEnabled) <- repositoryPackageCheckFlagValues packageChecks
+      | (checkName, isEnabled) <-
+          [ ("check", repositoryPackageHasCheck packageChecks),
+            ("coverage", repositoryPackageHasCoverageCheck packageChecks),
+            ("profile", repositoryPackageHasProfileCheck packageChecks),
+            ("property-testing", repositoryPackageHasPropertyTestingCheck packageChecks),
+            ("mutation-testing", repositoryPackageHasMutationTestingCheck packageChecks)
+          ]
       ]
     ++ " }"
 summarizeRepositoryPackage :: Set.Set FilePath -> FilePath -> IO RepositoryPackageSummary
@@ -706,7 +710,7 @@ summarizeRepositoryPackage repositoryCheckNames packageName = do
   packageKind <- detectPackageKindForPackage packageName
   let packageRoot = "packages" </> packageName
   repositoryPackageDescriptionValue <-
-    if isPythonPackageKind packageKind || packageKind == PythonPypiPackage
+    if packageKind `elem` [PythonPackage, PythonLatexPackage, PythonPypiPackage]
       then do
         maybePyprojectTomlContents <- readTextFileIfExists (packageRoot </> "pyproject.toml")
         maybeDefaultNixContents <- readTextFileIfExists (packageRoot </> "default.nix")
@@ -724,7 +728,7 @@ summarizeRepositoryPackage repositoryCheckNames packageName = do
           maybeDefaultNixContents <- readTextFileIfExists (packageRoot </> "default.nix")
           pure (extractDefaultNixPackageDescription =<< maybeDefaultNixContents)
   repositoryPackageTestNamesValue <-
-    if isPythonPackageKind packageKind
+    if packageKind `elem` [PythonPackage, PythonLatexPackage]
       then do
         maybeMainPythonSourceText <- readTextFileIfExists (packageRoot </> "main.py")
         pure (maybe [] (discoverPythonUnitTestNamesFromSource . T.unpack) maybeMainPythonSourceText)
@@ -1235,14 +1239,6 @@ data PackageKind
   | BinaryReleasePackage
   | UnknownPackage
   deriving stock (Eq, Ord, Show)
-isPythonPackageKind :: PackageKind -> Bool
-isPythonPackageKind packageKind = packageKind `elem` [PythonPackage, PythonLatexPackage]
-isHaskellPackageKind :: PackageKind -> Bool
-isHaskellPackageKind = (== HaskellPackage)
-isRustPackageKind :: PackageKind -> Bool
-isRustPackageKind = (== RustPackage)
-isCPackageKind :: PackageKind -> Bool
-isCPackageKind = (== CPackage)
 type PackageInfo :: Type
 data PackageInfo = PackageInfo
   { packageRootPath :: FilePath,
@@ -1451,9 +1447,9 @@ checkPackageWith canonicalizationSettings allRepositoryStructureIssues packageNa
         if packageDefaultNixExists && null defaultNixIssues
           then CheckPassed
           else CheckFailed
-      pythonTestConventionOutcome = if isPythonPackageKind packageKind then checkOutcomeFromIssues pythonTestConventionIssues else CheckSkipped
-      haskellTestConventionOutcome = if isHaskellPackageKind packageKind then checkOutcomeFromIssues haskellTestConventionIssues else CheckSkipped
-      rustTestConventionOutcome = if isRustPackageKind packageKind then checkOutcomeFromIssues rustTestConventionIssues else CheckSkipped
+      pythonTestConventionOutcome = if packageKind `elem` [PythonPackage, PythonLatexPackage] then checkOutcomeFromIssues pythonTestConventionIssues else CheckSkipped
+      haskellTestConventionOutcome = if packageKind == HaskellPackage then checkOutcomeFromIssues haskellTestConventionIssues else CheckSkipped
+      rustTestConventionOutcome = if packageKind == RustPackage then checkOutcomeFromIssues rustTestConventionIssues else CheckSkipped
       basePackageTests =
         [ PackageTest
             "directory structure"
@@ -1463,7 +1459,7 @@ checkPackageWith canonicalizationSettings allRepositoryStructureIssues packageNa
         ]
       languageSpecificPackageTests =
         concat
-          [ if isRustPackageKind packageKind
+          [ if packageKind == RustPackage
               then
                 [ makePackageTest "Cargo.toml" cargoTomlOutcome "matches Cargo.toml conventions" cargoTomlIssues,
                   PackageTest
@@ -1477,7 +1473,7 @@ checkPackageWith canonicalizationSettings allRepositoryStructureIssues packageNa
                     )
                 ]
               else [],
-            if isHaskellPackageKind packageKind
+            if packageKind == HaskellPackage
               then
                 [ makePackageTest (packageName ++ ".cabal") cabalFileOutcome "matches Cabal conventions" cabalFileIssues,
                   PackageTest
@@ -1505,7 +1501,7 @@ checkPackageWith canonicalizationSettings allRepositoryStructureIssues packageNa
                     pythonTestConventionIssues
                     : [PackageTestCase pythonUnitTestName CheckSkipped [] | pythonUnitTestName <- pythonUnitTestNames]
                 )
-            | isPythonPackageKind packageKind
+            | packageKind `elem` [PythonPackage, PythonLatexPackage]
             ]
           ]
       packageTests = basePackageTests ++ languageSpecificPackageTests
@@ -1607,10 +1603,10 @@ checkDefaultNixConventions packageName packageKind = do
             packageKind `elem` [RustPackage, PythonLatexPackage, PythonPackage, CPackage, BinaryReleasePackage]
        in pure $
             catMaybes
-              [ if isHaskellPackageKind packageKind && not hasLegacyMainProgram
+              [ if packageKind == HaskellPackage && not hasLegacyMainProgram
                   then Just ("packages/" ++ packageName ++ "/default.nix: Haskell packages must set mainProgram = pname;")
                   else Nothing,
-                if isHaskellPackageKind packageKind && hasMetaMainProgram
+                if packageKind == HaskellPackage && hasMetaMainProgram
                   then Just ("packages/" ++ packageName ++ "/default.nix: Haskell packages must not set meta.mainProgram = pname;")
                   else Nothing,
                 if expectsMetaMainProgram && not hasMetaMainProgram
@@ -1628,7 +1624,7 @@ checkDefaultNixConventions packageName packageKind = do
               ]
 checkPythonTestConventions :: FilePath -> PackageKind -> IO [String]
 checkPythonTestConventions packageName packageKind =
-  if not (isPythonPackageKind packageKind)
+  if packageKind `notElem` [PythonPackage, PythonLatexPackage]
     then pure []
     else do
       let mainPythonPath = "packages" </> packageName </> "main.py"
@@ -1696,7 +1692,7 @@ extractPythonUnitTestName sourceLine =
         else Nothing
 checkHaskellTestConventions :: FilePath -> PackageKind -> IO [String]
 checkHaskellTestConventions packageName packageKind =
-  if not (isHaskellPackageKind packageKind)
+  if packageKind /= HaskellPackage
     then pure []
     else do
       let mainHaskellPath = "packages" </> packageName </> "Main.hs"
@@ -1834,7 +1830,7 @@ firstQuotedToken inputText =
    in firstTokenAfter '"' <|> firstTokenAfter '\''
 checkRustTestConventions :: FilePath -> PackageKind -> IO [String]
 checkRustTestConventions packageName packageKind =
-  if not (isRustPackageKind packageKind)
+  if packageKind /= RustPackage
     then pure []
     else do
       let mainRustPath = "packages" </> packageName </> "src/main.rs"
@@ -2171,7 +2167,7 @@ validateCPackageVmCheckSource packageKind checkName checkDefaultNixPath checkDef
         "inputs.self.packages.${pkgs.stdenv.system}.${name}" `isInfixOf` checkDefaultNixSource
           || ("inputs.self.packages.${pkgs.stdenv.system}." ++ checkName) `isInfixOf` checkDefaultNixSource
    in catMaybes
-        [ if isCPackageKind packageKind
+        [ if packageKind == CPackage
             then Nothing
             else Just (checkDefaultNixPath ++ ": generic C VM checks require a same-name C package under packages/"),
           if hasRunNixOSTest
