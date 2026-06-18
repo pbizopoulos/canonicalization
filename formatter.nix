@@ -117,7 +117,7 @@ let
         };
         nixfmt.priority = 1;
         remove-empty-lines = {
-          command = inputs.self.packages.${pkgs.stdenv.system}."remove-empty-lines";
+          command = inputs.self.packages.${pkgs.stdenv.system}.remove-empty-lines;
           includes = [
             "*"
           ];
