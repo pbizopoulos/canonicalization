@@ -500,37 +500,6 @@ runInGitRepositoryRoot repositoryDirectory action = do
   action `finally` setCurrentDirectory previousDirectory
 runCreatePackageMode :: CanonicalizationSettings -> String -> FilePath -> Maybe String -> IO ()
 runCreatePackageMode canonicalizationSettings packageKindName packageName packageDescription =
-  runValidatedCreateMode
-    packageKindName
-    packageName
-    canonicalizationSettings
-    packageDescription
-    createPackageInCurrentRepositoryWith
-    ( \packageKind createdFilePaths ->
-        putStrLn ("created package packages/" ++ packageName ++ " (" ++ renderPackageKind packageKind ++ ")")
-          >> putStrLn ("created " ++ show (length createdFilePaths) ++ " files")
-    )
-runCreateRepositoryMode :: CanonicalizationSettings -> String -> FilePath -> Set.Set RepositoryCheckKind -> IO ()
-runCreateRepositoryMode canonicalizationSettings packageKindName packageName requestedCheckKinds =
-  runValidatedCreateMode
-    packageKindName
-    packageName
-    canonicalizationSettings
-    requestedCheckKinds
-    createRepositoryInCurrentRepositoryWith
-    ( \packageKind createdFilePaths ->
-        putStrLn ("created repository scaffold for packages/" ++ packageName ++ " (" ++ renderPackageKind packageKind ++ ")")
-          >> putStrLn ("created " ++ show (length createdFilePaths) ++ " files")
-    )
-runValidatedCreateMode ::
-  String ->
-  FilePath ->
-  CanonicalizationSettings ->
-  a ->
-  (CanonicalizationSettings -> PackageKind -> FilePath -> a -> IO (Either String [FilePath])) ->
-  (PackageKind -> [FilePath] -> IO ()) ->
-  IO ()
-runValidatedCreateMode packageKindName packageName canonicalizationSettings modeInput createAction onSuccess =
   case parseSupportedCreatePackageKind packageKindName of
     Nothing -> do
       putStrLn ("unsupported package type: " ++ packageKindName)
@@ -542,12 +511,35 @@ runValidatedCreateMode packageKindName packageName canonicalizationSettings mode
           putStrLn validationError
           exitFailure
         Nothing -> do
-          createResult <- createAction canonicalizationSettings packageKind packageName modeInput
+          createResult <- createPackageInCurrentRepositoryWith canonicalizationSettings packageKind packageName packageDescription
           case createResult of
             Left createError -> do
               putStrLn createError
               exitFailure
-            Right createdFilePaths -> onSuccess packageKind createdFilePaths
+            Right createdFilePaths -> do
+              putStrLn ("created package packages/" ++ packageName ++ " (" ++ renderPackageKind packageKind ++ ")")
+              putStrLn ("created " ++ show (length createdFilePaths) ++ " files")
+runCreateRepositoryMode :: CanonicalizationSettings -> String -> FilePath -> Set.Set RepositoryCheckKind -> IO ()
+runCreateRepositoryMode canonicalizationSettings packageKindName packageName requestedCheckKinds =
+  case parseSupportedCreatePackageKind packageKindName of
+    Nothing -> do
+      putStrLn ("unsupported package type: " ++ packageKindName)
+      putStrLn ("supported package types: " ++ intercalate ", " (map fst supportedCreatePackageKinds))
+      exitFailure
+    Just packageKind ->
+      case validateCreatePackageName packageName of
+        Just validationError -> do
+          putStrLn validationError
+          exitFailure
+        Nothing -> do
+          createResult <- createRepositoryInCurrentRepositoryWith canonicalizationSettings packageKind packageName requestedCheckKinds
+          case createResult of
+            Left createError -> do
+              putStrLn createError
+              exitFailure
+            Right createdFilePaths -> do
+              putStrLn ("created repository scaffold for packages/" ++ packageName ++ " (" ++ renderPackageKind packageKind ++ ")")
+              putStrLn ("created " ++ show (length createdFilePaths) ++ " files")
 collectRepositoryCompliance :: IO (Either (String, [String]) RepositoryComplianceSuccess)
 collectRepositoryCompliance = collectRepositoryComplianceWith defaultCanonicalizationSettings
 collectRepositoryComplianceWith :: CanonicalizationSettings -> IO (Either (String, [String]) RepositoryComplianceSuccess)
@@ -726,7 +718,7 @@ summarizeRepositoryPackage repositoryCheckNames packageName = do
       }
 readRepositoryPackageDescription :: PackageKind -> FilePath -> FilePath -> IO (Maybe String)
 readRepositoryPackageDescription packageKind packageRoot packageName
-  | isPythonPackageDescriptionKind packageKind = do
+  | isPythonPackageKind packageKind || packageKind == PythonPypiPackage = do
       maybePyprojectTomlContents <- readTextFileIfExists (packageRoot </> "pyproject.toml")
       maybeDefaultNixContents <- readTextFileIfExists (packageRoot </> "default.nix")
       let maybePyprojectDescription = maybePyprojectTomlContents >>= extractPythonPackageDescriptionFromPyprojectToml
@@ -1252,17 +1244,12 @@ data PackageKind
   deriving stock (Eq, Ord, Show)
 isPythonPackageKind :: PackageKind -> Bool
 isPythonPackageKind packageKind = packageKind `elem` [PythonPackage, PythonLatexPackage]
-isPythonPackageDescriptionKind :: PackageKind -> Bool
-isPythonPackageDescriptionKind packageKind = isPythonPackageKind packageKind || packageKind == PythonPypiPackage
 isHaskellPackageKind :: PackageKind -> Bool
 isHaskellPackageKind = (== HaskellPackage)
 isRustPackageKind :: PackageKind -> Bool
 isRustPackageKind = (== RustPackage)
 isCPackageKind :: PackageKind -> Bool
 isCPackageKind = (== CPackage)
-packageKindRequiresMetaMainProgram :: PackageKind -> Bool
-packageKindRequiresMetaMainProgram packageKind =
-  packageKind `elem` [RustPackage, PythonLatexPackage, PythonPackage, CPackage, BinaryReleasePackage]
 type PackageInfo :: Type
 data PackageInfo = PackageInfo
   { packageRootPath :: FilePath,
@@ -1623,7 +1610,8 @@ checkDefaultNixConventions packageName packageKind = do
           hasLocalSource = "src = ./.;" `isInfixOf` defaultNixSource
           hasPlaceholderVersion = "version = \"0.0.0\";" `isInfixOf` defaultNixSource
           hasVersionAssignment = "version = \"" `isInfixOf` defaultNixSource
-          expectsMetaMainProgram = packageKindRequiresMetaMainProgram packageKind
+          expectsMetaMainProgram =
+            packageKind `elem` [RustPackage, PythonLatexPackage, PythonPackage, CPackage, BinaryReleasePackage]
        in pure $
             catMaybes
               [ if isHaskellPackageKind packageKind && not hasLegacyMainProgram
