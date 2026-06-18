@@ -189,20 +189,17 @@ matchesPythonLatexTemplate packageName nixSource
       hasFiguresDirectory <- doesDirectoryExist (packageDirectory </> "figures")
       pure (hasManuscriptTexFile || hasRefsBibFile || hasFiguresDirectory)
   | otherwise = pure False
+matchesPythonPypiTemplateLike :: String -> FilePath -> String -> IO Bool
+matchesPythonPypiTemplateLike buildFunction _ nixSource =
+  pure
+    ( buildFunction `isInfixOf` nixSource
+        && not ("src = ./.;" `isInfixOf` nixSource)
+        && ("fetchPypi" `isInfixOf` nixSource || "fetchurl" `isInfixOf` nixSource)
+    )
 matchesPythonPypiApplicationTemplate :: FilePath -> String -> IO Bool
-matchesPythonPypiApplicationTemplate _ nixSource =
-  pure
-    ( "buildPythonApplication" `isInfixOf` nixSource
-        && not ("src = ./.;" `isInfixOf` nixSource)
-        && ("fetchPypi" `isInfixOf` nixSource || "fetchurl" `isInfixOf` nixSource)
-    )
+matchesPythonPypiApplicationTemplate = matchesPythonPypiTemplateLike "buildPythonApplication"
 matchesPythonPypiTemplate :: FilePath -> String -> IO Bool
-matchesPythonPypiTemplate _ nixSource =
-  pure
-    ( "buildPythonPackage" `isInfixOf` nixSource
-        && not ("src = ./.;" `isInfixOf` nixSource)
-        && ("fetchPypi" `isInfixOf` nixSource || "fetchurl" `isInfixOf` nixSource)
-    )
+matchesPythonPypiTemplate = matchesPythonPypiTemplateLike "buildPythonPackage"
 matchesBinaryReleaseTemplate :: FilePath -> String -> IO Bool
 matchesBinaryReleaseTemplate _ nixSource =
   pure
@@ -210,6 +207,12 @@ matchesBinaryReleaseTemplate _ nixSource =
         && "src = pkgs.fetchurl" `isInfixOf` nixSource
         && "sourceRoot = \".\";" `isInfixOf` nixSource
         && "install -Dm755 ${pname}-v${version}-x86_64-unknown-linux-musl/${pname}" `isInfixOf` nixSource
+    )
+matchesCheckNameSuffixAndSourceContains :: String -> [String] -> FilePath -> String -> IO Bool
+matchesCheckNameSuffixAndSourceContains suffix requiredNeedles checkName nixSource =
+  pure
+    ( suffix `isSuffixOf` checkName
+        && all (`isInfixOf` nixSource) requiredNeedles
     )
 defaultNixTemplateSpecByName :: FilePath -> Maybe DefaultNixTemplateSpec
 defaultNixTemplateSpecByName defaultNixTemplateNameToFind = find ((== defaultNixTemplateNameToFind) . defaultNixTemplateName) defaultNixTemplateSpecs
@@ -331,86 +334,33 @@ checkDefaultNixTemplateSpecs =
 checkDefaultNixTemplateSpecByName :: FilePath -> Maybe CheckDefaultNixTemplateSpec
 checkDefaultNixTemplateSpecByName checkDefaultNixTemplateNameToFind = find ((== checkDefaultNixTemplateNameToFind) . checkDefaultNixTemplateName) checkDefaultNixTemplateSpecs
 matchesHaskellCoverageCheck :: FilePath -> String -> IO Bool
-matchesHaskellCoverageCheck checkName nixSource =
-  pure
-    ( "-coverage" `isSuffixOf` checkName
-        && "ghcWithPackages" `isInfixOf` nixSource
-        && "-fhpc" `isInfixOf` nixSource
-    )
+matchesHaskellCoverageCheck = matchesCheckNameSuffixAndSourceContains "-coverage" ["ghcWithPackages", "-fhpc"]
 matchesHaskellProfileCheck :: FilePath -> String -> IO Bool
-matchesHaskellProfileCheck checkName nixSource =
-  pure
-    ( "-profile" `isSuffixOf` checkName
-        && "ghcWithPackages" `isInfixOf` nixSource
-        && "-fprof-auto" `isInfixOf` nixSource
-    )
+matchesHaskellProfileCheck = matchesCheckNameSuffixAndSourceContains "-profile" ["ghcWithPackages", "-fprof-auto"]
 matchesHaskellPropertyTestingCheck :: FilePath -> String -> IO Bool
-matchesHaskellPropertyTestingCheck checkName nixSource =
-  pure
-    ( "-property-testing" `isSuffixOf` checkName
-        && "ghcWithPackages" `isInfixOf` nixSource
-        && "runPackageTests" `isInfixOf` nixSource
-    )
+matchesHaskellPropertyTestingCheck = matchesCheckNameSuffixAndSourceContains "-property-testing" ["ghcWithPackages", "runPackageTests"]
 matchesPythonCoverageCheck :: FilePath -> String -> IO Bool
-matchesPythonCoverageCheck checkName nixSource =
-  pure
-    ( "_coverage" `isSuffixOf` checkName
-        && "--cov=\"$src\"" `isInfixOf` nixSource
-    )
+matchesPythonCoverageCheck = matchesCheckNameSuffixAndSourceContains "_coverage" ["--cov=\"$src\""]
 matchesPythonProfileCheck :: FilePath -> String -> IO Bool
-matchesPythonProfileCheck checkName nixSource =
-  pure
-    ( "_profile" `isSuffixOf` checkName
-        && "pyinstrument" `isInfixOf` nixSource
-    )
+matchesPythonProfileCheck = matchesCheckNameSuffixAndSourceContains "_profile" ["pyinstrument"]
 matchesPythonPropertyTestingCheck :: FilePath -> String -> IO Bool
-matchesPythonPropertyTestingCheck checkName nixSource =
-  pure
-    ( "_property_testing" `isSuffixOf` checkName
-        && "python -m pytest -v main.py -k property" `isInfixOf` nixSource
-    )
+matchesPythonPropertyTestingCheck = matchesCheckNameSuffixAndSourceContains "_property_testing" ["python -m pytest -v main.py -k property"]
 matchesPythonMutationTestingCheck :: FilePath -> String -> IO Bool
-matchesPythonMutationTestingCheck checkName nixSource =
-  pure
-    ( "_mutation_testing" `isSuffixOf` checkName
-        && "cosmic-ray" `isInfixOf` nixSource
-    )
+matchesPythonMutationTestingCheck = matchesCheckNameSuffixAndSourceContains "_mutation_testing" ["cosmic-ray"]
 matchesRustCoverageCheck :: FilePath -> String -> IO Bool
-matchesRustCoverageCheck checkName nixSource =
-  pure
-    ( "-coverage" `isSuffixOf` checkName
-        && "cargo llvm-cov" `isInfixOf` nixSource
-    )
+matchesRustCoverageCheck = matchesCheckNameSuffixAndSourceContains "-coverage" ["cargo llvm-cov"]
 matchesRustProfileCheck :: FilePath -> String -> IO Bool
-matchesRustProfileCheck checkName nixSource =
-  pure
-    ( "-profile" `isSuffixOf` checkName
-        && "pkgs.perf" `isInfixOf` nixSource
-        && "perf record" `isInfixOf` nixSource
-    )
+matchesRustProfileCheck = matchesCheckNameSuffixAndSourceContains "-profile" ["pkgs.perf", "perf record"]
 matchesRustPropertyTestingCheck :: FilePath -> String -> IO Bool
-matchesRustPropertyTestingCheck checkName nixSource =
-  pure
-    ( "-property-testing" `isSuffixOf` checkName
-        && "cargo test --locked" `isInfixOf` nixSource
-    )
+matchesRustPropertyTestingCheck = matchesCheckNameSuffixAndSourceContains "-property-testing" ["cargo test --locked"]
 matchesRustMutationTestingCheck :: FilePath -> String -> IO Bool
-matchesRustMutationTestingCheck checkName nixSource =
-  pure
-    ( "-mutation-testing" `isSuffixOf` checkName
-        && "cargo mutants" `isInfixOf` nixSource
-    )
+matchesRustMutationTestingCheck = matchesCheckNameSuffixAndSourceContains "-mutation-testing" ["cargo mutants"]
 matchesCPackageVmCheck :: FilePath -> String -> IO Bool
 matchesCPackageVmCheck checkName nixSource = do
   packageKind <- detectPackageKindForPackage checkName
   pure (isCPackageVmCheckShape packageKind nixSource)
 matchesDefaultVmWithDiskoCheck :: FilePath -> String -> IO Bool
-matchesDefaultVmWithDiskoCheck checkName nixSource =
-  pure
-    ( "VmWithDisko" `isSuffixOf` checkName
-        && "pkgs.runCommand" `isInfixOf` nixSource
-        && "config.system.build.vmWithDisko" `isInfixOf` nixSource
-    )
+matchesDefaultVmWithDiskoCheck = matchesCheckNameSuffixAndSourceContains "VmWithDisko" ["pkgs.runCommand", "config.system.build.vmWithDisko"]
 isCPackageVmCheckShape :: PackageKind -> String -> Bool
 isCPackageVmCheckShape packageKind nixSource =
   packageKind == CPackage
@@ -472,26 +422,21 @@ runCli canonicalizationSettings commandLineArgs =
           runInGitRepositoryRoot repositoryDirectory (runCreateRepositoryMode canonicalizationSettings packageKindName packageName requestedCheckKinds)
         Nothing ->
           case createRepositoryArgs of
-            "create-repository" : _ -> do
-              putStrLn "Usage: canonicalization check-repository [git-directory]"
-              putStrLn "       canonicalization describe-repository [git-directory]"
-              putStrLn "       canonicalization describe-repository --json [git-directory]"
-              putStrLn "       canonicalization create-package [git-directory] <package-type> <package-name> [description]"
-              putStrLn "       canonicalization create-repository [git-directory] <package-type> <package-name> [--check] [--coverage] [--profile] [--property-testing] [--mutation-testing]"
-              putStrLn "       canonicalization check-gitmodules"
-              exitFailure
+            "create-repository" : _ -> printUsageAndExit
             _ ->
               case parseCreatePackageArgs createRepositoryArgs of
                 Just (repositoryDirectory, packageKindName, packageName, packageDescription) ->
                   runInGitRepositoryRoot repositoryDirectory (runCreatePackageMode canonicalizationSettings packageKindName packageName packageDescription)
-                Nothing -> do
-                  putStrLn "Usage: canonicalization check-repository [git-directory]"
-                  putStrLn "       canonicalization describe-repository [git-directory]"
-                  putStrLn "       canonicalization describe-repository --json [git-directory]"
-                  putStrLn "       canonicalization create-package [git-directory] <package-type> <package-name> [description]"
-                  putStrLn "       canonicalization create-repository [git-directory] <package-type> <package-name> [--check] [--coverage] [--profile] [--property-testing] [--mutation-testing]"
-                  putStrLn "       canonicalization check-gitmodules"
-                  exitFailure
+                Nothing -> printUsageAndExit
+printUsageAndExit :: IO a
+printUsageAndExit = do
+  putStrLn "Usage: canonicalization check-repository [git-directory]"
+  putStrLn "       canonicalization describe-repository [git-directory]"
+  putStrLn "       canonicalization describe-repository --json [git-directory]"
+  putStrLn "       canonicalization create-package [git-directory] <package-type> <package-name> [description]"
+  putStrLn "       canonicalization create-repository [git-directory] <package-type> <package-name> [--check] [--coverage] [--profile] [--property-testing] [--mutation-testing]"
+  putStrLn "       canonicalization check-gitmodules"
+  exitFailure
 parseCreatePackageArgs :: [String] -> Maybe (FilePath, String, FilePath, Maybe String)
 parseCreatePackageArgs commandLineArgs =
   case commandLineArgs of
