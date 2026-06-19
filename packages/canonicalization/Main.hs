@@ -1155,6 +1155,7 @@ checkRepositoryStructure = do
       globalAllowedPathRegexes :: [String]
       globalAllowedPathRegexes =
         [ "^\\.git(/.*)?$",
+          "^AGENTS\\.md$",
           "^\\.github/workflows/workflow\\.yml$",
           "^\\.gitignore$",
           "^CITATION\\.bib$",
@@ -3278,6 +3279,20 @@ repositoryPolicyDebugTests =
                   ("unexpected/file.txt: is not allowed" `elem` repositoryStructureIssues)
               otherResult ->
                 assertFailure ("Expected directory-structure failure, got: " ++ show otherResult),
+      TestCase $
+        withTemporaryPackageRepository "agents-file-repository-validation" $ \tempRepository -> do
+          withCurrentWorkingDirectory tempRepository $ do
+            TIO.writeFile "AGENTS.md" "repository instructions"
+            repositoryComplianceResult <- collectRepositoryComplianceWith defaultCanonicalizationSettings
+            assertEqual
+              "Allows AGENTS.md at repository root."
+              ( Right
+                  RepositoryComplianceSuccess
+                    { repositoryCompliancePackageNames = [],
+                      repositoryComplianceCheckNames = []
+                    }
+              )
+              repositoryComplianceResult,
       TestCase $
         withTemporaryPackageRepository "file-compliance-repository-validation" $ \tempRepository -> do
           withCurrentWorkingDirectory tempRepository $ do
