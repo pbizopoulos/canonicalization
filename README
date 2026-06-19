@@ -1,15 +1,14 @@
-xdg-open https://nix.dev/manual/nix/latest/command-ref/new-cli/nix3-flake.html#examples
-# ~/<domain>/<namespace>/<repository-name>				# <URL-local> local repository
-# <domain>:<namespace>/<repository-name>				# <URL-public> remote public repository
 # git+ssh://git@<domain>/<namespace>/<repository-name>			# <URL-private> remote private repository
+# <domain>:<namespace>/<repository-name>				# <URL-public> remote public repository
+# ~/<domain>/<namespace>/<repository-name>				# <URL-local> local repository
+# Using a subset of https://numtide.github.io/blueprint/main/
+# ~/<domain>/<namespace>/<repository-name>/packages/<package>		# <URL-local-package> https://numtide.github.io/blueprint/main/getting-started/folder_structure/#packages-for-packages
+# ~/<domain>/<namespace>/<repository-name>/hosts/<host>			# <URL-local-host> https://numtide.github.io/blueprint/main/getting-started/folder_structure/#hostshostnamedefaultnixconfigurationnixdarwin-configurationnixsystem-configurationnixrpi-configurationnix
+# ~/<domain>/<namespace>/<repository-name>/checks/<check>		# <URL-local-check> https://numtide.github.io/blueprint/main/getting-started/folder_structure/#checks-for-flake-checks
 git clone <URL-*> <URL-local>						# clone repository
 nix flake update <URL-*> 						# update flake lock file
 nix flake check <URL-*>			 				# check whether the flake evaluates and run its tests
 cd <URL-local> && nix fmt						# run formatter
-nix build <URL-*>#packages.<cpu>.<package>				# build <package> for <cpu>, you can use --print-out-paths
+cd <URL-local-package> && nix develop .#<package>			# enter <package> development environment
 nix run <URL-*>#<package>						# run <package>; use the next command to run tests if the build is slow
 nix run <URL-*>#<package> --extra-substituters "https://nix-community.cachix.org https://cache.nixos-cuda.org" --extra-trusted-public-keys "nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs= cache.nixos-cuda.org:74DUi4Ye579gUqzH4ziL9IyiJBlDpMRn9MBN8oNan9M="
-nix run --impure github:numtide/nix-gl-host -- nix run <URL-*>#<package>	# run <package> on non-NixOS with host graphics drivers, export NIXPKGS_ALLOW_UNFREE=1 if needed
-nix run <URL-*>#nixosConfigurations.<host>.config.system.build.vm	# run <host> in virtual machine (replace with vmWithDisko if using Disko)
-nix run nixpkgs#nixos-generators -- --flake <URL-*>#<host> --format iso	# generate iso from <host>
-nixos-rebuild switch --flake <URL-*>#<host>				# deploy <host> locally
