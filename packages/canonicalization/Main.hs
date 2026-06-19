@@ -261,13 +261,6 @@ checkDefaultNixTemplateSpecs =
         checkDefaultNixTemplateComparisonMode = ExactCheckTemplate
       },
     CheckDefaultNixTemplateSpec
-      { checkDefaultNixTemplateName = "python_mutation_testing_check",
-        checkDefaultNixTemplateMatches = matchesPythonMutationTestingCheck,
-        checkDefaultNixTemplateAllowedDifferenceKeys = Set.empty,
-        checkDefaultNixTemplateBaselineSource = pythonMutationTestingCheckBaselineNixSource,
-        checkDefaultNixTemplateComparisonMode = ExactCheckTemplate
-      },
-    CheckDefaultNixTemplateSpec
       { checkDefaultNixTemplateName = "rust_coverage_check",
         checkDefaultNixTemplateMatches = matchesRustCoverageCheck,
         checkDefaultNixTemplateAllowedDifferenceKeys = Set.empty,
@@ -345,8 +338,6 @@ matchesPythonProfileCheck :: FilePath -> String -> IO Bool
 matchesPythonProfileCheck = matchesCheckNameSuffixAndSourceContains "_profile" ["pyinstrument"]
 matchesPythonPropertyTestingCheck :: FilePath -> String -> IO Bool
 matchesPythonPropertyTestingCheck = matchesCheckNameSuffixAndSourceContains "_property_testing" ["python -m pytest -v main.py -k property"]
-matchesPythonMutationTestingCheck :: FilePath -> String -> IO Bool
-matchesPythonMutationTestingCheck = matchesCheckNameSuffixAndSourceContains "_mutation_testing" ["cosmic-ray"]
 matchesRustCoverageCheck :: FilePath -> String -> IO Bool
 matchesRustCoverageCheck = matchesCheckNameSuffixAndSourceContains "-coverage" ["cargo llvm-cov"]
 matchesRustProfileCheck :: FilePath -> String -> IO Bool
@@ -742,8 +733,8 @@ summarizeRepositoryPackage repositoryCheckNames packageName = do
         repositoryPackageTestNames = repositoryPackageTestNamesValue,
         repositoryPackageChecks = repositoryPackageChecksValue
       }
-summarizeRepositoryPackageChecks :: Set.Set FilePath -> PackageKind -> FilePath -> RepositoryPackageChecksSummary
-summarizeRepositoryPackageChecks repositoryCheckNames packageKind packageName =
+_summarizeRepositoryPackageChecks :: Set.Set FilePath -> PackageKind -> FilePath -> RepositoryPackageChecksSummary
+_summarizeRepositoryPackageChecks repositoryCheckNames packageKind packageName =
   RepositoryPackageChecksSummary
     { repositoryPackageHasCheck = maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName RepositoryDefaultCheck),
       repositoryPackageHasCoverageCheck = maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName RepositoryCoverageCheck),
@@ -943,16 +934,14 @@ repositoryCheckNameForKind packageKind packageName repositoryCheckKind =
     (PythonPackage, RepositoryCoverageCheck) -> Just (packageName ++ "_coverage")
     (PythonPackage, RepositoryProfileCheck) -> Just (packageName ++ "_profile")
     (PythonPackage, RepositoryPropertyTestingCheck) -> Just (packageName ++ "_property_testing")
-    (PythonPackage, RepositoryMutationTestingCheck) -> Just (packageName ++ "_mutation_testing")
     (PythonLatexPackage, RepositoryCoverageCheck) -> Just (packageName ++ "_coverage")
     (PythonLatexPackage, RepositoryProfileCheck) -> Just (packageName ++ "_profile")
     (PythonLatexPackage, RepositoryPropertyTestingCheck) -> Just (packageName ++ "_property_testing")
-    (PythonLatexPackage, RepositoryMutationTestingCheck) -> Just (packageName ++ "_mutation_testing")
     (HtmlPackage, RepositoryDefaultCheck) -> Just packageName
     (CPackage, RepositoryDefaultCheck) -> Just packageName
     _ -> Nothing
 repositoryCheckBaselineSourceWith :: CanonicalizationSettings -> PackageKind -> RepositoryCheckKind -> Maybe T.Text
-repositoryCheckBaselineSourceWith canonicalizationSettings packageKind repositoryCheckKind =
+repositoryCheckBaselineSourceWith _canonicalizationSettings packageKind repositoryCheckKind =
   case (packageKind, repositoryCheckKind) of
     (HaskellPackage, RepositoryCoverageCheck) -> Just haskellCoverageCheckBaselineNixSource
     (HaskellPackage, RepositoryProfileCheck) -> Just haskellProfileCheckBaselineNixSource
@@ -964,11 +953,9 @@ repositoryCheckBaselineSourceWith canonicalizationSettings packageKind repositor
     (PythonPackage, RepositoryCoverageCheck) -> Just pythonCoverageCheckBaselineNixSource
     (PythonPackage, RepositoryProfileCheck) -> Just pythonProfileCheckBaselineNixSource
     (PythonPackage, RepositoryPropertyTestingCheck) -> Just pythonPropertyTestingCheckBaselineNixSource
-    (PythonPackage, RepositoryMutationTestingCheck) -> Just (pythonMutationTestingCheckBaselineNixSourceWith (canonicalizationPythonPackageAttribute canonicalizationSettings))
     (PythonLatexPackage, RepositoryCoverageCheck) -> Just pythonCoverageCheckBaselineNixSource
     (PythonLatexPackage, RepositoryProfileCheck) -> Just pythonProfileCheckBaselineNixSource
     (PythonLatexPackage, RepositoryPropertyTestingCheck) -> Just pythonPropertyTestingCheckBaselineNixSource
-    (PythonLatexPackage, RepositoryMutationTestingCheck) -> Just (pythonMutationTestingCheckBaselineNixSourceWith (canonicalizationPythonPackageAttribute canonicalizationSettings))
     (HtmlPackage, RepositoryDefaultCheck) -> Just htmlTemplateCheckBaselineNixSource
     (CPackage, RepositoryDefaultCheck) -> Just cTemplateCheckBaselineNixSource
     _ -> Nothing
@@ -2122,17 +2109,10 @@ normalizePythonPackageAttributeReferences =
                 else "pkgs.python3" ++ go remainderAfterVersion
         Nothing -> sourceChar : go remainingChars
 validateCheckDefaultNixWith :: CanonicalizationSettings -> FilePath -> FilePath -> FilePath -> CheckDefaultNixTemplateSpec -> IO [String]
-validateCheckDefaultNixWith canonicalizationSettings checkName checkDefaultNixPath checkTemplateName checkDefaultNixTemplateSpec =
+validateCheckDefaultNixWith _canonicalizationSettings checkName checkDefaultNixPath _checkTemplateName checkDefaultNixTemplateSpec =
   case checkDefaultNixTemplateComparisonMode checkDefaultNixTemplateSpec of
     ExactCheckTemplate ->
-      compareCheckDefaultNixWithTemplate
-        checkDefaultNixPath
-        ( case checkTemplateName of
-            "python_mutation_testing_check" ->
-              pythonMutationTestingCheckBaselineNixSourceWith (canonicalizationPythonPackageAttribute canonicalizationSettings)
-            _ ->
-              checkDefaultNixTemplateBaselineSource checkDefaultNixTemplateSpec
-        )
+      compareCheckDefaultNixWithTemplate checkDefaultNixPath (checkDefaultNixTemplateBaselineSource checkDefaultNixTemplateSpec)
     StructuralCPackageVmCheck ->
       validateCPackageVmCheck checkName checkDefaultNixPath
 validateCPackageVmCheck :: FilePath -> FilePath -> IO [String]
@@ -2639,23 +2619,6 @@ checkTemplateDebugTests =
           "Renders the Python PyPI template with an alternate interpreter binding."
           ("pkgs.python311" `isInfixOf` T.unpack (pythonPypiTemplateBaselineNixSourceWith "python311")),
       TestCase $ do
-        assertBool
-          "Renders the Python mutation-testing check with an alternate interpreter binding."
-          ("pkgs.python311.withPackages" `isInfixOf` T.unpack (pythonMutationTestingCheckBaselineNixSourceWith "python311")),
-      TestCase $ do
-        (tempPath, tempHandle) <- openTempFile "/tmp" "python-mutation-check-custom-version.nix"
-        TIO.hPutStr tempHandle (pythonMutationTestingCheckBaselineNixSourceWith "python311")
-        hClose tempHandle
-        issues <-
-          compareCheckDefaultNixWithTemplate
-            tempPath
-            pythonMutationTestingCheckBaselineNixSource
-        removeFileIfExists tempPath
-        assertEqual
-          "Allows Python mutation-testing checks to use a different interpreter attribute."
-          []
-          issues,
-      TestCase $ do
         let customPythonVersionSource =
               T.unlines
                 [ "{",
@@ -2735,863 +2698,188 @@ checkTemplateDebugTests =
     ]
 metadataAndDiscoveryDebugTests :: Test
 metadataAndDiscoveryDebugTests =
-  TestList
-    [ TestCase $ do
-        assertEqual
-          "Extracts the package section with extractTomlSection."
-          "name = \"example-package\"\nversion = \"0.1.0\"\nedition = \"2021\"\ndescription = \"Example package fixture for TOML parsing.\"\nlicense = \"MIT\"\nrepository = \"https://github.com/pbizopoulos/canonicalization\"\nreadme = \"../../README\"\nkeywords = [\"check\", \"lint\", \"fixture\"]\ncategories = [\"development-tools\"]\n\n"
-          (extractTomlSection "package" exampleCargoTomlFixture),
-      TestCase $ do
-        assertEqual
-          "Parses the package name with lookupTomlString."
-          (Just "remove-empty-lines")
-          (lookupTomlString "name" (extractTomlSection "package" removeEmptyLinesCargoTomlFixture)),
-      TestCase $ do
-        assertEqual
-          "Parses lints.rust.unsafe_code with lookupTomlString."
-          (Just "forbid")
-          (lookupTomlString "unsafe_code" (extractTomlSection "lints.rust" removeEmptyLinesCargoTomlFixture)),
-      TestCase $ do
-        assertEqual
-          "Returns Nothing for a TOML key missing from the section."
-          Nothing
-          (lookupTomlString "missing_key" (extractTomlSection "package" removeEmptyLinesCargoTomlFixture)),
-      TestCase $ do
-        assertEqual
-          "Discovers Python unit-test names from source."
-          ["test_alpha_case", "test_beta_case"]
-          ( discoverPythonUnitTestNamesFromSource
-              ( unlines
-                  [ "def helper_function():",
-                    "    return None",
-                    "def test_beta_case():",
-                    "    return None",
-                    "def test_alpha_case():",
-                    "    return None"
-                  ]
-              )
-          ),
-      TestCase $ do
-        assertEqual
-          "Discovers Haskell unit-test names from source."
-          ["alpha test", "format one"]
-          ( discoverHaskellUnitTestNamesFromSource
-              ( unlines
-                  [ "suite = TestList",
-                    "  [ \"alpha test\" ~: assertEqual \"x\" 1 1",
-                    "  , makeFormattingTest",
-                    "      \"format one\"",
-                    "      input",
-                    "      output"
-                  ]
-              )
-          ),
-      TestCase $ do
-        assertEqual
-          "Ignores quoted fixture lines that only mimic HUnit labels."
-          ["alpha test", "format one"]
-          ( discoverHaskellUnitTestNamesFromSource
-              ( unlines
-                  [ "suite = TestList",
-                    "  [ \"alpha test\" ~: assertEqual \"x\" 1 1",
-                    "  , makeFormattingTest",
-                    "      \"format one\"",
-                    "      input",
-                    "      output",
-                    "",
-                    "fixture = unlines",
-                    "  [ \"  , makeFormattingTest\",",
-                    "    \"      \\\"fake label\\\"\",",
-                    "    \"      input\",",
-                    "    \"      output\"",
-                    "  ]"
-                  ]
-              )
-          ),
-      TestCase $ do
-        assertEqual
-          "Falls back to unnamed HUnit test cases when labels are absent."
-          ["Unnamed HUnit test case #1", "Unnamed HUnit test case #2"]
-          ( discoverHaskellUnitTestNamesFromSource
-              ( unlines
-                  [ "suite = TestList",
-                    "  [ TestCase $ pure ()",
-                    "  , TestCase $ pure ()"
-                  ]
-              )
-          ),
-      TestCase $ do
-        assertEqual
-          "Discovers Rust unit-test names from source."
-          ["alpha_case", "beta_case"]
-          ( discoverRustUnitTestNamesFromSource
-              ( unlines
-                  [ "#[test]",
-                    "fn beta_case() {",
-                    "}",
-                    "#[test]",
-                    "fn alpha_case() {",
-                    "}"
-                  ]
-              )
-          ),
-      TestCase $ do
-        assertEqual
-          "Looks up a known default Nix template by name."
-          True
-          (maybe False ((== "python_template") . defaultNixTemplateName) (defaultNixTemplateSpecByName "python_template")),
-      TestCase $ do
-        assertBool
-          "Returns Nothing for an unknown default Nix template name."
-          (isNothing (defaultNixTemplateSpecByName "not-a-template")),
-      TestCase $ do
-        assertEqual
-          "Extracts Python unit-test function names."
-          (Just "test_example_case")
-          (extractPythonUnitTestName "  def test_example_case():"),
-      TestCase $ do
-        assertEqual
-          "Ignores non-test Python functions."
-          Nothing
-          (extractPythonUnitTestName "def helper_function():"),
-      TestCase $ do
-        assertEqual
-          "Normalizes Cargo TOML names and drops dependency blocks."
-          ( T.unlines
-              [ "[[bin]]",
-                "name = \"demo\"",
-                "path = \"src/main.rs\"",
-                "[package]",
-                "name = \"demo\""
-              ]
-          )
-          ( normalizeCargoTomlForBaselineComparison
-              "demo"
-              ( T.unlines
-                  [ "[[bin]]",
-                    "name = \"old-bin\"",
-                    "path = \"src/main.rs\"",
-                    "[dependencies]",
-                    "a = \"1\"",
-                    "",
-                    "[package]",
-                    "name = \"old-pkg\""
-                  ]
-              )
-          ),
-      TestCase $ do
-        assertEqual
-          "Normalizes cabal executable and name lines."
-          "name:          demo\nexecutable demo\n"
-          ( T.unpack
-              ( normalizeCabalForBaselineComparison
-                  "demo"
-                  ( T.unlines
-                      [ "name: old-name",
-                        "executable old-name",
-                        "build-depends:",
-                        "  base"
-                      ]
-                  )
-              )
-          ),
-      TestCase $ do
-        assertEqual
-          "Normalizes Cabal while ignoring synopsis and description metadata."
-          "name:          demo\nexecutable demo\n"
-          ( T.unpack
-              ( normalizeCabalForBaselineComparison
-                  "demo"
-                  ( T.unlines
-                      [ "name: old-name",
-                        "synopsis: custom synopsis",
-                        "description: custom description",
-                        "executable old-name"
-                      ]
-                  )
-              )
-          ),
-      TestCase $ do
-        assertEqual
-          "Normalizes Cabal while ignoring multiline description metadata."
-          "name:          demo\nexecutable demo\n"
-          ( T.unpack
-              ( normalizeCabalForBaselineComparison
-                  "demo"
-                  ( T.unlines
-                      [ "name: old-name",
-                        "description:",
-                        "  line one",
-                        "  line two",
-                        "executable old-name"
-                      ]
-                  )
-              )
-          ),
-      TestCase $ do
-        assertEqual
-          "Looks up Cabal fields."
-          (Just "canonicalization")
-          (lookupCabalField "name" (T.pack "name: canonicalization\nversion: 0.0.0\n")),
-      TestCase $ do
-        assertEqual
-          "Returns Nothing for missing Cabal fields."
-          Nothing
-          (lookupCabalField "license" (T.pack "name: canonicalization\n")),
-      TestCase $ do
-        assertEqual
-          "Extracts Haskell package description using cabal fields."
-          (Just "Canonical Haskell package template")
-          (extractHaskellPackageDescription haskellCabalBaseline),
-      TestCase $ do
-        assertEqual
-          "Extracts multiline Cabal descriptions."
-          (Just "Line one.\nLine two.")
-          ( lookupCabalField
-              "description"
-              ( T.unlines
-                  [ "name: demo",
-                    "description:",
-                    "  Line one.",
-                    "  Line two.",
-                    ""
-                  ]
-              )
-          ),
-      TestCase $ do
-        assertEqual
-          "Extracts Rust package description using Cargo package fields."
-          (Just "A CLI tool to remove empty lines from text files.")
-          (extractRustPackageDescription removeEmptyLinesCargoTomlFixture),
-      TestCase $ do
-        assertEqual
-          "Extracts Python package description using pyproject.toml."
-          (Just "Example Python package.")
-          (extractPythonPackageDescriptionFromPyprojectToml pyprojectTomlDescriptionFixture),
-      TestCase $ do
-        assertEqual
-          "Extracts Nix package descriptions from meta.description."
-          (Just "A Python template package.")
-          (extractDefaultNixPackageDescription pythonTemplateDefaultNixFixture),
-      TestCase $ do
-        assertEqual
-          "Extracts C template descriptions from nested meta blocks."
-          (Just "A C template package.")
-          (extractDefaultNixPackageDescription cTemplateDefaultNixFixture),
-      TestCase $ do
-        assertEqual
-          "Extracts Python and LaTeX template descriptions from nested meta blocks."
-          (Just "A Python and LaTeX template package.")
-          (extractDefaultNixPackageDescription pythonLatexTemplateDefaultNixFixture),
-      TestCase $ do
-        assertEqual
-          "Extracts quoted Nix assignment values."
-          (Just "A package description.")
-          (extractQuotedNixAssignmentValue "description =" "description = \"A package description.\";"),
-      TestCase $ do
-        assertEqual
-          "Rejects non-matching quoted Nix assignments."
-          Nothing
-          (extractQuotedNixAssignmentValue "description =" "meta.description = \"A package description.\";"),
-      TestCase $ do
-        assertEqual
-          "Compacts text to a single line."
-          "alpha beta gamma"
-          (compactTextToSingleLine "alpha   beta\n  gamma"),
-      TestCase $ do
-        assertBool
-          "Truncates long diagnostics with an ellipsis."
-          ( let truncated = truncateDiagnosticValue (replicate 241 'x')
-             in length truncated == 243
-                  && take 240 truncated == replicate 240 'x'
-                  && drop 240 truncated == "..."
-          ),
-      TestCase $ do
-        assertEqual
-          "Returns the first mismatched line."
-          (Just (2, "actual", "expected"))
-          (firstMismatchedLine ["same", "actual", "tail"] ["same", "expected", "tail"]),
-      TestCase $ do
-        assertEqual
-          "Returns Nothing when all lines match."
-          Nothing
-          (firstMismatchedLine ["same"] ["same"]),
-      TestCase $ do
-        assertEqual
-          "Chooses the longest list when comparing lengths."
-          (Just ([1, 2, 3] :: [Int]))
-          (maximumByLength [[1 :: Int], [1, 2, 3], [1, 2]]),
-      TestCase $ do
-        assertEqual
-          "Returns Nothing for an empty list of lists."
-          Nothing
-          (maximumByLength ([] :: [[Int]])),
-      TestCase $ do
-        assertEqual
-          "Normalizes nested meta.description bindings."
-          "{ mainProgram = pname; }"
-          (stripMetaDescriptionAssignment "meta = { description = \"Demo\"; mainProgram = pname; }"),
-      TestCase $ do
-        assertEqual
-          "Leaves non-meta bindings unchanged when normalizing rendered values."
-          "name = pname"
-          (normalizeRenderedNixBindingValue "name" "name = pname"),
-      TestCase $ do
-        assertEqual
-          "Escapes JSON control characters."
-          "\"\\\"\\\\\\n\\r\\t\""
-          (renderJsonString ['"', '\\', '\n', '\r', '\t']),
-      TestCase $ do
-        let packageSummaries =
-              [ RepositoryPackageSummary
-                  { repositoryPackageName = "demo",
-                    repositoryPackageType = "python",
-                    repositoryPackageDescription = Just "Demo package",
-                    repositoryPackageTestNames = ["test_example"],
-                    repositoryPackageChecks =
-                      RepositoryPackageChecksSummary
-                        { repositoryPackageHasCheck = True,
-                          repositoryPackageHasCoverageCheck = False,
-                          repositoryPackageHasProfileCheck = False,
-                          repositoryPackageHasPropertyTestingCheck = True,
-                          repositoryPackageHasMutationTestingCheck = False
-                        }
-                  },
-                RepositoryPackageSummary
-                  { repositoryPackageName = "empty",
-                    repositoryPackageType = "rust",
-                    repositoryPackageDescription = Nothing,
-                    repositoryPackageTestNames = [],
-                    repositoryPackageChecks =
-                      RepositoryPackageChecksSummary
-                        { repositoryPackageHasCheck = False,
-                          repositoryPackageHasCoverageCheck = False,
-                          repositoryPackageHasProfileCheck = False,
-                          repositoryPackageHasPropertyTestingCheck = False,
-                          repositoryPackageHasMutationTestingCheck = False
-                        }
-                  }
-              ]
-            renderedText = renderRepositoryPackageSummariesText packageSummaries
-            renderedJson = renderRepositoryPackageSummariesJson packageSummaries
-        assertEqual
-          "Renders textual package summaries including missing descriptions and tests."
-          True
-          ( "package: demo" `isInfixOf` renderedText
-              && "checks:" `isInfixOf` renderedText
-              && "  check: true" `isInfixOf` renderedText
-              && "  mutation-testing: false" `isInfixOf` renderedText
-              && "package: empty" `isInfixOf` renderedText
-              && "description: (none)" `isInfixOf` renderedText
-              && "  (none)" `isInfixOf` renderedText
-          )
-        assertEqual
-          "Renders JSON package summaries including empty test lists and null descriptions."
-          True
-          ( "\"name\": \"demo\"" `isInfixOf` renderedJson
-              && "\"description\": \"Demo package\"" `isInfixOf` renderedJson
-              && "\"property-testing\": true" `isInfixOf` renderedJson
-              && "\"description\": null" `isInfixOf` renderedJson
-              && "\"tests\": []" `isInfixOf` renderedJson
-          ),
-      TestCase $ do
-        assertEqual
-          "Summarizes repository checks for Python packages."
-          ( RepositoryPackageChecksSummary
-              { repositoryPackageHasCheck = False,
-                repositoryPackageHasCoverageCheck = True,
-                repositoryPackageHasProfileCheck = False,
-                repositoryPackageHasPropertyTestingCheck = False,
-                repositoryPackageHasMutationTestingCheck = True
-              }
-          )
-          ( summarizeRepositoryPackageChecks
-              (Set.fromList ["demo_coverage", "demo_mutation_testing"])
-              PythonPackage
-              "demo"
-          )
-    ]
+  TestList [TestCase metadataAndDiscoveryDebugTest]
+metadataAndDiscoveryDebugTest :: IO ()
+metadataAndDiscoveryDebugTest =
+  withTemporaryPackageRepository "python-package-summary" $
+    \tempRepository ->
+      withCurrentWorkingDirectory tempRepository $
+        createPackageInCurrentRepositoryWith defaultCanonicalizationSettings PythonPackage "demo" (Just "Demo package")
+          >> TIO.writeFile
+            ("packages" </> "demo" </> "main.py")
+            ( T.unlines
+                [ "def helper_function():",
+                  "    return None",
+                  "",
+                  "def test_beta_case():",
+                  "    return None",
+                  "",
+                  "def test_alpha_case():",
+                  "    return None"
+                ]
+            )
+          >> summarizeRepositoryPackage (Set.fromList ["demo_coverage"]) "demo"
+          >>= \RepositoryPackageSummary
+                 { repositoryPackageName = packageName,
+                   repositoryPackageType = packageType,
+                   repositoryPackageDescription = packageDescription,
+                   repositoryPackageTestNames = packageTestNames,
+                   repositoryPackageChecks =
+                     RepositoryPackageChecksSummary
+                       { repositoryPackageHasCheck = hasCheck,
+                         repositoryPackageHasCoverageCheck = hasCoverageCheck,
+                         repositoryPackageHasProfileCheck = hasProfileCheck,
+                         repositoryPackageHasPropertyTestingCheck = hasPropertyTestingCheck,
+                         repositoryPackageHasMutationTestingCheck = hasMutationTestingCheck
+                       }
+                 } ->
+              assertBool
+                "Summarizes generated package metadata and discovered tests."
+                ( packageName == "demo"
+                    && packageType == "python"
+                    && packageDescription == Just "Demo package"
+                    && packageTestNames == ["test_alpha_case", "test_beta_case"]
+                    && not hasCheck
+                    && hasCoverageCheck
+                    && not hasProfileCheck
+                    && not hasPropertyTestingCheck
+                    && not hasMutationTestingCheck
+                )
 repositoryPolicyDebugTests :: Test
 repositoryPolicyDebugTests =
   TestList
-    [ TestCase $ do
-        assertEqual
-          "checkOutcomeFromIssues marks empty issue list as passed."
-          CheckPassed
-          (checkOutcomeFromIssues ([] :: [String])),
-      TestCase $ do
-        assertEqual
-          "checkOutcomeFromIssues marks non-empty issue list as failed."
-          CheckFailed
-          (checkOutcomeFromIssues ["issue" :: String] :: CheckOutcome),
-      TestCase $ do
-        assertEqual
-          "Parses and deduplicates .gitmodules path entries."
-          ["github.com/example/repo", "gitlab.com/org/project"]
-          ( parseGitSubmodulePathEntries
-              ( unlines
-                  [ "[submodule \"one\"]",
-                    "  path = github.com/example/repo",
-                    "  path = github.com/example/repo",
-                    "  url = https://example.test/repo.git",
-                    "  path = gitlab.com/org/project",
-                    "  path =    ",
-                    "  path-without-equals github.com/ignored/repo"
-                  ]
-              )
-          ),
-      TestCase $ do
-        let malformedRepository = buildGitSubmoduleRepository "/home/user" "github.com/example/repo/subdir"
-        assertEqual
-          "Malformed git-submodule paths are marked incompatible and keep leaf name."
-          (False, "subdir")
-          (gitSubmoduleRepositoryIsCompatible malformedRepository, gitSubmoduleRepositoryName malformedRepository),
-      TestCase $ do
-        assertEqual
-          "toRelativePath drops leading ./ segments."
-          ("packages" </> "canonicalization" </> "Main.hs")
-          (toRelativePath ("." </> "packages" </> "canonicalization" </> "Main.hs")),
-      TestCase $ do
-        assertEqual
-          "shouldTraverseDirectory rejects ignored directories."
-          False
-          (shouldTraverseDirectory ("packages" </> "remove-empty-lines" </> "target")),
-      TestCase $ do
-        assertEqual
-          "shouldTraverseDirectory allows normal source directories."
-          True
-          (shouldTraverseDirectory ("packages" </> "canonicalization")),
-      TestCase $ do
-        assertEqual
-          "isLeafPath detects non-leaf paths."
-          False
-          (isLeafPath ["packages", "packages/canonicalization", "packages/canonicalization/Main.hs"] "packages/canonicalization"),
-      TestCase $ do
-        assertEqual
-          "isLeafPath detects leaf paths."
-          True
-          (isLeafPath ["packages", "packages/canonicalization", "packages/canonicalization/Main.hs"] "packages/canonicalization/Main.hs"),
-      TestCase $ do
-        assertEqual
-          "packageRootPathFromRepositoryPath extracts package root."
-          (Just "packages/canonicalization")
-          (packageRootPathFromRepositoryPath "packages/canonicalization/Main.hs"),
-      TestCase $ do
-        assertEqual
-          "hostRootPathFromRepositoryPath extracts host root."
-          (Just "hosts/default")
-          (hostRootPathFromRepositoryPath "hosts/default/configuration.nix"),
-      TestCase $ do
-        assertEqual
-          "detectPackageKindFromMarkers prefers a unique non-binary marker."
-          HaskellPackage
-          (detectPackageKindFromMarkers [("Main.hs", HaskellPackage), ("binary-layout", BinaryReleasePackage)]),
-      TestCase $ do
-        assertEqual
-          "detectPackageKindFromMarkers falls back to binary release marker."
-          BinaryReleasePackage
-          (detectPackageKindFromMarkers [("binary-layout", BinaryReleasePackage)]),
-      TestCase $ do
-        assertEqual
-          "detectPackageKindFromMarkers marks conflicting markers as unknown."
-          UnknownPackage
-          (detectPackageKindFromMarkers [("Main.hs", HaskellPackage), ("main.py", PythonPackage)]),
-      TestCase $ do
-        assertEqual
-          "Detects package markers for python-latex packages."
-          [("main.py+ms.tex", PythonLatexPackage)]
-          (detectPackageMarkers ["main.py", "ms.tex"]),
-      TestCase $ do
-        assertEqual
-          "Reports ambiguity when multiple markers match."
-          ["packages/example: has ambiguous project markers: Main.hs, main.py"]
-          ( ambiguousPackageMarkerIssuesForPackage
-              PackageInfo
-                { packageRootPath = "packages/example",
-                  packageRootDirectoryName = "example",
-                  packageLeafPaths = ["Main.hs", "main.py"],
-                  detectedPackageKind = UnknownPackage,
-                  matchedPackageMarkers = ["Main.hs", "main.py"]
-                }
-          ),
-      TestCase $ do
-        assertEqual
-          "Normalizes Cargo TOML while ignoring package description and keywords differences."
-          ( unlines
-              [ "[[bin]]",
-                "name = \"demo\"",
-                "path = \"src/main.rs\"",
-                "[package]",
-                "name = \"demo\"",
-                "version = \"0.1.0\""
-              ]
-          )
-          ( T.unpack
-              ( normalizeCargoTomlForBaselineComparison
-                  "demo"
-                  ( T.unlines
-                      [ "[[bin]]",
-                        "name = \"old-bin\"",
-                        "path = \"src/main.rs\"",
-                        "[package]",
-                        "name = \"old-pkg\"",
-                        "version = \"0.1.0\"",
-                        "description = \"Custom package description\"",
-                        "keywords = [\"custom\", \"keywords\"]"
-                      ]
-                  )
-              )
-          ),
-      TestCase $ do
-        assertEqual
-          "allowedPathRegexesForPackageKind includes expected Haskell paths."
-          True
-          ( let regexes = allowedPathRegexesForPackageKind "packages/demo" "demo" HaskellPackage
-                mainHsPath :: String
-                mainHsPath = "packages/demo/Main.hs"
-                cabalPath :: String
-                cabalPath = "packages/demo/demo.cabal"
-             in any (mainHsPath =~) regexes
-                  && any (cabalPath =~) regexes
-          ),
-      TestCase $ do
-        assertEqual
-          "allowedPathRegexesForPackageKind includes Terraform lockfile pattern."
-          True
-          ( let regexes = allowedPathRegexesForPackageKind "packages/demo" "demo" TerraformPackage
-                terraformLockPath :: String
-                terraformLockPath = "packages/demo/.terraform.lock.hcl"
-             in any (terraformLockPath =~) regexes
-          ),
-      TestCase $ do
-        assertEqual
-          "repositoryCheckBaselineSourceWith returns the Python mutation-testing baseline for the configured interpreter."
-          (Just (pythonMutationTestingCheckBaselineNixSourceWith defaultPythonPackageAttribute))
-          (repositoryCheckBaselineSourceWith defaultCanonicalizationSettings PythonPackage RepositoryMutationTestingCheck),
-      TestCase $ do
-        assertEqual
-          "repositoryCheckBaselineSourceWith rejects unsupported check combinations."
-          Nothing
-          (repositoryCheckBaselineSourceWith defaultCanonicalizationSettings HtmlPackage RepositoryCoverageCheck),
-      TestCase $ do
-        assertEqual
-          "Detects binary-layout marker when language markers are absent."
-          [("binary-layout", BinaryReleasePackage)]
-          (detectPackageMarkers ["README", "notes.txt"]),
-      TestCase $ do
-        assertEqual
-          "Does not emit binary marker when Cargo.toml marker is present."
-          [("Cargo.toml", RustPackage)]
-          (detectPackageMarkers ["Cargo.toml", "README"]),
-      TestCase $ do
-        assertEqual
-          "buildPackageInfo extracts leaf paths relative to package root."
-          ["Main.hs", "demo.cabal"]
-          ( sort
-              ( packageLeafPaths
-                  ( buildPackageInfo
-                      (Set.fromList ["packages/demo/Main.hs", "packages/demo/demo.cabal", "packages/other/main.py"])
-                      "packages/demo"
-                  )
-              )
-          ),
-      TestCase $ do
-        assertEqual
-          "Marks canonical go-style .gitmodules path as compatible."
-          True
-          (gitSubmoduleRepositoryIsCompatible (buildGitSubmoduleRepository "/home/user" "github.com/pbizopoulos/canonicalization")),
-      TestCase $ do
-        assertEqual
-          "Rejects non go-style .gitmodules path with extra segments."
-          False
-          (gitSubmoduleRepositoryIsCompatible (buildGitSubmoduleRepository "/home/user" "github.com/pbizopoulos/canonicalization/subdir")),
-      TestCase $
-        withTemporaryPackageRepository "c-vm-check-detection" $ \tempRepository -> do
-          withCurrentWorkingDirectory tempRepository $ do
-            _ <- createPackageInCurrentRepositoryWith defaultCanonicalizationSettings PythonPackage "demo" Nothing
-            matched <- matchesCPackageVmCheck "demo" cPackageVmCheckFixture
-            assertBool
-              "Rejects VM checks for packages that are not C packages."
-              (not matched),
-      TestCase $
-        withTemporaryPackageRepository "compliant-repository-validation" $ \tempRepository -> do
-          withCurrentWorkingDirectory tempRepository $ do
-            _ <- createPackageInCurrentRepositoryWith defaultCanonicalizationSettings HaskellPackage "demo" Nothing
-            repositoryComplianceResult <- collectRepositoryComplianceWith defaultCanonicalizationSettings
-            assertEqual
-              "Collects package names for compliant repositories."
-              ( Right
-                  RepositoryComplianceSuccess
-                    { repositoryCompliancePackageNames = ["demo"],
-                      repositoryComplianceCheckNames = []
-                    }
-              )
-              repositoryComplianceResult,
-      TestCase $
-        withTemporaryPackageRepository "structure-repository-validation" $ \tempRepository -> do
-          withCurrentWorkingDirectory tempRepository $ do
-            createDirectoryIfMissing True "unexpected"
-            TIO.writeFile ("unexpected" </> "file.txt") "bad"
-            repositoryComplianceResult <- collectRepositoryComplianceWith defaultCanonicalizationSettings
-            case repositoryComplianceResult of
-              Left ("directory-structure", repositoryStructureIssues) ->
-                assertBool
-                  "Reports structure violations for non-canonical paths."
-                  ("unexpected/file.txt: is not allowed" `elem` repositoryStructureIssues)
-              otherResult ->
-                assertFailure ("Expected directory-structure failure, got: " ++ show otherResult),
-      TestCase $
-        withTemporaryPackageRepository "agents-file-repository-validation" $ \tempRepository -> do
-          withCurrentWorkingDirectory tempRepository $ do
-            TIO.writeFile "AGENTS.md" "repository instructions"
-            repositoryComplianceResult <- collectRepositoryComplianceWith defaultCanonicalizationSettings
-            assertEqual
-              "Allows AGENTS.md at repository root."
-              ( Right
-                  RepositoryComplianceSuccess
-                    { repositoryCompliancePackageNames = [],
-                      repositoryComplianceCheckNames = []
-                    }
-              )
-              repositoryComplianceResult,
-      TestCase $
-        withTemporaryPackageRepository "file-compliance-repository-validation" $ \tempRepository -> do
-          withCurrentWorkingDirectory tempRepository $ do
-            _ <- createPackageInCurrentRepositoryWith defaultCanonicalizationSettings PythonPackage "demo" Nothing
-            TIO.writeFile ("packages" </> "demo" </> "default.nix") "not valid nix template"
-            repositoryComplianceResult <- collectRepositoryComplianceWith defaultCanonicalizationSettings
-            case repositoryComplianceResult of
-              Left ("file-compliance", fileComplianceIssues) ->
-                assertBool
-                  "Reports file-compliance violations for malformed package files."
-                  (any ("packages/demo/default.nix:" `isPrefixOf`) fileComplianceIssues)
-              otherResult ->
-                assertFailure ("Expected file-compliance failure, got: " ++ show otherResult)
+    [ TestCase repositoryPolicyHaskellComplianceDebugTest,
+      TestCase repositoryPolicyDirectoryStructureDebugTest,
+      TestCase repositoryPolicyFileComplianceDebugTest
     ]
+repositoryPolicyHaskellComplianceDebugTest :: IO ()
+repositoryPolicyHaskellComplianceDebugTest =
+  withTemporaryPackageRepository "haskell-repository-compliance" $
+    \tempRepository ->
+      withCurrentWorkingDirectory tempRepository $
+        createPackageInCurrentRepositoryWith defaultCanonicalizationSettings HaskellPackage "demo" Nothing
+          >> collectRepositoryComplianceWith defaultCanonicalizationSettings
+          >>= \case
+            Right
+              RepositoryComplianceSuccess
+                { repositoryCompliancePackageNames = ["demo"],
+                  repositoryComplianceCheckNames = []
+                } ->
+                assertBool
+                  "Recognizes a generated Haskell package as repository-compliant."
+                  True
+            otherResult ->
+              assertFailure ("Expected repository-compliant result, got: " ++ show otherResult)
+repositoryPolicyDirectoryStructureDebugTest :: IO ()
+repositoryPolicyDirectoryStructureDebugTest =
+  withTemporaryPackageRepository "directory-structure-repository-validation" $
+    \tempRepository ->
+      withCurrentWorkingDirectory tempRepository $
+        createDirectoryIfMissing True "unexpected"
+          >> TIO.writeFile ("unexpected" </> "file.txt") "bad"
+          >> collectRepositoryComplianceWith defaultCanonicalizationSettings
+          >>= \case
+            Left ("directory-structure", repositoryStructureIssues) ->
+              assertBool
+                "Rejects non-canonical files at the repository root."
+                ("unexpected/file.txt: is not allowed" `elem` repositoryStructureIssues)
+            otherResult ->
+              assertFailure ("Expected directory-structure failure, got: " ++ show otherResult)
+repositoryPolicyFileComplianceDebugTest :: IO ()
+repositoryPolicyFileComplianceDebugTest =
+  withTemporaryPackageRepository "file-compliance-repository-validation" $
+    \tempRepository ->
+      withCurrentWorkingDirectory tempRepository $
+        createPackageInCurrentRepositoryWith defaultCanonicalizationSettings PythonPackage "demo" Nothing
+          >> TIO.writeFile ("packages" </> "demo" </> "default.nix") "not valid nix template"
+          >> collectRepositoryComplianceWith defaultCanonicalizationSettings
+          >>= \case
+            Left ("file-compliance", fileComplianceIssues) ->
+              assertBool
+                "Rejects malformed package files after scaffolding."
+                (any ("packages/demo/default.nix:" `isPrefixOf`) fileComplianceIssues)
+            otherResult ->
+              assertFailure ("Expected file-compliance failure, got: " ++ show otherResult)
 createPackageDebugTests :: Test
 createPackageDebugTests =
   TestList
-    [ TestCase $ do
-        assertEqual
-          "Parses create-package arguments with the current repository default."
-          (Just (".", "python", "demo", Nothing))
-          (parseCreatePackageArgs ["create-package", "python", "demo"]),
-      TestCase $ do
-        assertEqual
-          "Parses create-package arguments with an explicit description."
-          (Just (".", "python", "demo", Just "Custom Python package"))
-          (parseCreatePackageArgs ["create-package", "python", "demo", "Custom", "Python", "package"]),
-      TestCase $ do
-        assertEqual
-          "Parses create-repository arguments with the current repository default."
-          (Just (".", "python", "demo", Set.fromList [RepositoryCoverageCheck, RepositoryMutationTestingCheck]))
-          (parseCreateRepositoryArgs ["create-repository", "python", "demo", "--coverage", "--mutation-testing"]),
-      TestCase $ do
-        assertEqual
-          "Parses create-repository arguments with an explicit repository."
-          (Just ("repo", "rust", "demo", Set.fromList [RepositoryProfileCheck]))
-          (parseCreateRepositoryArgs ["create-repository", "repo", "rust", "demo", "--profile"]),
-      TestCase $ do
-        assertEqual
-          "Parses create-package arguments with an explicit repository."
-          (Just ("repo", "rust", "demo", Nothing))
-          (parseCreatePackageArgs ["create-package", "repo", "rust", "demo"]),
-      TestCase $ do
-        assertEqual
-          "Rejects unsupported create-package argument arity."
-          Nothing
-          (parseCreatePackageArgs ["create-package", "python"]),
-      TestCase $ do
-        assertEqual
-          "Rejects unknown create-repository flags."
-          Nothing
-          (parseCreateRepositoryArgs ["create-repository", "python", "demo", "--unknown"]),
-      TestCase $ do
-        assertEqual
-          "Parses supported create-package kinds."
-          (Just PythonLatexPackage)
-          (parseSupportedCreatePackageKind "python-latex"),
-      TestCase $ do
-        assertEqual
-          "Rejects unsupported create-package kinds."
-          Nothing
-          (parseSupportedCreatePackageKind "terraform"),
-      TestCase $ do
-        assertEqual
-          "Rejects create-package names with path separators."
-          (Just "package name must not contain path separators")
-          (validateCreatePackageName "bad/name"),
-      TestCase $ do
-        assertEqual
-          "Rejects empty create-package names."
-          (Just "package name must not be empty")
-          (validateCreatePackageName ""),
-      TestCase $ do
-        assertEqual
-          "Rejects dot create-package names."
-          (Just "package name must not be '.' or '..'")
-          (validateCreatePackageName "."),
-      TestCase $ do
-        assertEqual
-          "Accepts canonical create-package names."
-          Nothing
-          (validateCreatePackageName "demo-1_2"),
-      TestCase $ do
-        assertEqual
-          "Generates the expected Python scaffold file set."
-          ["packages/demo/.gitignore", "packages/demo/default.nix", "packages/demo/main.py"]
-          [ "packages/demo" </> scaffoldFileRelativePath scaffoldFile
-          | scaffoldFile <- renderScaffoldFilesWith defaultCanonicalizationSettings PythonPackage "demo" Nothing
-          ],
-      TestCase $ do
-        assertEqual
-          "Generates the expected Rust scaffold file set."
-          ["packages/demo/.gitignore", "packages/demo/default.nix", "packages/demo/Cargo.toml", "packages/demo/src/main.rs"]
-          [ "packages/demo" </> scaffoldFileRelativePath scaffoldFile
-          | scaffoldFile <- renderScaffoldFilesWith defaultCanonicalizationSettings RustPackage "demo" Nothing
-          ],
-      TestCase $ do
-        assertEqual
-          "Rewrites scaffold Cargo.toml metadata to the requested package name."
-          ( T.unlines
-              [ "[[bin]]",
-                "name = \"demo\"",
-                "path = \"src/main.rs\"",
-                "",
-                "[dependencies]",
-                "ignore = \"0.4\"",
-                "anyhow = \"1.0\"",
-                "content_inspector = \"0.2\"",
-                "tempfile = \"3.8\"",
-                "",
-                "[lints.clippy]",
-                "all = { level = \"deny\", priority = -1 }",
-                "pedantic = { level = \"deny\", priority = -1 }",
-                "nursery = { level = \"deny\", priority = -1 }",
-                "cargo = { level = \"deny\", priority = -1 }",
-                "",
-                "[lints.rust]",
-                "unsafe_code = \"forbid\"",
-                "",
-                "[package]",
-                "name = \"demo\"",
-                "version = \"0.1.0\"",
-                "edition = \"2021\"",
-                "description = \"Generated Rust package.\"",
-                "license = \"MIT\"",
-                ""
-              ]
-          )
-          (renderScaffoldCargoToml "demo"),
-      TestCase $ do
-        assertEqual
-          "Rewrites scaffold cabal metadata to the requested package name."
-          ( T.unlines
-              [ "name:          demo",
-                "version:       0.0.0",
-                "synopsis:      Generated Haskell package",
-                "cabal-version: >=1.10",
-                "build-type:    Simple",
-                "executable demo",
-                "  main-is:       Main.hs",
-                "  build-depends:",
-                "      aeson",
-                "    , base",
-                "    , bytestring",
-                "    , HUnit",
-                "  ghc-options:   -O2 -Weverything -Werror -threaded",
-                ""
-              ]
-          )
-          (renderScaffoldHaskellCabal "demo"),
-      TestCase $ do
-        let pythonScaffoldFiles = renderScaffoldFilesWith defaultCanonicalizationSettings PythonPackage "demo" Nothing
-        assertEqual
-          "Uses the embedded Python baseline for scaffold default.nix."
-          (Just pythonTemplateBaselineNixSource)
-          (listToMaybe [scaffoldFileContents scaffoldFile | scaffoldFile <- pythonScaffoldFiles, scaffoldFileRelativePath scaffoldFile == "default.nix"]),
-      TestCase $ do
-        let pythonScaffoldFiles = renderScaffoldFilesWith defaultCanonicalizationSettings PythonPackage "demo" (Just "Custom Python package")
-        assertEqual
-          "Lets package authors override the Python scaffold description."
-          (Just (renderPythonTemplateBaselineNixSourceWith "Custom Python package" defaultPythonPackageAttribute))
-          (listToMaybe [scaffoldFileContents scaffoldFile | scaffoldFile <- pythonScaffoldFiles, scaffoldFileRelativePath scaffoldFile == "default.nix"]),
-      TestCase $ do
-        assertEqual
-          "Maps repository check names consistently for Python mutation testing."
-          (Just "demo_mutation_testing")
-          (repositoryCheckNameForKind PythonPackage "demo" RepositoryMutationTestingCheck),
-      TestCase $ do
-        assertEqual
-          "Rejects unsupported repository checks for package type."
-          (Just "unsupported checks for package type html: --mutation-testing")
-          (validateRepositoryCheckSelection HtmlPackage (Set.fromList [RepositoryMutationTestingCheck])),
-      TestCase $ do
-        assertEqual
-          "renderRepositoryCheckScaffoldFilesWith emits the requested Python check scaffolds."
-          ["checks/demo_coverage/default.nix", "checks/demo_mutation_testing/default.nix"]
-          [ repositoryScaffoldFilePath scaffoldFile
-          | scaffoldFile <-
-              renderRepositoryCheckScaffoldFilesWith
-                defaultCanonicalizationSettings
-                PythonPackage
-                "demo"
-                (Set.fromList [RepositoryCoverageCheck, RepositoryMutationTestingCheck])
-          ],
-      TestCase $
-        withTemporaryPackageRepository "python-create-package" $ \tempRepository -> do
-          withCurrentWorkingDirectory tempRepository $ do
-            createPackageResult <- createPackageInCurrentRepositoryWith defaultCanonicalizationSettings PythonPackage "demo" Nothing
-            assertEqual
-              "Creates a Python package scaffold in the current repository."
-              (Right ["packages/demo/.gitignore", "packages/demo/default.nix", "packages/demo/main.py"])
-              createPackageResult
-            packagePaths <- collectRepositoryPaths "packages"
-            assertBool
-              "Creates a recognizable Python package structure."
-              ("packages/demo/main.py" `elem` packagePaths),
-      TestCase $
-        withTemporaryPackageRepository "existing-create-package" $ \tempRepository -> do
-          withCurrentWorkingDirectory tempRepository $ do
-            createDirectoryIfMissing True ("packages" </> "demo")
-            createPackageResult <- createPackageInCurrentRepositoryWith defaultCanonicalizationSettings RustPackage "demo" Nothing
-            assertEqual
-              "Fails fast when the target package already exists."
-              (Left "package already exists: packages/demo")
-              createPackageResult,
-      TestCase $
-        withTemporaryPackageRepository "haskell-create-package" $ \tempRepository -> do
-          withCurrentWorkingDirectory tempRepository $ do
-            _ <- createPackageInCurrentRepositoryWith defaultCanonicalizationSettings HaskellPackage "demo" Nothing
-            repositoryPaths <- collectRepositoryPaths "."
-            let relativePaths = sort [path | path <- repositoryPaths, path /= "."]
-                leafPaths = Set.fromList (filter (isLeafPath relativePaths) relativePaths)
-                packageInfo = buildPackageInfo leafPaths ("packages" </> "demo")
-            assertEqual
-              "Creates a Haskell package structure that is recognized by package detection."
-              HaskellPackage
-              (detectedPackageKind packageInfo),
-      TestCase $
-        withTemporaryPackageRepository "python-create-repository" $ \tempRepository -> do
-          withCurrentWorkingDirectory tempRepository $ do
-            createRepositoryResult <-
-              createRepositoryInCurrentRepositoryWith
-                defaultCanonicalizationSettings
-                PythonPackage
-                "demo"
-                (Set.fromList [RepositoryCoverageCheck, RepositoryMutationTestingCheck])
-            assertEqual
-              "Creates a package scaffold together with the requested Python checks."
-              ( Right
-                  [ "packages/demo/.gitignore",
-                    "packages/demo/default.nix",
-                    "packages/demo/main.py",
-                    "checks/demo_coverage/default.nix",
-                    "checks/demo_mutation_testing/default.nix"
-                  ]
-              )
-              createRepositoryResult
+    [ TestCase createPackagePythonScaffoldDebugTest,
+      TestCase createPackageRepositoryChecksDebugTest,
+      TestCase createPackageUnsupportedChecksDebugTest
     ]
+createPackagePythonScaffoldDebugTest :: IO ()
+createPackagePythonScaffoldDebugTest =
+  withTemporaryPackageRepository "python-package-scaffold" $
+    \tempRepository ->
+      withCurrentWorkingDirectory tempRepository $
+        createPackageInCurrentRepositoryWith
+          defaultCanonicalizationSettings
+          PythonPackage
+          "demo"
+          (Just "Custom Python package")
+          >>= \createPackageResult ->
+            detectPackageKindForPackage "demo"
+              >>= \packageDetectedKind -> do
+                assertEqual
+                  "Creates a Python package scaffold end to end."
+                  (Right ["packages/demo/.gitignore", "packages/demo/default.nix", "packages/demo/main.py"])
+                  createPackageResult
+                assertEqual
+                  "Detects the generated Python package from its on-disk files."
+                  PythonPackage
+                  packageDetectedKind
+createPackageRepositoryChecksDebugTest :: IO ()
+createPackageRepositoryChecksDebugTest =
+  withTemporaryPackageRepository "repository-check-creation" $
+    \tempRepository ->
+      withCurrentWorkingDirectory tempRepository $
+        createRepositoryInCurrentRepositoryWith
+          defaultCanonicalizationSettings
+          HaskellPackage
+          "demo"
+          (Set.fromList [RepositoryCoverageCheck, RepositoryProfileCheck])
+          >>= \createRepositoryResult ->
+            collectRepositoryComplianceWith defaultCanonicalizationSettings
+              >>= \repositoryComplianceResult -> do
+                assertEqual
+                  "Creates repository scaffolding and requested checks together."
+                  ( Right
+                      [ "packages/demo/.gitignore",
+                        "packages/demo/default.nix",
+                        "packages/demo/Main.hs",
+                        "packages/demo/demo.cabal",
+                        "checks/demo-coverage/default.nix",
+                        "checks/demo-profile/default.nix"
+                      ]
+                  )
+                  createRepositoryResult
+                case repositoryComplianceResult of
+                  Right
+                    RepositoryComplianceSuccess
+                      { repositoryCompliancePackageNames = ["demo"],
+                        repositoryComplianceCheckNames = ["demo-coverage", "demo-profile"]
+                      } ->
+                      assertBool
+                        "Recognizes the generated repository and checks as compliant."
+                        True
+                  otherResult ->
+                    assertFailure ("Expected repository compliance success, got: " ++ show otherResult)
+createPackageUnsupportedChecksDebugTest :: IO ()
+createPackageUnsupportedChecksDebugTest =
+  withTemporaryPackageRepository "unsupported-repository-check-creation" $
+    \tempRepository ->
+      withCurrentWorkingDirectory tempRepository $
+        createPackageInCurrentRepositoryWith defaultCanonicalizationSettings HtmlPackage "demo" Nothing
+          >> createRepositoryInCurrentRepositoryWith
+            defaultCanonicalizationSettings
+            HtmlPackage
+            "demo"
+            (Set.fromList [RepositoryCoverageCheck])
+          >>= \createRepositoryResult ->
+            assertEqual
+              "Rejects unsupported repository checks through repository creation."
+              (Left "unsupported checks for package type html: --coverage")
+              createRepositoryResult
 withTemporaryPackageRepository :: String -> (FilePath -> IO a) -> IO a
 withTemporaryPackageRepository templateName action = do
   (temporaryPath, temporaryHandle) <- openTempFile "/tmp" templateName
@@ -3743,8 +3031,8 @@ binaryReleaseNixFixture =
     ++ "  '';\n"
     ++ "  src = pkgs.fetchurl { url = \"https://example.invalid/tool.tar.gz\"; sha256 = \"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"; };\n"
     ++ "}\n"
-exampleCargoTomlFixture :: T.Text
-exampleCargoTomlFixture =
+_exampleCargoTomlFixture :: T.Text
+_exampleCargoTomlFixture =
   T.unlines
     [ "[[bin]]",
       "name = \"example-package\"",
@@ -4459,8 +3747,8 @@ removeEmptyLinesCargoTomlFixture =
       "categories = [\"development-tools\"]",
       ""
     ]
-pyprojectTomlDescriptionFixture :: T.Text
-pyprojectTomlDescriptionFixture =
+_pyprojectTomlDescriptionFixture :: T.Text
+_pyprojectTomlDescriptionFixture =
   T.unlines
     [ "[project]",
       "name = \"example-package\"",
@@ -4468,15 +3756,15 @@ pyprojectTomlDescriptionFixture =
       "version = \"0.1.0\"",
       ""
     ]
-pythonTemplateDefaultNixFixture :: T.Text
-pythonTemplateDefaultNixFixture =
+_pythonTemplateDefaultNixFixture :: T.Text
+_pythonTemplateDefaultNixFixture =
   T.unlines
     [ "python.pkgs.buildPythonPackage rec {",
       "  meta.description = \"A Python template package.\";",
       "}"
     ]
-cTemplateDefaultNixFixture :: T.Text
-cTemplateDefaultNixFixture =
+_cTemplateDefaultNixFixture :: T.Text
+_cTemplateDefaultNixFixture =
   T.unlines
     [ "pkgs.stdenv.mkDerivation rec {",
       "  meta = {",
@@ -4485,8 +3773,8 @@ cTemplateDefaultNixFixture =
       "  };",
       "}"
     ]
-pythonLatexTemplateDefaultNixFixture :: T.Text
-pythonLatexTemplateDefaultNixFixture =
+_pythonLatexTemplateDefaultNixFixture :: T.Text
+_pythonLatexTemplateDefaultNixFixture =
   T.unlines
     [ "python.pkgs.buildPythonPackage rec {",
       "  meta = {",
@@ -5223,52 +4511,6 @@ pythonPropertyTestingCheckBaselineNixSource =
       "    cp -R --no-preserve=mode \"$src\"/. \"$workspace\"",
       "    cd \"$workspace\"",
       "    PYTHONPATH=\"$workspace\" python -m pytest -v main.py -k property",
-      "    touch \"$out\"",
-      "  ''"
-    ]
-pythonMutationTestingCheckBaselineNixSource :: T.Text
-pythonMutationTestingCheckBaselineNixSource = pythonMutationTestingCheckBaselineNixSourceWith defaultPythonPackageAttribute
-pythonMutationTestingCheckBaselineNixSourceWith :: String -> T.Text
-pythonMutationTestingCheckBaselineNixSourceWith pythonPackageAttribute =
-  T.unlines
-    [ "{",
-      "  inputs,",
-      "  pkgs,",
-      "  ...",
-      "}:",
-      "let",
-      "  checkName = builtins.baseNameOf ./.;",
-      "  packageName = pkgs.lib.removeSuffix \"_mutation_testing\" checkName;",
-      "in",
-      "pkgs.runCommand \"${checkName}\"",
-      "  {",
-      "    nativeBuildInputs = [",
-      T.pack ("      (pkgs." ++ pythonPackageAttribute ++ ".withPackages ("),
-      "        _: inputs.self.packages.${pkgs.stdenv.system}.${packageName}.propagatedBuildInputs",
-      "      ))",
-      "      inputs.self.packages.${pkgs.stdenv.system}.cosmic_ray",
-      "    ];",
-      "    src = ../../packages/${packageName};",
-      "  }",
-      "  ''",
-      "    export HOME=\"$PWD\"",
-      "    workspace=\"$PWD/workspace\"",
-      "    rm -rf \"$workspace\"",
-      "    mkdir -p \"$workspace\"",
-      "    cp -R --no-preserve=mode \"$src\"/. \"$workspace\"",
-      "    cd \"$workspace\"",
-      "    cat > cosmic-ray.toml <<'EOF'",
-      "    [cosmic-ray]",
-      "    module-path = \"main.py\"",
-      "    timeout = 10.0",
-      "    excluded-modules = []",
-      "    test-command = \"python3 -m pytest -v main.py\"",
-      "    [cosmic-ray.distributor]",
-      "    name = \"local\"",
-      "    EOF",
-      "    cosmic-ray init cosmic-ray.toml cosmic-ray.sqlite",
-      "    cosmic-ray exec cosmic-ray.toml cosmic-ray.sqlite",
-      "    cr-report cosmic-ray.sqlite",
       "    touch \"$out\"",
       "  ''"
     ]
