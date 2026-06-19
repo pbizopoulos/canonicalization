@@ -2995,6 +2995,49 @@ metadataAndDiscoveryDebugTests =
           (extractQuotedNixAssignmentValue "description =" "meta.description = \"A package description.\";"),
       TestCase $ do
         assertEqual
+          "Compacts text to a single line."
+          "alpha beta gamma"
+          (compactTextToSingleLine "alpha   beta\n  gamma"),
+      TestCase $ do
+        assertBool
+          "Truncates long diagnostics with an ellipsis."
+          ( let truncated = truncateDiagnosticValue (replicate 241 'x')
+             in length truncated == 243
+                  && take 240 truncated == replicate 240 'x'
+                  && drop 240 truncated == "..."
+          ),
+      TestCase $ do
+        assertEqual
+          "Returns the first mismatched line."
+          (Just (2, "actual", "expected"))
+          (firstMismatchedLine ["same", "actual", "tail"] ["same", "expected", "tail"]),
+      TestCase $ do
+        assertEqual
+          "Returns Nothing when all lines match."
+          Nothing
+          (firstMismatchedLine ["same"] ["same"]),
+      TestCase $ do
+        assertEqual
+          "Chooses the longest list when comparing lengths."
+          (Just ([1, 2, 3] :: [Int]))
+          (maximumByLength [[1 :: Int], [1, 2, 3], [1, 2]]),
+      TestCase $ do
+        assertEqual
+          "Returns Nothing for an empty list of lists."
+          Nothing
+          (maximumByLength ([] :: [[Int]])),
+      TestCase $ do
+        assertEqual
+          "Normalizes nested meta.description bindings."
+          "{ mainProgram = pname; }"
+          (stripMetaDescriptionAssignment "meta = { description = \"Demo\"; mainProgram = pname; }"),
+      TestCase $ do
+        assertEqual
+          "Leaves non-meta bindings unchanged when normalizing rendered values."
+          "name = pname"
+          (normalizeRenderedNixBindingValue "name" "name = pname"),
+      TestCase $ do
+        assertEqual
           "Escapes JSON control characters."
           "\"\\\"\\\\\\n\\r\\t\""
           (renderJsonString ['"', '\\', '\n', '\r', '\t']),
@@ -3222,6 +3265,16 @@ repositoryPolicyDebugTests =
           ),
       TestCase $ do
         assertEqual
+          "repositoryCheckBaselineSourceWith returns the Python mutation-testing baseline for the configured interpreter."
+          (Just (pythonMutationTestingCheckBaselineNixSourceWith defaultPythonPackageAttribute))
+          (repositoryCheckBaselineSourceWith defaultCanonicalizationSettings PythonPackage RepositoryMutationTestingCheck),
+      TestCase $ do
+        assertEqual
+          "repositoryCheckBaselineSourceWith rejects unsupported check combinations."
+          Nothing
+          (repositoryCheckBaselineSourceWith defaultCanonicalizationSettings HtmlPackage RepositoryCoverageCheck),
+      TestCase $ do
+        assertEqual
           "Detects binary-layout marker when language markers are absent."
           [("binary-layout", BinaryReleasePackage)]
           (detectPackageMarkers ["README", "notes.txt"]),
@@ -3252,6 +3305,14 @@ repositoryPolicyDebugTests =
           "Rejects non go-style .gitmodules path with extra segments."
           False
           (gitSubmoduleRepositoryIsCompatible (buildGitSubmoduleRepository "/home/user" "github.com/pbizopoulos/canonicalization/subdir")),
+      TestCase $
+        withTemporaryPackageRepository "c-vm-check-detection" $ \tempRepository -> do
+          withCurrentWorkingDirectory tempRepository $ do
+            _ <- createPackageInCurrentRepositoryWith defaultCanonicalizationSettings PythonPackage "demo" Nothing
+            matched <- matchesCPackageVmCheck "demo" cPackageVmCheckFixture
+            assertBool
+              "Rejects VM checks for packages that are not C packages."
+              (not matched),
       TestCase $
         withTemporaryPackageRepository "compliant-repository-validation" $ \tempRepository -> do
           withCurrentWorkingDirectory tempRepository $ do
@@ -3362,6 +3423,21 @@ createPackageDebugTests =
           (validateCreatePackageName "bad/name"),
       TestCase $ do
         assertEqual
+          "Rejects empty create-package names."
+          (Just "package name must not be empty")
+          (validateCreatePackageName ""),
+      TestCase $ do
+        assertEqual
+          "Rejects dot create-package names."
+          (Just "package name must not be '.' or '..'")
+          (validateCreatePackageName "."),
+      TestCase $ do
+        assertEqual
+          "Accepts canonical create-package names."
+          Nothing
+          (validateCreatePackageName "demo-1_2"),
+      TestCase $ do
+        assertEqual
           "Generates the expected Python scaffold file set."
           ["packages/demo/.gitignore", "packages/demo/default.nix", "packages/demo/main.py"]
           [ "packages/demo" </> scaffoldFileRelativePath scaffoldFile
@@ -3450,6 +3526,18 @@ createPackageDebugTests =
           "Rejects unsupported repository checks for package type."
           (Just "unsupported checks for package type html: --mutation-testing")
           (validateRepositoryCheckSelection HtmlPackage (Set.fromList [RepositoryMutationTestingCheck])),
+      TestCase $ do
+        assertEqual
+          "renderRepositoryCheckScaffoldFilesWith emits the requested Python check scaffolds."
+          ["checks/demo_coverage/default.nix", "checks/demo_mutation_testing/default.nix"]
+          [ repositoryScaffoldFilePath scaffoldFile
+          | scaffoldFile <-
+              renderRepositoryCheckScaffoldFilesWith
+                defaultCanonicalizationSettings
+                PythonPackage
+                "demo"
+                (Set.fromList [RepositoryCoverageCheck, RepositoryMutationTestingCheck])
+          ],
       TestCase $
         withTemporaryPackageRepository "python-create-package" $ \tempRepository -> do
           withCurrentWorkingDirectory tempRepository $ do
