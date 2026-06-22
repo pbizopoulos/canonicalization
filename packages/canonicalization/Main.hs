@@ -2061,19 +2061,19 @@ stripCabalQuotedValue :: T.Text -> T.Text
 stripCabalQuotedValue quotedValue =
   fromMaybe quotedValue (T.stripPrefix "\"" quotedValue >>= T.stripSuffix "\"")
 comparePackageDefaultNixWithTemplate :: FilePath -> FilePath -> FilePath -> Set.Set T.Text -> Maybe T.Text -> IO [String]
-comparePackageDefaultNixWithTemplate packageName subjectNixPath templateDefaultNixPath allowedNixDifferenceKeys maybeTemplateDefaultNixSourceOverride = do
+comparePackageDefaultNixWithTemplate packageName subjectNixPath templateBaselineNixPath allowedNixDifferenceKeys maybeTemplateBaselineSourceOverride = do
   packageKind <- detectPackageKindForPackage packageName
   let ignoredTopLevelFunctionParams :: Set.Set T.Text
       ignoredTopLevelFunctionParams =
         case packageKind of
           CPackage -> Set.singleton "inputs"
           _ -> Set.empty
-  compareNixFileWithTemplate ignoredTopLevelFunctionParams subjectNixPath templateDefaultNixPath allowedNixDifferenceKeys maybeTemplateDefaultNixSourceOverride
+  compareNixFileWithTemplate ignoredTopLevelFunctionParams subjectNixPath templateBaselineNixPath allowedNixDifferenceKeys maybeTemplateBaselineSourceOverride
 compareCheckTemplateWithBaseline :: FilePath -> T.Text -> IO [String]
-compareCheckTemplateWithBaseline checkDefaultNixPath templateDefaultNixSource = do
-  checkDefaultNixSource <- TIO.readFile checkDefaultNixPath
-  let normalizedCheckDefaultNix = normalizePythonPackageAttributeReferences (T.strip checkDefaultNixSource)
-      normalizedTemplateDefaultNix = normalizePythonPackageAttributeReferences (T.strip templateDefaultNixSource)
+compareCheckTemplateWithBaseline checkTemplatePath templateBaselineText = do
+  checkTemplateSource <- TIO.readFile checkTemplatePath
+  let normalizedCheckDefaultNix = normalizePythonPackageAttributeReferences (T.strip checkTemplateSource)
+      normalizedTemplateDefaultNix = normalizePythonPackageAttributeReferences (T.strip templateBaselineText)
   pure $
     if normalizedCheckDefaultNix == normalizedTemplateDefaultNix
       then []
@@ -2091,7 +2091,7 @@ compareCheckTemplateWithBaseline checkDefaultNixPath templateDefaultNixSource = 
                   [ "  - expected normalized form: " ++ truncateDiagnosticValue (compactTextToSingleLine normalizedTemplateDefaultNix),
                     "  - actual normalized form:   " ++ truncateDiagnosticValue (compactTextToSingleLine normalizedCheckDefaultNix)
                   ]
-         in [ checkDefaultNixPath
+         in [ checkTemplatePath
                 ++ ": differs from embedded check template\n"
                 ++ intercalate "\n" mismatchDetails
             ]
@@ -2109,72 +2109,72 @@ normalizePythonPackageAttributeReferences =
                 else "pkgs.python3" ++ go remainderAfterVersion
         Nothing -> sourceChar : go remainingChars
 validateCheckTemplateWith :: CanonicalizationSettings -> FilePath -> FilePath -> FilePath -> CheckTemplateSpec -> IO [String]
-validateCheckTemplateWith _canonicalizationSettings checkName checkDefaultNixPath _matchedTemplateName checkTemplateSpec =
+validateCheckTemplateWith _canonicalizationSettings checkName checkTemplatePath _matchedTemplateName checkTemplateSpec =
   case checkTemplateComparisonMode checkTemplateSpec of
     ExactCheckTemplate ->
-      compareCheckTemplateWithBaseline checkDefaultNixPath (checkTemplateBaselineSource checkTemplateSpec)
+      compareCheckTemplateWithBaseline checkTemplatePath (checkTemplateBaselineSource checkTemplateSpec)
     StructuralCPackageVm ->
-      validateCPackageVmCheck checkName checkDefaultNixPath
+      validateCPackageVmCheck checkName checkTemplatePath
 validateCPackageVmCheck :: FilePath -> FilePath -> IO [String]
-validateCPackageVmCheck checkName checkDefaultNixPath = do
-  maybeCheckDefaultNixText <- readTextFileIfExists checkDefaultNixPath
+validateCPackageVmCheck checkName checkTemplatePath = do
+  maybeCheckDefaultNixText <- readTextFileIfExists checkTemplatePath
   case maybeCheckDefaultNixText of
     Nothing -> pure []
     Just checkDefaultNixText -> do
       packageKind <- detectPackageKindForPackage checkName
-      pure (validateCPackageVmCheckSource packageKind checkName checkDefaultNixPath (T.unpack checkDefaultNixText))
+      pure (validateCPackageVmCheckSource packageKind checkName checkTemplatePath (T.unpack checkDefaultNixText))
 validateCPackageVmCheckSource :: PackageKind -> FilePath -> FilePath -> String -> [String]
-validateCPackageVmCheckSource packageKind checkName checkDefaultNixPath checkDefaultNixSource =
+validateCPackageVmCheckSource packageKind checkName checkTemplatePath checkTemplateSource =
   let hasCanonicalNameBinding =
-        "name = builtins.baseNameOf ./.;" `isInfixOf` checkDefaultNixSource
-          || "name = baseNameOf ./.;" `isInfixOf` checkDefaultNixSource
-      hasRunNixOSTest = "pkgs.testers.runNixOSTest" `isInfixOf` checkDefaultNixSource
-      hasMachineNode = "nodes.machine" `isInfixOf` checkDefaultNixSource
-      hasTestScript = "testScript = ''" `isInfixOf` checkDefaultNixSource
+        "name = builtins.baseNameOf ./.;" `isInfixOf` checkTemplateSource
+          || "name = baseNameOf ./.;" `isInfixOf` checkTemplateSource
+      hasRunNixOSTest = "pkgs.testers.runNixOSTest" `isInfixOf` checkTemplateSource
+      hasMachineNode = "nodes.machine" `isInfixOf` checkTemplateSource
+      hasTestScript = "testScript = ''" `isInfixOf` checkTemplateSource
       hasSameNamePackageReference =
-        "inputs.self.packages.${pkgs.stdenv.system}.${name}" `isInfixOf` checkDefaultNixSource
-          || ("inputs.self.packages.${pkgs.stdenv.system}." ++ checkName) `isInfixOf` checkDefaultNixSource
+        "inputs.self.packages.${pkgs.stdenv.system}.${name}" `isInfixOf` checkTemplateSource
+          || ("inputs.self.packages.${pkgs.stdenv.system}." ++ checkName) `isInfixOf` checkTemplateSource
    in catMaybes
         [ if packageKind == CPackage
             then Nothing
-            else Just (checkDefaultNixPath ++ ": generic C VM checks require a same-name C package under packages/"),
+            else Just (checkTemplatePath ++ ": generic C VM checks require a same-name C package under packages/"),
           if hasRunNixOSTest
             then Nothing
-            else Just (checkDefaultNixPath ++ ": generic C VM checks must use pkgs.testers.runNixOSTest"),
+            else Just (checkTemplatePath ++ ": generic C VM checks must use pkgs.testers.runNixOSTest"),
           if hasCanonicalNameBinding
             then Nothing
-            else Just (checkDefaultNixPath ++ ": generic C VM checks must bind name from ./."),
+            else Just (checkTemplatePath ++ ": generic C VM checks must bind name from ./."),
           if hasMachineNode
             then Nothing
-            else Just (checkDefaultNixPath ++ ": generic C VM checks must define nodes.machine"),
+            else Just (checkTemplatePath ++ ": generic C VM checks must define nodes.machine"),
           if hasTestScript
             then Nothing
-            else Just (checkDefaultNixPath ++ ": generic C VM checks must define testScript"),
+            else Just (checkTemplatePath ++ ": generic C VM checks must define testScript"),
           if hasSameNamePackageReference
             then Nothing
-            else Just (checkDefaultNixPath ++ ": generic C VM checks must install or override the same-name package from inputs.self.packages")
+            else Just (checkTemplatePath ++ ": generic C VM checks must install or override the same-name package from inputs.self.packages")
         ]
 compareNixFileWithTemplate :: Set.Set T.Text -> FilePath -> FilePath -> Set.Set T.Text -> Maybe T.Text -> IO [String]
-compareNixFileWithTemplate ignoredTopLevelFunctionParams subjectNixPath templateDefaultNixPath allowedNixDifferenceKeys maybeTemplateDefaultNixSourceOverride = do
+compareNixFileWithTemplate ignoredTopLevelFunctionParams subjectNixPath templateBaselineNixPath allowedNixDifferenceKeys maybeTemplateBaselineSourceOverride = do
   subjectNixParseResult <- parseNixExprFromFile subjectNixPath
-  templateDefaultNixParseResult <-
-    case maybeTemplateDefaultNixSourceOverride of
-      Just templateDefaultNixSource -> parseNixExprFromText templateDefaultNixSource
-      Nothing -> parseNixExprFromFile templateDefaultNixPath
-  case (subjectNixParseResult, templateDefaultNixParseResult) of
+  templateBaselineParseResult <-
+    case maybeTemplateBaselineSourceOverride of
+      Just templateBaselineText -> parseNixExprFromText templateBaselineText
+      Nothing -> parseNixExprFromFile templateBaselineNixPath
+  case (subjectNixParseResult, templateBaselineParseResult) of
     (Left parseError, _) ->
       pure [subjectNixPath ++ ": parse error: " ++ show parseError]
     (_, Left parseError) ->
-      pure [templateDefaultNixPath ++ ": parse error: " ++ show parseError]
-    (Right subjectNixExpr, Right templateDefaultNixExpr) ->
+      pure [templateBaselineNixPath ++ ": parse error: " ++ show parseError]
+    (Right subjectNixExpr, Right templateBaselineExpr) ->
       let normalizedSubjectNixExpr = normalizeNixExpr ignoredTopLevelFunctionParams allowedNixDifferenceKeys subjectNixExpr
-          normalizedTemplateDefaultNixExpr = normalizeNixExpr ignoredTopLevelFunctionParams allowedNixDifferenceKeys templateDefaultNixExpr
+          normalizedTemplateBaselineExpr = normalizeNixExpr ignoredTopLevelFunctionParams allowedNixDifferenceKeys templateBaselineExpr
        in pure $
             formatNixTemplateDifferences
               subjectNixPath
-              templateDefaultNixPath
+              templateBaselineNixPath
               normalizedSubjectNixExpr
-              normalizedTemplateDefaultNixExpr
+              normalizedTemplateBaselineExpr
 parseNixExprFromText :: T.Text -> IO (Either String NExprLoc)
 parseNixExprFromText nixSource = do
   (temporaryNixPath, temporaryNixHandle) <- openTempFile "/tmp" "check-repository-template-override.nix"
@@ -2247,16 +2247,16 @@ formatTemplateDifferences :: FilePath -> FilePath -> NExprLoc -> NExprLoc -> [St
 formatTemplateDifferences packageName =
   formatNixTemplateDifferences ("packages/" ++ packageName ++ "/default.nix")
 formatNixTemplateDifferences :: FilePath -> FilePath -> NExprLoc -> NExprLoc -> [String]
-formatNixTemplateDifferences subjectNixPath templateDefaultNixPath subjectNixExpr templateDefaultNixExpr =
+formatNixTemplateDifferences subjectNixPath templateBaselineNixPath subjectNixExpr templateBaselineExpr =
   let renderedPackageDefaultNix = renderNixExpr subjectNixExpr
-      renderedTemplateDefaultNix = renderNixExpr templateDefaultNixExpr
+      renderedTemplateDefaultNix = renderNixExpr templateBaselineExpr
    in if renderedPackageDefaultNix == renderedTemplateDefaultNix
         then []
         else
           let packageLetBindingMap = fromMaybe Map.empty (extractOutermostLetBindings subjectNixExpr)
-              templateLetBindingMap = fromMaybe Map.empty (extractOutermostLetBindings templateDefaultNixExpr)
+              templateLetBindingMap = fromMaybe Map.empty (extractOutermostLetBindings templateBaselineExpr)
               packagePrimaryBindingMap = fromMaybe Map.empty (extractPrimaryNixBindings subjectNixExpr)
-              templatePrimaryBindingMap = fromMaybe Map.empty (extractPrimaryNixBindings templateDefaultNixExpr)
+              templatePrimaryBindingMap = fromMaybe Map.empty (extractPrimaryNixBindings templateBaselineExpr)
               letBindingDifferenceLines =
                 if Map.null packageLetBindingMap && Map.null templateLetBindingMap
                   then []
@@ -2275,7 +2275,7 @@ formatNixTemplateDifferences subjectNixPath templateDefaultNixPath subjectNixExp
                   else differenceDetailLines
            in [ subjectNixPath
                   ++ ": differs from template "
-                  ++ templateDefaultNixPath
+                  ++ templateBaselineNixPath
                   ++ " (excluding dependency keys)\n"
                   ++ intercalate "\n" renderedDifferenceDetailLines
               ]
