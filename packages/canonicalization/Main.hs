@@ -2492,7 +2492,7 @@ templateInferenceDebugTests =
       TestCase $ do
         inferred <- inferTemplateName "test" pythonPyPINixFixture
         assertEqual
-          "Infers the PyPI Python template."
+          "Infers the Python PyPI template."
           (Just "python_pypi_template")
           inferred,
       TestCase $ do
@@ -2583,14 +2583,14 @@ checkTemplateDebugTests =
           validationIssues,
       TestCase $ do
         legacyPythonTemplateParseResult <- parseNixExprFromText (T.pack legacyPythonTemplateNixFixture)
-        templatePythonParseResult <- parseNixExprFromText pythonTemplateBaselineNixSource
-        case (legacyPythonTemplateParseResult, templatePythonParseResult) of
-          (Right legacyPythonTemplateExpr, Right templatePythonExpr) ->
+        baselinePythonParseResult <- parseNixExprFromText pythonTemplateBaselineNixSource
+        case (legacyPythonTemplateParseResult, baselinePythonParseResult) of
+          (Right legacyPythonTemplateExpr, Right baselinePythonExpr) ->
             assertBool
               "Reports legacy Python template let-binding differences explicitly."
               ( any
                   ("unexpected let key: pyPkgs" `isInfixOf`)
-                  (formatTemplateDifferences "test" "packages/python_template/default.nix" legacyPythonTemplateExpr templatePythonExpr)
+                  (formatTemplateDifferences "test" "packages/python_template/default.nix" legacyPythonTemplateExpr baselinePythonExpr)
               )
           (Left parseError, _) -> assertFailure ("Failed to parse legacy Python template fixture: " ++ parseError)
           (_, Left parseError) -> assertFailure ("Failed to parse Python template baseline fixture: " ++ parseError),
