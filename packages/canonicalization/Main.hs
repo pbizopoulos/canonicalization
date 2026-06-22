@@ -913,11 +913,11 @@ renderRepositoryCheckScaffoldFilesWith canonicalizationSettings packageKind pack
   catMaybes
     [ do
         checkName <- repositoryCheckNameForKind packageKind packageName requestedCheckKind
-        checkDefaultNixSource <- repositoryCheckBaselineSourceWith canonicalizationSettings packageKind requestedCheckKind
+        checkTemplateSource <- repositoryCheckBaselineSourceWith canonicalizationSettings packageKind requestedCheckKind
         pure
           ( RepositoryScaffoldFile
               ("checks" </> checkName </> "default.nix")
-              checkDefaultNixSource
+              checkTemplateSource
           )
     | requestedCheckKind <- Set.toList requestedCheckKinds
     ]
@@ -1498,12 +1498,12 @@ checkPackageWith canonicalizationSettings allRepositoryStructureIssues packageNa
       }
 checkTemplateWith :: CanonicalizationSettings -> FilePath -> IO [String]
 checkTemplateWith canonicalizationSettings checkName = do
-  let checkDefaultNixPath = "checks" </> checkName </> "default.nix"
-  maybeCheckDefaultNixText <- readTextFileIfExists checkDefaultNixPath
-  case maybeCheckDefaultNixText of
+  let checkTemplatePath = "checks" </> checkName </> "default.nix"
+  maybeCheckTemplateText <- readTextFileIfExists checkTemplatePath
+  case maybeCheckTemplateText of
     Nothing -> pure []
-    Just checkDefaultNixText -> do
-      inferredCheckTemplateName <- inferCheckTemplateName checkName (T.unpack checkDefaultNixText)
+    Just checkTemplateText -> do
+      inferredCheckTemplateName <- inferCheckTemplateName checkName (T.unpack checkTemplateText)
       case inferredCheckTemplateName of
         Nothing ->
           pure
@@ -1519,7 +1519,7 @@ checkTemplateWith canonicalizationSettings checkName = do
               validateCheckTemplateWith
                 canonicalizationSettings
                 checkName
-                checkDefaultNixPath
+                checkTemplatePath
                 matchedCheckTemplateName
                 checkTemplateSpec
 detectPackageKindForPackage :: FilePath -> IO PackageKind
@@ -2117,12 +2117,12 @@ validateCheckTemplateWith _canonicalizationSettings checkName checkTemplatePath 
       validateCPackageVmCheck checkName checkTemplatePath
 validateCPackageVmCheck :: FilePath -> FilePath -> IO [String]
 validateCPackageVmCheck checkName checkTemplatePath = do
-  maybeCheckDefaultNixText <- readTextFileIfExists checkTemplatePath
-  case maybeCheckDefaultNixText of
+  maybeCheckTemplateText <- readTextFileIfExists checkTemplatePath
+  case maybeCheckTemplateText of
     Nothing -> pure []
-    Just checkDefaultNixText -> do
+    Just checkTemplateText -> do
       packageKind <- detectPackageKindForPackage checkName
-      pure (validateCPackageVmCheckSource packageKind checkName checkTemplatePath (T.unpack checkDefaultNixText))
+      pure (validateCPackageVmCheckSource packageKind checkName checkTemplatePath (T.unpack checkTemplateText))
 validateCPackageVmCheckSource :: PackageKind -> FilePath -> FilePath -> String -> [String]
 validateCPackageVmCheckSource packageKind checkName checkTemplatePath checkTemplateSource =
   let hasCanonicalNameBinding =
