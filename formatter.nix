@@ -107,6 +107,8 @@ let
             "no"
             "wrap"
             "0"
+            "write-back"
+            "yes"
           ];
           priority = 0;
         };
