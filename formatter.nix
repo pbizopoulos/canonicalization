@@ -101,10 +101,12 @@ let
             "*.html"
           ];
           options = [
-            "wrap"
-            "0"
+            "quiet"
+            "yes"
             "tidy-mark"
             "no"
+            "wrap"
+            "0"
           ];
           priority = 0;
         };
