@@ -43,6 +43,7 @@ let
       mdsh.enable = true;
       nixfmt.enable = true;
       ormolu.enable = true;
+      oxfmt.enable = true;
       ruff-check = {
         enable = true;
         extendSelect = [
@@ -101,13 +102,13 @@ let
             "*.html"
           ];
           options = [
-            "quiet"
+            "--quiet"
             "yes"
-            "tidy-mark"
+            "--tidy-mark"
             "no"
-            "wrap"
+            "--wrap"
             "0"
-            "write-back"
+            "--write-back"
             "yes"
           ];
           priority = 0;
@@ -129,6 +130,17 @@ let
           includes = [
             "*.nix"
           ];
+        };
+        oxlint = {
+          command = pkgs.oxlint;
+          includes = [
+            "*.js"
+          ];
+          options = [
+            "-A"
+            "all"
+          ];
+          priority = 1;
         };
         remove-empty-lines = {
           command = inputs.self.packages.${pkgs.stdenv.system}.remove-empty-lines;
