@@ -30,6 +30,7 @@ let
       biome = {
         enable = true;
         formatUnsafe = true;
+        priority = 1;
       };
       cabal-fmt.enable = true;
       clang-format.enable = true;
@@ -93,6 +94,19 @@ let
           includes = [
             "*.rs"
           ];
+        };
+        html-tidy = {
+          command = pkgs.html-tidy;
+          includes = [
+            "*.html"
+          ];
+          options = [
+            "wrap"
+            "0"
+            "tidy-mark"
+            "no"
+          ];
+          priority = 0;
         };
         mypy = {
           command = pkgs.mypy;
