@@ -1,0 +1,32 @@
+[[bin]]
+name = "remove-new-lines"
+path = "src/main.rs"
+
+[dependencies]
+ignore = "0.4"
+anyhow = "1.0"
+content_inspector = "0.2"
+tempfile = "3.8"
+
+[dev-dependencies]
+quickcheck = "1"
+
+[lints.clippy]
+all = {level = "deny", priority = -1}
+pedantic = {level = "deny", priority = -1}
+nursery = {level = "deny", priority = -1}
+cargo = {level = "deny", priority = -1}
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[package]
+name = "remove-new-lines"
+version = "0.1.0"
+edition = "2021"
+description = "A CLI tool to remove new lines from text files."
+license = "MIT"
+repository = "https://github.com/pbizopoulos/canonicalization"
+readme = "../../README"
+keywords = ["cleanup", "formatter"]
+categories = ["development-tools"]

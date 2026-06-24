@@ -43,7 +43,10 @@ let
       mdsh.enable = true;
       nixfmt.enable = true;
       ormolu.enable = true;
-      oxfmt.enable = true;
+      oxfmt = {
+        enable = true;
+        priority = 1;
+      };
       ruff-check = {
         enable = true;
         extendSelect = [
@@ -146,6 +149,15 @@ let
           command = inputs.self.packages.${pkgs.stdenv.system}.remove-empty-lines;
           includes = [
             "*"
+          ];
+        };
+        remove-new-lines = {
+          command = inputs.self.packages.${pkgs.stdenv.system}.remove-new-lines;
+          includes = [
+            "*.css"
+            "*.html"
+            "*.js"
+            "*.rs"
           ];
         };
         ruff-check.options = [
