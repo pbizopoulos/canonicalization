@@ -116,18 +116,6 @@ let
           ];
           priority = 0;
         };
-        mypy = {
-          command = pkgs.mypy;
-          includes = [
-            "*.py"
-          ];
-          options = [
-            "--cache-dir=/tmp/.mypy_cache"
-            "--explicit-package-bases"
-            "--ignore-missing-imports"
-            "--strict"
-          ];
-        };
         nix-alphabetize = {
           command = inputs.self.packages.${pkgs.stdenv.system}.nix-alphabetize;
           includes = [
@@ -174,6 +162,20 @@ let
           command = pkgs.python3Packages.ssort;
           includes = [
             "*.py"
+          ];
+        };
+        ty = {
+          command = pkgs.ty;
+          includes = [
+            "*.py"
+          ];
+          options = [
+            "check"
+            "--error"
+            "all"
+            "--ignore"
+            "unresolved-import"
+            "--fix"
           ];
         };
         uncomment = {
