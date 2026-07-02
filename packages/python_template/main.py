@@ -105,7 +105,7 @@ def test_main_prints_message() -> None:
         raise AssertionError(msg)
 
 
-@given(st.text())
+@given(st.text())  # type: ignore[untyped-decorator]
 def test_property_canonicalization_is_idempotent(label: str) -> None:
     """Canonicalizing twice should not change the result."""
     canonical = canonicalize_label(label)
@@ -114,7 +114,7 @@ def test_property_canonicalization_is_idempotent(label: str) -> None:
         raise AssertionError(msg)
 
 
-@given(st.text())
+@given(st.text())  # type: ignore[untyped-decorator]
 def test_property_canonicalization_uses_restricted_character_set(label: str) -> None:
     """Canonical labels should only contain lowercase ASCII, digits, and hyphens."""
     canonical = canonicalize_label(label)
@@ -125,7 +125,7 @@ def test_property_canonicalization_uses_restricted_character_set(label: str) -> 
         )
 
 
-@given(st.lists(st.text(), max_size=25))
+@given(st.lists(st.text(), max_size=25))  # type: ignore[untyped-decorator]
 def test_property_unique_canonical_labels_is_idempotent(labels: list[str]) -> None:
     """Deduplicating canonical labels twice should be stable."""
     canonical_labels = unique_canonical_labels(labels)

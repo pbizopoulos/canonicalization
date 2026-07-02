@@ -176,7 +176,7 @@ def test_main_generates_workspace_artifacts_in_current_directory() -> None:
             raise AssertionError(msg)
 
 
-@given(
+@given(  # type: ignore[untyped-decorator]
     st.lists(
         st.floats(
             min_value=-1_000,
@@ -188,7 +188,7 @@ def test_main_generates_workspace_artifacts_in_current_directory() -> None:
         max_size=25,
     ),
 )
-@settings(deadline=None)
+@settings(deadline=None)  # type: ignore[untyped-decorator]
 def test_property_summary_is_permutation_invariant(samples: list[float]) -> None:
     """Aggregate statistics should not depend on sample ordering."""
     forward = summarize_samples(samples)
@@ -209,7 +209,7 @@ def test_property_summary_is_permutation_invariant(samples: list[float]) -> None
             raise AssertionError(msg)
 
 
-@given(st.text())
+@given(st.text())  # type: ignore[untyped-decorator]
 def test_property_latex_escape_prefixes_special_characters(text: str) -> None:
     """Escaped output should prefix special characters that need escaping."""
     escaped = latex_escape(text)
@@ -219,7 +219,7 @@ def test_property_latex_escape_prefixes_special_characters(text: str) -> None:
             raise AssertionError(msg)
 
 
-@given(
+@given(  # type: ignore[untyped-decorator]
     st.lists(
         st.text(
             alphabet="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-",
@@ -230,7 +230,7 @@ def test_property_latex_escape_prefixes_special_characters(text: str) -> None:
         max_size=5,
     ),
 )
-@settings(deadline=None, max_examples=25)
+@settings(deadline=None, max_examples=25)  # type: ignore[untyped-decorator]
 def test_property_workspace_artifacts_created_for_nested_paths(
     path_segments: list[str],
 ) -> None:
