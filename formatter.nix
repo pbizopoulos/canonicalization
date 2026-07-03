@@ -176,6 +176,9 @@ let
             "*.py"
           ];
         };
+        texfmt.options = [
+          "--nowrap"
+        ];
         uncomment = {
           command = inputs.self.packages.${pkgs.stdenv.system}.uncomment;
           includes = [
