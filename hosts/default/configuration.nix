@@ -11,10 +11,7 @@ let
   ];
 in
 {
-  boot = {
-    initrd.systemd.enable = true;
-    loader.systemd-boot.enable = true;
-  };
+  boot.loader.systemd-boot.enable = true;
   disko.devices = {
     disk.main = {
       content = {
@@ -61,7 +58,6 @@ in
       ];
     };
   };
-  environment.systemPackages = [ ];
   fileSystems."/persistent".neededForBoot = true;
   imports = [
     inputs.agenix.nixosModules.age

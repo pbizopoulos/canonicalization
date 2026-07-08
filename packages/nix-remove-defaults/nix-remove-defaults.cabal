@@ -1,0 +1,24 @@
+name:          nix-remove-defaults
+version:       0.0.0
+synopsis:      Remove redundant NixOS option assignments.
+description:
+  Remove literal NixOS option assignments that equal their evaluated defaults.
+cabal-version: >=1.10
+build-type:    Simple
+executable nix-remove-defaults
+  main-is:       Main.hs
+  build-depends:
+      aeson
+    , base
+    , bytestring
+    , containers
+    , data-fix
+    , filepath
+    , hnix
+    , HUnit
+    , prettyprinter
+    , process
+    , scientific
+    , temporary
+    , text
+  ghc-options:   -O2 -Weverything -Werror -threaded
