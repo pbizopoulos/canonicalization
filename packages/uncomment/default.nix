@@ -2,6 +2,9 @@
   pkgs ? import <nixpkgs> { },
 }:
 pkgs.stdenv.mkDerivation rec {
+  buildInputs = [
+    pkgs.stdenv.cc.cc.lib
+  ];
   doInstallCheck = pkgs.stdenv.isLinux;
   installCheckPhase = ''
     runHook preInstallCheck
@@ -25,9 +28,9 @@ pkgs.stdenv.mkDerivation rec {
   pname = baseNameOf ./.;
   sourceRoot = ".";
   src = pkgs.fetchurl {
-    sha256 = "eoMb0G0wCLOjIQczGGzUjpAtwfuv7DLMdS+4iZhoAlc=";
+    sha256 = "ugzQGUSz6p8InZgcriAulNVGGBuInAzFEDshSPAowww=";
     url = "https://github.com/Goldziher/${pname}/releases/download/v${version}/${pname}-x86_64-unknown-linux-gnu.tar.gz";
   };
   strictDeps = true;
-  version = "3.0.3";
+  version = "3.1.0";
 }
