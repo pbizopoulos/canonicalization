@@ -56,10 +56,7 @@ let
       ruff-format.enable = true;
       rustfmt.enable = true;
       shellcheck.enable = true;
-      shfmt = {
-        enable = true;
-        simplify = true;
-      };
+      shfmt.enable = true;
       statix.enable = true;
       taplo.enable = true;
       texfmt.enable = true;
@@ -114,7 +111,6 @@ let
             "--write-back"
             "yes"
           ];
-          priority = 0;
         };
         mypy = {
           command = pkgs.mypy;

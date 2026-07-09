@@ -9,6 +9,7 @@ let
     pkgs.haskellPackages.bytestring
     pkgs.haskellPackages.containers
     pkgs.haskellPackages.data-fix
+    pkgs.haskellPackages.directory
     pkgs.haskellPackages.filepath
     pkgs.haskellPackages.hnix
     pkgs.haskellPackages.prettyprinter

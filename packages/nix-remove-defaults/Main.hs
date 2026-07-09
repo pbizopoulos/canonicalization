@@ -5,7 +5,7 @@
 {-# LANGUAGE Trustworthy #-}
 {-# OPTIONS_GHC -Wno-all-missed-specialisations -Wno-missed-specialisations -Wno-unsafe #-}
 module Main (main, runPackageTests) where
-import Control.Monad (unless, when)
+import Control.Monad (mapM_, unless, when)
 import Data.Aeson (Value (Array, Bool, Null, Number, Object, String), eitherDecodeStrict', encode)
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
@@ -15,7 +15,7 @@ import Data.Fix (Fix (Fix))
 import Data.Foldable (toList)
 import Data.Functor.Compose (Compose (Compose))
 import Data.Kind (Type)
-import Data.List (sortBy)
+import Data.List (isPrefixOf, isSuffixOf, nub, sortBy)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -29,7 +29,7 @@ import Nix.Atoms (NAtom (NBool, NFloat, NInt, NNull))
 import Nix.Expr.Types
   ( Antiquoted (Plain),
     Binding (NamedVar),
-    NExprF (NAbs, NConstant, NLet, NList, NSet, NStr),
+    NExprF (NAbs, NApp, NConstant, NLet, NList, NSelect, NSet, NStr, NSym),
     NKeyName (DynamicKey, StaticKey),
     NString (DoubleQuoted, Indented),
     Recursivity (NonRecursive),
@@ -41,9 +41,10 @@ import Nix.Pretty (prettyNix)
 import Nix.Utils (Path (Path))
 import Prettyprinter (defaultLayoutOptions, layoutPretty)
 import Prettyprinter.Render.Text (renderStrict)
+import System.Directory (doesDirectoryExist, doesFileExist, listDirectory, makeAbsolute)
 import System.Environment (getArgs)
 import System.Exit (ExitCode (ExitSuccess), exitFailure)
-import System.FilePath (splitDirectories)
+import System.FilePath (normalise, pathSeparator, takeDirectory, takeExtension, (</>))
 import System.IO (hClose)
 import System.IO.Temp (withSystemTempFile)
 import System.Process (readProcessWithExitCode)
@@ -68,12 +69,14 @@ import Prelude
     String,
     and,
     any,
+    concat,
     concatMap,
     fmap,
     fst,
     map,
     mapM,
     null,
+    otherwise,
     pure,
     putStrLn,
     show,
@@ -84,6 +87,8 @@ import Prelude
     (.),
     (<$>),
     (==),
+    (>>=),
+    (||),
   )
 type Literal :: Type
 data Literal
@@ -99,32 +104,99 @@ type OptionPath :: Type
 type OptionPath = [Text]
 type DefaultResolver :: Type
 type DefaultResolver = OptionPath -> IO (Maybe Literal)
+type ParsedNixFile :: Type
+type ParsedNixFile = (FilePath, NExprLoc)
 main :: IO ()
 main = do
   args <- getArgs
   case args of
-    filePaths@(_ : _) -> do
-      successResults <- mapM processFileWithInferredConfiguration filePaths
-      unless (and successResults) exitFailure
+    [repositoryPath] -> do
+      succeeded <- processRepositoryArgument repositoryPath
+      unless succeeded exitFailure
     _ -> do
-      putStrLn "Usage: nix-remove-defaults <file>..."
+      putStrLn "Usage: nix-remove-defaults <flake-or-repository-directory>"
       exitFailure
-processFileWithInferredConfiguration :: FilePath -> IO Bool
-processFileWithInferredConfiguration filePath =
-  case configurationForFile filePath of
-    Just configuration -> processFile (resolveDefaultWithNix configuration) filePath
-    Nothing -> do
-      putStrLn ("Cannot infer a NixOS configuration from " ++ filePath ++ "; expected a path under hosts/<host>/")
+processRepositoryArgument :: FilePath -> IO Bool
+processRepositoryArgument repositoryPath = do
+  repositoryRootResult <- repositoryRootFromArgument repositoryPath
+  case repositoryRootResult of
+    Right repositoryRoot -> processRepository repositoryRoot
+    Left errorMessage -> do
+      putStrLn errorMessage
       pure False
-configurationForFile :: FilePath -> Maybe String
-configurationForFile = fmap configurationForHost . hostNameFromPath . splitDirectories
-configurationForHost :: FilePath -> String
-configurationForHost hostName =
-  ".#nixosConfigurations." ++ unpack (renderOptionKey (pack hostName))
-hostNameFromPath :: [FilePath] -> Maybe FilePath
-hostNameFromPath ("hosts" : hostName : _) = Just hostName
-hostNameFromPath (_ : remainingParts) = hostNameFromPath remainingParts
-hostNameFromPath [] = Nothing
+repositoryRootFromArgument :: FilePath -> IO (Either String FilePath)
+repositoryRootFromArgument repositoryPath = do
+  absolutePath <- makeAbsolute repositoryPath
+  isFile <- doesFileExist absolutePath
+  isDirectory <- doesDirectoryExist absolutePath
+  if isFile
+    then pure (Left ("Expected a flake/repository directory, got a file: " ++ repositoryPath))
+    else
+      if isDirectory
+        then do
+          repositoryRoot <- findFlakeRootFrom absolutePath
+          case repositoryRoot of
+            Just rootPath -> pure (Right rootPath)
+            Nothing -> pure (Left ("Cannot find flake.nix in " ++ repositoryPath ++ " or its parents"))
+        else pure (Left ("No such flake/repository directory: " ++ repositoryPath))
+processRepository :: FilePath -> IO Bool
+processRepository repositoryRoot = do
+  flakeSourcePath <- flakeSourcePathForRepository repositoryRoot
+  nixosConfigurations <- nixosConfigurationsForRepository repositoryRoot
+  nixFiles <- findNixFiles repositoryRoot
+  parseResults <- mapM parseRepositoryFile nixFiles
+  let parseErrors = repositoryParseErrors parseResults
+      parsedFiles = repositoryParsedFiles parseResults
+  if null parseErrors
+    then do
+      let nixosCandidates = concatMap (collectCandidates . snd) parsedFiles
+          treefmtCandidates = concatMap (collectTreefmtCandidates . snd) parsedFiles
+      nixosDefinitionFiles <- resolveNixosDefinitionFiles repositoryRoot nixosConfigurations (uniqueCandidatePaths nixosCandidates)
+      treefmtDefaults <- resolveTreefmtDefaults repositoryRoot (uniqueCandidatePaths treefmtCandidates)
+      successResults <- mapM (processParsedRepositoryFile repositoryRoot flakeSourcePath nixosDefinitionFiles treefmtDefaults) parsedFiles
+      pure (and successResults)
+    else do
+      mapM_ putStrLn parseErrors
+      pure False
+findFlakeRootFrom :: FilePath -> IO (Maybe FilePath)
+findFlakeRootFrom directoryPath = do
+  hasFlake <- doesFileExist (directoryPath </> "flake.nix")
+  if hasFlake
+    then pure (Just directoryPath)
+    else
+      let parentDirectory = takeDirectory directoryPath
+       in if parentDirectory == directoryPath
+            then pure Nothing
+            else findFlakeRootFrom parentDirectory
+findNixFiles :: FilePath -> IO [FilePath]
+findNixFiles directoryPath = do
+  entries <- listDirectory directoryPath
+  nestedFiles <-
+    mapM
+      ( \entryName -> do
+          let entryPath = directoryPath </> entryName
+          entryIsDirectory <- doesDirectoryExist entryPath
+          if entryIsDirectory
+            then
+              if shouldSkipDirectory entryName
+                then pure []
+                else findNixFiles entryPath
+            else
+              pure
+                [ entryPath
+                | takeExtension entryName == ".nix"
+                ]
+      )
+      entries
+  pure (concat nestedFiles)
+shouldSkipDirectory :: FilePath -> Bool
+shouldSkipDirectory directoryName =
+  directoryName == ".git"
+    || directoryName == ".agents"
+    || directoryName == ".codex"
+    || directoryName == "result"
+    || directoryName == "tmp"
+    || directoryName == "prm"
 processFile :: DefaultResolver -> FilePath -> IO Bool
 processFile resolveDefault filePath = do
   parseResult <- parseNixFileLoc (Path filePath)
@@ -136,6 +208,32 @@ processFile resolveDefault filePath = do
       (changed, transformed) <- removeDefaultAssignments resolveDefault expr
       when changed $ TIO.writeFile filePath (renderExpression transformed)
       pure True
+parseRepositoryFile :: FilePath -> IO (Either String ParsedNixFile)
+parseRepositoryFile filePath = do
+  parseResult <- parseNixFileLoc (Path filePath)
+  case parseResult of
+    Left parseError -> do
+      pure (Left ("Error parsing " ++ filePath ++ ": " ++ show parseError))
+    Right expr -> pure (Right (filePath, expr))
+repositoryParseErrors :: [Either String ParsedNixFile] -> [String]
+repositoryParseErrors [] = []
+repositoryParseErrors (Left parseError : remainingResults) = parseError : repositoryParseErrors remainingResults
+repositoryParseErrors (Right _ : remainingResults) = repositoryParseErrors remainingResults
+repositoryParsedFiles :: [Either String ParsedNixFile] -> [ParsedNixFile]
+repositoryParsedFiles [] = []
+repositoryParsedFiles (Left _ : remainingResults) = repositoryParsedFiles remainingResults
+repositoryParsedFiles (Right parsedFile : remainingResults) = parsedFile : repositoryParsedFiles remainingResults
+processParsedRepositoryFile :: FilePath -> FilePath -> Map OptionPath [FilePath] -> Map OptionPath Literal -> ParsedNixFile -> IO Bool
+processParsedRepositoryFile repositoryRoot flakeSourcePath nixosDefinitionFiles treefmtDefaults (filePath, expr) = do
+  let nixosRemovals = nixosRemovalsForFile repositoryRoot flakeSourcePath filePath nixosDefinitionFiles (collectCandidates expr)
+      treefmtRemovals = removalsFromDefaults treefmtDefaults (collectTreefmtCandidates expr)
+      changed = any snd (Map.toList nixosRemovals) || any snd (Map.toList treefmtRemovals)
+      transformed =
+        rewriteTreefmtEvalModuleArguments
+          treefmtRemovals
+          (rewriteModuleExpression nixosRemovals expr)
+  when changed $ TIO.writeFile filePath (renderExpression transformed)
+  pure True
 renderExpression :: NExprLoc -> Text
 renderExpression =
   renderStrict . layoutPretty defaultLayoutOptions . prettyNix . stripAnnotation
@@ -150,8 +248,34 @@ removeDefaultAssignments resolveDefault expr = do
       )
       candidates
   pure (any snd resolutions, rewriteModuleExpression (Map.fromList resolutions) expr)
+resolveLiteralRemovals :: DefaultResolver -> [(OptionPath, Literal)] -> IO (Map OptionPath Bool)
+resolveLiteralRemovals resolveDefault candidates = do
+  resolutions <-
+    mapM
+      ( \(optionPath, literalValue) -> do
+          defaultValue <- resolveDefault optionPath
+          pure (optionPath, defaultValue == Just literalValue)
+      )
+      candidates
+  pure (Map.fromList resolutions)
+removalsFromDefaults :: Map OptionPath Literal -> [(OptionPath, Literal)] -> Map OptionPath Bool
+removalsFromDefaults defaults candidates =
+  Map.fromList
+    [ (optionPath, Map.lookup optionPath defaults == Just literalValue)
+    | (optionPath, literalValue) <- candidates
+    ]
+uniqueCandidatePaths :: [(OptionPath, Literal)] -> [OptionPath]
+uniqueCandidatePaths candidates = nub (map fst candidates)
 collectCandidates :: NExprLoc -> [(OptionPath, Literal)]
 collectCandidates = collectModuleExpression []
+collectTreefmtCandidates :: NExprLoc -> [(OptionPath, Literal)]
+collectTreefmtCandidates (Fix (Compose (AnnUnit _ exprF))) =
+  let nestedCandidates = concatMap collectTreefmtCandidates exprF
+   in case exprF of
+        NApp function argument
+          | isTreefmtEvalModuleFunction function ->
+              collectCandidates argument ++ nestedCandidates
+        _ -> nestedCandidates
 collectModuleExpression :: OptionPath -> NExprLoc -> [(OptionPath, Literal)]
 collectModuleExpression prefix expr@(Fix (Compose (AnnUnit _ exprF))) =
   case exprF of
@@ -208,6 +332,33 @@ rewriteModuleExpression removals = goModule []
     rewriteNested prefix (Fix (Compose (AnnUnit exprSpan (NSet rec bindings)))) =
       Fix (Compose (AnnUnit exprSpan (NSet rec (rewriteBindings prefix bindings))))
     rewriteNested _ valueExpr = valueExpr
+rewriteTreefmtEvalModuleArguments :: Map OptionPath Bool -> NExprLoc -> NExprLoc
+rewriteTreefmtEvalModuleArguments removals = go
+  where
+    go :: NExprLoc -> NExprLoc
+    go (Fix (Compose (AnnUnit exprSpan exprF))) =
+      Fix . Compose . AnnUnit exprSpan $ case exprF of
+        NApp function argument
+          | isTreefmtEvalModuleFunction function ->
+              NApp (go function) (rewriteModuleExpression removals argument)
+        otherExpr -> fmap go otherExpr
+isTreefmtEvalModuleFunction :: NExprLoc -> Bool
+isTreefmtEvalModuleFunction expr@(Fix (Compose (AnnUnit _ exprF))) =
+  case exprF of
+    NApp function _ -> isTreefmtEvalModuleFunction function
+    _ ->
+      case selectorPath expr of
+        Just path -> ["treefmt-nix", "lib", "evalModule"] `isSuffixOf` path
+        Nothing -> False
+selectorPath :: NExprLoc -> Maybe [Text]
+selectorPath (Fix (Compose (AnnUnit _ exprF))) =
+  case exprF of
+    NSym (VarName keyText) -> Just [keyText]
+    NSelect _ base keyPath -> do
+      basePath <- selectorPath base
+      suffix <- keyPathTexts keyPath
+      pure (basePath ++ suffix)
+    _ -> Nothing
 effectivePath :: OptionPath -> OptionPath -> OptionPath
 effectivePath [] ("config" : rest) = rest
 effectivePath prefix suffix = prefix ++ suffix
@@ -253,21 +404,163 @@ wasNonEmptySet _ = False
 notNull :: [a] -> Bool
 notNull [] = False
 notNull (_ : _) = True
-resolveDefaultWithNix :: String -> DefaultResolver
-resolveDefaultWithNix configuration optionPath = do
-  let installable = configuration ++ ".options." ++ unpack (renderOptionPath optionPath) ++ ".default"
+flakeSourcePathForRepository :: FilePath -> IO FilePath
+flakeSourcePathForRepository repositoryRoot = do
+  maybeSourcePath <- readStringFromNix ["eval", "--impure", "--json", "--expr", flakeSourcePathExpression repositoryRoot]
+  case maybeSourcePath of
+    Just sourcePath -> pure sourcePath
+    Nothing -> pure repositoryRoot
+nixosConfigurationsForRepository :: FilePath -> IO [String]
+nixosConfigurationsForRepository repositoryRoot = do
+  maybeConfigurationNames <- readStringListFromNix ["eval", "--impure", "--json", "--expr", nixosConfigurationsExpression repositoryRoot]
+  case maybeConfigurationNames of
+    Just configurationNames -> pure configurationNames
+    Nothing -> pure []
+resolveNixosDefinitionFiles :: FilePath -> [String] -> [OptionPath] -> IO (Map OptionPath [FilePath])
+resolveNixosDefinitionFiles repositoryRoot nixosConfigurations optionPaths = do
+  maybeDefinitionFiles <- readNixosDefinitionFilesFromNix ["eval", "--impure", "--json", "--expr", nixosDefaultDefinitionFilesExpression repositoryRoot nixosConfigurations optionPaths]
+  case maybeDefinitionFiles of
+    Just definitionFiles -> pure (Map.fromList definitionFiles)
+    Nothing -> pure Map.empty
+nixosRemovalsForFile :: FilePath -> FilePath -> FilePath -> Map OptionPath [FilePath] -> [(OptionPath, Literal)] -> Map OptionPath Bool
+nixosRemovalsForFile repositoryRoot flakeSourcePath localFilePath nixosDefinitionFiles candidates =
+  Map.fromList
+    [ (optionPath, any (sourceLocationMatches repositoryRoot flakeSourcePath localFilePath) (Map.findWithDefault [] optionPath nixosDefinitionFiles))
+    | optionPath <- uniqueCandidatePaths candidates
+    ]
+resolveTreefmtDefaults :: FilePath -> [OptionPath] -> IO (Map OptionPath Literal)
+resolveTreefmtDefaults repositoryRoot optionPaths = do
+  maybeDefaults <- readTreefmtDefaultsFromNix ["eval", "--impure", "--json", "--expr", treefmtDefaultsExpression repositoryRoot optionPaths]
+  case maybeDefaults of
+    Just defaults -> pure (Map.fromList defaults)
+    Nothing -> pure Map.empty
+flakeSourcePathExpression :: FilePath -> String
+flakeSourcePathExpression repositoryRoot =
+  "(builtins.getFlake (toString (/. + " ++ nixString repositoryRoot ++ "))).outPath"
+nixosConfigurationsExpression :: FilePath -> String
+nixosConfigurationsExpression repositoryRoot =
+  "let flake = builtins.getFlake (toString (/. + "
+    ++ nixString repositoryRoot
+    ++ ")); in builtins.attrNames (flake.nixosConfigurations or {})"
+nixosDefaultDefinitionFilesExpression :: FilePath -> [String] -> [OptionPath] -> String
+nixosDefaultDefinitionFilesExpression repositoryRoot configurationNames optionPaths =
+  "let flake = builtins.getFlake (toString (/. + "
+    ++ nixString repositoryRoot
+    ++ ")); configurations = flake.nixosConfigurations or {}; configurationNames = "
+    ++ renderStringList configurationNames
+    ++ "; optionPaths = "
+    ++ renderOptionPathList optionPaths
+    ++ "; optionAt = options: path: builtins.foldl' (value: key: value.${key}) options path; filesFor = configurationName: path: let evaluated = builtins.getAttr configurationName configurations; option = optionAt evaluated.options path; raw = if option ? default then builtins.map (definition: definition.file) (builtins.filter (definition: let comparison = builtins.tryEval (definition.value == option.default); in comparison.success && comparison.value) (option.definitionsWithLocations or [])) else []; attempted = builtins.tryEval (builtins.deepSeq raw raw); in if attempted.success then attempted.value else []; pathFiles = path: { inherit path; files = builtins.concatMap (configurationName: filesFor configurationName path) configurationNames; }; in builtins.map pathFiles optionPaths"
+treefmtDefaultsExpression :: FilePath -> [OptionPath] -> String
+treefmtDefaultsExpression repositoryRoot optionPaths =
+  "let flake = builtins.getFlake (toString (/. + "
+    ++ nixString repositoryRoot
+    ++ ")); pkgs = import flake.inputs.nixpkgs { system = builtins.currentSystem; }; evaluated = flake.inputs.treefmt-nix.lib.evalModule pkgs {}; optionPaths = "
+    ++ renderOptionPathList optionPaths
+    ++ "; optionAt = options: path: builtins.foldl' (value: key: value.${key}) options path; defaultFor = path: let raw = (optionAt evaluated.options path).default; attempted = builtins.tryEval (builtins.deepSeq raw raw); in if attempted.success then [{ inherit path; default = attempted.value; }] else []; in builtins.concatMap defaultFor optionPaths"
+renderStringList :: [String] -> String
+renderStringList values =
+  "[ " ++ intercalateStrings " " (map nixString values) ++ " ]"
+renderOptionPathList :: [OptionPath] -> String
+renderOptionPathList optionPaths =
+  "[ " ++ intercalateStrings " " (map renderOptionPathAsList optionPaths) ++ " ]"
+renderOptionPathAsList :: OptionPath -> String
+renderOptionPathAsList optionPath =
+  "[ " ++ intercalateStrings " " (map (nixString . unpack) optionPath) ++ " ]"
+intercalateStrings :: String -> [String] -> String
+intercalateStrings _ [] = ""
+intercalateStrings _ [value] = value
+intercalateStrings separator (value : remainingValues) = value ++ separator ++ intercalateStrings separator remainingValues
+sourceLocationMatches :: FilePath -> FilePath -> FilePath -> FilePath -> Bool
+sourceLocationMatches repositoryRoot flakeSourcePath localFilePath sourceFilePath =
+  case stripPathPrefix flakeSourcePath sourceFilePath of
+    Just relativeSourcePath ->
+      normalise (repositoryRoot </> relativeSourcePath) == normalise localFilePath
+    Nothing ->
+      case stripStoreSourcePrefix sourceFilePath of
+        Just relativeSourcePath ->
+          normalise (repositoryRoot </> relativeSourcePath) == normalise localFilePath
+        Nothing -> normalise sourceFilePath == normalise localFilePath
+stripPathPrefix :: FilePath -> FilePath -> Maybe FilePath
+stripPathPrefix prefix path
+  | prefix == path = Just ""
+  | prefixWithSeparator `isPrefixOf` path = Just (dropPrefix prefixWithSeparator path)
+  | otherwise = Nothing
+  where
+    prefixWithSeparator = prefix ++ [pathSeparator]
+stripStoreSourcePrefix :: FilePath -> Maybe FilePath
+stripStoreSourcePrefix path
+  | storeSourceMarker `isPrefixOf` path = Just (dropPrefix storeSourceMarker path)
+  | otherwise =
+      case path of
+        _ : remainingPath -> stripStoreSourcePrefix remainingPath
+        [] -> Nothing
+  where
+    storeSourceMarker = "-source" ++ [pathSeparator]
+dropPrefix :: String -> String -> String
+dropPrefix [] path = path
+dropPrefix (_ : remainingPrefix) (_ : remainingPath) = dropPrefix remainingPrefix remainingPath
+dropPrefix _ [] = []
+nixString :: String -> String
+nixString = unpack . renderOptionKey . pack
+readStringFromNix :: [String] -> IO (Maybe String)
+readStringFromNix arguments = do
+  maybeJsonValue <- readJsonFromNix arguments
+  pure (maybeJsonValue >>= jsonString)
+readStringListFromNix :: [String] -> IO (Maybe [String])
+readStringListFromNix arguments = do
+  maybeJsonValue <- readJsonFromNix arguments
+  pure (maybeJsonValue >>= jsonStringList)
+readNixosDefinitionFilesFromNix :: [String] -> IO (Maybe [(OptionPath, [FilePath])])
+readNixosDefinitionFilesFromNix arguments = do
+  maybeJsonValue <- readJsonFromNix arguments
+  pure (maybeJsonValue >>= jsonNixosDefinitionFiles)
+readTreefmtDefaultsFromNix :: [String] -> IO (Maybe [(OptionPath, Literal)])
+readTreefmtDefaultsFromNix arguments = do
+  maybeJsonValue <- readJsonFromNix arguments
+  pure (maybeJsonValue >>= jsonTreefmtDefaults)
+readJsonFromNix :: [String] -> IO (Maybe Value)
+readJsonFromNix arguments = do
   (exitCode, standardOutput, _standardError) <-
-    readProcessWithExitCode "nix" ["eval", "--json", installable] ""
+    readProcessWithExitCode "nix" arguments ""
   case exitCode of
     ExitSuccess ->
       case eitherDecodeStrict' (BS.pack standardOutput) of
-        Right jsonValue -> pure (jsonLiteral jsonValue)
+        Right jsonValue -> pure (Just jsonValue)
         Left _ -> pure Nothing
     _ -> pure Nothing
-renderOptionPath :: OptionPath -> Text
-renderOptionPath = intercalate (pack ".") . map renderOptionKey
 renderOptionKey :: Text -> Text
 renderOptionKey = Text.decodeUtf8 . LBS.toStrict . encode
+jsonString :: Value -> Maybe String
+jsonString (String value) = Just (unpack value)
+jsonString _ = Nothing
+jsonStringList :: Value -> Maybe [String]
+jsonStringList (Array values) = mapM jsonString (toList values)
+jsonStringList _ = Nothing
+jsonText :: Value -> Maybe Text
+jsonText (String value) = Just value
+jsonText _ = Nothing
+jsonOptionPath :: Value -> Maybe OptionPath
+jsonOptionPath (Array values) = mapM jsonText (toList values)
+jsonOptionPath _ = Nothing
+jsonNixosDefinitionFiles :: Value -> Maybe [(OptionPath, [FilePath])]
+jsonNixosDefinitionFiles (Array values) = mapM jsonNixosDefinitionFile (toList values)
+jsonNixosDefinitionFiles _ = Nothing
+jsonNixosDefinitionFile :: Value -> Maybe (OptionPath, [FilePath])
+jsonNixosDefinitionFile (Object values) = do
+  optionPath <- KeyMap.lookup (Key.fromText "path") values >>= jsonOptionPath
+  sourceFiles <- KeyMap.lookup (Key.fromText "files") values >>= jsonStringList
+  pure (optionPath, sourceFiles)
+jsonNixosDefinitionFile _ = Nothing
+jsonTreefmtDefaults :: Value -> Maybe [(OptionPath, Literal)]
+jsonTreefmtDefaults (Array values) = mapM jsonTreefmtDefault (toList values)
+jsonTreefmtDefaults _ = Nothing
+jsonTreefmtDefault :: Value -> Maybe (OptionPath, Literal)
+jsonTreefmtDefault (Object values) = do
+  optionPath <- KeyMap.lookup (Key.fromText "path") values >>= jsonOptionPath
+  defaultValue <- KeyMap.lookup (Key.fromText "default") values >>= jsonLiteral
+  pure (optionPath, defaultValue)
+jsonTreefmtDefault _ = Nothing
 jsonLiteral :: Value -> Maybe Literal
 jsonLiteral Null = Just LiteralNull
 jsonLiteral (Bool value) = Just (LiteralBool value)
@@ -296,9 +589,24 @@ formatWithDefaults defaults input =
         (_changed, transformed) <- removeDefaultAssignments (pure . (`Map.lookup` defaults)) expr
         pure (renderExpression transformed)
       Left parseError -> assertFailure ("Test fixture failed to parse: " ++ show parseError)
+formatTreefmtWithDefaults :: Map OptionPath Literal -> Text -> IO Text
+formatTreefmtWithDefaults defaults input =
+  withSystemTempFile "nix-remove-defaults-treefmt-test.nix" $ \tmpFile tmpHandle -> do
+    hClose tmpHandle
+    TIO.writeFile tmpFile input
+    parseResult <- parseNixFileLoc (Path tmpFile)
+    case parseResult of
+      Right expr -> do
+        removals <- resolveLiteralRemovals (pure . (`Map.lookup` defaults)) (collectTreefmtCandidates expr)
+        pure (renderExpression (rewriteTreefmtEvalModuleArguments removals expr))
+      Left parseError -> assertFailure ("Test fixture failed to parse: " ++ show parseError)
 makeRemovalTest :: String -> Map OptionPath Literal -> Text -> Text -> Test
 makeRemovalTest testName defaults input expectedOutput = TestCase $ do
   actualOutput <- formatWithDefaults defaults input
+  assertEqual testName expectedOutput actualOutput
+makeTreefmtRemovalTest :: String -> Map OptionPath Literal -> Text -> Text -> Test
+makeTreefmtRemovalTest testName defaults input expectedOutput = TestCase $ do
+  actualOutput <- formatTreefmtWithDefaults defaults input
   assertEqual testName expectedOutput actualOutput
 runPackageTests :: IO ()
 runPackageTests = do
@@ -371,17 +679,22 @@ hUnitDebugTests =
           output <- TIO.readFile tmpFile
           assertEqual "An unavailable default is not an execution failure." True processSucceeded
           assertEqual "An unavailable default does not rewrite the file." input output,
-      TestCase $ do
+      makeTreefmtRemovalTest
+        "Removes defaults inside a treefmt evalModule argument."
+        (Map.singleton ["programs", "shfmt", "simplify"] (LiteralBool True))
+        (pack "{ inputs, pkgs, ... }: let treefmtEval = inputs.treefmt-nix.lib.evalModule pkgs { programs.shfmt.simplify = true; keep = false; }; in treefmtEval.config.build.wrapper")
+        (pack "{ inputs, pkgs, ... }:\n  let\n    treefmtEval = inputs.treefmt-nix.lib.evalModule pkgs { keep = false; };\n  in treefmtEval.config.build.wrapper"),
+      TestCase $
+        withSystemTempFile "nix-remove-defaults-direct-file-input.nix" $ \tmpFile tmpHandle -> do
+          hClose tmpHandle
+          repositoryRootResult <- repositoryRootFromArgument tmpFile
+          assertEqual
+            "Direct file input is rejected."
+            (Left ("Expected a flake/repository directory, got a file: " ++ tmpFile))
+            repositoryRootResult,
+      TestCase $
         assertEqual
-          "Infers a configuration from a relative host path."
-          (Just ".#nixosConfigurations.\"default\"")
-          (configurationForFile "hosts/default/configuration.nix")
-        assertEqual
-          "Infers a configuration from an absolute host path."
-          (Just ".#nixosConfigurations.\"example-host\"")
-          (configurationForFile "/tmp/repository/hosts/example-host/configuration.nix")
-        assertEqual
-          "Rejects files outside the hosts directory."
-          Nothing
-          (configurationForFile "packages/example/default.nix")
+          "Builds a NixOS default-definition lookup expression."
+          "let flake = builtins.getFlake (toString (/. + \"/repository\")); configurations = flake.nixosConfigurations or {}; configurationNames = [ \"default\" ]; optionPaths = [ [ \"boot\" \"initrd\" \"systemd\" \"enable\" ] ]; optionAt = options: path: builtins.foldl' (value: key: value.${key}) options path; filesFor = configurationName: path: let evaluated = builtins.getAttr configurationName configurations; option = optionAt evaluated.options path; raw = if option ? default then builtins.map (definition: definition.file) (builtins.filter (definition: let comparison = builtins.tryEval (definition.value == option.default); in comparison.success && comparison.value) (option.definitionsWithLocations or [])) else []; attempted = builtins.tryEval (builtins.deepSeq raw raw); in if attempted.success then attempted.value else []; pathFiles = path: { inherit path; files = builtins.concatMap (configurationName: filesFor configurationName path) configurationNames; }; in builtins.map pathFiles optionPaths"
+          (nixosDefaultDefinitionFilesExpression "/repository" ["default"] [["boot", "initrd", "systemd", "enable"]])
     ]

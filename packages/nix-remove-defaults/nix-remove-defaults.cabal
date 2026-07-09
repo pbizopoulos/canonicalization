@@ -13,6 +13,7 @@ executable nix-remove-defaults
     , bytestring
     , containers
     , data-fix
+    , directory
     , filepath
     , hnix
     , HUnit
