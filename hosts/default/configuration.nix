@@ -5,7 +5,6 @@
   ...
 }:
 let
-  hostName = baseNameOf ./.;
   opensshAuthorizedKeyFiles = [
     ./../../prm/developer.pub
   ];
@@ -66,9 +65,7 @@ in
     (modulesPath + "/installer/scan/not-detected.nix")
     (modulesPath + "/profiles/qemu-guest.nix")
   ];
-  networking = {
-    inherit hostName;
-  };
+  networking.hostName = baseNameOf ./.;
   nix = {
     gc.automatic = true;
     settings.experimental-features = [
