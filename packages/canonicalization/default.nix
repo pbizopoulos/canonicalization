@@ -21,6 +21,7 @@ in
 pkgs.haskellPackages.mkDerivation rec {
   inherit executableHaskellDepends;
   executableToolDepends = [
+    pkgs.git
     pkgs.makeWrapper
     pkgs.python3
   ];
@@ -30,6 +31,7 @@ pkgs.haskellPackages.mkDerivation rec {
   postInstall = ''
     wrapProgram $out/bin/${pname} --prefix PATH : ${
       pkgs.lib.makeBinPath [
+        pkgs.git
         pkgs.python3
       ]
     } --run "rm -f tmp/${pname}.tix" --set-default HPCTIXFILE tmp/${pname}.tix

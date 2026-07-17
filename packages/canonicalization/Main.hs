@@ -522,13 +522,9 @@ runInGitRepositoryRoot repositoryDirectory action = do
   unless (repositoryRootExit == ExitSuccess) $ do
     putStrLn ("not a git directory: " ++ repositoryDirectory)
     exitFailure
-  canonicalInputDirectory <- canonicalizePath repositoryDirectory
   canonicalRepositoryRoot <- canonicalizePath (T.unpack (T.strip (T.pack repositoryRootStdout)))
-  unless (canonicalInputDirectory == canonicalRepositoryRoot) $ do
-    putStrLn ("not a git repository root directory: " ++ repositoryDirectory)
-    exitFailure
   previousDirectory <- getCurrentDirectory
-  setCurrentDirectory canonicalInputDirectory
+  setCurrentDirectory canonicalRepositoryRoot
   action `finally` setCurrentDirectory previousDirectory
 createGitRepository :: String -> String -> FilePath -> IO (Either String FilePath)
 createGitRepository hostname username repositoryName = do
@@ -2711,10 +2707,35 @@ metadataAndDiscoveryTest =
 repositoryPolicyTests :: Test
 repositoryPolicyTests =
   TestList
-    [ TestCase repositoryPolicyHaskellComplianceTest,
+    [ TestCase gitRepositoryRootDiscoveryTest,
+      TestCase repositoryPolicyHaskellComplianceTest,
       TestCase repositoryPolicyDirectoryStructureTest,
       TestCase repositoryPolicyFileComplianceTest
     ]
+gitRepositoryRootDiscoveryTest :: IO ()
+gitRepositoryRootDiscoveryTest =
+  findExecutable "git" >>= \case
+    Nothing -> pure ()
+    Just _ ->
+      withTemporaryPackageRepository "git-repository-root-discovery" $
+        \tempRepository -> do
+          (gitInitExit, _gitInitStdout, gitInitStderr) <- readProcessWithExitCode "git" ["init", "--quiet", tempRepository] ""
+          unless (gitInitExit == ExitSuccess) $
+            assertFailure ("Failed to initialize Git repository fixture: " ++ gitInitStderr)
+          let nestedDirectory = tempRepository </> "packages" </> "demo"
+          createDirectoryIfMissing True nestedDirectory
+          canonicalRepositoryRoot <- canonicalizePath tempRepository
+          runInGitRepositoryRoot nestedDirectory $
+            getCurrentDirectory
+              >>= assertEqual
+                "Uses the discovered Git repository root for an explicit nested directory."
+                canonicalRepositoryRoot
+          withCurrentWorkingDirectory nestedDirectory $
+            runInGitRepositoryRoot "." $
+              getCurrentDirectory
+                >>= assertEqual
+                  "Uses the discovered Git repository root when invoked from a nested directory."
+                  canonicalRepositoryRoot
 repositoryPolicyHaskellComplianceTest :: IO ()
 repositoryPolicyHaskellComplianceTest =
   withTemporaryPackageRepository "haskell-repository-compliance" $
