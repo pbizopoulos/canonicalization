@@ -413,6 +413,17 @@ runCli canonicalizationSettings commandLineArgs =
               Right _ -> pure ()
         ["summary"] -> runInGitRepositoryRoot "." (summarizeRepository renderRepositoryPackageSummariesText)
         ["summary", "--json"] -> runInGitRepositoryRoot "." (summarizeRepository renderRepositoryPackageSummariesJson)
+        cloneArgs@("clone" : _) ->
+          case parseCloneArgs cloneArgs of
+            Just (hostname, username, repositoryName) -> do
+              cloneResult <- cloneGitRepository hostname username repositoryName
+              case cloneResult of
+                Left cloneError -> do
+                  putStrLn cloneError
+                  exitFailure
+                Right repositoryPath ->
+                  putStrLn ("cloned git repository " ++ repositoryPath)
+            Nothing -> printUsageAndExit
         commandArgs ->
           case parseInitArgs commandArgs of
             Just (hostname, username, repositoryName) -> do
@@ -456,6 +467,7 @@ printUsageAndExit = do
   putStrLn "       git canonicalization summary [--json]"
   putStrLn "       git canonicalization add <package-type> <package-name> [description] [--check] [--coverage] [--profile] [--property-testing] [--mutation-testing]"
   putStrLn "       git canonicalization init <hostname> <username> <repository-name>"
+  putStrLn "       git canonicalization clone <hostname> <username> <repository-name>"
   exitFailure
 parseAddPackageArgs :: [String] -> Maybe (String, FilePath, Maybe String, Set.Set RepositoryCheckKind)
 parseAddPackageArgs commandLineArgs = do
@@ -475,6 +487,11 @@ parseInitArgs :: [String] -> Maybe (String, String, FilePath)
 parseInitArgs commandLineArgs =
   case commandLineArgs of
     ["init", hostname, username, repositoryName] -> Just (hostname, username, repositoryName)
+    _ -> Nothing
+parseCloneArgs :: [String] -> Maybe (String, String, FilePath)
+parseCloneArgs commandLineArgs =
+  case commandLineArgs of
+    ["clone", hostname, username, repositoryName] -> Just (hostname, username, repositoryName)
     _ -> Nothing
 parseRepositoryCheckFlags :: [String] -> Maybe (Set.Set RepositoryCheckKind)
 parseRepositoryCheckFlags flagArguments =
@@ -539,6 +556,49 @@ probeRemoteRepository repositoryUrl = do
       ["-c", "core.sshCommand=ssh -oBatchMode=yes -oConnectTimeout=10", "ls-remote", repositoryUrl]
       ""
   pure (classifyRemoteRepositoryProbe probeExit probeStdout probeStderr)
+cloneGitRepository :: String -> String -> FilePath -> IO (Either String FilePath)
+cloneGitRepository hostname username repositoryName = do
+  homeDirectory <- getHomeDirectory
+  cloneGitRepositoryInHome homeDirectory hostname username repositoryName
+cloneGitRepositoryInHome :: FilePath -> String -> String -> FilePath -> IO (Either String FilePath)
+cloneGitRepositoryInHome = cloneGitRepositoryInHomeWith probeRemoteRepository
+cloneGitRepositoryInHomeWith :: (String -> IO RemoteRepositoryProbeResult) -> FilePath -> String -> String -> FilePath -> IO (Either String FilePath)
+cloneGitRepositoryInHomeWith probeRepository homeDirectory hostname username repositoryName =
+  case catMaybes [validateNewName "hostname" hostname, validateNewName "username" username, validateNewName "repository" repositoryName] of
+    validationError : _ -> pure (Left validationError)
+    [] -> do
+      let repositoryPathEntry = hostname </> username </> repositoryName
+          repositoryPath = homeDirectory </> repositoryPathEntry
+          repositoryUrl = "git@" ++ hostname ++ ":" ++ username ++ "/" ++ repositoryName
+      (homeGitRootExit, homeGitRootStdout, _homeGitRootStderr) <- readProcessWithExitCode "git" ["-C", homeDirectory, "rev-parse", "--show-toplevel"] ""
+      canonicalHomeDirectory <- canonicalizePath homeDirectory
+      let reportedHomeGitRoot = T.unpack (T.strip (T.pack homeGitRootStdout))
+      canonicalHomeGitRoot <- if homeGitRootExit == ExitSuccess then canonicalizePath reportedHomeGitRoot else pure reportedHomeGitRoot
+      if homeGitRootExit /= ExitSuccess || canonicalHomeGitRoot /= canonicalHomeDirectory
+        then pure (Left ("not a git repository root directory: " ++ homeDirectory))
+        else do
+          repositoryPathExists <- doesPathExist repositoryPath
+          if repositoryPathExists
+            then pure (Left ("path already exists: " ++ repositoryPath))
+            else
+              probeRepository repositoryUrl >>= \case
+                RemoteRepositoryAbsent -> pure (Left ("remote repository does not exist: " ++ repositoryUrl))
+                RemoteRepositoryIndeterminate probeDiagnostic ->
+                  pure
+                    ( Left
+                        ( "could not determine whether remote repository exists: "
+                            ++ repositoryUrl
+                            ++ if null probeDiagnostic then "" else ": " ++ probeDiagnostic
+                        )
+                    )
+                RemoteRepositoryExists -> do
+                  createDirectoryIfMissing True (takeDirectory repositoryPath)
+                  runRepositoryCreationCommand
+                    "could not clone repository as a submodule"
+                    ["-C", homeDirectory, "submodule", "add", "--force", repositoryUrl, repositoryPathEntry]
+                    >>= \case
+                      Just cloneError -> pure (Left cloneError)
+                      Nothing -> pure (Right repositoryPath)
 createGitRepositoryInHome :: FilePath -> String -> String -> FilePath -> IO (Either String FilePath)
 createGitRepositoryInHome = createGitRepositoryInHomeWith probeRemoteRepository
 createGitRepositoryInHomeWith :: (String -> IO RemoteRepositoryProbeResult) -> FilePath -> String -> String -> FilePath -> IO (Either String FilePath)
@@ -2805,8 +2865,15 @@ createRepositoryTests =
           "Classifies an SSH configuration failure as indeterminate."
           (RemoteRepositoryIndeterminate "Could not resolve hostname example.test")
           (classifyRemoteRepositoryProbe (ExitFailure 128) "" "Could not resolve hostname example.test"),
+      TestCase $ do
+        assertEqual
+          "Parses the mandatory clone location components."
+          (Just ("github.com", "example", "demo"))
+          (parseCloneArgs ["clone", "github.com", "example", "demo"]),
       TestCase $ remoteRepositoryPreflightStopsCreationTest RemoteRepositoryExists "remote repository already exists",
-      TestCase $ remoteRepositoryPreflightStopsCreationTest (RemoteRepositoryIndeterminate "network unavailable") "could not determine whether remote repository exists"
+      TestCase $ remoteRepositoryPreflightStopsCreationTest (RemoteRepositoryIndeterminate "network unavailable") "could not determine whether remote repository exists",
+      TestCase $ remoteRepositoryPreflightStopsCloneTest RemoteRepositoryAbsent "remote repository does not exist",
+      TestCase $ remoteRepositoryPreflightStopsCloneTest (RemoteRepositoryIndeterminate "network unavailable") "could not determine whether remote repository exists"
     ]
 remoteRepositoryPreflightStopsCreationTest :: RemoteRepositoryProbeResult -> String -> IO ()
 remoteRepositoryPreflightStopsCreationTest probeResult expectedErrorPrefix =
@@ -2824,6 +2891,24 @@ remoteRepositoryPreflightStopsCreationTest probeResult expectedErrorPrefix =
             "Stops repository creation during the remote preflight without writing the target path."
             ( case createResult of
                 Left createError -> expectedErrorPrefix `isPrefixOf` createError && not targetExists
+                Right _ -> False
+            )
+remoteRepositoryPreflightStopsCloneTest :: RemoteRepositoryProbeResult -> String -> IO ()
+remoteRepositoryPreflightStopsCloneTest probeResult expectedErrorPrefix =
+  findExecutable "git" >>= \case
+    Nothing -> pure ()
+    Just _ ->
+      withTemporaryPackageRepository "clone-repository-preflight" $
+        \tempHome -> do
+          (gitInitExit, _gitInitStdout, gitInitStderr) <- readProcessWithExitCode "git" ["init", "--quiet", tempHome] ""
+          unless (gitInitExit == ExitSuccess) $
+            assertFailure ("Failed to initialize home Git repository fixture: " ++ gitInitStderr)
+          cloneResult <- cloneGitRepositoryInHomeWith (\_ -> pure probeResult) tempHome "example.test" "owner" "demo"
+          targetExists <- doesPathExist (tempHome </> "example.test" </> "owner" </> "demo")
+          assertBool
+            "Stops repository cloning during the remote preflight without writing the target path."
+            ( case cloneResult of
+                Left cloneError -> expectedErrorPrefix `isPrefixOf` cloneError && not targetExists
                 Right _ -> False
             )
 addPackageTests :: Test
