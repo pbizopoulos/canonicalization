@@ -390,6 +390,14 @@ defaultCanonicalizationSettings =
   CanonicalizationSettings
     { canonicalizationPythonPackageAttribute = defaultPythonPackageAttribute
     }
+type RepositoryLocation :: Type
+data RepositoryLocation = RepositoryLocation
+  { repositoryLocationHostname :: String,
+    repositoryLocationUsername :: String,
+    repositoryLocationName :: FilePath,
+    repositoryLocationUrl :: String
+  }
+  deriving stock (Eq, Show)
 main :: IO ()
 main = getArgs >>= runCli defaultCanonicalizationSettings
 runCli :: CanonicalizationSettings -> [String] -> IO ()
@@ -414,9 +422,9 @@ runCli canonicalizationSettings commandLineArgs =
         ["summary"] -> runInGitRepositoryRoot "." (summarizeRepository renderRepositoryPackageSummariesText)
         ["summary", "--json"] -> runInGitRepositoryRoot "." (summarizeRepository renderRepositoryPackageSummariesJson)
         cloneArgs@("clone" : _) ->
-          case parseCloneArgs cloneArgs of
-            Just (hostname, username, repositoryName) -> do
-              cloneResult <- cloneGitRepository hostname username repositoryName
+          case parseCloneRepositoryArgs cloneArgs of
+            Just repositoryLocation -> do
+              cloneResult <- cloneGitRepositoryFromLocation repositoryLocation
               case cloneResult of
                 Left cloneError -> do
                   putStrLn cloneError
@@ -425,9 +433,9 @@ runCli canonicalizationSettings commandLineArgs =
                   putStrLn ("cloned git repository " ++ repositoryPath)
             Nothing -> printUsageAndExit
         commandArgs ->
-          case parseInitArgs commandArgs of
-            Just (hostname, username, repositoryName) -> do
-              createResult <- createGitRepository hostname username repositoryName
+          case parseInitRepositoryArgs commandArgs of
+            Just repositoryLocation -> do
+              createResult <- createGitRepositoryFromLocation repositoryLocation
               case createResult of
                 Left createError -> do
                   putStrLn createError
@@ -466,8 +474,8 @@ printUsageAndExit = do
   putStrLn "Usage: git canonicalization check"
   putStrLn "       git canonicalization summary [--json]"
   putStrLn "       git canonicalization add <package-type> <package-name> [description] [--check] [--coverage] [--profile] [--property-testing] [--mutation-testing]"
-  putStrLn "       git canonicalization init <hostname> <username> <repository-name>"
-  putStrLn "       git canonicalization clone <hostname> <username> <repository-name>"
+  putStrLn "       git canonicalization init <https-or-ssh-repository-url>"
+  putStrLn "       git canonicalization clone <https-or-ssh-repository-url>"
   exitFailure
 parseAddPackageArgs :: [String] -> Maybe (String, FilePath, Maybe String, Set.Set RepositoryCheckKind)
 parseAddPackageArgs commandLineArgs = do
@@ -493,6 +501,54 @@ parseCloneArgs commandLineArgs =
   case commandLineArgs of
     ["clone", hostname, username, repositoryName] -> Just (hostname, username, repositoryName)
     _ -> Nothing
+parseInitRepositoryArgs :: [String] -> Maybe RepositoryLocation
+parseInitRepositoryArgs commandLineArgs =
+  case commandLineArgs of
+    ["init", repositoryUrl] -> parseRepositoryUrl repositoryUrl
+    _ -> repositoryLocationFromComponents <$> parseInitArgs commandLineArgs
+parseCloneRepositoryArgs :: [String] -> Maybe RepositoryLocation
+parseCloneRepositoryArgs commandLineArgs =
+  case commandLineArgs of
+    ["clone", repositoryUrl] -> parseRepositoryUrl repositoryUrl
+    _ -> repositoryLocationFromComponents <$> parseCloneArgs commandLineArgs
+parseRepositoryUrl :: String -> Maybe RepositoryLocation
+parseRepositoryUrl repositoryUrl =
+  parseHttpsRepositoryUrl repositoryUrl
+    <|> parseSshSchemeRepositoryUrl repositoryUrl
+    <|> parseScpRepositoryUrl repositoryUrl
+parseHttpsRepositoryUrl :: String -> Maybe RepositoryLocation
+parseHttpsRepositoryUrl repositoryUrl = do
+  hostnameAndPath <- stripPrefix "https://" repositoryUrl
+  repositoryLocationFromUrlPath repositoryUrl hostnameAndPath
+parseSshSchemeRepositoryUrl :: String -> Maybe RepositoryLocation
+parseSshSchemeRepositoryUrl repositoryUrl = do
+  sshLocation <- stripPrefix "ssh://" repositoryUrl
+  hostnameAndPath <- stripPrefix "git@" sshLocation
+  repositoryLocationFromUrlPath repositoryUrl hostnameAndPath
+parseScpRepositoryUrl :: String -> Maybe RepositoryLocation
+parseScpRepositoryUrl repositoryUrl = do
+  hostnameAndPath <- stripPrefix "git@" repositoryUrl
+  let (hostname, colonAndPath) = break (== ':') hostnameAndPath
+  repositoryPath <- stripPrefix ":" colonAndPath
+  repositoryLocationFromUrlParts repositoryUrl hostname repositoryPath
+repositoryLocationFromUrlPath :: String -> String -> Maybe RepositoryLocation
+repositoryLocationFromUrlPath repositoryUrl hostnameAndPath =
+  case T.splitOn "/" (T.pack hostnameAndPath) of
+    hostname : repositoryPathParts -> repositoryLocationFromUrlParts repositoryUrl (T.unpack hostname) (T.unpack (T.intercalate "/" repositoryPathParts))
+    [] -> Nothing
+repositoryLocationFromUrlParts :: String -> String -> String -> Maybe RepositoryLocation
+repositoryLocationFromUrlParts repositoryUrl hostname repositoryPath =
+  case T.splitOn "/" (T.pack repositoryPath) of
+    [username, repositoryNameWithSuffix] -> do
+      let repositoryName = fromMaybe repositoryNameWithSuffix (T.stripSuffix ".git" repositoryNameWithSuffix)
+          location = RepositoryLocation hostname (T.unpack username) (T.unpack repositoryName) repositoryUrl
+      if any T.null [T.pack hostname, username, repositoryName]
+        then Nothing
+        else Just location
+    _ -> Nothing
+repositoryLocationFromComponents :: (String, String, FilePath) -> RepositoryLocation
+repositoryLocationFromComponents (hostname, username, repositoryName) =
+  RepositoryLocation hostname username repositoryName ("git@" ++ hostname ++ ":" ++ username ++ "/" ++ repositoryName)
 parseRepositoryCheckFlags :: [String] -> Maybe (Set.Set RepositoryCheckKind)
 parseRepositoryCheckFlags flagArguments =
   Set.fromList
@@ -526,10 +582,10 @@ runInGitRepositoryRoot repositoryDirectory action = do
   previousDirectory <- getCurrentDirectory
   setCurrentDirectory canonicalRepositoryRoot
   action `finally` setCurrentDirectory previousDirectory
-createGitRepository :: String -> String -> FilePath -> IO (Either String FilePath)
-createGitRepository hostname username repositoryName = do
+createGitRepositoryFromLocation :: RepositoryLocation -> IO (Either String FilePath)
+createGitRepositoryFromLocation repositoryLocation = do
   homeDirectory <- getHomeDirectory
-  createGitRepositoryInHome homeDirectory hostname username repositoryName
+  createGitRepositoryLocationInHome homeDirectory repositoryLocation
 type RemoteRepositoryProbeResult :: Type
 data RemoteRepositoryProbeResult
   = RemoteRepositoryExists
@@ -556,20 +612,23 @@ probeRemoteRepository repositoryUrl = do
       ["-c", "core.sshCommand=ssh -oBatchMode=yes -oConnectTimeout=10", "ls-remote", repositoryUrl]
       ""
   pure (classifyRemoteRepositoryProbe probeExit probeStdout probeStderr)
-cloneGitRepository :: String -> String -> FilePath -> IO (Either String FilePath)
-cloneGitRepository hostname username repositoryName = do
+cloneGitRepositoryFromLocation :: RepositoryLocation -> IO (Either String FilePath)
+cloneGitRepositoryFromLocation repositoryLocation = do
   homeDirectory <- getHomeDirectory
-  cloneGitRepositoryInHome homeDirectory hostname username repositoryName
-cloneGitRepositoryInHome :: FilePath -> String -> String -> FilePath -> IO (Either String FilePath)
-cloneGitRepositoryInHome = cloneGitRepositoryInHomeWith probeRemoteRepository
+  cloneGitRepositoryLocationInHome homeDirectory repositoryLocation
 cloneGitRepositoryInHomeWith :: (String -> IO RemoteRepositoryProbeResult) -> FilePath -> String -> String -> FilePath -> IO (Either String FilePath)
 cloneGitRepositoryInHomeWith probeRepository homeDirectory hostname username repositoryName =
+  cloneGitRepositoryLocationInHomeWith probeRepository homeDirectory (repositoryLocationFromComponents (hostname, username, repositoryName))
+cloneGitRepositoryLocationInHome :: FilePath -> RepositoryLocation -> IO (Either String FilePath)
+cloneGitRepositoryLocationInHome = cloneGitRepositoryLocationInHomeWith probeRemoteRepository
+cloneGitRepositoryLocationInHomeWith :: (String -> IO RemoteRepositoryProbeResult) -> FilePath -> RepositoryLocation -> IO (Either String FilePath)
+cloneGitRepositoryLocationInHomeWith probeRepository homeDirectory repositoryLocation =
   case catMaybes [validateNewName "hostname" hostname, validateNewName "username" username, validateNewName "repository" repositoryName] of
     validationError : _ -> pure (Left validationError)
     [] -> do
       let repositoryPathEntry = hostname </> username </> repositoryName
           repositoryPath = homeDirectory </> repositoryPathEntry
-          repositoryUrl = "git@" ++ hostname ++ ":" ++ username ++ "/" ++ repositoryName
+          repositoryUrl = repositoryLocationUrl repositoryLocation
       (homeGitRootExit, homeGitRootStdout, _homeGitRootStderr) <- readProcessWithExitCode "git" ["-C", homeDirectory, "rev-parse", "--show-toplevel"] ""
       canonicalHomeDirectory <- canonicalizePath homeDirectory
       let reportedHomeGitRoot = T.unpack (T.strip (T.pack homeGitRootStdout))
@@ -599,16 +658,23 @@ cloneGitRepositoryInHomeWith probeRepository homeDirectory hostname username rep
                     >>= \case
                       Just cloneError -> pure (Left cloneError)
                       Nothing -> pure (Right repositoryPath)
-createGitRepositoryInHome :: FilePath -> String -> String -> FilePath -> IO (Either String FilePath)
-createGitRepositoryInHome = createGitRepositoryInHomeWith probeRemoteRepository
+  where
+    hostname = repositoryLocationHostname repositoryLocation
+    username = repositoryLocationUsername repositoryLocation
+    repositoryName = repositoryLocationName repositoryLocation
 createGitRepositoryInHomeWith :: (String -> IO RemoteRepositoryProbeResult) -> FilePath -> String -> String -> FilePath -> IO (Either String FilePath)
 createGitRepositoryInHomeWith probeRepository homeDirectory hostname username repositoryName =
+  createGitRepositoryLocationInHomeWith probeRepository homeDirectory (repositoryLocationFromComponents (hostname, username, repositoryName))
+createGitRepositoryLocationInHome :: FilePath -> RepositoryLocation -> IO (Either String FilePath)
+createGitRepositoryLocationInHome = createGitRepositoryLocationInHomeWith probeRemoteRepository
+createGitRepositoryLocationInHomeWith :: (String -> IO RemoteRepositoryProbeResult) -> FilePath -> RepositoryLocation -> IO (Either String FilePath)
+createGitRepositoryLocationInHomeWith probeRepository homeDirectory repositoryLocation =
   case catMaybes [validateNewName "hostname" hostname, validateNewName "username" username, validateNewName "repository" repositoryName] of
     validationError : _ -> pure (Left validationError)
     [] -> do
       let repositoryPathEntry = hostname </> username </> repositoryName
           repositoryPath = homeDirectory </> repositoryPathEntry
-          repositoryUrl = "git@" ++ hostname ++ ":" ++ username ++ "/" ++ repositoryName
+          repositoryUrl = repositoryLocationUrl repositoryLocation
       (homeGitRootExit, homeGitRootStdout, _homeGitRootStderr) <- readProcessWithExitCode "git" ["-C", homeDirectory, "rev-parse", "--show-toplevel"] ""
       canonicalHomeDirectory <- canonicalizePath homeDirectory
       let reportedHomeGitRoot = T.unpack (T.strip (T.pack homeGitRootStdout))
@@ -657,6 +723,10 @@ createGitRepositoryInHomeWith probeRepository homeDirectory hostname username re
                                           >>= \case
                                             Just createError -> pure (Left createError)
                                             Nothing -> pure (Right repositoryPath)
+  where
+    hostname = repositoryLocationHostname repositoryLocation
+    username = repositoryLocationUsername repositoryLocation
+    repositoryName = repositoryLocationName repositoryLocation
 runRepositoryCreationCommand :: String -> [String] -> IO (Maybe String)
 runRepositoryCreationCommand errorContext = runRepositoryCreationProgram errorContext "git"
 runRepositoryCreationProgram :: String -> FilePath -> [String] -> IO (Maybe String)
@@ -2870,6 +2940,26 @@ createRepositoryTests =
           "Parses the mandatory clone location components."
           (Just ("github.com", "example", "demo"))
           (parseCloneArgs ["clone", "github.com", "example", "demo"]),
+      TestCase $ do
+        assertEqual
+          "Parses an HTTPS repository URL for init."
+          (Just (RepositoryLocation "github.com" "example" "demo" "https://github.com/example/demo.git"))
+          (parseInitRepositoryArgs ["init", "https://github.com/example/demo.git"]),
+      TestCase $ do
+        assertEqual
+          "Parses an SCP-style SSH repository URL for clone."
+          (Just (RepositoryLocation "github.com" "example" "demo" "git@github.com:example/demo.git"))
+          (parseCloneRepositoryArgs ["clone", "git@github.com:example/demo.git"]),
+      TestCase $ do
+        assertEqual
+          "Parses an ssh-scheme repository URL for clone."
+          (Just (RepositoryLocation "github.com" "example" "demo" "ssh://git@github.com/example/demo"))
+          (parseCloneRepositoryArgs ["clone", "ssh://git@github.com/example/demo"]),
+      TestCase $ do
+        assertEqual
+          "Rejects repository URLs without a username and repository name."
+          Nothing
+          (parseCloneRepositoryArgs ["clone", "https://github.com/demo"]),
       TestCase $ remoteRepositoryPreflightStopsCreationTest RemoteRepositoryExists "remote repository already exists",
       TestCase $ remoteRepositoryPreflightStopsCreationTest (RemoteRepositoryIndeterminate "network unavailable") "could not determine whether remote repository exists",
       TestCase $ remoteRepositoryPreflightStopsCloneTest RemoteRepositoryAbsent "remote repository does not exist",
