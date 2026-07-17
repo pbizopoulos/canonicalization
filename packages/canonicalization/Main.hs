@@ -611,7 +611,7 @@ collectRepositoryComplianceWith canonicalizationSettings = do
       packageNames <- listSubdirectoryNames "packages"
       packageChecks <- forM packageNames (checkPackageWith canonicalizationSettings [])
       checkNames <- listSubdirectoryNames "checks"
-      checkComplianceIssues <- concat <$> forM checkNames (checkTemplateWith canonicalizationSettings)
+      checkComplianceIssues <- concat <$> forM checkNames checkTemplateWith
       let fileComplianceIssues = concatMap packageCheckIssues packageChecks ++ checkComplianceIssues
       if not (null fileComplianceIssues)
         then pure (Left ("file-compliance", fileComplianceIssues))
@@ -790,15 +790,6 @@ summarizeRepositoryPackage repositoryCheckNames packageName = do
         repositoryPackageTestNames = repositoryPackageTestNamesValue,
         repositoryPackageChecks = repositoryPackageChecksValue
       }
-_summarizeRepositoryPackageChecks :: Set.Set FilePath -> PackageKind -> FilePath -> RepositoryPackageChecksSummary
-_summarizeRepositoryPackageChecks repositoryCheckNames packageKind packageName =
-  RepositoryPackageChecksSummary
-    { repositoryPackageHasCheck = maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName RepositoryDefaultCheck),
-      repositoryPackageHasCoverageCheck = maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName RepositoryCoverageCheck),
-      repositoryPackageHasProfileCheck = maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName RepositoryProfileCheck),
-      repositoryPackageHasPropertyTestingCheck = maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName RepositoryPropertyTestingCheck),
-      repositoryPackageHasMutationTestingCheck = maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName RepositoryMutationTestingCheck)
-    }
 extractHaskellPackageDescription :: T.Text -> Maybe String
 extractHaskellPackageDescription cabalContents =
   (T.unpack <$> lookupCabalField "description" cabalContents)
@@ -809,10 +800,7 @@ extractRustPackageDescription cargoTomlContents =
    in T.unpack <$> lookupTomlString "description" packageSection
 extractPythonPackageDescriptionFromPyprojectToml :: T.Text -> Maybe String
 extractPythonPackageDescriptionFromPyprojectToml pyprojectTomlContents =
-  let projectSection = extractTomlSection "project" pyprojectTomlContents
-      poetrySection = extractTomlSection "tool.poetry" pyprojectTomlContents
-   in T.unpack <$> lookupTomlString "description" projectSection
-        <|> T.unpack <$> lookupTomlString "description" poetrySection
+  T.unpack <$> lookupTomlString "description" (extractTomlSection "project" pyprojectTomlContents)
 extractDefaultNixPackageDescription :: T.Text -> Maybe String
 extractDefaultNixPackageDescription defaultNixContents =
   go False (T.lines defaultNixContents)
@@ -911,7 +899,7 @@ createPackageInCurrentRepositoryWith canonicalizationSettings packageKind packag
                 (scaffoldFileContents scaffoldFile)
             | scaffoldFile <- renderScaffoldFilesWith canonicalizationSettings packageKind packageName packageDescription
             ]
-          checkScaffoldFiles = renderRepositoryCheckScaffoldFilesWith canonicalizationSettings packageKind packageName requestedCheckKinds
+          checkScaffoldFiles = renderRepositoryCheckScaffoldFiles packageKind packageName requestedCheckKinds
           scaffoldFiles = packageScaffoldFiles ++ checkScaffoldFiles
           scaffoldPaths = map repositoryScaffoldFilePath scaffoldFiles
       if null packageScaffoldFiles
@@ -952,12 +940,12 @@ validateRepositoryCheckSelection packageKind requestedCheckKinds =
                   | repositoryCheckKind <- unsupportedCheckKinds
                   ]
             )
-renderRepositoryCheckScaffoldFilesWith :: CanonicalizationSettings -> PackageKind -> FilePath -> Set.Set RepositoryCheckKind -> [RepositoryScaffoldFile]
-renderRepositoryCheckScaffoldFilesWith canonicalizationSettings packageKind packageName requestedCheckKinds =
+renderRepositoryCheckScaffoldFiles :: PackageKind -> FilePath -> Set.Set RepositoryCheckKind -> [RepositoryScaffoldFile]
+renderRepositoryCheckScaffoldFiles packageKind packageName requestedCheckKinds =
   catMaybes
     [ do
         checkName <- repositoryCheckNameForKind packageKind packageName requestedCheckKind
-        checkTemplateSource <- repositoryCheckBaselineSourceWith canonicalizationSettings packageKind requestedCheckKind
+        checkTemplateSource <- repositoryCheckBaselineSource packageKind requestedCheckKind
         pure
           ( RepositoryScaffoldFile
               ("checks" </> checkName </> "default.nix")
@@ -984,8 +972,8 @@ repositoryCheckNameForKind packageKind packageName repositoryCheckKind =
     (HtmlPackage, RepositoryDefaultCheck) -> Just packageName
     (CPackage, RepositoryDefaultCheck) -> Just packageName
     _ -> Nothing
-repositoryCheckBaselineSourceWith :: CanonicalizationSettings -> PackageKind -> RepositoryCheckKind -> Maybe T.Text
-repositoryCheckBaselineSourceWith _canonicalizationSettings packageKind repositoryCheckKind =
+repositoryCheckBaselineSource :: PackageKind -> RepositoryCheckKind -> Maybe T.Text
+repositoryCheckBaselineSource packageKind repositoryCheckKind =
   case (packageKind, repositoryCheckKind) of
     (HaskellPackage, RepositoryCoverageCheck) -> Just haskellCoverageCheckBaselineNixSource
     (HaskellPackage, RepositoryProfileCheck) -> Just haskellProfileCheckBaselineNixSource
@@ -1540,8 +1528,8 @@ checkPackageWith canonicalizationSettings allRepositoryStructureIssues packageNa
         packageCheckTests = packageTests,
         packageCheckIssues = packageIssues
       }
-checkTemplateWith :: CanonicalizationSettings -> FilePath -> IO [String]
-checkTemplateWith canonicalizationSettings checkName = do
+checkTemplateWith :: FilePath -> IO [String]
+checkTemplateWith checkName = do
   let checkTemplatePath = "checks" </> checkName </> "default.nix"
   maybeCheckTemplateText <- readTextFileIfExists checkTemplatePath
   case maybeCheckTemplateText of
@@ -1560,12 +1548,7 @@ checkTemplateWith canonicalizationSettings checkName = do
                 [ "checks/" ++ checkName ++ "/default.nix: unsupported check template " ++ matchedCheckTemplateName
                 ]
             Just checkTemplateSpec ->
-              validateCheckTemplateWith
-                canonicalizationSettings
-                checkName
-                checkTemplatePath
-                matchedCheckTemplateName
-                checkTemplateSpec
+              validateCheckTemplate checkName checkTemplatePath checkTemplateSpec
 detectPackageKindForPackage :: FilePath -> IO PackageKind
 detectPackageKindForPackage packageName = do
   let packageRootDirectory = "packages" </> packageName
@@ -1652,13 +1635,12 @@ checkPythonTestConventions packageName packageKind =
         then pure []
         else do
           python3Path <- findExecutable "python3"
-          pythonPath <- findExecutable "python"
-          case python3Path <|> pythonPath of
+          case python3Path of
             Nothing ->
               pure
                 [ "packages/"
                     ++ packageName
-                    ++ "/main.py: missing Python interpreter (tried python3, python)"
+                    ++ "/main.py: missing Python 3 interpreter"
                 ]
             Just pythonCommand -> do
               (exitCode, validatorStdout, validatorStderr) <- readProcessWithExitCode pythonCommand ["-c", pythonUnittestValidatorPythonSource, mainPythonPath] ""
@@ -1747,20 +1729,8 @@ discoverHaskellUnitTestNamesFromSource :: String -> [String]
 discoverHaskellUnitTestNamesFromSource haskellSource =
   let haskellSourceLines = lines haskellSource
       labelsFromMakeFormattingTest = extractMakeFormattingTestLabels haskellSourceLines
-      labelsFromHUnitTilde =
-        [ label
-        | sourceLine <- haskellSourceLines,
-          Just label <- [extractHUnitTildeTestLabel sourceLine]
-        ]
       labelsFromAssertEqual = extractAssertEqualTestLabels haskellSourceLines
-      fallbackHUnitTestNames =
-        [ "Unnamed HUnit test case #" ++ show i
-        | i <- [1 .. length [() | sourceLine <- haskellSourceLines, "TestCase" `isInfixOf` sourceLine]]
-        ]
-      discoveredHaskellUnitTestNames =
-        if null labelsFromMakeFormattingTest && null labelsFromHUnitTilde && null labelsFromAssertEqual
-          then fallbackHUnitTestNames
-          else labelsFromMakeFormattingTest ++ labelsFromHUnitTilde ++ labelsFromAssertEqual
+      discoveredHaskellUnitTestNames = labelsFromMakeFormattingTest ++ labelsFromAssertEqual
       meaningfulHaskellUnitTestNames = filter isMeaningfulTestLabel discoveredHaskellUnitTestNames
    in sort (Set.toList (Set.fromList meaningfulHaskellUnitTestNames))
 isMeaningfulTestLabel :: String -> Bool
@@ -1769,39 +1739,6 @@ isMeaningfulTestLabel label =
    in case trimmedLabel of
         firstCharacter : _ -> isAlphaNum firstCharacter && any isAlphaNum trimmedLabel
         [] -> False
-extractHUnitTildeTestLabel :: String -> Maybe String
-extractHUnitTildeTestLabel sourceLine =
-  case breakOnSubstring "~:" sourceLine of
-    Nothing -> Nothing
-    Just (beforeTilde, _) -> lastQuotedToken beforeTilde
-breakOnSubstring :: String -> String -> Maybe (String, String)
-breakOnSubstring needle = go []
-  where
-    go _prefixReversed [] = Nothing
-    go prefixReversed rest
-      | needle `isPrefixOf` rest = Just (prefix, drop (length needle) rest)
-      | otherwise =
-          case rest of
-            ch : tailRest -> go (ch : prefixReversed) tailRest
-      where
-        prefix = reverse prefixReversed
-lastQuotedToken :: String -> Maybe String
-lastQuotedToken inputText =
-  let go [] _currentQuote _currentToken acc = reverse acc
-      go (ch : rest) currentQuote currentToken acc =
-        case currentQuote of
-          Nothing ->
-            if ch == '"' || ch == '\''
-              then go rest (Just ch) "" acc
-              else go rest Nothing currentToken acc
-          Just q ->
-            if ch == q
-              then go rest Nothing "" (if null currentToken then acc else currentToken : acc)
-              else go rest (Just q) (currentToken ++ [ch]) acc
-      tokens = go inputText Nothing "" []
-   in case tokens of
-        [] -> Nothing
-        token : _ -> Just token
 extractAssertEqualTestLabels :: [String] -> [String]
 extractAssertEqualTestLabels = go False
   where
@@ -2152,8 +2089,8 @@ normalizePythonPackageAttributeReferences =
                 then sourceChar : go remainingChars
                 else "pkgs.python3" ++ go remainderAfterVersion
         Nothing -> sourceChar : go remainingChars
-validateCheckTemplateWith :: CanonicalizationSettings -> FilePath -> FilePath -> FilePath -> CheckTemplateSpec -> IO [String]
-validateCheckTemplateWith _canonicalizationSettings checkName checkTemplatePath _matchedTemplateName checkTemplateSpec =
+validateCheckTemplate :: FilePath -> FilePath -> CheckTemplateSpec -> IO [String]
+validateCheckTemplate checkName checkTemplatePath checkTemplateSpec =
   case checkTemplateComparisonMode checkTemplateSpec of
     ExactCheckTemplate ->
       compareCheckTemplateWithBaseline checkTemplatePath (checkTemplateBaselineSource checkTemplateSpec)
@@ -3047,33 +2984,6 @@ binaryReleaseNixFixture =
     ++ "  '';\n"
     ++ "  src = pkgs.fetchurl { url = \"https://example.invalid/tool.tar.gz\"; sha256 = \"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"; };\n"
     ++ "}\n"
-_exampleCargoTomlFixture :: T.Text
-_exampleCargoTomlFixture =
-  T.unlines
-    [ "[[bin]]",
-      "name = \"example-package\"",
-      "path = \"src/main.rs\"",
-      "",
-      "[dependencies]",
-      "clap = {version = \"4.5\", features = [\"derive\"]}",
-      "fd-lock = \"4.0\"",
-      "git2 = \"0.19\"",
-      "idna = \"1.1\"",
-      "regex = \"1.10\"",
-      "walkdir = \"2.5\"",
-      "",
-      "[package]",
-      "name = \"example-package\"",
-      "version = \"0.1.0\"",
-      "edition = \"2021\"",
-      "description = \"Example package fixture for TOML parsing.\"",
-      "license = \"MIT\"",
-      "repository = \"https://github.com/pbizopoulos/canonicalization\"",
-      "readme = \"../../README\"",
-      "keywords = [\"check\", \"lint\", \"fixture\"]",
-      "categories = [\"development-tools\"]",
-      ""
-    ]
 pythonGitignoreSource :: T.Text
 pythonGitignoreSource =
   T.unlines
@@ -3762,42 +3672,6 @@ removeEmptyLinesCargoTomlFixture =
       "keywords = [\"cleanup\", \"formatter\"]",
       "categories = [\"development-tools\"]",
       ""
-    ]
-_pyprojectTomlDescriptionFixture :: T.Text
-_pyprojectTomlDescriptionFixture =
-  T.unlines
-    [ "[project]",
-      "name = \"example-package\"",
-      "description = \"Example Python package.\"",
-      "version = \"0.1.0\"",
-      ""
-    ]
-_pythonTemplateDefaultNixFixture :: T.Text
-_pythonTemplateDefaultNixFixture =
-  T.unlines
-    [ "python.pkgs.buildPythonPackage rec {",
-      "  meta.description = \"A Python template package.\";",
-      "}"
-    ]
-_cTemplateDefaultNixFixture :: T.Text
-_cTemplateDefaultNixFixture =
-  T.unlines
-    [ "pkgs.stdenv.mkDerivation rec {",
-      "  meta = {",
-      "    description = \"A C template package.\";",
-      "    mainProgram = pname;",
-      "  };",
-      "}"
-    ]
-_pythonLatexTemplateDefaultNixFixture :: T.Text
-_pythonLatexTemplateDefaultNixFixture =
-  T.unlines
-    [ "python.pkgs.buildPythonPackage rec {",
-      "  meta = {",
-      "    description = \"A Python and LaTeX template package.\";",
-      "    mainProgram = pname;",
-      "  };",
-      "}"
     ]
 rustCargoTomlBaseline :: T.Text
 rustCargoTomlBaseline =
