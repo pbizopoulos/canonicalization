@@ -414,7 +414,7 @@ runCli canonicalizationSettings commandLineArgs =
         ["summary"] -> runInGitRepositoryRoot "." (summarizeRepository renderRepositoryPackageSummariesText)
         ["summary", "--json"] -> runInGitRepositoryRoot "." (summarizeRepository renderRepositoryPackageSummariesJson)
         createArgs ->
-          case parseCreateRepositoryArgs createArgs of
+          case parseInitArgs createArgs of
             Just (hostname, username, repositoryName) -> do
               createResult <- createGitRepository hostname username repositoryName
               case createResult of
@@ -425,7 +425,7 @@ runCli canonicalizationSettings commandLineArgs =
                   putStrLn ("created git repository " ++ repositoryPath)
             Nothing ->
               case createArgs of
-                "repository" : "create" : _ -> printUsageAndExit
+                "init" : _ -> printUsageAndExit
                 _ ->
                   case parseCreatePackageArgs createArgs of
                     Just (packageKindName, packageName, packageDescription, requestedCheckKinds) ->
@@ -455,7 +455,7 @@ printUsageAndExit = do
   putStrLn "Usage: git canonicalization check"
   putStrLn "       git canonicalization summary [--json]"
   putStrLn "       git canonicalization package create <package-type> <package-name> [description] [--check] [--coverage] [--profile] [--property-testing] [--mutation-testing]"
-  putStrLn "       git canonicalization repository create <hostname> <username> <repository-name>"
+  putStrLn "       git canonicalization init <hostname> <username> <repository-name>"
   exitFailure
 parseCreatePackageArgs :: [String] -> Maybe (String, FilePath, Maybe String, Set.Set RepositoryCheckKind)
 parseCreatePackageArgs commandLineArgs = do
@@ -471,10 +471,10 @@ parseCreatePackageArgs commandLineArgs = do
       packageDescription = case packageDescriptionArguments of [] -> Nothing; args -> Just (unwords args)
   requestedCheckKinds <- parseRepositoryCheckFlags flagArguments
   pure (packageKindName, packageName, packageDescription, requestedCheckKinds)
-parseCreateRepositoryArgs :: [String] -> Maybe (String, String, FilePath)
-parseCreateRepositoryArgs commandLineArgs =
+parseInitArgs :: [String] -> Maybe (String, String, FilePath)
+parseInitArgs commandLineArgs =
   case commandLineArgs of
-    ["repository", "create", hostname, username, repositoryName] -> Just (hostname, username, repositoryName)
+    ["init", hostname, username, repositoryName] -> Just (hostname, username, repositoryName)
     _ -> Nothing
 parseRepositoryCheckFlags :: [String] -> Maybe (Set.Set RepositoryCheckKind)
 parseRepositoryCheckFlags flagArguments =
@@ -2842,24 +2842,14 @@ createPackageTests =
           (parseCreatePackageArgs ["package", "create", "haskell", "demo", "Demo", "package", "--coverage", "--profile"]),
       TestCase $ do
         assertEqual
-          "Parses the mandatory repository create location components."
+          "Parses the mandatory init location components."
           (Just ("github.com", "example", "demo"))
-          (parseCreateRepositoryArgs ["repository", "create", "github.com", "example", "demo"]),
+          (parseInitArgs ["init", "github.com", "example", "demo"]),
       TestCase $ do
         assertEqual
           "Rejects unknown package create options."
           Nothing
           (parseCreatePackageArgs ["package", "create", "haskell", "demo", "--unknown"]),
-      TestCase $ do
-        assertEqual
-          "Rejects the old create-package command."
-          Nothing
-          (parseCreatePackageArgs ["create-package", "haskell", "demo"]),
-      TestCase $ do
-        assertEqual
-          "Rejects the old create-repository command."
-          Nothing
-          (parseCreateRepositoryArgs ["create-repository", "github.com", "example", "demo"]),
       TestCase createPackagePythonScaffoldTest,
       TestCase createPackageRepositoryChecksTest,
       TestCase createPackageUnsupportedChecksTest
