@@ -419,9 +419,9 @@ runCli canonicalizationSettings commandLineArgs =
                 exitFailure
               Right _ -> pure ()
         ["describe-repository"] -> runInGitRepositoryRoot "." (describeRepository renderRepositoryPackageSummariesText)
-        ["describe-repository", repositoryDirectory] -> runInGitRepositoryRoot repositoryDirectory (describeRepository renderRepositoryPackageSummariesText)
         ["describe-repository", "--json"] -> runInGitRepositoryRoot "." (describeRepository renderRepositoryPackageSummariesJson)
         ["describe-repository", "--json", repositoryDirectory] -> runInGitRepositoryRoot repositoryDirectory (describeRepository renderRepositoryPackageSummariesJson)
+        ["describe-repository", repositoryDirectory] -> runInGitRepositoryRoot repositoryDirectory (describeRepository renderRepositoryPackageSummariesText)
         ["check-gitmodules"] -> runCheckGitSubmodulesMode
         createArgs ->
           case parseCreateRepositoryArgs createArgs of
@@ -462,12 +462,11 @@ runCli canonicalizationSettings commandLineArgs =
                     Nothing -> printUsageAndExit
 printUsageAndExit :: IO a
 printUsageAndExit = do
-  putStrLn "Usage: canonicalization check-repository [git-directory]"
-  putStrLn "       canonicalization describe-repository [git-directory]"
-  putStrLn "       canonicalization describe-repository --json [git-directory]"
+  putStrLn "Usage: canonicalization check-gitmodules"
+  putStrLn "       canonicalization check-repository [git-directory]"
   putStrLn "       canonicalization create-package [git-directory] <package-type> <package-name> [description] [--check] [--coverage] [--profile] [--property-testing] [--mutation-testing]"
   putStrLn "       canonicalization create-repository <hostname> <username> <repository-name>"
-  putStrLn "       canonicalization check-gitmodules"
+  putStrLn "       canonicalization describe-repository [--json] [git-directory]"
   exitFailure
 parseCreatePackageArgs :: [String] -> Maybe (FilePath, String, FilePath, Maybe String, Set.Set RepositoryCheckKind)
 parseCreatePackageArgs commandLineArgs = do
