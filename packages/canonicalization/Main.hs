@@ -425,8 +425,8 @@ runCli canonicalizationSettings commandLineArgs =
         ["check-gitmodules"] -> runCheckGitSubmodulesMode
         createArgs ->
           case parseCreateRepositoryArgs createArgs of
-            Just (gitDirectory, gitName) -> do
-              createResult <- createGitRepository gitDirectory gitName
+            Just (hostname, username, repositoryName) -> do
+              createResult <- createGitRepository hostname username repositoryName
               case createResult of
                 Left createError -> do
                   putStrLn createError
@@ -466,7 +466,7 @@ printUsageAndExit = do
   putStrLn "       canonicalization describe-repository [git-directory]"
   putStrLn "       canonicalization describe-repository --json [git-directory]"
   putStrLn "       canonicalization create-package [git-directory] <package-type> <package-name> [description] [--check] [--coverage] [--profile] [--property-testing] [--mutation-testing]"
-  putStrLn "       canonicalization create-repository <git-directory> <git-name>"
+  putStrLn "       canonicalization create-repository <hostname> <username> <repository-name>"
   putStrLn "       canonicalization check-gitmodules"
   exitFailure
 parseCreatePackageArgs :: [String] -> Maybe (FilePath, String, FilePath, Maybe String, Set.Set RepositoryCheckKind)
@@ -488,10 +488,10 @@ parseCreatePackageArgs commandLineArgs = do
       packageDescription = case packageDescriptionArguments of [] -> Nothing; args -> Just (unwords args)
   requestedCheckKinds <- parseRepositoryCheckFlags flagArguments
   pure (repositoryDirectory, packageKindName, packageName, packageDescription, requestedCheckKinds)
-parseCreateRepositoryArgs :: [String] -> Maybe (FilePath, FilePath)
+parseCreateRepositoryArgs :: [String] -> Maybe (String, String, FilePath)
 parseCreateRepositoryArgs commandLineArgs =
   case commandLineArgs of
-    ["create-repository", gitDirectory, gitName] -> Just (gitDirectory, gitName)
+    ["create-repository", hostname, username, repositoryName] -> Just (hostname, username, repositoryName)
     _ -> Nothing
 parseRepositoryCheckFlags :: [String] -> Maybe (Set.Set RepositoryCheckKind)
 parseRepositoryCheckFlags flagArguments =
@@ -530,24 +530,78 @@ runInGitRepositoryRoot repositoryDirectory action = do
   previousDirectory <- getCurrentDirectory
   setCurrentDirectory canonicalInputDirectory
   action `finally` setCurrentDirectory previousDirectory
-createGitRepository :: FilePath -> FilePath -> IO (Either String FilePath)
-createGitRepository gitDirectory gitName = do
-  gitDirectoryExists <- doesDirectoryExist gitDirectory
-  if not gitDirectoryExists
-    then pure (Left ("not a directory: " ++ gitDirectory))
-    else case validateCreateGitName gitName of
-      Just validationError -> pure (Left validationError)
-      Nothing -> do
-        let repositoryPath = gitDirectory </> gitName
-        repositoryPathExists <- doesPathExist repositoryPath
-        if repositoryPathExists
-          then pure (Left ("path already exists: " ++ repositoryPath))
-          else do
-            (gitInitExit, _gitInitStdout, gitInitStderr) <- readProcessWithExitCode "git" ["init", "--initial-branch=main", repositoryPath] ""
-            pure $
-              if gitInitExit == ExitSuccess
-                then Right repositoryPath
-                else Left ("could not create git repository: " ++ T.unpack (T.strip (T.pack gitInitStderr)))
+createGitRepository :: String -> String -> FilePath -> IO (Either String FilePath)
+createGitRepository hostname username repositoryName = do
+  homeDirectory <- getHomeDirectory
+  createGitRepositoryInHome homeDirectory hostname username repositoryName
+createGitRepositoryInHome :: FilePath -> String -> String -> FilePath -> IO (Either String FilePath)
+createGitRepositoryInHome homeDirectory hostname username repositoryName =
+  case catMaybes [validateCreateName "hostname" hostname, validateCreateName "username" username, validateCreateName "repository" repositoryName] of
+    validationError : _ -> pure (Left validationError)
+    [] -> do
+      let repositoryPathEntry = hostname </> username </> repositoryName
+          repositoryPath = homeDirectory </> repositoryPathEntry
+          repositoryUrl = "git@" ++ hostname ++ ":" ++ username ++ "/" ++ repositoryName
+      (homeGitRootExit, homeGitRootStdout, _homeGitRootStderr) <- readProcessWithExitCode "git" ["-C", homeDirectory, "rev-parse", "--show-toplevel"] ""
+      canonicalHomeDirectory <- canonicalizePath homeDirectory
+      let reportedHomeGitRoot = T.unpack (T.strip (T.pack homeGitRootStdout))
+      canonicalHomeGitRoot <- if homeGitRootExit == ExitSuccess then canonicalizePath reportedHomeGitRoot else pure reportedHomeGitRoot
+      if homeGitRootExit /= ExitSuccess || canonicalHomeGitRoot /= canonicalHomeDirectory
+        then pure (Left ("not a git repository root directory: " ++ homeDirectory))
+        else do
+          repositoryPathExists <- doesPathExist repositoryPath
+          if repositoryPathExists
+            then pure (Left ("path already exists: " ++ repositoryPath))
+            else do
+              createDirectoryIfMissing True (takeDirectory repositoryPath)
+              runRepositoryCreationCommand
+                "could not initialize git repository"
+                ["init", "--initial-branch=main", repositoryPath]
+                >>= \case
+                  Just createError -> pure (Left createError)
+                  Nothing -> do
+                    TIO.writeFile (repositoryPath </> "flake.nix") newRepositoryFlakeNixSource
+                    runRepositoryCreationCommand "could not stage flake.nix" ["-C", repositoryPath, "add", "flake.nix"] >>= \case
+                      Just createError -> pure (Left createError)
+                      Nothing ->
+                        runRepositoryCreationCommand "could not create initial commit" ["-C", repositoryPath, "commit", "-m", "Initial commit"] >>= \case
+                          Just createError -> pure (Left createError)
+                          Nothing ->
+                            runRepositoryCreationCommand "could not configure origin" ["-C", repositoryPath, "remote", "add", "origin", repositoryUrl] >>= \case
+                              Just createError -> pure (Left createError)
+                              Nothing ->
+                                runRepositoryCreationCommand
+                                  "could not add repository as a submodule"
+                                  ["-C", homeDirectory, "submodule", "add", "--force", repositoryUrl, repositoryPathEntry]
+                                  >>= \case
+                                    Just createError -> pure (Left createError)
+                                    Nothing -> pure (Right repositoryPath)
+runRepositoryCreationCommand :: String -> [String] -> IO (Maybe String)
+runRepositoryCreationCommand errorContext gitArguments = do
+  (commandExit, commandStdout, commandStderr) <- readProcessWithExitCode "git" gitArguments ""
+  let commandDiagnostic = T.unpack (T.strip (T.pack (if null commandStderr then commandStdout else commandStderr)))
+  pure $
+    if commandExit == ExitSuccess
+      then Nothing
+      else Just (errorContext ++ if null commandDiagnostic then "" else ": " ++ commandDiagnostic)
+newRepositoryFlakeNixSource :: T.Text
+newRepositoryFlakeNixSource =
+  T.unlines
+    [ "{",
+      "  inputs = {",
+      "    canonicalization.url = \"github:pbizopoulos/canonicalization\";",
+      "    nixpkgs.follows = \"canonicalization/nixpkgs\";",
+      "  };",
+      "  outputs =",
+      "    inputs:",
+      "    inputs.canonicalization.blueprint {",
+      "      inherit inputs;",
+      "    }",
+      "    // {",
+      "      inherit (inputs.canonicalization) formatter;",
+      "    };",
+      "}"
+    ]
 collectRepositoryComplianceWith :: CanonicalizationSettings -> IO (Either (String, [String]) RepositoryComplianceSuccess)
 collectRepositoryComplianceWith canonicalizationSettings = do
   repositoryStructureIssues <- checkRepositoryStructure
@@ -825,8 +879,6 @@ parseSupportedCreatePackageKind :: String -> Maybe PackageKind
 parseSupportedCreatePackageKind packageKindName = lookup packageKindName supportedCreatePackageKinds
 validateCreatePackageName :: FilePath -> Maybe String
 validateCreatePackageName = validateCreateName "package"
-validateCreateGitName :: FilePath -> Maybe String
-validateCreateGitName = validateCreateName "git"
 validateCreateName :: String -> FilePath -> Maybe String
 validateCreateName nameKind name
   | null name = Just (nameKind ++ " name must not be empty")
@@ -2809,14 +2861,14 @@ createPackageDebugTests =
           (parseCreatePackageArgs ["create-package", "haskell", "demo", "Demo", "package", "--coverage", "--profile"]),
       TestCase $ do
         assertEqual
-          "Parses create-repository with only a Git directory and name."
-          (Just ("/tmp", "demo"))
-          (parseCreateRepositoryArgs ["create-repository", "/tmp", "demo"]),
+          "Parses the mandatory create-repository location components."
+          (Just ("github.com", "example", "demo"))
+          (parseCreateRepositoryArgs ["create-repository", "github.com", "example", "demo"]),
       TestCase $ do
         assertEqual
-          "Rejects package options on create-repository."
+          "Rejects the former create-repository arguments."
           Nothing
-          (parseCreateRepositoryArgs ["create-repository", "/tmp", "demo", "--coverage"]),
+          (parseCreateRepositoryArgs ["create-repository", "/tmp", "demo"]),
       TestCase $ do
         assertEqual
           "Rejects unknown create-package options."
