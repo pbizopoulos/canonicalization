@@ -16,7 +16,7 @@ import Data.Char (isAlphaNum)
 import Data.Fix (Fix (Fix))
 import Data.Functor.Compose (Compose (Compose))
 import Data.Kind (Type)
-import Data.List (find, intercalate, isInfixOf, isPrefixOf, isSuffixOf, maximumBy, nub, sort, sortBy, stripPrefix)
+import Data.List (find, intercalate, isInfixOf, isPrefixOf, isSuffixOf, maximumBy, sort, sortBy, stripPrefix)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
@@ -422,7 +422,6 @@ runCli canonicalizationSettings commandLineArgs =
         ["describe-repository", "--json"] -> runInGitRepositoryRoot "." (describeRepository renderRepositoryPackageSummariesJson)
         ["describe-repository", "--json", repositoryDirectory] -> runInGitRepositoryRoot repositoryDirectory (describeRepository renderRepositoryPackageSummariesJson)
         ["describe-repository", repositoryDirectory] -> runInGitRepositoryRoot repositoryDirectory (describeRepository renderRepositoryPackageSummariesText)
-        ["check-gitmodules"] -> runCheckGitSubmodulesMode
         createArgs ->
           case parseCreateRepositoryArgs createArgs of
             Just (hostname, username, repositoryName) -> do
@@ -462,8 +461,7 @@ runCli canonicalizationSettings commandLineArgs =
                     Nothing -> printUsageAndExit
 printUsageAndExit :: IO a
 printUsageAndExit = do
-  putStrLn "Usage: canonicalization check-gitmodules"
-  putStrLn "       canonicalization check-repository [git-directory]"
+  putStrLn "Usage: canonicalization check-repository [git-directory]"
   putStrLn "       canonicalization create-package [git-directory] <package-type> <package-name> [description] [--check] [--coverage] [--profile] [--property-testing] [--mutation-testing]"
   putStrLn "       canonicalization create-repository <hostname> <username> <repository-name>"
   putStrLn "       canonicalization describe-repository [--json] [git-directory]"
@@ -693,26 +691,6 @@ reportCheckRepositoryFailures checkPhaseName checkPhaseIssues = do
     "file-compliance" ->
       putStrLn "hint: align package files with the expected internal templates and language-specific policy checks."
     _ -> pure ()
-runCheckGitSubmodulesMode :: IO ()
-runCheckGitSubmodulesMode = do
-  homeDirectory <- getHomeDirectory
-  let gitSubmodulesFilePath = homeDirectory </> ".gitmodules"
-  fileExists <- doesFileExist gitSubmodulesFilePath
-  unless fileExists $ do
-    putStrLn ("missing file: " ++ gitSubmodulesFilePath)
-    exitFailure
-  gitSubmodulesContents <- T.unpack <$> TIO.readFile gitSubmodulesFilePath
-  let gitSubmodulePathEntries = parseGitSubmodulePathEntries gitSubmodulesContents
-      gitSubmoduleRepositories = map (buildGitSubmoduleRepository homeDirectory) gitSubmodulePathEntries
-      invalidGitSubmodulePathEntries =
-        [ gitSubmoduleRepositoryPathEntry gitSubmoduleRepository
-        | gitSubmoduleRepository <- gitSubmoduleRepositories,
-          not (gitSubmoduleRepositoryIsCompatible gitSubmoduleRepository)
-        ]
-  unless (null invalidGitSubmodulePathEntries) $ do
-    forM_ invalidGitSubmodulePathEntries $ \invalidGitSubmodulePathEntry ->
-      putStrLn (invalidGitSubmodulePathEntry ++ ": must be exactly <host>/<owner>/<repo>")
-    exitFailure
 type RepositoryPackageChecksSummary :: Type
 data RepositoryPackageChecksSummary = RepositoryPackageChecksSummary
   { repositoryPackageHasCheck :: Bool,
@@ -1181,49 +1159,6 @@ renderScaffoldHaskellCabal packageName =
         "executable haskell-template" -> T.pack ("executable " ++ packageName)
         otherLine -> otherLine
     | sourceLine <- T.lines haskellCabalBaseline
-    ]
-type GitSubmoduleRepository :: Type
-data GitSubmoduleRepository = GitSubmoduleRepository
-  { gitSubmoduleRepositoryHost :: String,
-    gitSubmoduleRepositoryOwner :: String,
-    gitSubmoduleRepositoryName :: String,
-    gitSubmoduleRepositoryPathEntry :: FilePath,
-    gitSubmoduleRepositoryPath :: FilePath,
-    gitSubmoduleRepositoryIsCompatible :: Bool
-  }
-buildGitSubmoduleRepository :: FilePath -> FilePath -> GitSubmoduleRepository
-buildGitSubmoduleRepository homeDirectory gitSubmodulePathEntry =
-  let localGitSubmoduleRepositoryPath = homeDirectory </> gitSubmodulePathEntry
-      gitSubmodulePathSegments = splitDirectories gitSubmodulePathEntry
-   in case gitSubmodulePathSegments of
-        [hostSegment, ownerSegment, repositorySegment] ->
-          GitSubmoduleRepository
-            { gitSubmoduleRepositoryHost = hostSegment,
-              gitSubmoduleRepositoryOwner = ownerSegment,
-              gitSubmoduleRepositoryName = repositorySegment,
-              gitSubmoduleRepositoryPathEntry = gitSubmodulePathEntry,
-              gitSubmoduleRepositoryPath = localGitSubmoduleRepositoryPath,
-              gitSubmoduleRepositoryIsCompatible = True
-            }
-        _ ->
-          GitSubmoduleRepository
-            { gitSubmoduleRepositoryHost = "",
-              gitSubmoduleRepositoryOwner = "",
-              gitSubmoduleRepositoryName = takeFileName gitSubmodulePathEntry,
-              gitSubmoduleRepositoryPathEntry = gitSubmodulePathEntry,
-              gitSubmoduleRepositoryPath = localGitSubmoduleRepositoryPath,
-              gitSubmoduleRepositoryIsCompatible = False
-            }
-parseGitSubmodulePathEntries :: String -> [FilePath]
-parseGitSubmodulePathEntries gitSubmodulesContents =
-  nub
-    [ T.unpack (T.strip (T.pack rawPathEntry))
-    | gitSubmodulesLine <- lines gitSubmodulesContents,
-      let trimmedLine = T.unpack (T.strip (T.pack gitSubmodulesLine)),
-      "path" `isPrefixOf` trimmedLine,
-      "=" `isInfixOf` trimmedLine,
-      let rawPathEntry = drop 1 (dropWhile (/= '=') trimmedLine),
-      not (null (T.unpack (T.strip (T.pack rawPathEntry))))
     ]
 checkRepositoryStructure :: IO [String]
 checkRepositoryStructure = do
@@ -2425,10 +2360,7 @@ runPackageTests = do
 quickCheckProperties :: IO Bool
 quickCheckProperties = do
   trimResult <- QC.quickCheckResult (QC.withMaxSuccess 100 prop_trimStringIdempotent)
-  gitSubmoduleParseResult <- QC.quickCheckResult (QC.withMaxSuccess 100 prop_parseGitSubmodulePathEntriesPreservesFirstOccurrences)
-  gitSubmoduleRepositoryAcceptanceResult <- QC.quickCheckResult (QC.withMaxSuccess 100 prop_buildGitSubmoduleRepositoryAcceptsGoStylePathEntries)
-  gitSubmoduleRepositoryRejectionResult <- QC.quickCheckResult (QC.withMaxSuccess 100 prop_buildGitSubmoduleRepositoryRejectsMalformedPathEntries)
-  pure (all isQuickCheckSuccess [trimResult, gitSubmoduleParseResult, gitSubmoduleRepositoryAcceptanceResult, gitSubmoduleRepositoryRejectionResult])
+  pure (isQuickCheckSuccess trimResult)
 isQuickCheckSuccess :: QC.Result -> Bool
 isQuickCheckSuccess QC.Success {} = True
 isQuickCheckSuccess _ = False
@@ -2436,61 +2368,6 @@ prop_trimStringIdempotent :: String -> Bool
 prop_trimStringIdempotent inputText =
   let trim = T.unpack . T.strip . T.pack
    in trim (trim inputText) == trim inputText
-prop_parseGitSubmodulePathEntriesPreservesFirstOccurrences :: QC.Property
-prop_parseGitSubmodulePathEntriesPreservesFirstOccurrences =
-  QC.forAll gitSubmodulePathEntriesGen $ \gitSubmodulePathEntries ->
-    let renderedGitSubmodulesContents =
-          concatMap
-            ( \gitSubmodulePathEntry ->
-                "[submodule \"example\"]\n"
-                  ++ "  path =  "
-                  ++ gitSubmodulePathEntry
-                  ++ "  \n"
-                  ++ "  url = https://example.test/repo.git\n"
-            )
-            gitSubmodulePathEntries
-            ++ "ignore = this-line\n"
-     in parseGitSubmodulePathEntries renderedGitSubmodulesContents == nub gitSubmodulePathEntries
-prop_buildGitSubmoduleRepositoryAcceptsGoStylePathEntries :: QC.Property
-prop_buildGitSubmoduleRepositoryAcceptsGoStylePathEntries =
-  QC.forAll goStylePathEntryGen $ \gitSubmodulePathEntry ->
-    let gitSubmoduleRepository = buildGitSubmoduleRepository "/home/test" gitSubmodulePathEntry
-        gitSubmodulePathSegments = splitDirectories gitSubmodulePathEntry
-     in case gitSubmodulePathSegments of
-          [hostSegment, ownerSegment, repositorySegment] ->
-            gitSubmoduleRepositoryIsCompatible gitSubmoduleRepository
-              && gitSubmoduleRepositoryPathEntry gitSubmoduleRepository == gitSubmodulePathEntry
-              && gitSubmoduleRepositoryPath gitSubmoduleRepository == "/home/test" </> gitSubmodulePathEntry
-              && gitSubmoduleRepositoryHost gitSubmoduleRepository == hostSegment
-              && gitSubmoduleRepositoryOwner gitSubmoduleRepository == ownerSegment
-              && gitSubmoduleRepositoryName gitSubmoduleRepository == repositorySegment
-          _ -> False
-prop_buildGitSubmoduleRepositoryRejectsMalformedPathEntries :: QC.Property
-prop_buildGitSubmoduleRepositoryRejectsMalformedPathEntries =
-  QC.forAll malformedPathEntryGen $ \gitSubmodulePathEntry ->
-    let gitSubmoduleRepository = buildGitSubmoduleRepository "/home/test" gitSubmodulePathEntry
-     in not (gitSubmoduleRepositoryIsCompatible gitSubmoduleRepository) && gitSubmoduleRepositoryPathEntry gitSubmoduleRepository == gitSubmodulePathEntry
-gitSubmodulePathEntriesGen :: QC.Gen [FilePath]
-gitSubmodulePathEntriesGen = QC.listOf goStylePathEntryGen
-goStylePathEntryGen :: QC.Gen FilePath
-goStylePathEntryGen = do
-  hostSegment <- hostSegmentGen
-  ownerSegment <- pathSegmentGen "-"
-  repositorySegment <- pathSegmentGen "-_"
-  pure (intercalate "/" [hostSegment, ownerSegment, repositorySegment])
-hostSegmentGen :: QC.Gen String
-hostSegmentGen = do
-  firstCharacter <- QC.elements (['a' .. 'z'] ++ ['0' .. '9'])
-  restCharacters <- QC.listOf (QC.elements (['a' .. 'z'] ++ ['0' .. '9'] ++ "."))
-  pure (firstCharacter : restCharacters)
-malformedPathEntryGen :: QC.Gen FilePath
-malformedPathEntryGen = do
-  segmentCount <- QC.elements [0, 1, 2, 4, 5]
-  segments <- QC.vectorOf segmentCount (pathSegmentGen "-_.")
-  pure (intercalate "/" segments)
-pathSegmentGen :: [Char] -> QC.Gen String
-pathSegmentGen extraCharacters =
-  QC.listOf1 (QC.elements (['a' .. 'z'] ++ ['0' .. '9'] ++ extraCharacters))
 hUnitPackageTests :: Test
 hUnitPackageTests =
   TestList
