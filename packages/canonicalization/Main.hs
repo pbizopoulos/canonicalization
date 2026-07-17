@@ -406,14 +406,14 @@ runCli canonicalizationSettings commandLineArgs =
    in case commandLineArgs of
         ["check-repository"] ->
           runInGitRepositoryRoot "." $
-            collectRepositoryComplianceWith canonicalizationSettings >>= \case
+            collectCheckRepositoryComplianceWith canonicalizationSettings >>= \case
               Left (checkPhaseName, checkPhaseIssues) -> do
                 reportCheckRepositoryFailures checkPhaseName checkPhaseIssues
                 exitFailure
               Right _ -> pure ()
         ["check-repository", repositoryDirectory] ->
           runInGitRepositoryRoot repositoryDirectory $
-            collectRepositoryComplianceWith canonicalizationSettings >>= \case
+            collectCheckRepositoryComplianceWith canonicalizationSettings >>= \case
               Left (checkPhaseName, checkPhaseIssues) -> do
                 reportCheckRepositoryFailures checkPhaseName checkPhaseIssues
                 exitFailure
@@ -530,8 +530,36 @@ createGitRepository :: String -> String -> FilePath -> IO (Either String FilePat
 createGitRepository hostname username repositoryName = do
   homeDirectory <- getHomeDirectory
   createGitRepositoryInHome homeDirectory hostname username repositoryName
+type RemoteRepositoryProbeResult :: Type
+data RemoteRepositoryProbeResult
+  = RemoteRepositoryExists
+  | RemoteRepositoryAbsent
+  | RemoteRepositoryIndeterminate String
+  deriving stock (Eq, Show)
+classifyRemoteRepositoryProbe :: ExitCode -> String -> String -> RemoteRepositoryProbeResult
+classifyRemoteRepositoryProbe probeExit probeStdout probeStderr
+  | probeExit == ExitSuccess = RemoteRepositoryExists
+  | isRecognizedRepositoryNotFoundDiagnostic probeDiagnostic = RemoteRepositoryAbsent
+  | otherwise = RemoteRepositoryIndeterminate probeDiagnostic
+  where
+    probeDiagnostic = T.unpack (T.strip (T.pack (if null probeStderr then probeStdout else probeStderr)))
+isRecognizedRepositoryNotFoundDiagnostic :: String -> Bool
+isRecognizedRepositoryNotFoundDiagnostic probeDiagnostic =
+  let normalizedDiagnostic = T.unpack (T.toLower (T.pack probeDiagnostic))
+   in "repository not found" `isInfixOf` normalizedDiagnostic
+        || "repository does not exist" `isInfixOf` normalizedDiagnostic
+probeRemoteRepository :: String -> IO RemoteRepositoryProbeResult
+probeRemoteRepository repositoryUrl = do
+  (probeExit, probeStdout, probeStderr) <-
+    readProcessWithExitCode
+      "git"
+      ["-c", "core.sshCommand=ssh -oBatchMode=yes -oConnectTimeout=10", "ls-remote", repositoryUrl]
+      ""
+  pure (classifyRemoteRepositoryProbe probeExit probeStdout probeStderr)
 createGitRepositoryInHome :: FilePath -> String -> String -> FilePath -> IO (Either String FilePath)
-createGitRepositoryInHome homeDirectory hostname username repositoryName =
+createGitRepositoryInHome = createGitRepositoryInHomeWith probeRemoteRepository
+createGitRepositoryInHomeWith :: (String -> IO RemoteRepositoryProbeResult) -> FilePath -> String -> String -> FilePath -> IO (Either String FilePath)
+createGitRepositoryInHomeWith probeRepository homeDirectory hostname username repositoryName =
   case catMaybes [validateCreateName "hostname" hostname, validateCreateName "username" username, validateCreateName "repository" repositoryName] of
     validationError : _ -> pure (Left validationError)
     [] -> do
@@ -548,33 +576,49 @@ createGitRepositoryInHome homeDirectory hostname username repositoryName =
           repositoryPathExists <- doesPathExist repositoryPath
           if repositoryPathExists
             then pure (Left ("path already exists: " ++ repositoryPath))
-            else do
-              createDirectoryIfMissing True (takeDirectory repositoryPath)
-              runRepositoryCreationCommand
-                "could not initialize git repository"
-                ["init", "--initial-branch=main", repositoryPath]
-                >>= \case
-                  Just createError -> pure (Left createError)
-                  Nothing -> do
-                    TIO.writeFile (repositoryPath </> "flake.nix") newRepositoryFlakeNixSource
-                    runRepositoryCreationCommand "could not stage flake.nix" ["-C", repositoryPath, "add", "flake.nix"] >>= \case
+            else
+              probeRepository repositoryUrl >>= \case
+                RemoteRepositoryExists -> pure (Left ("remote repository already exists: " ++ repositoryUrl))
+                RemoteRepositoryIndeterminate probeDiagnostic ->
+                  pure
+                    ( Left
+                        ( "could not determine whether remote repository exists: "
+                            ++ repositoryUrl
+                            ++ if null probeDiagnostic then "" else ": " ++ probeDiagnostic
+                        )
+                    )
+                RemoteRepositoryAbsent -> do
+                  createDirectoryIfMissing True (takeDirectory repositoryPath)
+                  runRepositoryCreationCommand
+                    "could not initialize git repository"
+                    ["init", "--initial-branch=main", repositoryPath]
+                    >>= \case
                       Just createError -> pure (Left createError)
-                      Nothing ->
-                        runRepositoryCreationCommand "could not create initial commit" ["-C", repositoryPath, "commit", "-m", "Initial commit"] >>= \case
+                      Nothing -> do
+                        TIO.writeFile (repositoryPath </> "flake.nix") newRepositoryFlakeNixSource
+                        runRepositoryCreationProgram "could not generate flake.lock" "nix" ["flake", "lock", repositoryPath] >>= \case
                           Just createError -> pure (Left createError)
                           Nothing ->
-                            runRepositoryCreationCommand "could not configure origin" ["-C", repositoryPath, "remote", "add", "origin", repositoryUrl] >>= \case
+                            runRepositoryCreationCommand "could not stage flake.nix and flake.lock" ["-C", repositoryPath, "add", "flake.nix", "flake.lock"] >>= \case
                               Just createError -> pure (Left createError)
                               Nothing ->
-                                runRepositoryCreationCommand
-                                  "could not add repository as a submodule"
-                                  ["-C", homeDirectory, "submodule", "add", "--force", repositoryUrl, repositoryPathEntry]
-                                  >>= \case
-                                    Just createError -> pure (Left createError)
-                                    Nothing -> pure (Right repositoryPath)
+                                runRepositoryCreationCommand "could not create initial commit" ["-C", repositoryPath, "commit", "-m", "Initial commit"] >>= \case
+                                  Just createError -> pure (Left createError)
+                                  Nothing ->
+                                    runRepositoryCreationCommand "could not configure origin" ["-C", repositoryPath, "remote", "add", "origin", repositoryUrl] >>= \case
+                                      Just createError -> pure (Left createError)
+                                      Nothing ->
+                                        runRepositoryCreationCommand
+                                          "could not add repository as a submodule"
+                                          ["-C", homeDirectory, "submodule", "add", "--force", repositoryUrl, repositoryPathEntry]
+                                          >>= \case
+                                            Just createError -> pure (Left createError)
+                                            Nothing -> pure (Right repositoryPath)
 runRepositoryCreationCommand :: String -> [String] -> IO (Maybe String)
-runRepositoryCreationCommand errorContext gitArguments = do
-  (commandExit, commandStdout, commandStderr) <- readProcessWithExitCode "git" gitArguments ""
+runRepositoryCreationCommand errorContext = runRepositoryCreationProgram errorContext "git"
+runRepositoryCreationProgram :: String -> FilePath -> [String] -> IO (Maybe String)
+runRepositoryCreationProgram errorContext executable arguments = do
+  (commandExit, commandStdout, commandStderr) <- readProcessWithExitCode executable arguments ""
   let commandDiagnostic = T.unpack (T.strip (T.pack (if null commandStderr then commandStdout else commandStderr)))
   pure $
     if commandExit == ExitSuccess
@@ -598,6 +642,24 @@ newRepositoryFlakeNixSource =
       "    };",
       "}"
     ]
+requiredRepositoryRootFiles :: [FilePath]
+requiredRepositoryRootFiles = ["flake.nix", "flake.lock"]
+checkRequiredRepositoryRootFiles :: IO [String]
+checkRequiredRepositoryRootFiles = do
+  requiredFilePresence <- forM requiredRepositoryRootFiles $ \requiredFile -> do
+    requiredFileExists <- doesFileExist requiredFile
+    pure (requiredFile, requiredFileExists)
+  pure
+    [ "missing required file: " ++ requiredFile
+    | (requiredFile, requiredFileExists) <- requiredFilePresence,
+      not requiredFileExists
+    ]
+collectCheckRepositoryComplianceWith :: CanonicalizationSettings -> IO (Either (String, [String]) RepositoryComplianceSuccess)
+collectCheckRepositoryComplianceWith canonicalizationSettings = do
+  requiredRootFileIssues <- checkRequiredRepositoryRootFiles
+  if null requiredRootFileIssues
+    then collectRepositoryComplianceWith canonicalizationSettings
+    else pure (Left ("required-root-files", requiredRootFileIssues))
 collectRepositoryComplianceWith :: CanonicalizationSettings -> IO (Either (String, [String]) RepositoryComplianceSuccess)
 collectRepositoryComplianceWith canonicalizationSettings = do
   repositoryStructureIssues <- checkRepositoryStructure
@@ -625,6 +687,8 @@ reportCheckRepositoryFailures checkPhaseName checkPhaseIssues = do
   forM_ checkPhaseIssues $ \issue ->
     putStrLn ("- [" ++ checkPhaseName ++ "] " ++ issue)
   case checkPhaseName of
+    "required-root-files" ->
+      putStrLn "hint: add flake.nix and run 'nix flake update' to create or update flake.lock."
     "directory-structure" ->
       putStrLn "hint: fix directory and required-file layout under packages/, hosts/, checks/, and repository root."
     "file-compliance" ->
@@ -2432,6 +2496,7 @@ hUnitPackageTests =
       checkTemplateTests,
       metadataAndDiscoveryTests,
       repositoryPolicyTests,
+      createRepositoryTests,
       createPackageTests
     ]
 templateInferenceTests :: Test
@@ -2708,10 +2773,49 @@ repositoryPolicyTests :: Test
 repositoryPolicyTests =
   TestList
     [ TestCase gitRepositoryRootDiscoveryTest,
+      TestCase repositoryRequiredRootFilesTest,
+      TestCase repositoryRequiredRootFilesPrecedenceTest,
       TestCase repositoryPolicyHaskellComplianceTest,
       TestCase repositoryPolicyDirectoryStructureTest,
       TestCase repositoryPolicyFileComplianceTest
     ]
+repositoryRequiredRootFilesTest :: IO ()
+repositoryRequiredRootFilesTest =
+  withTemporaryPackageRepository "required-root-files" $
+    \tempRepository ->
+      withCurrentWorkingDirectory tempRepository $ do
+        missingBothIssues <- checkRequiredRepositoryRootFiles
+        TIO.writeFile "flake.nix" "{}"
+        missingLockIssues <- checkRequiredRepositoryRootFiles
+        TIO.writeFile "flake.lock" "{}"
+        noMissingIssues <- checkRequiredRepositoryRootFiles
+        assertEqual
+          "Reports every missing required repository root file in canonical order."
+          ["missing required file: flake.nix", "missing required file: flake.lock"]
+          missingBothIssues
+        assertEqual
+          "Reports a missing flake.lock after flake.nix is present."
+          ["missing required file: flake.lock"]
+          missingLockIssues
+        assertEqual
+          "Accepts both required repository root files."
+          []
+          noMissingIssues
+repositoryRequiredRootFilesPrecedenceTest :: IO ()
+repositoryRequiredRootFilesPrecedenceTest =
+  withTemporaryPackageRepository "required-root-files-precedence" $
+    \tempRepository ->
+      withCurrentWorkingDirectory tempRepository $
+        createDirectoryIfMissing True "unexpected"
+          >> TIO.writeFile ("unexpected" </> "file.txt") "bad"
+          >> collectCheckRepositoryComplianceWith defaultCanonicalizationSettings
+          >>= assertEqual
+            "Reports missing root files before traversing or validating repository structure."
+            ( Left
+                ( "required-root-files",
+                  ["missing required file: flake.nix", "missing required file: flake.lock"]
+                )
+            )
 gitRepositoryRootDiscoveryTest :: IO ()
 gitRepositoryRootDiscoveryTest =
   findExecutable "git" >>= \case
@@ -2784,6 +2888,45 @@ repositoryPolicyFileComplianceTest =
                 (any ("packages/demo/default.nix:" `isPrefixOf`) fileComplianceIssues)
             otherResult ->
               assertFailure ("Expected file-compliance failure, got: " ++ show otherResult)
+createRepositoryTests :: Test
+createRepositoryTests =
+  TestList
+    [ TestCase $ do
+        assertEqual
+          "Classifies a successful remote probe as an existing repository."
+          RemoteRepositoryExists
+          (classifyRemoteRepositoryProbe ExitSuccess "" ""),
+      TestCase $ do
+        assertEqual
+          "Classifies a recognized repository-not-found response as absence."
+          RemoteRepositoryAbsent
+          (classifyRemoteRepositoryProbe (ExitFailure 128) "" "ERROR: Repository not found."),
+      TestCase $ do
+        assertEqual
+          "Classifies an SSH configuration failure as indeterminate."
+          (RemoteRepositoryIndeterminate "Could not resolve hostname example.test")
+          (classifyRemoteRepositoryProbe (ExitFailure 128) "" "Could not resolve hostname example.test"),
+      TestCase $ remoteRepositoryPreflightStopsCreationTest RemoteRepositoryExists "remote repository already exists",
+      TestCase $ remoteRepositoryPreflightStopsCreationTest (RemoteRepositoryIndeterminate "network unavailable") "could not determine whether remote repository exists"
+    ]
+remoteRepositoryPreflightStopsCreationTest :: RemoteRepositoryProbeResult -> String -> IO ()
+remoteRepositoryPreflightStopsCreationTest probeResult expectedErrorPrefix =
+  findExecutable "git" >>= \case
+    Nothing -> pure ()
+    Just _ ->
+      withTemporaryPackageRepository "create-repository-preflight" $
+        \tempHome -> do
+          (gitInitExit, _gitInitStdout, gitInitStderr) <- readProcessWithExitCode "git" ["init", "--quiet", tempHome] ""
+          unless (gitInitExit == ExitSuccess) $
+            assertFailure ("Failed to initialize home Git repository fixture: " ++ gitInitStderr)
+          createResult <- createGitRepositoryInHomeWith (\_ -> pure probeResult) tempHome "example.test" "owner" "demo"
+          targetExists <- doesPathExist (tempHome </> "example.test" </> "owner" </> "demo")
+          assertBool
+            "Stops repository creation during the remote preflight without writing the target path."
+            ( case createResult of
+                Left createError -> expectedErrorPrefix `isPrefixOf` createError && not targetExists
+                Right _ -> False
+            )
 createPackageTests :: Test
 createPackageTests =
   TestList

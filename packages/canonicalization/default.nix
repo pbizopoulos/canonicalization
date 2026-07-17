@@ -23,6 +23,7 @@ pkgs.haskellPackages.mkDerivation rec {
   executableToolDepends = [
     pkgs.git
     pkgs.makeWrapper
+    pkgs.nix
     pkgs.python3
   ];
   mainProgram = pname;
@@ -32,6 +33,7 @@ pkgs.haskellPackages.mkDerivation rec {
     wrapProgram $out/bin/${pname} --prefix PATH : ${
       pkgs.lib.makeBinPath [
         pkgs.git
+        pkgs.nix
         pkgs.python3
       ]
     } --run "rm -f tmp/${pname}.tix" --set-default HPCTIXFILE tmp/${pname}.tix
