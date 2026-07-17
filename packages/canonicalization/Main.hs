@@ -1704,7 +1704,7 @@ checkHaskellTestConventions packageName packageKind =
           let haskellSource = T.unpack mainHaskellSourceText
               hasHUnitTestRunner = "runTestTT" `isInfixOf` haskellSource
               hasNamedTestSuite =
-                "hUnitDebugTests" `isInfixOf` haskellSource
+                "hUnitPackageTests" `isInfixOf` haskellSource
                   || "getAllFormattingTests" `isInfixOf` haskellSource
           pure $
             catMaybes
@@ -1757,7 +1757,7 @@ extractAssertEqualTestLabels = go False
                     else go False rest
       | otherwise = go False rest
     startsWithQuote [] = False
-    startsWithQuote (ch : _) = ch == '"' || ch == '\''
+    startsWithQuote (ch : _) = ch == '"'
 extractMakeFormattingTestLabels :: [String] -> [String]
 extractMakeFormattingTestLabels = go False
   where
@@ -1777,13 +1777,11 @@ extractMakeFormattingTestLabels = go False
        in ", makeFormattingTest" `isPrefixOf` trimmed || "makeFormattingTest" `isPrefixOf` trimmed
 firstQuotedToken :: String -> Maybe String
 firstQuotedToken inputText =
-  let firstTokenAfter quoteCharacter =
-        case dropWhile (/= quoteCharacter) inputText of
-          _ : rest ->
-            let token = takeWhile (/= quoteCharacter) rest
-             in if null token then Nothing else Just token
-          _ -> Nothing
-   in firstTokenAfter '"' <|> firstTokenAfter '\''
+  case dropWhile (/= '"') inputText of
+    _ : rest ->
+      let token = takeWhile (/= '"') rest
+       in if null token then Nothing else Just token
+    _ -> Nothing
 checkRustTestConventions :: FilePath -> PackageKind -> IO [String]
 checkRustTestConventions packageName packageKind =
   if packageKind /= RustPackage
@@ -2357,13 +2355,13 @@ stripMetaDescriptionAssignment renderedMetaValue =
         Nothing -> renderedMetaValue
 runPackageTests :: IO ()
 runPackageTests = do
-  hUnitCounts <- runTestTT hUnitDebugTests
-  propertySuccess <- quickCheckDebugProperties
+  hUnitCounts <- runTestTT hUnitPackageTests
+  propertySuccess <- quickCheckProperties
   if errors hUnitCounts == 0 && failures hUnitCounts == 0 && propertySuccess
     then putStrLn "test ... ok"
     else exitFailure
-quickCheckDebugProperties :: IO Bool
-quickCheckDebugProperties = do
+quickCheckProperties :: IO Bool
+quickCheckProperties = do
   trimResult <- QC.quickCheckResult (QC.withMaxSuccess 100 prop_trimStringIdempotent)
   gitSubmoduleParseResult <- QC.quickCheckResult (QC.withMaxSuccess 100 prop_parseGitSubmodulePathEntriesPreservesFirstOccurrences)
   gitSubmoduleRepositoryAcceptanceResult <- QC.quickCheckResult (QC.withMaxSuccess 100 prop_buildGitSubmoduleRepositoryAcceptsGoStylePathEntries)
@@ -2431,17 +2429,17 @@ malformedPathEntryGen = do
 pathSegmentGen :: [Char] -> QC.Gen String
 pathSegmentGen extraCharacters =
   QC.listOf1 (QC.elements (['a' .. 'z'] ++ ['0' .. '9'] ++ extraCharacters))
-hUnitDebugTests :: Test
-hUnitDebugTests =
+hUnitPackageTests :: Test
+hUnitPackageTests =
   TestList
-    [ templateInferenceDebugTests,
-      checkTemplateDebugTests,
-      metadataAndDiscoveryDebugTests,
-      repositoryPolicyDebugTests,
-      createPackageDebugTests
+    [ templateInferenceTests,
+      checkTemplateTests,
+      metadataAndDiscoveryTests,
+      repositoryPolicyTests,
+      createPackageTests
     ]
-templateInferenceDebugTests :: Test
-templateInferenceDebugTests =
+templateInferenceTests :: Test
+templateInferenceTests =
   TestList
     [ TestCase $ do
         inferred <- inferTemplateName "test" uncommentNixFixture
@@ -2540,8 +2538,8 @@ templateInferenceDebugTests =
           (Just "default_vm_with_disko_check")
           inferred
     ]
-checkTemplateDebugTests :: Test
-checkTemplateDebugTests =
+checkTemplateTests :: Test
+checkTemplateTests =
   TestList
     [ TestCase $ do
         let matched = isCPackageVmCheckShape CPackage cPackageVmCheckFixture
@@ -2661,11 +2659,11 @@ checkTemplateDebugTests =
               (extractPrimaryNixBindings runNixOsTestExpr)
           Left parseError -> assertFailure ("Failed to parse runNixOSTest fixture: " ++ parseError)
     ]
-metadataAndDiscoveryDebugTests :: Test
-metadataAndDiscoveryDebugTests =
-  TestList [TestCase metadataAndDiscoveryDebugTest]
-metadataAndDiscoveryDebugTest :: IO ()
-metadataAndDiscoveryDebugTest =
+metadataAndDiscoveryTests :: Test
+metadataAndDiscoveryTests =
+  TestList [TestCase metadataAndDiscoveryTest]
+metadataAndDiscoveryTest :: IO ()
+metadataAndDiscoveryTest =
   withTemporaryPackageRepository "python-package-summary" $
     \tempRepository ->
       withCurrentWorkingDirectory tempRepository $
@@ -2710,15 +2708,15 @@ metadataAndDiscoveryDebugTest =
                     && not hasPropertyTestingCheck
                     && not hasMutationTestingCheck
                 )
-repositoryPolicyDebugTests :: Test
-repositoryPolicyDebugTests =
+repositoryPolicyTests :: Test
+repositoryPolicyTests =
   TestList
-    [ TestCase repositoryPolicyHaskellComplianceDebugTest,
-      TestCase repositoryPolicyDirectoryStructureDebugTest,
-      TestCase repositoryPolicyFileComplianceDebugTest
+    [ TestCase repositoryPolicyHaskellComplianceTest,
+      TestCase repositoryPolicyDirectoryStructureTest,
+      TestCase repositoryPolicyFileComplianceTest
     ]
-repositoryPolicyHaskellComplianceDebugTest :: IO ()
-repositoryPolicyHaskellComplianceDebugTest =
+repositoryPolicyHaskellComplianceTest :: IO ()
+repositoryPolicyHaskellComplianceTest =
   withTemporaryPackageRepository "haskell-repository-compliance" $
     \tempRepository ->
       withCurrentWorkingDirectory tempRepository $
@@ -2735,8 +2733,8 @@ repositoryPolicyHaskellComplianceDebugTest =
                   True
             otherResult ->
               assertFailure ("Expected repository-compliant result, got: " ++ show otherResult)
-repositoryPolicyDirectoryStructureDebugTest :: IO ()
-repositoryPolicyDirectoryStructureDebugTest =
+repositoryPolicyDirectoryStructureTest :: IO ()
+repositoryPolicyDirectoryStructureTest =
   withTemporaryPackageRepository "directory-structure-repository-validation" $
     \tempRepository ->
       withCurrentWorkingDirectory tempRepository $
@@ -2750,8 +2748,8 @@ repositoryPolicyDirectoryStructureDebugTest =
                 ("unexpected/file.txt: is not allowed" `elem` repositoryStructureIssues)
             otherResult ->
               assertFailure ("Expected directory-structure failure, got: " ++ show otherResult)
-repositoryPolicyFileComplianceDebugTest :: IO ()
-repositoryPolicyFileComplianceDebugTest =
+repositoryPolicyFileComplianceTest :: IO ()
+repositoryPolicyFileComplianceTest =
   withTemporaryPackageRepository "file-compliance-repository-validation" $
     \tempRepository ->
       withCurrentWorkingDirectory tempRepository $
@@ -2765,8 +2763,8 @@ repositoryPolicyFileComplianceDebugTest =
                 (any ("packages/demo/default.nix:" `isPrefixOf`) fileComplianceIssues)
             otherResult ->
               assertFailure ("Expected file-compliance failure, got: " ++ show otherResult)
-createPackageDebugTests :: Test
-createPackageDebugTests =
+createPackageTests :: Test
+createPackageTests =
   TestList
     [ TestCase $ do
         assertEqual
@@ -2790,12 +2788,12 @@ createPackageDebugTests =
           "Rejects unknown create-package options."
           Nothing
           (parseCreatePackageArgs ["create-package", "haskell", "demo", "--unknown"]),
-      TestCase createPackagePythonScaffoldDebugTest,
-      TestCase createPackageRepositoryChecksDebugTest,
-      TestCase createPackageUnsupportedChecksDebugTest
+      TestCase createPackagePythonScaffoldTest,
+      TestCase createPackageRepositoryChecksTest,
+      TestCase createPackageUnsupportedChecksTest
     ]
-createPackagePythonScaffoldDebugTest :: IO ()
-createPackagePythonScaffoldDebugTest =
+createPackagePythonScaffoldTest :: IO ()
+createPackagePythonScaffoldTest =
   withTemporaryPackageRepository "python-package-scaffold" $
     \tempRepository ->
       withCurrentWorkingDirectory tempRepository $
@@ -2816,8 +2814,8 @@ createPackagePythonScaffoldDebugTest =
                   "Detects the generated Python package from its on-disk files."
                   PythonPackage
                   packageDetectedKind
-createPackageRepositoryChecksDebugTest :: IO ()
-createPackageRepositoryChecksDebugTest =
+createPackageRepositoryChecksTest :: IO ()
+createPackageRepositoryChecksTest =
   withTemporaryPackageRepository "repository-check-creation" $
     \tempRepository ->
       withCurrentWorkingDirectory tempRepository $
@@ -2853,8 +2851,8 @@ createPackageRepositoryChecksDebugTest =
                         True
                   otherResult ->
                     assertFailure ("Expected repository compliance success, got: " ++ show otherResult)
-createPackageUnsupportedChecksDebugTest :: IO ()
-createPackageUnsupportedChecksDebugTest =
+createPackageUnsupportedChecksTest :: IO ()
+createPackageUnsupportedChecksTest =
   withTemporaryPackageRepository "unsupported-repository-check-creation" $
     \tempRepository ->
       withCurrentWorkingDirectory tempRepository $
@@ -3384,7 +3382,6 @@ haskellMainSource =
     [ "{-# LANGUAGE Trustworthy #-}",
       "{-# OPTIONS_GHC -Wno-unsafe #-}",
       "module Main (main) where",
-      "import System.Environment (getArgs, lookupEnv)",
       "import System.Exit (exitFailure)",
       "import Test.HUnit (Counts (errors, failures), Test (TestCase, TestList), assertEqual, runTestTT)",
       "",
@@ -3393,22 +3390,20 @@ haskellMainSource =
       "",
       "runPackageTests :: IO ()",
       "runPackageTests = do",
-      "  counts <- runTestTT hUnitDebugTests",
+      "  counts <- runTestTT hUnitPackageTests",
       "  if errors counts == 0 && failures counts == 0",
       "    then putStrLn \"test ... ok\"",
       "    else exitFailure",
       "",
-      "hUnitDebugTests :: Test",
-      "hUnitDebugTests =",
+      "hUnitPackageTests :: Test",
+      "hUnitPackageTests =",
       "  TestList",
       "    [ TestCase $ do",
       "        assertEqual \"renders the sample message\" \"Hello World Haskell\" renderMessage",
       "    ]",
       "",
       "main :: IO ()",
-      "main = do",
-      "  _ <- getArgs",
-      "  putStrLn renderMessage"
+      "main = putStrLn renderMessage"
     ]
 rustMainSource :: T.Text
 rustMainSource =
@@ -4164,16 +4159,16 @@ haskellCoverageCheckBaselineNixSource =
       "}:",
       "let",
       "  checkName = builtins.baseNameOf ./.;",
-      "  debugGhc = pkgs.haskellPackages.ghcWithPackages (_: packageDrv.passthru.haskellExecutableDepends);",
       "  packageDrv = import (../.. + \"/packages/${packageName}/default.nix\") {",
       "    inherit pkgs;",
       "  };",
       "  packageName = pkgs.lib.removeSuffix \"-coverage\" checkName;",
+      "  testGhc = pkgs.haskellPackages.ghcWithPackages (_: packageDrv.passthru.haskellExecutableDepends);",
       "in",
       "pkgs.runCommand checkName",
       "  {",
       "    nativeBuildInputs = [",
-      "      debugGhc",
+      "      testGhc",
       "    ];",
       "    src = ../.. + \"/packages/${packageName}\";",
       "  }",
@@ -4258,16 +4253,16 @@ haskellPropertyTestingCheckBaselineNixSource =
       "}:",
       "let",
       "  checkName = builtins.baseNameOf ./.;",
-      "  debugGhc = pkgs.haskellPackages.ghcWithPackages (_: packageDrv.passthru.haskellExecutableDepends);",
       "  packageDrv = import (../.. + \"/packages/${packageName}/default.nix\") {",
       "    inherit pkgs;",
       "  };",
       "  packageName = pkgs.lib.removeSuffix \"-property-testing\" checkName;",
+      "  testGhc = pkgs.haskellPackages.ghcWithPackages (_: packageDrv.passthru.haskellExecutableDepends);",
       "in",
       "pkgs.runCommand \"${checkName}\"",
       "  {",
       "    nativeBuildInputs = [",
-      "      debugGhc",
+      "      testGhc",
       "    ];",
       "    src = ../.. + \"/packages/${packageName}\";",
       "  }",
@@ -4283,7 +4278,7 @@ haskellPropertyTestingCheckBaselineNixSource =
       "    main :: IO ()",
       "    main = PackageMain.runPackageTests",
       "    EOF",
-      "    \"${debugGhc}/bin/ghc\" \\",
+      "    \"${testGhc}/bin/ghc\" \\",
       "      -O2 \\",
       "      -main-is TestMain.main \\",
       "      -i\"$src\" \\",

@@ -4,16 +4,16 @@
 }:
 let
   checkName = builtins.baseNameOf ./.;
-  debugGhc = pkgs.haskellPackages.ghcWithPackages (_: packageDrv.passthru.haskellExecutableDepends);
   packageDrv = import (../.. + "/packages/${packageName}/default.nix") {
     inherit pkgs;
   };
   packageName = pkgs.lib.removeSuffix "-coverage" checkName;
+  testGhc = pkgs.haskellPackages.ghcWithPackages (_: packageDrv.passthru.haskellExecutableDepends);
 in
 pkgs.runCommand checkName
   {
     nativeBuildInputs = [
-      debugGhc
+      testGhc
     ];
     src = ../.. + "/packages/${packageName}";
   }

@@ -4,16 +4,16 @@
 }:
 let
   checkName = builtins.baseNameOf ./.;
-  debugGhc = pkgs.haskellPackages.ghcWithPackages (_: packageDrv.passthru.haskellExecutableDepends);
   packageDrv = import (../.. + "/packages/${packageName}/default.nix") {
     inherit pkgs;
   };
   packageName = pkgs.lib.removeSuffix "-property-testing" checkName;
+  testGhc = pkgs.haskellPackages.ghcWithPackages (_: packageDrv.passthru.haskellExecutableDepends);
 in
 pkgs.runCommand "${checkName}"
   {
     nativeBuildInputs = [
-      debugGhc
+      testGhc
     ];
     src = ../.. + "/packages/${packageName}";
   }
@@ -29,7 +29,7 @@ pkgs.runCommand "${checkName}"
     main :: IO ()
     main = PackageMain.runPackageTests
     EOF
-    "${debugGhc}/bin/ghc" \
+    "${testGhc}/bin/ghc" \
       -O2 \
       -main-is TestMain.main \
       -i"$src" \

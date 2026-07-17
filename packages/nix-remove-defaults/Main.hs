@@ -648,12 +648,12 @@ makeTreefmtRemovalTest testName defaults input expectedOutput = TestCase $ do
   assertEqual testName expectedOutput actualOutput
 runPackageTests :: IO ()
 runPackageTests = do
-  counts <- runTestTT hUnitDebugTests
+  counts <- runTestTT hUnitPackageTests
   if errors counts == 0 && failures counts == 0
     then putStrLn "test ... ok"
     else exitFailure
-hUnitDebugTests :: Test
-hUnitDebugTests =
+hUnitPackageTests :: Test
+hUnitPackageTests =
   TestList
     [ makeRemovalTest
         "Removes a literal assignment equal to its default."
