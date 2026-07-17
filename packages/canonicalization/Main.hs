@@ -739,31 +739,30 @@ data RepositoryPackageSummary = RepositoryPackageSummary
 renderRepositoryPackageSummariesText :: [RepositoryPackageSummary] -> String
 renderRepositoryPackageSummariesText packageSummaries =
   intercalate
-    "\n\n"
+    "\n"
     [ unlines
         ( let packageChecks = repositoryPackageChecks packageSummary
-           in [ "package: " ++ repositoryPackageName packageSummary,
-                "packageType: " ++ repositoryPackageType packageSummary,
-                "description: " ++ fromMaybe "(none)" (repositoryPackageDescription packageSummary),
-                "checks:"
+           in [ renderRepositoryPackageFieldName "packageName" ++ " " ++ repositoryPackageName packageSummary,
+                renderRepositoryPackageFieldName "packageType" ++ " " ++ repositoryPackageType packageSummary,
+                renderRepositoryPackageFieldName "description" ++ " " ++ fromMaybe "(none)" (repositoryPackageDescription packageSummary),
+                renderRepositoryPackageFieldName "checks"
               ]
-                ++ [ "  " ++ checkName ++ ": " ++ bool "false" "true" isEnabled
-                   | (checkName, isEnabled) <-
-                       [ ("check", repositoryPackageHasCheck packageChecks),
-                         ("coverage", repositoryPackageHasCoverageCheck packageChecks),
-                         ("profile", repositoryPackageHasProfileCheck packageChecks),
-                         ("property-testing", repositoryPackageHasPropertyTestingCheck packageChecks),
-                         ("mutation-testing", repositoryPackageHasMutationTestingCheck packageChecks)
-                       ]
-                   ]
-                ++ ["tests:"]
+                ++ case enabledRepositoryPackageCheckNames packageChecks of
+                  [] -> [repositoryPackageValueIndent ++ "(none)"]
+                  checkNames -> [repositoryPackageValueIndent ++ checkName | checkName <- checkNames]
+                ++ [renderRepositoryPackageFieldName "tests"]
                 ++ case repositoryPackageTestNames packageSummary of
-                  [] -> ["  (none)"]
-                  testNames -> ["  - " ++ testName | testName <- testNames]
+                  [] -> [repositoryPackageValueIndent ++ "(none)"]
+                  testNames -> [repositoryPackageValueIndent ++ testName | testName <- testNames]
         )
     | packageSummary <- packageSummaries
     ]
     ++ if null packageSummaries then "" else "\n"
+renderRepositoryPackageFieldName :: String -> String
+renderRepositoryPackageFieldName fieldName =
+  replicate (length ("description" :: String) - length fieldName) ' ' ++ fieldName ++ ":"
+repositoryPackageValueIndent :: String
+repositoryPackageValueIndent = replicate (length ("description: " :: String)) ' '
 renderRepositoryPackageSummariesJson :: [RepositoryPackageSummary] -> String
 renderRepositoryPackageSummariesJson packageSummaries =
   "{\n"
@@ -789,15 +788,19 @@ renderRepositoryPackageChecksJson packageChecks =
     ++ intercalate
       ", "
       [ "\"" ++ checkName ++ "\": " ++ bool "false" "true" isEnabled
-      | (checkName, isEnabled) <-
-          [ ("check", repositoryPackageHasCheck packageChecks),
-            ("coverage", repositoryPackageHasCoverageCheck packageChecks),
-            ("profile", repositoryPackageHasProfileCheck packageChecks),
-            ("property-testing", repositoryPackageHasPropertyTestingCheck packageChecks),
-            ("mutation-testing", repositoryPackageHasMutationTestingCheck packageChecks)
-          ]
+      | (checkName, isEnabled) <- repositoryPackageCheckEntries packageChecks
       ]
     ++ " }"
+repositoryPackageCheckEntries :: RepositoryPackageChecksSummary -> [(String, Bool)]
+repositoryPackageCheckEntries packageChecks =
+  [ ("check", repositoryPackageHasCheck packageChecks),
+    ("coverage", repositoryPackageHasCoverageCheck packageChecks),
+    ("profile", repositoryPackageHasProfileCheck packageChecks),
+    ("property-testing", repositoryPackageHasPropertyTestingCheck packageChecks),
+    ("mutation-testing", repositoryPackageHasMutationTestingCheck packageChecks)
+  ]
+enabledRepositoryPackageCheckNames :: RepositoryPackageChecksSummary -> [String]
+enabledRepositoryPackageCheckNames = map fst . filter snd . repositoryPackageCheckEntries
 summarizeRepositoryPackage :: Set.Set FilePath -> FilePath -> IO RepositoryPackageSummary
 summarizeRepositoryPackage repositoryCheckNames packageName = do
   packageKind <- detectPackageKindForPackage packageName
@@ -2721,7 +2724,35 @@ checkTemplateTests =
     ]
 metadataAndDiscoveryTests :: Test
 metadataAndDiscoveryTests =
-  TestList [TestCase metadataAndDiscoveryTest]
+  TestList
+    [ TestCase metadataAndDiscoveryTest,
+      TestCase repositoryPackageChecksTextRenderingTest
+    ]
+repositoryPackageChecksTextRenderingTest :: IO ()
+repositoryPackageChecksTextRenderingTest = do
+  let packageSummary packageChecks =
+        RepositoryPackageSummary
+          { repositoryPackageName = "demo",
+            repositoryPackageType = "python",
+            repositoryPackageDescription = Nothing,
+            repositoryPackageTestNames = [],
+            repositoryPackageChecks = packageChecks
+          }
+      noChecks = RepositoryPackageChecksSummary False False False False False
+      selectedChecks = RepositoryPackageChecksSummary False True False True False
+      selectedChecksAndTests = (packageSummary selectedChecks) {repositoryPackageTestNames = ["test_alpha"]}
+      twoPackageSummaryOutput = renderRepositoryPackageSummariesText [packageSummary noChecks, packageSummary selectedChecks]
+  assertEqual
+    "Renders none when a package has no repository checks."
+    "packageName: demo\npackageType: python\ndescription: (none)\n     checks:\n             (none)\n      tests:\n             (none)\n\n"
+    (renderRepositoryPackageSummariesText [packageSummary noChecks])
+  assertEqual
+    "Renders enabled repository checks and tests without list markers."
+    "packageName: demo\npackageType: python\ndescription: (none)\n     checks:\n             coverage\n             property-testing\n      tests:\n             test_alpha\n\n"
+    (renderRepositoryPackageSummariesText [selectedChecksAndTests])
+  assertBool
+    "Separates package summaries with one blank line."
+    ("\n\npackageName:" `isInfixOf` twoPackageSummaryOutput && not ("\n\n\npackageName:" `isInfixOf` twoPackageSummaryOutput))
 metadataAndDiscoveryTest :: IO ()
 metadataAndDiscoveryTest =
   withTemporaryPackageRepository "python-package-summary" $
