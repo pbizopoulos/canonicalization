@@ -38,9 +38,6 @@ let
       dos2unix.enable = true;
       hclfmt.enable = true;
       hlint.enable = true;
-      jsonfmt.enable = true;
-      mdformat.enable = true;
-      mdsh.enable = true;
       nixfmt.enable = true;
       ormolu.enable = true;
       oxfmt = {
