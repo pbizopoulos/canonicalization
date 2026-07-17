@@ -6,7 +6,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneKindSignatures #-}
 {-# LANGUAGE Trustworthy #-}
-{-# OPTIONS_GHC -Wno-missing-import-lists -Wno-unsafe #-}
+{-# OPTIONS_GHC -Wno-all-missed-specialisations -Wno-missing-import-lists -Wno-unsafe #-}
 module Main (main, runPackageTests) where
 import Control.Applicative ((<|>))
 import Control.Exception (finally)
@@ -20,7 +20,7 @@ import Data.List (find, intercalate, isInfixOf, isPrefixOf, isSuffixOf, maximumB
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing, listToMaybe, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isNothing, listToMaybe, mapMaybe)
 import Data.Ord (comparing)
 import Data.Set qualified as Set
 import Data.Text qualified as T
@@ -394,7 +394,7 @@ main :: IO ()
 main = getArgs >>= runCli defaultCanonicalizationSettings
 runCli :: CanonicalizationSettings -> [String] -> IO ()
 runCli canonicalizationSettings commandLineArgs =
-  let describeRepository render =
+  let summarizeRepository render =
         collectRepositoryComplianceWith canonicalizationSettings >>= \case
           Left (checkPhaseName, checkPhaseIssues) -> do
             reportCheckRepositoryFailures checkPhaseName checkPhaseIssues
@@ -404,24 +404,15 @@ runCli canonicalizationSettings commandLineArgs =
             packageSummaries <- forM packageNames (summarizeRepositoryPackage repositoryCheckNames)
             putStr (render packageSummaries)
    in case commandLineArgs of
-        ["check-repository"] ->
+        ["check"] ->
           runInGitRepositoryRoot "." $
-            collectCheckRepositoryComplianceWith canonicalizationSettings >>= \case
+            collectRepositoryComplianceWith canonicalizationSettings >>= \case
               Left (checkPhaseName, checkPhaseIssues) -> do
                 reportCheckRepositoryFailures checkPhaseName checkPhaseIssues
                 exitFailure
               Right _ -> pure ()
-        ["check-repository", repositoryDirectory] ->
-          runInGitRepositoryRoot repositoryDirectory $
-            collectCheckRepositoryComplianceWith canonicalizationSettings >>= \case
-              Left (checkPhaseName, checkPhaseIssues) -> do
-                reportCheckRepositoryFailures checkPhaseName checkPhaseIssues
-                exitFailure
-              Right _ -> pure ()
-        ["describe-repository"] -> runInGitRepositoryRoot "." (describeRepository renderRepositoryPackageSummariesText)
-        ["describe-repository", "--json"] -> runInGitRepositoryRoot "." (describeRepository renderRepositoryPackageSummariesJson)
-        ["describe-repository", "--json", repositoryDirectory] -> runInGitRepositoryRoot repositoryDirectory (describeRepository renderRepositoryPackageSummariesJson)
-        ["describe-repository", repositoryDirectory] -> runInGitRepositoryRoot repositoryDirectory (describeRepository renderRepositoryPackageSummariesText)
+        ["summary"] -> runInGitRepositoryRoot "." (summarizeRepository renderRepositoryPackageSummariesText)
+        ["summary", "--json"] -> runInGitRepositoryRoot "." (summarizeRepository renderRepositoryPackageSummariesJson)
         createArgs ->
           case parseCreateRepositoryArgs createArgs of
             Just (hostname, username, repositoryName) -> do
@@ -434,11 +425,11 @@ runCli canonicalizationSettings commandLineArgs =
                   putStrLn ("created git repository " ++ repositoryPath)
             Nothing ->
               case createArgs of
-                "create-repository" : _ -> printUsageAndExit
+                "repository" : "create" : _ -> printUsageAndExit
                 _ ->
                   case parseCreatePackageArgs createArgs of
-                    Just (repositoryDirectory, packageKindName, packageName, packageDescription, requestedCheckKinds) ->
-                      runInGitRepositoryRoot repositoryDirectory $
+                    Just (packageKindName, packageName, packageDescription, requestedCheckKinds) ->
+                      runInGitRepositoryRoot "." $
                         case parseSupportedCreatePackageKind packageKindName of
                           Nothing -> do
                             putStrLn ("unsupported package type: " ++ packageKindName)
@@ -461,22 +452,17 @@ runCli canonicalizationSettings commandLineArgs =
                     Nothing -> printUsageAndExit
 printUsageAndExit :: IO a
 printUsageAndExit = do
-  putStrLn "Usage: canonicalization check-repository [git-directory]"
-  putStrLn "       canonicalization create-package [git-directory] <package-type> <package-name> [description] [--check] [--coverage] [--profile] [--property-testing] [--mutation-testing]"
-  putStrLn "       canonicalization create-repository <hostname> <username> <repository-name>"
-  putStrLn "       canonicalization describe-repository [--json] [git-directory]"
+  putStrLn "Usage: git canonicalization check"
+  putStrLn "       git canonicalization summary [--json]"
+  putStrLn "       git canonicalization package create <package-type> <package-name> [description] [--check] [--coverage] [--profile] [--property-testing] [--mutation-testing]"
+  putStrLn "       git canonicalization repository create <hostname> <username> <repository-name>"
   exitFailure
-parseCreatePackageArgs :: [String] -> Maybe (FilePath, String, FilePath, Maybe String, Set.Set RepositoryCheckKind)
+parseCreatePackageArgs :: [String] -> Maybe (String, FilePath, Maybe String, Set.Set RepositoryCheckKind)
 parseCreatePackageArgs commandLineArgs = do
-  (repositoryDirectory, packageKindName, packageName, remainingArguments) <-
+  (packageKindName, packageName, remainingArguments) <-
     case commandLineArgs of
-      "create-package" : firstArgument : secondArgument : remainingArguments
-        | isJust (parseSupportedCreatePackageKind firstArgument) ->
-            Just (".", firstArgument, secondArgument, remainingArguments)
-        | isJust (parseSupportedCreatePackageKind secondArgument) ->
-            case remainingArguments of
-              packageName : packageArguments -> Just (firstArgument, secondArgument, packageName, packageArguments)
-              [] -> Nothing
+      "package" : "create" : packageKindName : packageName : remainingArguments ->
+        Just (packageKindName, packageName, remainingArguments)
       _ -> Nothing
   let (flagArguments, packageDescriptionArguments) =
         ( filter ("--" `isPrefixOf`) remainingArguments,
@@ -484,11 +470,11 @@ parseCreatePackageArgs commandLineArgs = do
         )
       packageDescription = case packageDescriptionArguments of [] -> Nothing; args -> Just (unwords args)
   requestedCheckKinds <- parseRepositoryCheckFlags flagArguments
-  pure (repositoryDirectory, packageKindName, packageName, packageDescription, requestedCheckKinds)
+  pure (packageKindName, packageName, packageDescription, requestedCheckKinds)
 parseCreateRepositoryArgs :: [String] -> Maybe (String, String, FilePath)
 parseCreateRepositoryArgs commandLineArgs =
   case commandLineArgs of
-    ["create-repository", hostname, username, repositoryName] -> Just (hostname, username, repositoryName)
+    ["repository", "create", hostname, username, repositoryName] -> Just (hostname, username, repositoryName)
     _ -> Nothing
 parseRepositoryCheckFlags :: [String] -> Maybe (Set.Set RepositoryCheckKind)
 parseRepositoryCheckFlags flagArguments =
@@ -651,14 +637,14 @@ checkRequiredRepositoryRootFiles = do
     | (requiredFile, requiredFileExists) <- requiredFilePresence,
       not requiredFileExists
     ]
-collectCheckRepositoryComplianceWith :: CanonicalizationSettings -> IO (Either (String, [String]) RepositoryComplianceSuccess)
-collectCheckRepositoryComplianceWith canonicalizationSettings = do
-  requiredRootFileIssues <- checkRequiredRepositoryRootFiles
-  if null requiredRootFileIssues
-    then collectRepositoryComplianceWith canonicalizationSettings
-    else pure (Left ("required-root-files", requiredRootFileIssues))
 collectRepositoryComplianceWith :: CanonicalizationSettings -> IO (Either (String, [String]) RepositoryComplianceSuccess)
 collectRepositoryComplianceWith canonicalizationSettings = do
+  requiredRootFileIssues <- checkRequiredRepositoryRootFiles
+  if null requiredRootFileIssues
+    then collectRepositoryContentComplianceWith canonicalizationSettings
+    else pure (Left ("required-root-files", requiredRootFileIssues))
+collectRepositoryContentComplianceWith :: CanonicalizationSettings -> IO (Either (String, [String]) RepositoryComplianceSuccess)
+collectRepositoryContentComplianceWith canonicalizationSettings = do
   repositoryStructureIssues <- checkRepositoryStructure
   if not (null repositoryStructureIssues)
     then pure (Left ("directory-structure", repositoryStructureIssues))
@@ -680,7 +666,7 @@ collectRepositoryComplianceWith canonicalizationSettings = do
             )
 reportCheckRepositoryFailures :: String -> [String] -> IO ()
 reportCheckRepositoryFailures checkPhaseName checkPhaseIssues = do
-  putStrLn ("check-repository failed at phase: " ++ checkPhaseName)
+  putStrLn ("canonicalization check failed at phase: " ++ checkPhaseName)
   forM_ checkPhaseIssues $ \issue ->
     putStrLn ("- [" ++ checkPhaseName ++ "] " ++ issue)
   case checkPhaseName of
@@ -2460,7 +2446,7 @@ templateInferenceTests =
           (Just "python_coverage_check")
           inferred,
       TestCase $ do
-        inferred <- inferCheckTemplateName "canonicalization-profile" (T.unpack haskellProfileCheckBaselineNixSource)
+        inferred <- inferCheckTemplateName "git-canonicalization-profile" (T.unpack haskellProfileCheckBaselineNixSource)
         assertEqual
           "Infers the Haskell profile check template."
           (Just "haskell_profile_check")
@@ -2715,7 +2701,7 @@ repositoryRequiredRootFilesPrecedenceTest =
       withCurrentWorkingDirectory tempRepository $
         createDirectoryIfMissing True "unexpected"
           >> TIO.writeFile ("unexpected" </> "file.txt") "bad"
-          >> collectCheckRepositoryComplianceWith defaultCanonicalizationSettings
+          >> collectRepositoryComplianceWith defaultCanonicalizationSettings
           >>= assertEqual
             "Reports missing root files before traversing or validating repository structure."
             ( Left
@@ -2752,7 +2738,9 @@ repositoryPolicyHaskellComplianceTest =
   withTemporaryPackageRepository "haskell-repository-compliance" $
     \tempRepository ->
       withCurrentWorkingDirectory tempRepository $
-        createPackageInCurrentRepositoryWith defaultCanonicalizationSettings HaskellPackage "demo" Nothing Set.empty
+        TIO.writeFile "flake.nix" "{}"
+          >> TIO.writeFile "flake.lock" "{}"
+          >> createPackageInCurrentRepositoryWith defaultCanonicalizationSettings HaskellPackage "demo" Nothing Set.empty
           >> collectRepositoryComplianceWith defaultCanonicalizationSettings
           >>= \case
             Right
@@ -2770,7 +2758,9 @@ repositoryPolicyDirectoryStructureTest =
   withTemporaryPackageRepository "directory-structure-repository-validation" $
     \tempRepository ->
       withCurrentWorkingDirectory tempRepository $
-        createDirectoryIfMissing True "unexpected"
+        TIO.writeFile "flake.nix" "{}"
+          >> TIO.writeFile "flake.lock" "{}"
+          >> createDirectoryIfMissing True "unexpected"
           >> TIO.writeFile ("unexpected" </> "file.txt") "bad"
           >> collectRepositoryComplianceWith defaultCanonicalizationSettings
           >>= \case
@@ -2785,7 +2775,9 @@ repositoryPolicyFileComplianceTest =
   withTemporaryPackageRepository "file-compliance-repository-validation" $
     \tempRepository ->
       withCurrentWorkingDirectory tempRepository $
-        createPackageInCurrentRepositoryWith defaultCanonicalizationSettings PythonPackage "demo" Nothing Set.empty
+        TIO.writeFile "flake.nix" "{}"
+          >> TIO.writeFile "flake.lock" "{}"
+          >> createPackageInCurrentRepositoryWith defaultCanonicalizationSettings PythonPackage "demo" Nothing Set.empty
           >> TIO.writeFile ("packages" </> "demo" </> "default.nix") "not valid nix template"
           >> collectRepositoryComplianceWith defaultCanonicalizationSettings
           >>= \case
@@ -2839,26 +2831,35 @@ createPackageTests =
   TestList
     [ TestCase $ do
         assertEqual
-          "Parses package checks as create-package options."
+          "Parses package checks as package create options."
           ( Just
-              ( ".",
-                "haskell",
+              ( "haskell",
                 "demo",
                 Just "Demo package",
                 Set.fromList [RepositoryCoverageCheck, RepositoryProfileCheck]
               )
           )
-          (parseCreatePackageArgs ["create-package", "haskell", "demo", "Demo", "package", "--coverage", "--profile"]),
+          (parseCreatePackageArgs ["package", "create", "haskell", "demo", "Demo", "package", "--coverage", "--profile"]),
       TestCase $ do
         assertEqual
-          "Parses the mandatory create-repository location components."
+          "Parses the mandatory repository create location components."
           (Just ("github.com", "example", "demo"))
-          (parseCreateRepositoryArgs ["create-repository", "github.com", "example", "demo"]),
+          (parseCreateRepositoryArgs ["repository", "create", "github.com", "example", "demo"]),
       TestCase $ do
         assertEqual
-          "Rejects unknown create-package options."
+          "Rejects unknown package create options."
           Nothing
-          (parseCreatePackageArgs ["create-package", "haskell", "demo", "--unknown"]),
+          (parseCreatePackageArgs ["package", "create", "haskell", "demo", "--unknown"]),
+      TestCase $ do
+        assertEqual
+          "Rejects the old create-package command."
+          Nothing
+          (parseCreatePackageArgs ["create-package", "haskell", "demo"]),
+      TestCase $ do
+        assertEqual
+          "Rejects the old create-repository command."
+          Nothing
+          (parseCreateRepositoryArgs ["create-repository", "github.com", "example", "demo"]),
       TestCase createPackagePythonScaffoldTest,
       TestCase createPackageRepositoryChecksTest,
       TestCase createPackageUnsupportedChecksTest
@@ -2890,12 +2891,14 @@ createPackageRepositoryChecksTest =
   withTemporaryPackageRepository "repository-check-creation" $
     \tempRepository ->
       withCurrentWorkingDirectory tempRepository $
-        createPackageInCurrentRepositoryWith
-          defaultCanonicalizationSettings
-          HaskellPackage
-          "demo"
-          Nothing
-          (Set.fromList [RepositoryCoverageCheck, RepositoryProfileCheck])
+        TIO.writeFile "flake.nix" "{}"
+          >> TIO.writeFile "flake.lock" "{}"
+          >> createPackageInCurrentRepositoryWith
+            defaultCanonicalizationSettings
+            HaskellPackage
+            "demo"
+            Nothing
+            (Set.fromList [RepositoryCoverageCheck, RepositoryProfileCheck])
           >>= \createPackageResult ->
             collectRepositoryComplianceWith defaultCanonicalizationSettings
               >>= \repositoryComplianceResult -> do

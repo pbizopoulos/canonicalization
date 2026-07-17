@@ -1,11 +1,11 @@
-name:          canonicalization
+name:          git-canonicalization
 version:       0.0.0
 synopsis:      Canonical repository checks and scaffolding CLI
 description:
   CLI for describing, checking, and scaffolding canonical repository packages and checks.
 cabal-version: >=1.10
 build-type:    Simple
-executable canonicalization
+executable git-canonicalization
   main-is:       Main.hs
   build-depends:
       base
