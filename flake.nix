@@ -27,8 +27,5 @@
     inputs:
     inputs.blueprint {
       inherit inputs;
-    }
-    // {
-      inherit (inputs) blueprint;
     };
 }
