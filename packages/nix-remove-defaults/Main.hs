@@ -130,18 +130,14 @@ processRepositoryArgument repositoryPath = do
 repositoryRootFromArgument :: FilePath -> IO (Either String FilePath)
 repositoryRootFromArgument repositoryPath = do
   absolutePath <- makeAbsolute repositoryPath
-  isFile <- doesFileExist absolutePath
   isDirectory <- doesDirectoryExist absolutePath
-  if isFile
-    then pure (Left ("Expected a flake/repository directory, got a file: " ++ repositoryPath))
-    else
-      if isDirectory
-        then do
-          repositoryRoot <- findFlakeRootFrom absolutePath
-          case repositoryRoot of
-            Just rootPath -> pure (Right rootPath)
-            Nothing -> pure (Left ("Cannot find flake.nix in " ++ repositoryPath ++ " or its parents"))
-        else pure (Left ("No such flake/repository directory: " ++ repositoryPath))
+  if isDirectory
+    then do
+      repositoryRoot <- findFlakeRootFrom absolutePath
+      case repositoryRoot of
+        Just rootPath -> pure (Right rootPath)
+        Nothing -> pure (Left ("Cannot find flake.nix in " ++ repositoryPath ++ " or its parents"))
+    else pure (Left ("No such flake/repository directory: " ++ repositoryPath))
 processRepository :: FilePath -> IO Bool
 processRepository repositoryRoot = do
   flakeSourcePath <- flakeSourcePathForRepository repositoryRoot
@@ -200,17 +196,6 @@ shouldSkipDirectory directoryName =
     || directoryName == "result"
     || directoryName == "tmp"
     || directoryName == "prm"
-processFile :: DefaultResolver -> FilePath -> IO Bool
-processFile resolveDefault filePath = do
-  parseResult <- parseNixFileLoc (Path filePath)
-  case parseResult of
-    Left parseError -> do
-      putStrLn ("Error parsing " ++ filePath ++ ": " ++ show parseError)
-      pure False
-    Right expr -> do
-      (changed, transformed) <- removeDefaultAssignments resolveDefault expr
-      when changed $ TIO.writeFile filePath (renderExpression transformed)
-      pure True
 parseRepositoryFile :: FilePath -> IO (Either String ParsedNixFile)
 parseRepositoryFile filePath = do
   parseResult <- parseNixFileLoc (Path filePath)
@@ -723,28 +708,11 @@ hUnitDebugTests =
         once <- formatWithDefaults defaults input
         twice <- formatWithDefaults defaults once
         assertEqual "Transformation is idempotent." once twice,
-      TestCase $
-        withSystemTempFile "nix-remove-defaults-failed-evaluation.nix" $ \tmpFile tmpHandle -> do
-          let input = pack "{   example.value = 1; }"
-          hClose tmpHandle
-          TIO.writeFile tmpFile input
-          processSucceeded <- processFile (\_ -> pure Nothing) tmpFile
-          output <- TIO.readFile tmpFile
-          assertEqual "An unavailable default is not an execution failure." True processSucceeded
-          assertEqual "An unavailable default does not rewrite the file." input output,
       makeTreefmtRemovalTest
         "Removes defaults inside a treefmt evalModule argument."
         (Map.singleton ["programs", "shfmt", "simplify"] (LiteralBool True))
         (pack "{ inputs, pkgs, ... }: let treefmtEval = inputs.treefmt-nix.lib.evalModule pkgs { programs.shfmt.simplify = true; keep = false; }; in treefmtEval.config.build.wrapper")
         (pack "{ inputs, pkgs, ... }:\n  let\n    treefmtEval = inputs.treefmt-nix.lib.evalModule pkgs { keep = false; };\n  in treefmtEval.config.build.wrapper"),
-      TestCase $
-        withSystemTempFile "nix-remove-defaults-direct-file-input.nix" $ \tmpFile tmpHandle -> do
-          hClose tmpHandle
-          repositoryRootResult <- repositoryRootFromArgument tmpFile
-          assertEqual
-            "Direct file input is rejected."
-            (Left ("Expected a flake/repository directory, got a file: " ++ tmpFile))
-            repositoryRootResult,
       TestCase $ do
         let expression =
               nixosDefaultDefinitionFilesExpression

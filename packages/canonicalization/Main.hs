@@ -1610,7 +1610,7 @@ checkDefaultNixConventions packageName packageKind = do
     Nothing -> pure []
     Just defaultNixText ->
       let defaultNixSource = T.unpack defaultNixText
-          hasLegacyMainProgram = "\n  mainProgram = pname;" `isInfixOf` defaultNixSource
+          hasTopLevelMainProgram = "\n  mainProgram = pname;" `isInfixOf` defaultNixSource
           hasMetaMainProgram =
             "meta.mainProgram = pname;" `isInfixOf` defaultNixSource
               || ("meta = {" `isInfixOf` defaultNixSource && "mainProgram = pname;" `isInfixOf` defaultNixSource)
@@ -1622,7 +1622,7 @@ checkDefaultNixConventions packageName packageKind = do
             packageKind `elem` [RustPackage, PythonLatexPackage, PythonPackage, CPackage, BinaryReleasePackage]
        in pure $
             catMaybes
-              [ if packageKind == HaskellPackage && not hasLegacyMainProgram
+              [ if packageKind == HaskellPackage && not hasTopLevelMainProgram
                   then Just ("packages/" ++ packageName ++ "/default.nix: Haskell packages must set mainProgram = pname;")
                   else Nothing,
                 if packageKind == HaskellPackage && hasMetaMainProgram
@@ -1631,7 +1631,7 @@ checkDefaultNixConventions packageName packageKind = do
                 if expectsMetaMainProgram && not hasMetaMainProgram
                   then Just ("packages/" ++ packageName ++ "/default.nix: package kind requires meta.mainProgram = pname;")
                   else Nothing,
-                if expectsMetaMainProgram && hasLegacyMainProgram
+                if expectsMetaMainProgram && hasTopLevelMainProgram
                   then Just ("packages/" ++ packageName ++ "/default.nix: package kind must use meta.mainProgram (not mainProgram)")
                   else Nothing,
                 if hasExternalFetchUrlSource && hasPlaceholderVersion
@@ -2287,9 +2287,6 @@ renderNixExpr =
     . layoutPretty defaultLayoutOptions
     . prettyNix
     . stripAnnotation
-formatTemplateDifferences :: FilePath -> FilePath -> NExprLoc -> NExprLoc -> [String]
-formatTemplateDifferences packageName =
-  formatNixTemplateDifferences ("packages/" ++ packageName ++ "/default.nix")
 formatNixTemplateDifferences :: FilePath -> FilePath -> NExprLoc -> NExprLoc -> [String]
 formatNixTemplateDifferences subjectNixPath templateBaselineNixPath subjectNixExpr templateBaselineExpr =
   let renderedPackageDefaultNix = renderNixExpr subjectNixExpr
@@ -2626,19 +2623,6 @@ checkTemplateDebugTests =
           []
           validationIssues,
       TestCase $ do
-        legacyPythonTemplateParseResult <- parseNixExprFromText (T.pack legacyPythonTemplateNixFixture)
-        baselinePythonParseResult <- parseNixExprFromText pythonTemplateBaselineNixSource
-        case (legacyPythonTemplateParseResult, baselinePythonParseResult) of
-          (Right legacyPythonTemplateExpr, Right baselinePythonExpr) ->
-            assertBool
-              "Reports legacy Python template let-binding differences explicitly."
-              ( any
-                  ("unexpected let key: pyPkgs" `isInfixOf`)
-                  (formatTemplateDifferences "test" "packages/python_template/default.nix" legacyPythonTemplateExpr baselinePythonExpr)
-              )
-          (Left parseError, _) -> assertFailure ("Failed to parse legacy Python template fixture: " ++ parseError)
-          (_, Left parseError) -> assertFailure ("Failed to parse Python template baseline fixture: " ++ parseError),
-      TestCase $ do
         (tempPath, tempHandle) <- openTempFile "/tmp" "python-template-custom-description.nix"
         TIO.hPutStr tempHandle (renderPythonTemplateBaselineNixSourceWith "Custom Python package" defaultPythonPackageAttribute)
         hClose tempHandle
@@ -2866,11 +2850,6 @@ createPackageDebugTests =
           (parseCreateRepositoryArgs ["create-repository", "github.com", "example", "demo"]),
       TestCase $ do
         assertEqual
-          "Rejects the former create-repository arguments."
-          Nothing
-          (parseCreateRepositoryArgs ["create-repository", "/tmp", "demo"]),
-      TestCase $ do
-        assertEqual
           "Rejects unknown create-package options."
           Nothing
           (parseCreatePackageArgs ["create-package", "haskell", "demo", "--unknown"]),
@@ -2990,42 +2969,6 @@ pythonNixFixture =
     ++ "let python = pkgs.python3; in\n"
     ++ "python.pkgs.buildPythonPackage rec {\n"
     ++ "  src = ./.;\n"
-    ++ "}\n"
-legacyPythonTemplateNixFixture :: String
-legacyPythonTemplateNixFixture =
-  "{\n"
-    ++ "  inputs,\n"
-    ++ "  pkgs ? import <nixpkgs> { },\n"
-    ++ "}:\n"
-    ++ "let\n"
-    ++ "  installationScript = inputs.agenix-shell.lib.installationScript pkgs.stdenv.system {\n"
-    ++ "    secrets.secrets.file = ../../secrets/secrets.age;\n"
-    ++ "  };\n"
-    ++ "  pyPkgs = pkgs.python312Packages;\n"
-    ++ "  python = pkgs.python312;\n"
-    ++ "in\n"
-    ++ "pyPkgs.buildPythonPackage rec {\n"
-    ++ "  installPhase = ''\n"
-    ++ "    install -Dm644 main.py $out/${python.sitePackages}/${pname}.py\n"
-    ++ "    install -Dm755 main.py $out/bin/${pname}\n"
-    ++ "    if [ -d prm ]; then\n"
-    ++ "      cp -r prm/ $out/${python.sitePackages}/\n"
-    ++ "      cp -r prm/ $out/bin/\n"
-    ++ "    fi\n"
-    ++ "  '';\n"
-    ++ "  meta.mainProgram = pname;\n"
-    ++ "  pname = baseNameOf ./.;\n"
-    ++ "  propagatedBuildInputs = [\n"
-    ++ "    pyPkgs.hypothesis\n"
-    ++ "  ];\n"
-    ++ "  pyproject = false;\n"
-    ++ "  shellHook = ''\n"
-    ++ "    source ${pkgs.lib.getExe installationScript}\n"
-    ++ "    export $secrets\n"
-    ++ "  '';\n"
-    ++ "  src = ./.;\n"
-    ++ "  strictDeps = true;\n"
-    ++ "  version = \"0.0.0\";\n"
     ++ "}\n"
 pythonLatexNixFixture :: String
 pythonLatexNixFixture =
