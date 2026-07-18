@@ -499,8 +499,8 @@ mainHelpText =
       "",
       "   add        Add a package and its requested checks",
       "   check      Check whether the repository is canonical",
-      "   clone      Clone a canonical repository",
-      "   init       Create a canonical repository",
+      "   clone      Add a canonical repository as a submodule below $HOME",
+      "   init       Create and add a canonical repository as a submodule below $HOME",
       "   summary    Show a summary of packages and checks",
       "",
       "See 'git canonicalization <command> -h' for help on a specific command.",
@@ -530,11 +530,17 @@ usageTextForCommand = \case
   Just "init" ->
     unlines
       [ "usage: git canonicalization init (<repository-url> | <hostname> <username> <repository-name>)",
+        "",
+        "Create $HOME/<hostname>/<username>/<repository-name> and add it as a submodule",
+        "of the Git repository rooted at $HOME. The remote repository must not yet exist.",
         ""
       ]
   Just "clone" ->
     unlines
       [ "usage: git canonicalization clone (<repository-url> | <hostname> <username> <repository-name>)",
+        "",
+        "Clone into $HOME/<hostname>/<username>/<repository-name> by adding the repository",
+        "as a submodule of the Git repository rooted at $HOME.",
         ""
       ]
   _ -> unlines ["usage: git canonicalization [-h | --help] <command> [<args>]", ""]
@@ -586,7 +592,7 @@ parseHttpsRepositoryUrl repositoryUrl = do
   repositoryLocationFromUrlPath repositoryUrl hostnameAndPath
 parseSshSchemeRepositoryUrl :: String -> Maybe RepositoryLocation
 parseSshSchemeRepositoryUrl repositoryUrl = do
-  sshLocation <- stripPrefix "ssh://" repositoryUrl
+  sshLocation <- stripPrefix "ssh://" repositoryUrl <|> stripPrefix "git+ssh://" repositoryUrl
   hostnameAndPath <- stripPrefix "git@" sshLocation
   repositoryLocationFromUrlPath repositoryUrl hostnameAndPath
 parseScpRepositoryUrl :: String -> Maybe RepositoryLocation
@@ -1331,11 +1337,13 @@ defaultPythonPackageAttribute = "python312"
 scaffoldDescription :: String -> Maybe String -> String
 scaffoldDescription defaultDescription = maybe defaultDescription (unwords . words)
 escapeNixDoubleQuotedString :: String -> String
-escapeNixDoubleQuotedString = concatMap escapeChar
+escapeNixDoubleQuotedString = go
   where
-    escapeChar '"' = "\\\""
-    escapeChar '\\' = "\\\\"
-    escapeChar otherChar = [otherChar]
+    go [] = []
+    go ('$' : '{' : remainingCharacters) = "\\${" ++ go remainingCharacters
+    go ('"' : remainingCharacters) = "\\\"" ++ go remainingCharacters
+    go ('\\' : remainingCharacters) = "\\\\" ++ go remainingCharacters
+    go (character : remainingCharacters) = character : go remainingCharacters
 renderNixTemplateDescription :: String -> Maybe String -> T.Text -> T.Text
 renderNixTemplateDescription defaultDescription packageDescription =
   T.replace
@@ -1813,7 +1821,45 @@ checkTemplateWith checkName = do
                 [ "checks/" ++ checkName ++ "/default.nix: unsupported check template " ++ matchedCheckTemplateName
                 ]
             Just checkTemplateSpec ->
-              validateCheckTemplate checkName checkTemplatePath checkTemplateSpec
+              (++)
+                <$> validateCheckPackageAssociation checkName checkTemplatePath matchedCheckTemplateName
+                <*> validateCheckTemplate checkName checkTemplatePath checkTemplateSpec
+validateCheckPackageAssociation :: FilePath -> FilePath -> FilePath -> IO [String]
+validateCheckPackageAssociation checkName checkTemplatePath matchedCheckTemplateName =
+  case checkPackageAssociation matchedCheckTemplateName checkName of
+    Nothing -> pure []
+    Just (packageName, expectedPackageKinds) -> do
+      packageDirectoryExists <- doesDirectoryExist ("packages" </> packageName)
+      actualPackageKind <- detectPackageKindForPackage packageName
+      pure
+        [ checkTemplatePath
+            ++ ": "
+            ++ matchedCheckTemplateName
+            ++ " requires corresponding "
+            ++ intercalate " or " (map renderPackageKind expectedPackageKinds)
+            ++ " package packages/"
+            ++ packageName
+        | not packageDirectoryExists || actualPackageKind `notElem` expectedPackageKinds
+        ]
+checkPackageAssociation :: FilePath -> FilePath -> Maybe (FilePath, [PackageKind])
+checkPackageAssociation matchedCheckTemplateName checkName =
+  case matchedCheckTemplateName of
+    "haskell_coverage_check" -> withSuffix "-coverage" [HaskellPackage]
+    "haskell_profile_check" -> withSuffix "-profile" [HaskellPackage]
+    "haskell_property_testing_check" -> withSuffix "-property-testing" [HaskellPackage]
+    "python_coverage_check" -> withSuffix "_coverage" [PythonPackage, PythonLatexPackage]
+    "python_profile_check" -> withSuffix "_profile" [PythonPackage, PythonLatexPackage]
+    "python_property_testing_check" -> withSuffix "_property_testing" [PythonPackage, PythonLatexPackage]
+    "rust_coverage_check" -> withSuffix "-coverage" [RustPackage]
+    "rust_profile_check" -> withSuffix "-profile" [RustPackage]
+    "rust_property_testing_check" -> withSuffix "-property-testing" [RustPackage]
+    "rust_mutation_testing_check" -> withSuffix "-mutation-testing" [RustPackage]
+    _ -> Nothing
+  where
+    withSuffix :: String -> [PackageKind] -> Maybe (FilePath, [PackageKind])
+    withSuffix checkNameSuffix expectedPackageKinds =
+      (\packageName -> (T.unpack packageName, expectedPackageKinds))
+        <$> T.stripSuffix (T.pack checkNameSuffix) (T.pack checkName)
 detectPackageKindForPackage :: FilePath -> IO PackageKind
 detectPackageKindForPackage packageName = do
   let packageRootDirectory = "packages" </> packageName
@@ -2656,6 +2702,18 @@ commandLineHelpEndToEndTest =
     assertEqual "Command-specific help succeeds." ExitSuccess addHelpExit
     assertBool "Command-specific help prints the add usage to stdout." ("usage: git canonicalization add" `isPrefixOf` addHelpStdout)
     assertEqual "Command-specific help leaves stderr empty." "" addHelpStderr
+    (cloneHelpExit, cloneHelpStdout, cloneHelpStderr) <- runEndToEndCommandIn temporaryDirectory ["clone", "--help"]
+    assertEqual "Clone help succeeds." ExitSuccess cloneHelpExit
+    assertBool
+      "Clone help explains the destination and submodule behavior."
+      ("$HOME/<hostname>/<username>/<repository-name>" `isInfixOf` cloneHelpStdout && "as a submodule" `isInfixOf` cloneHelpStdout)
+    assertEqual "Clone help leaves stderr empty." "" cloneHelpStderr
+    (initHelpExit, initHelpStdout, initHelpStderr) <- runEndToEndCommandIn temporaryDirectory ["init", "--help"]
+    assertEqual "Init help succeeds." ExitSuccess initHelpExit
+    assertBool
+      "Init help explains the home Git repository and absent-remote precondition."
+      ("Git repository rooted at $HOME" `isInfixOf` initHelpStdout && "remote repository must not yet exist" `isInfixOf` initHelpStdout)
+    assertEqual "Init help leaves stderr empty." "" initHelpStderr
     (missingCommandExit, missingCommandStdout, missingCommandStderr) <- runEndToEndCommandIn temporaryDirectory []
     assertEqual "An omitted command exits unsuccessfully." (ExitFailure 1) missingCommandExit
     assertEqual "An omitted command leaves stdout empty." "" missingCommandStdout
@@ -2873,7 +2931,19 @@ templateInferenceTests =
         assertEqual
           "Infers the generic VM-with-disko check template."
           (Just "default_vm_with_disko_check")
-          inferred
+          inferred,
+      TestCase $
+        assertEqual
+          "Parses the canonical git+ssh repository URL form."
+          ( Just
+              ( RepositoryLocation
+                  "example.test"
+                  "owner"
+                  "demo"
+                  "git+ssh://git@example.test/owner/demo"
+              )
+          )
+          (parseRepositoryUrl "git+ssh://git@example.test/owner/demo")
     ]
 checkTemplateTests :: Test
 checkTemplateTests =
@@ -2986,8 +3056,32 @@ checkTemplateTests =
               "Extracts primary bindings from runNixOSTest application shapes without crashing."
               (Just (Map.fromList [("name", "\"example\"")]))
               (extractPrimaryNixBindings runNixOsTestExpr)
-          Left parseError -> assertFailure ("Failed to parse runNixOSTest fixture: " ++ parseError)
+          Left parseError -> assertFailure ("Failed to parse runNixOSTest fixture: " ++ parseError),
+      TestCase orphanCheckPackageAssociationTest
     ]
+orphanCheckPackageAssociationTest :: IO ()
+orphanCheckPackageAssociationTest =
+  withTemporaryPackageRepository "orphan-check-package-association" $ \tempRepository ->
+    withCurrentWorkingDirectory tempRepository $ do
+      let checkDirectory = "checks" </> "orphan_coverage"
+          checkPath = checkDirectory </> "default.nix"
+      createDirectoryIfMissing True checkDirectory
+      TIO.writeFile checkPath pythonCoverageCheckBaselineNixSource
+      orphanIssues <- checkTemplateWith "orphan_coverage"
+      addPackageResult <-
+        addPackageToCurrentRepositoryWith
+          defaultCanonicalizationSettings
+          PythonPackage
+          "orphan"
+          Nothing
+          Set.empty
+      associatedIssues <- checkTemplateWith "orphan_coverage"
+      assertEqual
+        "Rejects a language check without its corresponding package."
+        ["checks/orphan_coverage/default.nix: python_coverage_check requires corresponding python or python-latex package packages/orphan"]
+        orphanIssues
+      assertBool "Creates the corresponding package fixture." (case addPackageResult of Right _ -> True; Left _ -> False)
+      assertEqual "Accepts the check once its corresponding package exists." [] associatedIssues
 metadataAndDiscoveryTests :: Test
 metadataAndDiscoveryTests =
   TestList
@@ -3245,6 +3339,7 @@ addPackageTests =
       TestCase addPackageRepositoryChecksTest,
       TestCase addPackageHtmlDefaultCheckTest,
       TestCase addPackageDescriptionsTest,
+      TestCase nixDescriptionInterpolationEscapingTest,
       TestCase repositoryPackageNamingConventionTest,
       TestCase addPackageUnsupportedChecksTest
     ]
@@ -3400,6 +3495,17 @@ addPackageDescriptionsTest =
           "Accepts every generated custom description during metadata validation."
           []
           (haskellDescriptionIssues ++ rustDescriptionIssues ++ nixDescriptionIssues)
+nixDescriptionInterpolationEscapingTest :: IO ()
+nixDescriptionInterpolationEscapingTest = do
+  let description :: String
+      description = "Literal ${builtins.abort \"must not evaluate\"} text"
+      renderedPythonTemplate = renderPythonTemplateBaselineNixSourceWith description defaultPythonPackageAttribute
+  assertBool
+    "Escapes Nix interpolation openers in scaffold descriptions."
+    ("description = \"Literal \\${builtins.abort \\\"must not evaluate\\\"} text\";" `T.isInfixOf` renderedPythonTemplate)
+  parseNixExprFromText renderedPythonTemplate >>= \case
+    Right _ -> pure ()
+    Left parseError -> assertFailure ("Escaped description did not produce valid Nix: " ++ parseError)
 repositoryPackageNamingConventionTest :: IO ()
 repositoryPackageNamingConventionTest =
   withTemporaryPackageRepository "repository-package-name-convention" $
