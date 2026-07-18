@@ -473,7 +473,7 @@ printUsageAndExit :: IO a
 printUsageAndExit = do
   putStrLn "Usage: git canonicalization check"
   putStrLn "       git canonicalization summary [--json]"
-  putStrLn "       git canonicalization add <package-type> <package-name> [description] [--check] [--coverage] [--profile] [--property-testing] [--mutation-testing]"
+  putStrLn "       git canonicalization add <package-type> <package-name> [description] [--default-check] [--coverage] [--profile] [--property-testing] [--mutation-testing]"
   putStrLn "       git canonicalization init <https-or-ssh-repository-url>"
   putStrLn "       git canonicalization clone <https-or-ssh-repository-url>"
   exitFailure
@@ -556,7 +556,7 @@ parseRepositoryCheckFlags flagArguments =
       ( \repositoryCheckFlag ->
           lookup
             repositoryCheckFlag
-            [ ("--check", RepositoryDefaultCheck),
+            [ ("--default-check", RepositoryDefaultCheck),
               ("--coverage", RepositoryCoverageCheck),
               ("--profile", RepositoryProfileCheck),
               ("--property-testing", RepositoryPropertyTestingCheck),
@@ -1088,7 +1088,7 @@ validateRepositoryCheckSelection packageKind requestedCheckKinds =
                 ++ intercalate
                   ", "
                   [ case repositoryCheckKind of
-                      RepositoryDefaultCheck -> "--check"
+                      RepositoryDefaultCheck -> "--default-check"
                       RepositoryCoverageCheck -> "--coverage"
                       RepositoryProfileCheck -> "--profile"
                       RepositoryPropertyTestingCheck -> "--property-testing"
@@ -3011,10 +3011,10 @@ addPackageTests =
               ( "haskell",
                 "demo",
                 Just "Demo package",
-                Set.fromList [RepositoryCoverageCheck, RepositoryProfileCheck]
+                Set.fromList [RepositoryDefaultCheck, RepositoryCoverageCheck, RepositoryProfileCheck]
               )
           )
-          (parseAddPackageArgs ["add", "haskell", "demo", "Demo", "package", "--coverage", "--profile"]),
+          (parseAddPackageArgs ["add", "haskell", "demo", "Demo", "package", "--default-check", "--coverage", "--profile"]),
       TestCase $ do
         assertEqual
           "Parses the mandatory init location components."
