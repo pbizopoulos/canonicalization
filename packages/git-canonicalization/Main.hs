@@ -44,7 +44,7 @@ import System.Directory (canonicalizePath, createDirectoryIfMissing, doesDirecto
 import System.Environment (getArgs)
 import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitFailure, exitWith)
 import System.FilePath ((<.>), (</>))
-import System.FilePath.Posix (splitDirectories, takeBaseName, takeDirectory, takeFileName)
+import System.FilePath.Posix (isRelative, makeRelative, splitDirectories, takeBaseName, takeDirectory, takeFileName)
 import System.IO (hClose, hPutStr, openTempFile, stderr)
 import System.Process (readProcessWithExitCode)
 import Test.HUnit (Counts (errors, failures), Test (TestCase, TestList), assertBool, assertEqual, assertFailure, runTestTT)
@@ -443,8 +443,7 @@ runCli canonicalizationSettings commandLineArgs =
                   Left cloneError -> do
                     putStrLn cloneError
                     exitFailure
-                  Right repositoryPath ->
-                    putStrLn ("cloned git repository " ++ repositoryPath)
+                  Right _ -> pure ()
               Nothing -> printCommandUsageAndExit usageExitCode cloneArgs
           commandArgs ->
             case parseInitRepositoryArgs commandArgs of
@@ -454,11 +453,17 @@ runCli canonicalizationSettings commandLineArgs =
                   Left createError -> do
                     putStrLn createError
                     exitFailure
-                  Right repositoryPath ->
-                    putStrLn ("created git repository " ++ repositoryPath)
+                  Right _ -> pure ()
               Nothing ->
                 case commandArgs of
                   "init" : _ -> printCommandUsageAndExit usageExitCode commandArgs
+                  ["rm", removalTarget] ->
+                    removeCanonicalizationTarget removalTarget >>= \case
+                      Left removeError -> do
+                        putStrLn removeError
+                        exitFailure
+                      Right () -> pure ()
+                  "rm" : _ -> printCommandUsageAndExit usageExitCode commandArgs
                   _ ->
                     case parseAddPackageArgs commandArgs of
                       Just (packageKindName, packageName, packageDescription, requestedCheckKinds) ->
@@ -474,9 +479,7 @@ runCli canonicalizationSettings commandLineArgs =
                                 Left addError -> do
                                   putStrLn addError
                                   exitFailure
-                                Right createdFilePaths -> do
-                                  putStrLn ("added package packages/" ++ packageName ++ " (" ++ renderPackageKind packageKind ++ ")")
-                                  putStrLn ("created " ++ show (length createdFilePaths) ++ " files")
+                                Right _ -> pure ()
                       Nothing -> printCommandUsageAndExit usageExitCode commandArgs
 printMainHelpAndExit :: ExitCode -> IO a
 printMainHelpAndExit exitCode = do
@@ -501,6 +504,7 @@ mainHelpText =
       "   check      Check whether the repository is canonical",
       "   clone      Add a canonical repository as a submodule below $HOME",
       "   init       Create and add a canonical repository as a submodule below $HOME",
+      "   rm         Remove a package or local repository submodule",
       "   summary    Show a summary of packages and checks",
       "",
       "See 'git canonicalization <command> -h' for help on a specific command.",
@@ -541,6 +545,15 @@ usageTextForCommand = \case
         "",
         "Clone into $HOME/<hostname>/<username>/<repository-name> by adding the repository",
         "as a submodule of the Git repository rooted at $HOME.",
+        ""
+      ]
+  Just "rm" ->
+    unlines
+      [ "usage: git canonicalization rm (<package-name> | <local-repository>)",
+        "",
+        "Remove a package and its corresponding checks from the current repository,",
+        "or remove a local repository from the Git repository rooted at $HOME.",
+        "Repository submodule entries in .gitmodules are removed and staged by git rm.",
         ""
       ]
   _ -> unlines ["usage: git canonicalization [-h | --help] <command> [<args>]", ""]
@@ -732,6 +745,78 @@ cloneGitRepositoryLocationInHomeWith probeRepository homeDirectory repositoryLoc
     hostname = repositoryLocationHostname repositoryLocation
     username = repositoryLocationUsername repositoryLocation
     repositoryName = repositoryLocationName repositoryLocation
+removeCanonicalizationTarget :: FilePath -> IO (Either String ())
+removeCanonicalizationTarget removalTarget = do
+  targetIsGitRepository <- doesDirectoryExist (removalTarget </> ".git")
+  targetHasGitFile <- doesFileExist (removalTarget </> ".git")
+  if targetIsGitRepository || targetHasGitFile || any (`elem` ("/\\" :: String)) removalTarget
+    then removeGitRepository removalTarget
+    else runInGitRepositoryRoot "." (removePackageFromCurrentRepository removalTarget)
+removeGitRepository :: FilePath -> IO (Either String ())
+removeGitRepository repositoryPath = do
+  homeDirectory <- getHomeDirectory
+  removeGitRepositoryInHome homeDirectory repositoryPath
+removeGitRepositoryInHome :: FilePath -> FilePath -> IO (Either String ())
+removeGitRepositoryInHome homeDirectory repositoryPath = do
+  repositoryPathExists <- doesPathExist repositoryPath
+  if not repositoryPathExists
+    then pure (Left ("path does not exist: " ++ repositoryPath))
+    else do
+      canonicalHomeDirectory <- canonicalizePath homeDirectory
+      canonicalRepositoryPath <- canonicalizePath repositoryPath
+      let repositoryPathEntry = makeRelative canonicalHomeDirectory canonicalRepositoryPath
+          repositoryPathParts = splitDirectories repositoryPathEntry
+          repositoryIsBelowHome = isRelative repositoryPathEntry && repositoryPathEntry /= "." && ".." `notElem` repositoryPathParts
+      if not repositoryIsBelowHome
+        then pure (Left ("repository is not below " ++ canonicalHomeDirectory ++ ": " ++ canonicalRepositoryPath))
+        else do
+          (homeGitRootExit, homeGitRootStdout, _homeGitRootStderr) <- readProcessWithExitCode "git" ["-C", canonicalHomeDirectory, "rev-parse", "--show-toplevel"] ""
+          let reportedHomeGitRoot = T.unpack (T.strip (T.pack homeGitRootStdout))
+          canonicalHomeGitRoot <- if homeGitRootExit == ExitSuccess then canonicalizePath reportedHomeGitRoot else pure reportedHomeGitRoot
+          if homeGitRootExit /= ExitSuccess || canonicalHomeGitRoot /= canonicalHomeDirectory
+            then pure (Left ("not a git repository root directory: " ++ canonicalHomeDirectory))
+            else
+              runRepositoryCreationCommand
+                "could not remove repository submodule"
+                ["-C", canonicalHomeDirectory, "rm", "--quiet", "--", repositoryPathEntry]
+                >>= \case
+                  Just removeError -> pure (Left removeError)
+                  Nothing -> pure (Right ())
+removePackageFromCurrentRepository :: FilePath -> IO (Either String ())
+removePackageFromCurrentRepository packageName = do
+  let packagePath = "packages" </> packageName
+  packageExists <- doesDirectoryExist packagePath
+  if not packageExists
+    then pure (Left ("package does not exist: " ++ packageName))
+    else do
+      packageKind <- detectPackageKindForPackage packageName
+      if packageKind == UnknownPackage
+        then pure (Left ("could not determine package type: " ++ packageName))
+        else do
+          let checkKinds =
+                [ RepositoryDefaultCheck,
+                  RepositoryCoverageCheck,
+                  RepositoryProfileCheck,
+                  RepositoryPropertyTestingCheck,
+                  RepositoryMutationTestingCheck
+                ]
+              associatedCheckPaths =
+                [ "checks" </> checkName
+                | checkKind <- checkKinds,
+                  Just checkName <- [repositoryCheckNameForKind packageKind packageName checkKind]
+                ]
+          existingAssociatedCheckPaths <- filterM doesPathExist associatedCheckPaths
+          let removalPaths = packagePath : existingAssociatedCheckPaths
+          runRepositoryCreationCommand
+            "could not remove package"
+            (["rm", "-r", "--quiet", "--ignore-unmatch", "--"] ++ removalPaths)
+            >>= \case
+              Just removeError -> pure (Left removeError)
+              Nothing -> do
+                forM_ removalPaths $ \removalPath -> do
+                  removalPathExists <- doesPathExist removalPath
+                  when removalPathExists (removePathForcibly removalPath)
+                pure (Right ())
 createGitRepositoryInHomeWith :: (String -> IO RemoteRepositoryProbeResult) -> FilePath -> String -> String -> FilePath -> IO (Either String FilePath)
 createGitRepositoryInHomeWith probeRepository homeDirectory hostname username repositoryName =
   createGitRepositoryLocationInHomeWith probeRepository homeDirectory (repositoryLocationFromComponents (hostname, username, repositoryName))
@@ -2714,6 +2799,12 @@ commandLineHelpEndToEndTest =
       "Init help explains the home Git repository and absent-remote precondition."
       ("Git repository rooted at $HOME" `isInfixOf` initHelpStdout && "remote repository must not yet exist" `isInfixOf` initHelpStdout)
     assertEqual "Init help leaves stderr empty." "" initHelpStderr
+    (rmHelpExit, rmHelpStdout, rmHelpStderr) <- runEndToEndCommandIn temporaryDirectory ["rm", "--help"]
+    assertEqual "Rm help succeeds." ExitSuccess rmHelpExit
+    assertBool
+      "Rm help explains the local repository and .gitmodules behavior."
+      ("<local-repository>" `isInfixOf` rmHelpStdout && ".gitmodules" `isInfixOf` rmHelpStdout)
+    assertEqual "Rm help leaves stderr empty." "" rmHelpStderr
     (missingCommandExit, missingCommandStdout, missingCommandStderr) <- runEndToEndCommandIn temporaryDirectory []
     assertEqual "An omitted command exits unsuccessfully." (ExitFailure 1) missingCommandExit
     assertEqual "An omitted command leaves stdout empty." "" missingCommandStdout
@@ -2735,10 +2826,7 @@ addSummaryAndCheckEndToEndTest =
         nestedDirectory
         ["add", "python", "demo", "Demo package", "--coverage", "--property-testing"]
     assertEqual "Adding a package through the installed CLI succeeds." ExitSuccess addExit
-    assertEqual
-      "Adding a package reports the package and complete file count."
-      "added package packages/demo (python)\ncreated 5 files\n"
-      addStdout
+    assertEqual "A successful add produces no stdout." "" addStdout
     assertEqual "A successful add leaves stderr empty." "" addStderr
     generatedFilesExist <-
       and
@@ -2793,6 +2881,16 @@ addSummaryAndCheckEndToEndTest =
           && "packages/demo/default.nix:" `isInfixOf` failedCheckStdout
       )
     assertEqual "Repository policy diagnostics are not written to stderr." "" failedCheckStderr
+    (rmExit, rmStdout, rmStderr) <- runEndToEndCommandIn temporaryRepository ["rm", "demo"]
+    assertEqual "Removing the generated package succeeds." ExitSuccess rmExit
+    assertEqual "A successful package removal produces no stdout." "" rmStdout
+    assertEqual "A successful package removal produces no stderr." "" rmStderr
+    removedPackageExists <- doesPathExist (temporaryRepository </> "packages/demo")
+    removedCoverageCheckExists <- doesPathExist (temporaryRepository </> "checks/demo_coverage")
+    removedPropertyTestingCheckExists <- doesPathExist (temporaryRepository </> "checks/demo_property_testing")
+    assertBool "Package removal deletes the package directory." (not removedPackageExists)
+    assertBool "Package removal deletes its coverage check." (not removedCoverageCheckExists)
+    assertBool "Package removal deletes its property-testing check." (not removedPropertyTestingCheckExists)
 invalidAddEndToEndTest :: IO ()
 invalidAddEndToEndTest =
   withTemporaryPackageRepository "invalid-add-end-to-end" $ \temporaryRepository -> do
@@ -2833,6 +2931,11 @@ initializeGitRepositoryFixture repositoryPath =
       (gitInitExit, _gitInitStdout, gitInitStderr) <- readProcessWithExitCode "git" ["init", "--quiet", repositoryPath] ""
       unless (gitInitExit == ExitSuccess) $
         assertFailure ("Failed to initialize Git repository fixture: " ++ gitInitStderr)
+runGitFixtureCommand :: [String] -> IO ()
+runGitFixtureCommand arguments = do
+  (gitExit, _gitStdout, gitStderr) <- readProcessWithExitCode "git" arguments ""
+  unless (gitExit == ExitSuccess) $
+    assertFailure ("Git fixture command failed: git " ++ unwords arguments ++ if null gitStderr then "" else ": " ++ gitStderr)
 templateInferenceTests :: Test
 templateInferenceTests =
   TestList
@@ -3279,7 +3382,8 @@ createRepositoryTests =
       TestCase $ remoteRepositoryPreflightStopsCreationTest (RemoteRepositoryIndeterminate "network unavailable") "could not determine whether remote repository exists",
       TestCase $ remoteRepositoryPreflightStopsCloneTest RemoteRepositoryAbsent "remote repository does not exist",
       TestCase $ remoteRepositoryPreflightStopsCloneTest (RemoteRepositoryIndeterminate "network unavailable") "could not determine whether remote repository exists",
-      TestCase failedRepositoryCreationCleanupTest
+      TestCase failedRepositoryCreationCleanupTest,
+      TestCase removeRepositorySubmoduleTest
     ]
 remoteRepositoryPreflightStopsCreationTest :: RemoteRepositoryProbeResult -> String -> IO ()
 remoteRepositoryPreflightStopsCreationTest probeResult expectedErrorPrefix =
@@ -3332,6 +3436,37 @@ failedRepositoryCreationCleanupTest =
     assertBool
       "Removes a partially created repository so init can be retried."
       (not partialRepositoryPathExists)
+removeRepositorySubmoduleTest :: IO ()
+removeRepositorySubmoduleTest =
+  findExecutable "git" >>= \case
+    Nothing -> pure ()
+    Just _ ->
+      withTemporaryPackageRepository "remove-repository-home" $ \tempHome ->
+        withTemporaryPackageRepository "remove-repository-remote" $ \tempRemote -> do
+          initializeGitRepositoryFixture tempRemote
+          runGitFixtureCommand ["-C", tempRemote, "config", "user.name", "Canonicalization Tests"]
+          runGitFixtureCommand ["-C", tempRemote, "config", "user.email", "canonicalization@example.test"]
+          TIO.writeFile (tempRemote </> "README.md") "test repository\n"
+          runGitFixtureCommand ["-C", tempRemote, "add", "README.md"]
+          runGitFixtureCommand ["-C", tempRemote, "commit", "--quiet", "-m", "Initial commit"]
+          initializeGitRepositoryFixture tempHome
+          runGitFixtureCommand ["-C", tempHome, "config", "user.name", "Canonicalization Tests"]
+          runGitFixtureCommand ["-C", tempHome, "config", "user.email", "canonicalization@example.test"]
+          let repositoryPathEntry = "example.test" </> "owner" </> "demo"
+              repositoryPath = tempHome </> repositoryPathEntry
+          runGitFixtureCommand ["-c", "protocol.file.allow=always", "-C", tempHome, "submodule", "add", "--quiet", tempRemote, repositoryPathEntry]
+          runGitFixtureCommand ["-C", tempHome, "commit", "--quiet", "-m", "Add test submodule"]
+          removeResult <- removeGitRepositoryInHome tempHome repositoryPath
+          repositoryPathExists <- doesPathExist repositoryPath
+          gitmodulesExists <- doesFileExist (tempHome </> ".gitmodules")
+          gitmodulesSource <- if gitmodulesExists then TIO.readFile (tempHome </> ".gitmodules") else pure ""
+          (trackedPathExit, trackedPathStdout, _trackedPathStderr) <- readProcessWithExitCode "git" ["-C", tempHome, "ls-files", "--", repositoryPathEntry] ""
+          retainedGitDirectoryExists <- doesDirectoryExist (tempHome </> ".git" </> "modules" </> repositoryPathEntry)
+          assertEqual "Removing a repository submodule succeeds." (Right ()) removeResult
+          assertBool "The removed submodule work tree no longer exists." (not repositoryPathExists)
+          assertBool "The removed submodule is no longer tracked." (trackedPathExit == ExitSuccess && null trackedPathStdout)
+          assertBool "The removed submodule no longer has a .gitmodules entry." (not (T.pack repositoryPathEntry `T.isInfixOf` gitmodulesSource))
+          assertBool "Git retains the removed submodule's Git directory for history." retainedGitDirectoryExists
 addPackageTests :: Test
 addPackageTests =
   TestList
@@ -3341,7 +3476,8 @@ addPackageTests =
       TestCase addPackageDescriptionsTest,
       TestCase nixDescriptionInterpolationEscapingTest,
       TestCase repositoryPackageNamingConventionTest,
-      TestCase addPackageUnsupportedChecksTest
+      TestCase addPackageUnsupportedChecksTest,
+      TestCase removePackageAndChecksTest
     ]
 addPackagePythonScaffoldTest :: IO ()
 addPackagePythonScaffoldTest =
@@ -3538,6 +3674,30 @@ addPackageUnsupportedChecksTest =
               "Rejects unsupported checks when adding a package."
               (Left "unsupported checks for package type html: --coverage")
               addPackageResult
+removePackageAndChecksTest :: IO ()
+removePackageAndChecksTest =
+  findExecutable "git" >>= \case
+    Nothing -> pure ()
+    Just _ ->
+      withTemporaryPackageRepository "remove-package-and-checks" $ \tempRepository ->
+        withCurrentWorkingDirectory tempRepository $ do
+          initializeGitRepositoryFixture tempRepository
+          addResult <-
+            addPackageToCurrentRepositoryWith
+              defaultCanonicalizationSettings
+              PythonPackage
+              "demo"
+              Nothing
+              (Set.fromList [RepositoryCoverageCheck, RepositoryPropertyTestingCheck])
+          assertBool "The package fixture was created before removal." (either (const False) (not . null) addResult)
+          removeResult <- removePackageFromCurrentRepository "demo"
+          packageExists <- doesPathExist ("packages" </> "demo")
+          coverageCheckExists <- doesPathExist ("checks" </> "demo_coverage")
+          propertyTestingCheckExists <- doesPathExist ("checks" </> "demo_property_testing")
+          assertEqual "Removing a package and its corresponding checks succeeds." (Right ()) removeResult
+          assertBool "The package directory is removed." (not packageExists)
+          assertBool "The package's coverage check is removed." (not coverageCheckExists)
+          assertBool "The package's property-testing check is removed." (not propertyTestingCheckExists)
 withTemporaryPackageRepository :: String -> (FilePath -> IO a) -> IO a
 withTemporaryPackageRepository tempDirName action = do
   (temporaryPath, temporaryHandle) <- openTempFile "/tmp" tempDirName
