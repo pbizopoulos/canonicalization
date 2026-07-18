@@ -9,10 +9,10 @@
 {-# OPTIONS_GHC -Wno-all-missed-specialisations -Wno-missing-import-lists -Wno-unsafe #-}
 module Main (main, runPackageTests) where
 import Control.Applicative ((<|>))
-import Control.Exception (finally)
+import Control.Exception (finally, onException)
 import Control.Monad (filterM, forM, forM_, unless, when)
 import Data.Bool (bool)
-import Data.Char (isAlphaNum)
+import Data.Char (isAlphaNum, isAsciiLower, isDigit)
 import Data.Fix (Fix (Fix))
 import Data.Functor.Compose (Compose (Compose))
 import Data.Kind (Type)
@@ -20,7 +20,7 @@ import Data.List (find, intercalate, isInfixOf, isPrefixOf, isSuffixOf, maximumB
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, fromMaybe, isNothing, listToMaybe, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing, listToMaybe, mapMaybe)
 import Data.Ord (comparing)
 import Data.Set qualified as Set
 import Data.Text qualified as T
@@ -40,7 +40,7 @@ import Nix.Pretty (prettyNix)
 import Nix.Utils (Path (Path))
 import Prettyprinter (defaultLayoutOptions, layoutPretty)
 import Prettyprinter.Render.Text (renderStrict)
-import System.Directory (canonicalizePath, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, doesPathExist, findExecutable, getCurrentDirectory, getHomeDirectory, listDirectory, removeFile, setCurrentDirectory)
+import System.Directory (canonicalizePath, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, doesPathExist, findExecutable, getCurrentDirectory, getHomeDirectory, listDirectory, removeFile, removePathForcibly, setCurrentDirectory)
 import System.Environment (getArgs)
 import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitFailure)
 import System.FilePath ((<.>), (</>))
@@ -111,7 +111,7 @@ templateSpecs =
     TemplateSpec
       { templateName = "python_latex_template",
         templateMatches = matchesPythonLatexTemplate,
-        templateAllowedDifferenceKeys = Set.fromList ["propagatedBuildInputs", "version"],
+        templateAllowedDifferenceKeys = Set.fromList ["meta", "propagatedBuildInputs", "version"],
         templateBaselineSource = Just pythonLatexTemplateBaselineNixSource
       },
     TemplateSpec
@@ -290,7 +290,7 @@ checkTemplateSpecs =
       },
     CheckTemplateSpec
       { checkTemplateName = "html_template_check",
-        checkTemplateMatches = \checkName _ -> pure (checkName == "html_template"),
+        checkTemplateMatches = matchesHtmlPackageDefaultCheck,
         checkTemplateAllowedDifferenceKeys = Set.empty,
         checkTemplateBaselineSource = htmlTemplateCheckBaselineNixSource,
         checkTemplateComparisonMode = ExactCheckTemplate
@@ -346,6 +346,15 @@ matchesRustPropertyTestingCheck :: FilePath -> String -> IO Bool
 matchesRustPropertyTestingCheck = matchesCheckNameSuffixAndSourceContains "-property-testing" ["cargo test --locked"]
 matchesRustMutationTestingCheck :: FilePath -> String -> IO Bool
 matchesRustMutationTestingCheck = matchesCheckNameSuffixAndSourceContains "-mutation-testing" ["cargo mutants"]
+matchesHtmlPackageDefaultCheck :: FilePath -> String -> IO Bool
+matchesHtmlPackageDefaultCheck checkName nixSource = do
+  packageKind <- detectPackageKindForPackage checkName
+  pure
+    ( packageKind == HtmlPackage
+        && "pkgs.testers.runNixOSTest" `isInfixOf` nixSource
+        && "pkgs.curl" `isInfixOf` nixSource
+        && "Hello World!" `isInfixOf` nixSource
+    )
 matchesCPackageVmCheck :: FilePath -> String -> IO Bool
 matchesCPackageVmCheck checkName nixSource = do
   packageKind <- detectPackageKindForPackage checkName
@@ -454,20 +463,15 @@ runCli canonicalizationSettings commandLineArgs =
                             putStrLn ("unsupported package type: " ++ packageKindName)
                             putStrLn ("supported package types: " ++ intercalate ", " (map fst supportedAddPackageKinds))
                             exitFailure
-                          Just packageKind ->
-                            case validateAddPackageName packageName of
-                              Just validationError -> do
-                                putStrLn validationError
+                          Just packageKind -> do
+                            addResult <- addPackageToCurrentRepositoryWith canonicalizationSettings packageKind packageName packageDescription requestedCheckKinds
+                            case addResult of
+                              Left addError -> do
+                                putStrLn addError
                                 exitFailure
-                              Nothing -> do
-                                addResult <- addPackageToCurrentRepositoryWith canonicalizationSettings packageKind packageName packageDescription requestedCheckKinds
-                                case addResult of
-                                  Left addError -> do
-                                    putStrLn addError
-                                    exitFailure
-                                  Right createdFilePaths -> do
-                                    putStrLn ("added package packages/" ++ packageName ++ " (" ++ renderPackageKind packageKind ++ ")")
-                                    putStrLn ("created " ++ show (length createdFilePaths) ++ " files")
+                              Right createdFilePaths -> do
+                                putStrLn ("added package packages/" ++ packageName ++ " (" ++ renderPackageKind packageKind ++ ")")
+                                putStrLn ("created " ++ show (length createdFilePaths) ++ " files")
                     Nothing -> printUsageAndExit
 printUsageAndExit :: IO a
 printUsageAndExit = do
@@ -475,7 +479,9 @@ printUsageAndExit = do
   putStrLn "       git canonicalization summary [--json]"
   putStrLn "       git canonicalization add <package-type> <package-name> [description] [--default-check] [--coverage] [--profile] [--property-testing] [--mutation-testing]"
   putStrLn "       git canonicalization init <https-or-ssh-repository-url>"
+  putStrLn "       git canonicalization init <hostname> <username> <repository-name>"
   putStrLn "       git canonicalization clone <https-or-ssh-repository-url>"
+  putStrLn "       git canonicalization clone <hostname> <username> <repository-name>"
   exitFailure
 parseAddPackageArgs :: [String] -> Maybe (String, FilePath, Maybe String, Set.Set RepositoryCheckKind)
 parseAddPackageArgs commandLineArgs = do
@@ -696,37 +702,48 @@ createGitRepositoryLocationInHomeWith probeRepository homeDirectory repositoryLo
                             ++ if null probeDiagnostic then "" else ": " ++ probeDiagnostic
                         )
                     )
-                RemoteRepositoryAbsent -> do
+                RemoteRepositoryAbsent -> cleanupRepositoryOnException repositoryPath $ do
                   createDirectoryIfMissing True (takeDirectory repositoryPath)
                   runRepositoryCreationCommand
                     "could not initialize git repository"
                     ["init", "--initial-branch=main", repositoryPath]
                     >>= \case
-                      Just createError -> pure (Left createError)
+                      Just createError -> cleanupFailedRepositoryCreation repositoryPath createError
                       Nothing -> do
                         TIO.writeFile (repositoryPath </> "flake.nix") newRepositoryFlakeNixSource
                         runRepositoryCreationProgram "could not generate flake.lock" "nix" ["flake", "lock", repositoryPath] >>= \case
-                          Just createError -> pure (Left createError)
+                          Just createError -> cleanupFailedRepositoryCreation repositoryPath createError
                           Nothing ->
                             runRepositoryCreationCommand "could not stage flake.nix and flake.lock" ["-C", repositoryPath, "add", "flake.nix", "flake.lock"] >>= \case
-                              Just createError -> pure (Left createError)
+                              Just createError -> cleanupFailedRepositoryCreation repositoryPath createError
                               Nothing ->
                                 runRepositoryCreationCommand "could not create initial commit" ["-C", repositoryPath, "commit", "-m", "Initial commit"] >>= \case
-                                  Just createError -> pure (Left createError)
+                                  Just createError -> cleanupFailedRepositoryCreation repositoryPath createError
                                   Nothing ->
                                     runRepositoryCreationCommand "could not configure origin" ["-C", repositoryPath, "remote", "add", "origin", repositoryUrl] >>= \case
-                                      Just createError -> pure (Left createError)
+                                      Just createError -> cleanupFailedRepositoryCreation repositoryPath createError
                                       Nothing ->
                                         runRepositoryCreationCommand
                                           "could not add repository as a submodule"
                                           ["-C", homeDirectory, "submodule", "add", "--force", repositoryUrl, repositoryPathEntry]
                                           >>= \case
-                                            Just createError -> pure (Left createError)
+                                            Just createError -> cleanupFailedRepositoryCreation repositoryPath createError
                                             Nothing -> pure (Right repositoryPath)
   where
     hostname = repositoryLocationHostname repositoryLocation
     username = repositoryLocationUsername repositoryLocation
     repositoryName = repositoryLocationName repositoryLocation
+cleanupFailedRepositoryCreation :: FilePath -> String -> IO (Either String FilePath)
+cleanupFailedRepositoryCreation repositoryPath createError = do
+  removeRepositoryPathIfExists repositoryPath
+  pure (Left createError)
+cleanupRepositoryOnException :: FilePath -> IO a -> IO a
+cleanupRepositoryOnException repositoryPath action =
+  action `onException` removeRepositoryPathIfExists repositoryPath
+removeRepositoryPathIfExists :: FilePath -> IO ()
+removeRepositoryPathIfExists repositoryPath = do
+  repositoryPathExists <- doesPathExist repositoryPath
+  when repositoryPathExists (removePathForcibly repositoryPath)
 runRepositoryCreationCommand :: String -> [String] -> IO (Maybe String)
 runRepositoryCreationCommand errorContext = runRepositoryCreationProgram errorContext "git"
 runRepositoryCreationProgram :: String -> FilePath -> [String] -> IO (Maybe String)
@@ -887,7 +904,7 @@ renderRepositoryPackageChecksJson packageChecks =
     ++ " }"
 repositoryPackageCheckEntries :: RepositoryPackageChecksSummary -> [(String, Bool)]
 repositoryPackageCheckEntries packageChecks =
-  [ ("check", repositoryPackageHasCheck packageChecks),
+  [ ("default-check", repositoryPackageHasCheck packageChecks),
     ("coverage", repositoryPackageHasCoverageCheck packageChecks),
     ("profile", repositoryPackageHasProfileCheck packageChecks),
     ("property-testing", repositoryPackageHasPropertyTestingCheck packageChecks),
@@ -1021,8 +1038,52 @@ supportedAddPackageKinds =
   ]
 parseSupportedAddPackageKind :: String -> Maybe PackageKind
 parseSupportedAddPackageKind packageKindName = lookup packageKindName supportedAddPackageKinds
-validateAddPackageName :: FilePath -> Maybe String
-validateAddPackageName = validateNewName "package"
+validatePackageNameForKind :: PackageKind -> FilePath -> Maybe String
+validatePackageNameForKind packageKind packageName =
+  case packageNameConventionForKind packageKind of
+    Just (conventionName, separator) ->
+      if isDelimitedLowercaseName separator packageName
+        then Nothing
+        else
+          Just
+            ( "package name must use "
+                ++ conventionName
+                ++ " for "
+                ++ renderPackageKind packageKind
+                ++ " packages"
+            )
+    Nothing -> validateNewName "package" packageName
+packageNameConventionForKind :: PackageKind -> Maybe (String, Char)
+packageNameConventionForKind packageKind =
+  case packageKind of
+    HaskellPackage -> Just ("kebab-case", '-')
+    RustPackage -> Just ("kebab-case", '-')
+    BinaryReleasePackage -> Just ("kebab-case", '-')
+    HtmlPackage -> Just ("snake_case", '_')
+    PythonLatexPackage -> Just ("snake_case", '_')
+    PythonPackage -> Just ("snake_case", '_')
+    PythonPyPIPackage -> Just ("snake_case", '_')
+    CPackage -> Just ("snake_case", '_')
+    TerraformPackage -> Just ("snake_case", '_')
+    LatexPackage -> Just ("snake_case", '_')
+    UnknownPackage -> Nothing
+isDelimitedLowercaseName :: Char -> String -> Bool
+isDelimitedLowercaseName separator packageName =
+  case splitOnCharacter separator packageName of
+    [] -> False
+    nameParts -> all isValidNamePart nameParts
+  where
+    isValidNamePart :: String -> Bool
+    isValidNamePart namePart =
+      not (null namePart)
+        && all (\character -> isAsciiLower character || isDigit character) namePart
+splitOnCharacter :: Char -> String -> [String]
+splitOnCharacter separator = go
+  where
+    go remainingValue =
+      case break (== separator) remainingValue of
+        (namePart, []) -> [namePart]
+        (namePart, _ : remainingParts) -> namePart : go remainingParts
 validateNewName :: String -> FilePath -> Maybe String
 validateNewName nameKind name
   | null name = Just (nameKind ++ " name must not be empty")
@@ -1045,7 +1106,7 @@ data RepositoryScaffoldFile = RepositoryScaffoldFile
   }
 addPackageToCurrentRepositoryWith :: CanonicalizationSettings -> PackageKind -> FilePath -> Maybe String -> Set.Set RepositoryCheckKind -> IO (Either String [FilePath])
 addPackageToCurrentRepositoryWith canonicalizationSettings packageKind packageName packageDescription requestedCheckKinds =
-  case validateRepositoryCheckSelection packageKind requestedCheckKinds of
+  case validatePackageNameForKind packageKind packageName <|> validateRepositoryCheckSelection packageKind requestedCheckKinds of
     Just validationError -> pure (Left validationError)
     Nothing -> do
       let packageRootDirectory = "packages" </> packageName
@@ -1154,55 +1215,74 @@ renderScaffoldFilesWith canonicalizationSettings packageKind packageName package
       [ ScaffoldFile ".gitignore" haskellGitignoreSource,
         ScaffoldFile "default.nix" haskellTemplateBaselineNixSource,
         ScaffoldFile "Main.hs" haskellMainSource,
-        ScaffoldFile (packageName <.> "cabal") (renderScaffoldHaskellCabal packageName)
+        ScaffoldFile (packageName <.> "cabal") (renderScaffoldHaskellCabal packageName packageDescription)
       ]
     RustPackage ->
       [ ScaffoldFile ".gitignore" rustGitignoreSource,
         ScaffoldFile "default.nix" rustTemplateBaselineNixSource,
-        ScaffoldFile "Cargo.toml" (renderScaffoldCargoToml packageName),
+        ScaffoldFile "Cargo.toml" (renderScaffoldCargoToml packageName packageDescription),
         ScaffoldFile "src/main.rs" rustMainSource
       ]
     HtmlPackage ->
       [ ScaffoldFile ".gitignore" htmlGitignoreSource,
-        ScaffoldFile "default.nix" htmlTemplateBaselineNixSource,
+        ScaffoldFile "default.nix" (renderNixTemplateDescription defaultHtmlTemplateDescription packageDescription htmlTemplateBaselineNixSource),
         ScaffoldFile "index.html" htmlIndexSource,
         ScaffoldFile "script.js" htmlScriptSource,
         ScaffoldFile "style.css" htmlStyleSource
       ]
     PythonLatexPackage ->
       [ ScaffoldFile ".gitignore" pythonLatexGitignoreSource,
-        ScaffoldFile "default.nix" pythonLatexTemplateBaselineNixSource,
+        ScaffoldFile "default.nix" (renderNixTemplateDescription defaultPythonLatexTemplateDescription packageDescription pythonLatexTemplateBaselineNixSource),
         ScaffoldFile "main.py" pythonLatexMainSource,
         ScaffoldFile "ms.tex" latexMsTexSource,
         ScaffoldFile "ms.bib" latexMsBibSource
       ]
     PythonPackage ->
       [ ScaffoldFile ".gitignore" pythonGitignoreSource,
-        ScaffoldFile "default.nix" (renderPythonTemplateBaselineNixSourceWith (fromMaybe defaultPythonTemplateDescription packageDescription) (canonicalizationPythonPackageAttribute canonicalizationSettings)),
+        ScaffoldFile "default.nix" (renderPythonTemplateBaselineNixSourceWith (scaffoldDescription defaultPythonTemplateDescription packageDescription) (canonicalizationPythonPackageAttribute canonicalizationSettings)),
         ScaffoldFile "main.py" pythonMainSource
       ]
     CPackage ->
       [ ScaffoldFile ".gitignore" cGitignoreSource,
-        ScaffoldFile "default.nix" cTemplateBaselineNixSource,
+        ScaffoldFile "default.nix" (renderNixTemplateDescription defaultCTemplateDescription packageDescription cTemplateBaselineNixSource),
         ScaffoldFile "main.c" cMainSource
       ]
     LatexPackage ->
       [ ScaffoldFile ".gitignore" latexGitignoreSource,
-        ScaffoldFile "default.nix" latexTemplateBaselineNixSource,
+        ScaffoldFile "default.nix" (renderNixTemplateDescription defaultLatexTemplateDescription packageDescription latexTemplateBaselineNixSource),
         ScaffoldFile "ms.tex" latexMsTexSource,
         ScaffoldFile "ms.bib" latexMsBibSource
       ]
     _ -> []
 defaultPythonTemplateDescription :: String
 defaultPythonTemplateDescription = "A Python template package."
+defaultHaskellScaffoldDescription :: String
+defaultHaskellScaffoldDescription = "Generated Haskell package"
+defaultRustScaffoldDescription :: String
+defaultRustScaffoldDescription = "Generated Rust package."
+defaultHtmlTemplateDescription :: String
+defaultHtmlTemplateDescription = "An HTML, CSS, and JavaScript template package."
+defaultPythonLatexTemplateDescription :: String
+defaultPythonLatexTemplateDescription = "A Python and LaTeX template package."
+defaultCTemplateDescription :: String
+defaultCTemplateDescription = "A C template package."
+defaultLatexTemplateDescription :: String
+defaultLatexTemplateDescription = "A LaTeX template package."
 defaultPythonPackageAttribute :: String
 defaultPythonPackageAttribute = "python312"
+scaffoldDescription :: String -> Maybe String -> String
+scaffoldDescription defaultDescription = maybe defaultDescription (unwords . words)
 escapeNixDoubleQuotedString :: String -> String
 escapeNixDoubleQuotedString = concatMap escapeChar
   where
     escapeChar '"' = "\\\""
     escapeChar '\\' = "\\\\"
     escapeChar otherChar = [otherChar]
+renderNixTemplateDescription :: String -> Maybe String -> T.Text -> T.Text
+renderNixTemplateDescription defaultDescription packageDescription =
+  T.replace
+    (T.pack defaultDescription)
+    (T.pack (escapeNixDoubleQuotedString (scaffoldDescription defaultDescription packageDescription)))
 renderPythonTemplateBaselineNixSourceWith :: String -> String -> T.Text
 renderPythonTemplateBaselineNixSourceWith packageDescription pythonPackageAttribute =
   T.unlines
@@ -1251,27 +1331,27 @@ renderPythonTemplateBaselineNixSourceWith packageDescription pythonPackageAttrib
 pythonTemplateBaselineNixSource :: T.Text
 pythonTemplateBaselineNixSource =
   renderPythonTemplateBaselineNixSourceWith defaultPythonTemplateDescription defaultPythonPackageAttribute
-renderScaffoldCargoToml :: FilePath -> T.Text
-renderScaffoldCargoToml packageName =
+renderScaffoldCargoToml :: FilePath -> Maybe String -> T.Text
+renderScaffoldCargoToml packageName packageDescription =
   T.unlines
     [ line
     | sourceLine <- T.lines removeEmptyLinesCargoTomlFixture,
       let line =
             case sourceLine of
               "name = \"remove-empty-lines\"" -> T.pack ("name = \"" ++ packageName ++ "\"")
-              "description = \"A CLI tool to remove empty lines from text files.\"" -> "description = \"Generated Rust package.\""
-              otherLine -> otherLine,
-      line /= "repository = \"https://github.com/pbizopoulos/canonicalization\"",
-      line /= "readme = \"../../README\"",
-      line /= "keywords = [\"cleanup\", \"formatter\"]",
-      line /= "categories = [\"development-tools\"]"
+              "description = \"A CLI tool to remove empty lines from text files.\"" -> T.pack ("description = \"" ++ escapeNixDoubleQuotedString (scaffoldDescription defaultRustScaffoldDescription packageDescription) ++ "\"")
+              "all = { level = \"deny\", priority = -1 }" -> "all = {level = \"deny\", priority = -1}"
+              "pedantic = { level = \"deny\", priority = -1 }" -> "pedantic = {level = \"deny\", priority = -1}"
+              "nursery = { level = \"deny\", priority = -1 }" -> "nursery = {level = \"deny\", priority = -1}"
+              "cargo = { level = \"deny\", priority = -1 }" -> "cargo = {level = \"deny\", priority = -1}"
+              otherLine -> otherLine
     ]
-renderScaffoldHaskellCabal :: FilePath -> T.Text
-renderScaffoldHaskellCabal packageName =
+renderScaffoldHaskellCabal :: FilePath -> Maybe String -> T.Text
+renderScaffoldHaskellCabal packageName packageDescription =
   T.unlines
     [ case sourceLine of
         "name:          haskell-template" -> T.pack ("name:          " ++ packageName)
-        "synopsis:      Canonical Haskell package template" -> "synopsis:      Generated Haskell package"
+        "synopsis:      Canonical Haskell package template" -> T.pack ("synopsis:      " ++ scaffoldDescription defaultHaskellScaffoldDescription packageDescription)
         "executable haskell-template" -> T.pack ("executable " ++ packageName)
         otherLine -> otherLine
     | sourceLine <- T.lines haskellCabalBaseline
@@ -1344,7 +1424,13 @@ checkRepositoryStructure = do
         | path <- Set.toList leafPaths,
           not (any (path =~) allowedPathRegexes)
         ]
-  pure (missingPackageDefaultNixIssues ++ missingHostConfigurationIssues ++ missingCabalForMainHaskellIssues ++ misnamedCabalFileIssues ++ ambiguousPackageMarkerIssues ++ disallowedPathIssues)
+  packageNameConventionIssues <-
+    fmap catMaybes $
+      forM (Set.toList packageRootPaths) $ \packageRootDirectory -> do
+        let packageName = takeBaseName packageRootDirectory
+        packageKind <- detectPackageKindForPackage packageName
+        pure (((packageRootDirectory ++ ": ") ++) <$> validatePackageNameForKind packageKind packageName)
+  pure (missingPackageDefaultNixIssues ++ missingHostConfigurationIssues ++ missingCabalForMainHaskellIssues ++ misnamedCabalFileIssues ++ packageNameConventionIssues ++ ambiguousPackageMarkerIssues ++ disallowedPathIssues)
 type PackageKind :: Type
 data PackageKind
   = HaskellPackage
@@ -1417,20 +1503,28 @@ ambiguousPackageMarkerIssuesForPackage packageInfo =
   ]
 allowedPathRegexesForPackageKind :: FilePath -> FilePath -> PackageKind -> [String]
 allowedPathRegexesForPackageKind packageRootDirectory packageDirectoryName packageKind =
-  let basePackagePathRegexes = ["^" ++ packageRootDirectory ++ "/default\\.nix$", "^" ++ packageRootDirectory ++ "/\\.gitignore$"]
+  let escapedPackageRootDirectory = escapeRegexLiteral packageRootDirectory
+      escapedPackageDirectoryName = escapeRegexLiteral packageDirectoryName
+      basePackagePathRegexes = ["^" ++ escapedPackageRootDirectory ++ "/default\\.nix$", "^" ++ escapedPackageRootDirectory ++ "/\\.gitignore$"]
       withBasePackagePathRegexes additionalPathRegexes = basePackagePathRegexes ++ additionalPathRegexes
    in case packageKind of
-        HaskellPackage -> withBasePackagePathRegexes ["^" ++ packageRootDirectory ++ "/Main\\.hs$", "^" ++ packageRootDirectory ++ "/" ++ packageDirectoryName ++ "\\.cabal$"]
-        RustPackage -> withBasePackagePathRegexes ["^" ++ packageRootDirectory ++ "/Cargo\\.toml$", "^" ++ packageRootDirectory ++ "/Cargo\\.lock$", "^" ++ packageRootDirectory ++ "/src/main\\.rs$"]
-        HtmlPackage -> withBasePackagePathRegexes ["^" ++ packageRootDirectory ++ "/index\\.html$", "^" ++ packageRootDirectory ++ "/script\\.js$", "^" ++ packageRootDirectory ++ "/style\\.css$"]
-        PythonLatexPackage -> withBasePackagePathRegexes ["^" ++ packageRootDirectory ++ "/main\\.py$", "^" ++ packageRootDirectory ++ "/ms\\.tex$", "^" ++ packageRootDirectory ++ "/ms\\.bib$", "^" ++ packageRootDirectory ++ "/refs\\.bib$", "^" ++ packageRootDirectory ++ "/figures(/.*)?$"]
-        PythonPackage -> withBasePackagePathRegexes ["^" ++ packageRootDirectory ++ "/main\\.py$"]
+        HaskellPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/Main\\.hs$", "^" ++ escapedPackageRootDirectory ++ "/" ++ escapedPackageDirectoryName ++ "\\.cabal$"]
+        RustPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/Cargo\\.toml$", "^" ++ escapedPackageRootDirectory ++ "/Cargo\\.lock$", "^" ++ escapedPackageRootDirectory ++ "/src/main\\.rs$"]
+        HtmlPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/index\\.html$", "^" ++ escapedPackageRootDirectory ++ "/script\\.js$", "^" ++ escapedPackageRootDirectory ++ "/style\\.css$"]
+        PythonLatexPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/main\\.py$", "^" ++ escapedPackageRootDirectory ++ "/ms\\.tex$", "^" ++ escapedPackageRootDirectory ++ "/ms\\.bib$", "^" ++ escapedPackageRootDirectory ++ "/refs\\.bib$", "^" ++ escapedPackageRootDirectory ++ "/figures(/.*)?$"]
+        PythonPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/main\\.py$"]
         PythonPyPIPackage -> basePackagePathRegexes
-        CPackage -> withBasePackagePathRegexes ["^" ++ packageRootDirectory ++ "/main\\.c$"]
-        TerraformPackage -> withBasePackagePathRegexes ["^" ++ packageRootDirectory ++ "/main\\.tf$", "^" ++ packageRootDirectory ++ "/\\.terraform(/.*)?$", "^" ++ packageRootDirectory ++ "/\\.terraform\\.lock\\.hcl$"]
-        LatexPackage -> withBasePackagePathRegexes ["^" ++ packageRootDirectory ++ "/ms\\.tex$", "^" ++ packageRootDirectory ++ "/ms\\.bib$"]
+        CPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/main\\.c$"]
+        TerraformPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/main\\.tf$", "^" ++ escapedPackageRootDirectory ++ "/\\.terraform(/.*)?$", "^" ++ escapedPackageRootDirectory ++ "/\\.terraform\\.lock\\.hcl$"]
+        LatexPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/ms\\.tex$", "^" ++ escapedPackageRootDirectory ++ "/ms\\.bib$"]
         BinaryReleasePackage -> basePackagePathRegexes
         UnknownPackage -> basePackagePathRegexes
+escapeRegexLiteral :: String -> String
+escapeRegexLiteral = concatMap escapeCharacter
+  where
+    escapeCharacter character
+      | character `elem` ("\\.^$|?*+()[]{}" :: String) = ['\\', character]
+      | otherwise = [character]
 collectRepositoryPaths :: FilePath -> IO [FilePath]
 collectRepositoryPaths rootPath = do
   childNames <- listDirectory rootPath
@@ -2732,7 +2826,7 @@ repositoryPackageChecksTextRenderingTest = do
             repositoryPackageChecks = packageChecks
           }
       noChecks = RepositoryPackageChecksSummary False False False False False
-      selectedChecks = RepositoryPackageChecksSummary False True False True False
+      selectedChecks = RepositoryPackageChecksSummary True True False True False
       selectedChecksAndTests = (packageSummary selectedChecks) {repositoryPackageTestNames = ["test_alpha"]}
       twoPackageSummaryOutput = renderRepositoryPackageSummariesText [packageSummary noChecks, packageSummary selectedChecks]
   assertEqual
@@ -2741,7 +2835,7 @@ repositoryPackageChecksTextRenderingTest = do
     (renderRepositoryPackageSummariesText [packageSummary noChecks])
   assertEqual
     "Renders enabled repository checks and tests without list markers."
-    "packageName: demo\npackageType: python\ndescription: (none)\n     checks:\n             coverage\n             property-testing\n      tests:\n             test_alpha\n\n"
+    "packageName: demo\npackageType: python\ndescription: (none)\n     checks:\n             default-check\n             coverage\n             property-testing\n      tests:\n             test_alpha\n\n"
     (renderRepositoryPackageSummariesText [selectedChecksAndTests])
   assertBool
     "Separates package summaries with one blank line."
@@ -2963,7 +3057,8 @@ createRepositoryTests =
       TestCase $ remoteRepositoryPreflightStopsCreationTest RemoteRepositoryExists "remote repository already exists",
       TestCase $ remoteRepositoryPreflightStopsCreationTest (RemoteRepositoryIndeterminate "network unavailable") "could not determine whether remote repository exists",
       TestCase $ remoteRepositoryPreflightStopsCloneTest RemoteRepositoryAbsent "remote repository does not exist",
-      TestCase $ remoteRepositoryPreflightStopsCloneTest (RemoteRepositoryIndeterminate "network unavailable") "could not determine whether remote repository exists"
+      TestCase $ remoteRepositoryPreflightStopsCloneTest (RemoteRepositoryIndeterminate "network unavailable") "could not determine whether remote repository exists",
+      TestCase failedRepositoryCreationCleanupTest
     ]
 remoteRepositoryPreflightStopsCreationTest :: RemoteRepositoryProbeResult -> String -> IO ()
 remoteRepositoryPreflightStopsCreationTest probeResult expectedErrorPrefix =
@@ -3001,6 +3096,21 @@ remoteRepositoryPreflightStopsCloneTest probeResult expectedErrorPrefix =
                 Left cloneError -> expectedErrorPrefix `isPrefixOf` cloneError && not targetExists
                 Right _ -> False
             )
+failedRepositoryCreationCleanupTest :: IO ()
+failedRepositoryCreationCleanupTest =
+  withTemporaryPackageRepository "failed-repository-creation-cleanup" $ \tempHome -> do
+    let partialRepositoryPath = tempHome </> "example.test" </> "owner" </> "demo"
+    createDirectoryIfMissing True partialRepositoryPath
+    TIO.writeFile (partialRepositoryPath </> "flake.nix") "{}"
+    cleanupResult <- cleanupFailedRepositoryCreation partialRepositoryPath "simulated creation failure"
+    partialRepositoryPathExists <- doesPathExist partialRepositoryPath
+    assertEqual
+      "Returns the original repository-creation failure after cleanup."
+      (Left "simulated creation failure")
+      cleanupResult
+    assertBool
+      "Removes a partially created repository so init can be retried."
+      (not partialRepositoryPathExists)
 addPackageTests :: Test
 addPackageTests =
   TestList
@@ -3011,10 +3121,15 @@ addPackageTests =
               ( "haskell",
                 "demo",
                 Just "Demo package",
-                Set.fromList [RepositoryDefaultCheck, RepositoryCoverageCheck, RepositoryProfileCheck]
+                Set.fromList [RepositoryCoverageCheck, RepositoryProfileCheck]
               )
           )
-          (parseAddPackageArgs ["add", "haskell", "demo", "Demo", "package", "--default-check", "--coverage", "--profile"]),
+          (parseAddPackageArgs ["add", "haskell", "demo", "Demo", "package", "--coverage", "--profile"]),
+      TestCase $ do
+        assertEqual
+          "Parses a supported HTML default-check option."
+          (Just ("html", "demo_page", Nothing, Set.singleton RepositoryDefaultCheck))
+          (parseAddPackageArgs ["add", "html", "demo_page", "--default-check"]),
       TestCase $ do
         assertEqual
           "Parses the mandatory init location components."
@@ -3027,6 +3142,10 @@ addPackageTests =
           (parseAddPackageArgs ["add", "haskell", "demo", "--unknown"]),
       TestCase addPackagePythonScaffoldTest,
       TestCase addPackageRepositoryChecksTest,
+      TestCase addPackageHtmlDefaultCheckTest,
+      TestCase addPackageDescriptionsTest,
+      TestCase packageNamingConventionTest,
+      TestCase repositoryPackageNamingConventionTest,
       TestCase addPackageUnsupportedChecksTest
     ]
 addPackagePythonScaffoldTest :: IO ()
@@ -3090,6 +3209,142 @@ addPackageRepositoryChecksTest =
                         True
                   otherResult ->
                     assertFailure ("Expected repository compliance success, got: " ++ show otherResult)
+addPackageHtmlDefaultCheckTest :: IO ()
+addPackageHtmlDefaultCheckTest =
+  withTemporaryPackageRepository "html-default-check-creation" $
+    \tempRepository ->
+      withCurrentWorkingDirectory tempRepository $ do
+        TIO.writeFile "flake.nix" "{}"
+        TIO.writeFile "flake.lock" "{}"
+        addPackageResult <-
+          addPackageToCurrentRepositoryWith
+            defaultCanonicalizationSettings
+            HtmlPackage
+            "demo_page"
+            Nothing
+            (Set.singleton RepositoryDefaultCheck)
+        repositoryComplianceResult <- collectRepositoryComplianceWith defaultCanonicalizationSettings
+        assertEqual
+          "Adds a same-name HTML default check."
+          ( Right
+              [ "packages/demo_page/.gitignore",
+                "packages/demo_page/default.nix",
+                "packages/demo_page/index.html",
+                "packages/demo_page/script.js",
+                "packages/demo_page/style.css",
+                "checks/demo_page/default.nix"
+              ]
+          )
+          addPackageResult
+        assertEqual
+          "Recognizes an HTML default check generated for an arbitrary valid package name."
+          (Right (RepositoryComplianceSuccess ["demo_page"] ["demo_page"]))
+          repositoryComplianceResult
+addPackageDescriptionsTest :: IO ()
+addPackageDescriptionsTest =
+  withTemporaryPackageRepository "package-scaffold-descriptions" $
+    \tempRepository ->
+      withCurrentWorkingDirectory tempRepository $ do
+        let customDescription :: String
+            customDescription = "Custom package description"
+            scaffoldCases :: [(PackageKind, FilePath)]
+            scaffoldCases =
+              [ (HaskellPackage, "demo-haskell"),
+                (RustPackage, "demo-rust"),
+                (HtmlPackage, "demo_html"),
+                (PythonLatexPackage, "demo_python_latex"),
+                (PythonPackage, "demo_python"),
+                (CPackage, "demo_c"),
+                (LatexPackage, "demo_latex")
+              ]
+        TIO.writeFile "flake.nix" "{}"
+        TIO.writeFile "flake.lock" "{}"
+        addResults <-
+          forM scaffoldCases $ \(packageKind, packageName) ->
+            addPackageToCurrentRepositoryWith
+              defaultCanonicalizationSettings
+              packageKind
+              packageName
+              (Just customDescription)
+              Set.empty
+        packageDescriptions <-
+          forM scaffoldCases $ \(_, packageName) ->
+            repositoryPackageDescription <$> summarizeRepositoryPackage Set.empty packageName
+        haskellDescriptionIssues <- checkCabalFile "demo-haskell"
+        rustDescriptionIssues <- checkCargoToml "demo-rust"
+        nixDescriptionIssues <-
+          concat
+            <$> mapM
+              ( \(packageName, templateNameValue, allowedDifferenceKeys, templateSource) ->
+                  comparePackageDefaultNixWithTemplate
+                    packageName
+                    ("packages" </> packageName </> "default.nix")
+                    ("packages" </> templateNameValue </> "default.nix")
+                    allowedDifferenceKeys
+                    (Just templateSource)
+              )
+              [ ("demo_html", "html_template", Set.insert "text" defaultAllowedNixDifferenceKeys, htmlTemplateBaselineNixSource),
+                ("demo_python_latex", "python_latex_template", Set.fromList ["meta", "propagatedBuildInputs", "version"], pythonLatexTemplateBaselineNixSource),
+                ("demo_python", "python_template", Set.fromList ["meta", "propagatedBuildInputs", "python", "shellHook", "version"], pythonTemplateBaselineNixSource),
+                ("demo_c", "c_template", Set.union defaultAllowedNixDifferenceKeys (Set.fromList ["buildPhase", "checkPhase"]), cTemplateBaselineNixSource),
+                ("demo_latex", "latex_template", defaultAllowedNixDifferenceKeys, latexTemplateBaselineNixSource)
+              ]
+        assertBool
+          "Adds every supported package type with a custom description."
+          (all (\case Right _ -> True; Left _ -> False) addResults)
+        assertEqual
+          "Persists add descriptions for every supported package type."
+          (replicate (length scaffoldCases) (Just customDescription))
+          packageDescriptions
+        assertEqual
+          "Accepts every generated custom description during metadata validation."
+          []
+          (haskellDescriptionIssues ++ rustDescriptionIssues ++ nixDescriptionIssues)
+packageNamingConventionTest :: IO ()
+packageNamingConventionTest = do
+  let validNames :: [(PackageKind, FilePath)]
+      validNames =
+        [ (HaskellPackage, "demo-haskell"),
+          (RustPackage, "demo-rust"),
+          (BinaryReleasePackage, "demo-release"),
+          (HtmlPackage, "demo_html"),
+          (PythonLatexPackage, "demo_python_latex"),
+          (PythonPackage, "demo_python"),
+          (PythonPyPIPackage, "demo_pypi"),
+          (CPackage, "demo_c"),
+          (TerraformPackage, "demo_terraform"),
+          (LatexPackage, "demo_latex")
+        ]
+      invalidNames :: [(PackageKind, FilePath)]
+      invalidNames =
+        [ (HaskellPackage, "demo_haskell"),
+          (RustPackage, "Demo-Rust"),
+          (HtmlPackage, "demo-html"),
+          (PythonPackage, "demo-python"),
+          (CPackage, "demo__c")
+        ]
+  assertBool
+    "Accepts package names that follow their package type's convention."
+    (all (\(packageKind, packageName) -> isNothing (validatePackageNameForKind packageKind packageName)) validNames)
+  assertBool
+    "Rejects package names that violate their package type's convention."
+    (all (\(packageKind, packageName) -> isJust (validatePackageNameForKind packageKind packageName)) invalidNames)
+repositoryPackageNamingConventionTest :: IO ()
+repositoryPackageNamingConventionTest =
+  withTemporaryPackageRepository "repository-package-name-convention" $
+    \tempRepository ->
+      withCurrentWorkingDirectory tempRepository $ do
+        let invalidPackageName :: FilePath
+            invalidPackageName = "demo-html"
+            packageRootDirectory = "packages" </> invalidPackageName
+        forM_ (renderScaffoldFilesWith defaultCanonicalizationSettings HtmlPackage invalidPackageName Nothing) $ \scaffoldFile -> do
+          let scaffoldPath = packageRootDirectory </> scaffoldFileRelativePath scaffoldFile
+          createDirectoryIfMissing True (takeDirectory scaffoldPath)
+          TIO.writeFile scaffoldPath (scaffoldFileContents scaffoldFile)
+        repositoryStructureIssues <- checkRepositoryStructure
+        assertBool
+          "Applies package-type naming conventions to existing repository packages."
+          ("packages/demo-html: package name must use snake_case for html packages" `elem` repositoryStructureIssues)
 addPackageUnsupportedChecksTest :: IO ()
 addPackageUnsupportedChecksTest =
   withTemporaryPackageRepository "unsupported-repository-check-creation" $
