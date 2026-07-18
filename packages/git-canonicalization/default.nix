@@ -4,7 +4,6 @@
 let
   executableHaskellDepends = [
     pkgs.haskellPackages.HUnit
-    pkgs.haskellPackages.QuickCheck
     pkgs.haskellPackages.base
     pkgs.haskellPackages.containers
     pkgs.haskellPackages.data-fix
@@ -38,6 +37,7 @@ pkgs.haskellPackages.mkDerivation rec {
       ]
     } --run "rm -f tmp/${pname}.tix" --set-default HPCTIXFILE tmp/${pname}.tix
     ${ghcForTests}/bin/ghc -i. -e 'Main.runPackageTests' Main.hs
+    PATH="$out/bin:$PATH" ${ghcForTests}/bin/ghc -i. -e 'Main.runPackageEndToEndTests' Main.hs
   '';
   src = ./.;
   version = "0.0.0";

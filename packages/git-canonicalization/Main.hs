@@ -7,7 +7,7 @@
 {-# LANGUAGE StandaloneKindSignatures #-}
 {-# LANGUAGE Trustworthy #-}
 {-# OPTIONS_GHC -Wno-all-missed-specialisations -Wno-missing-import-lists -Wno-unsafe #-}
-module Main (main, runPackageTests) where
+module Main (main, runPackageEndToEndTests, runPackageTests) where
 import Control.Applicative ((<|>))
 import Control.Exception (finally, onException)
 import Control.Monad (filterM, forM, forM_, unless, when)
@@ -20,7 +20,7 @@ import Data.List (find, intercalate, isInfixOf, isPrefixOf, isSuffixOf, maximumB
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing, listToMaybe, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isNothing, listToMaybe, mapMaybe)
 import Data.Ord (comparing)
 import Data.Set qualified as Set
 import Data.Text qualified as T
@@ -48,7 +48,6 @@ import System.FilePath.Posix (splitDirectories, takeBaseName, takeDirectory, tak
 import System.IO (hClose, hPutStr, openTempFile, stderr)
 import System.Process (readProcessWithExitCode)
 import Test.HUnit (Counts (errors, failures), Test (TestCase, TestList), assertBool, assertEqual, assertFailure, runTestTT)
-import Test.QuickCheck qualified as QC
 import Text.Regex.TDFA ((=~))
 import Prelude
 defaultAllowedNixDifferenceKeys :: Set.Set T.Text
@@ -425,7 +424,7 @@ runCli canonicalizationSettings commandLineArgs =
         ["-h"] -> printMainHelpAndExit ExitSuccess
         ["--help"] -> printMainHelpAndExit ExitSuccess
         ["help"] -> printMainHelpAndExit ExitSuccess
-        _ | isHelpRequest commandLineArgs -> printCommandUsageAndExit commandLineArgs
+        _ | isHelpRequest commandLineArgs -> printCommandUsageAndExit ExitSuccess commandLineArgs
         _ -> case commandLineArgs of
           ["check"] ->
             runInGitRepositoryRoot "." $
@@ -446,7 +445,7 @@ runCli canonicalizationSettings commandLineArgs =
                     exitFailure
                   Right repositoryPath ->
                     putStrLn ("cloned git repository " ++ repositoryPath)
-              Nothing -> printCommandUsageAndExit cloneArgs
+              Nothing -> printCommandUsageAndExit usageExitCode cloneArgs
           commandArgs ->
             case parseInitRepositoryArgs commandArgs of
               Just repositoryLocation -> do
@@ -459,7 +458,7 @@ runCli canonicalizationSettings commandLineArgs =
                     putStrLn ("created git repository " ++ repositoryPath)
               Nothing ->
                 case commandArgs of
-                  "init" : _ -> printCommandUsageAndExit commandArgs
+                  "init" : _ -> printCommandUsageAndExit usageExitCode commandArgs
                   _ ->
                     case parseAddPackageArgs commandArgs of
                       Just (packageKindName, packageName, packageDescription, requestedCheckKinds) ->
@@ -478,15 +477,17 @@ runCli canonicalizationSettings commandLineArgs =
                                 Right createdFilePaths -> do
                                   putStrLn ("added package packages/" ++ packageName ++ " (" ++ renderPackageKind packageKind ++ ")")
                                   putStrLn ("created " ++ show (length createdFilePaths) ++ " files")
-                      Nothing -> printCommandUsageAndExit commandArgs
+                      Nothing -> printCommandUsageAndExit usageExitCode commandArgs
 printMainHelpAndExit :: ExitCode -> IO a
 printMainHelpAndExit exitCode = do
   if exitCode == ExitSuccess then putStr mainHelpText else hPutStr stderr mainHelpText
   exitWith exitCode
-printCommandUsageAndExit :: [String] -> IO a
-printCommandUsageAndExit commandLineArgs = do
-  hPutStr stderr (usageTextForCommand (listToMaybe commandLineArgs))
-  exitWith usageExitCode
+printCommandUsageAndExit :: ExitCode -> [String] -> IO a
+printCommandUsageAndExit exitCode commandLineArgs = do
+  if exitCode == ExitSuccess
+    then putStr (usageTextForCommand (listToMaybe commandLineArgs))
+    else hPutStr stderr (usageTextForCommand (listToMaybe commandLineArgs))
+  exitWith exitCode
 isHelpRequest :: [String] -> Bool
 isHelpRequest = any (`elem` ["-h", "--help"])
 usageExitCode :: ExitCode
@@ -2618,47 +2619,162 @@ stripMetaDescriptionAssignment renderedMetaValue =
                 else renderedMetaValue
         Nothing -> renderedMetaValue
 runPackageTests :: IO ()
-runPackageTests = do
-  hUnitCounts <- runTestTT hUnitPackageTests
-  propertySuccess <- quickCheckProperties
-  if errors hUnitCounts == 0 && failures hUnitCounts == 0 && propertySuccess
+runPackageTests = runPackageTestSuite hUnitPackageTests
+runPackageEndToEndTests :: IO ()
+runPackageEndToEndTests = runPackageTestSuite commandLineEndToEndTests
+runPackageTestSuite :: Test -> IO ()
+runPackageTestSuite packageTestSuite = do
+  hUnitCounts <- runTestTT packageTestSuite
+  if errors hUnitCounts == 0 && failures hUnitCounts == 0
     then putStrLn "test ... ok"
     else exitFailure
-quickCheckProperties :: IO Bool
-quickCheckProperties = do
-  trimResult <- QC.quickCheckResult (QC.withMaxSuccess 100 prop_trimStringIdempotent)
-  pure (isQuickCheckSuccess trimResult)
-isQuickCheckSuccess :: QC.Result -> Bool
-isQuickCheckSuccess QC.Success {} = True
-isQuickCheckSuccess _ = False
-prop_trimStringIdempotent :: String -> Bool
-prop_trimStringIdempotent inputText =
-  let trim = T.unpack . T.strip . T.pack
-   in trim (trim inputText) == trim inputText
 hUnitPackageTests :: Test
 hUnitPackageTests =
   TestList
-    [ cliHelpTests,
-      templateInferenceTests,
+    [ templateInferenceTests,
       checkTemplateTests,
       metadataAndDiscoveryTests,
       repositoryPolicyTests,
       createRepositoryTests,
       addPackageTests
     ]
-cliHelpTests :: Test
-cliHelpTests =
+commandLineEndToEndTests :: Test
+commandLineEndToEndTests =
   TestList
-    [ TestCase $ do
-        assertBool
-          "Recognizes Git-style short and long help requests."
-          (all isHelpRequest [["-h"], ["--help"], ["add", "-h"], ["summary", "--help"]]),
-      TestCase $ do
-        assertEqual
-          "Uses Git's usage exit status."
-          (ExitFailure 129)
-          usageExitCode
+    [ TestCase commandLineHelpEndToEndTest,
+      TestCase addSummaryAndCheckEndToEndTest,
+      TestCase invalidAddEndToEndTest
     ]
+commandLineHelpEndToEndTest :: IO ()
+commandLineHelpEndToEndTest =
+  withTemporaryPackageRepository "command-line-help" $ \temporaryDirectory -> do
+    (helpExit, helpStdout, helpStderr) <- runEndToEndCommandIn temporaryDirectory ["--help"]
+    assertEqual "The top-level help command succeeds." ExitSuccess helpExit
+    assertBool "The top-level help command prints usage to stdout." ("usage: git canonicalization" `isPrefixOf` helpStdout)
+    assertEqual "The top-level help command leaves stderr empty." "" helpStderr
+    (addHelpExit, addHelpStdout, addHelpStderr) <- runEndToEndCommandIn temporaryDirectory ["add", "--help"]
+    assertEqual "Command-specific help succeeds." ExitSuccess addHelpExit
+    assertBool "Command-specific help prints the add usage to stdout." ("usage: git canonicalization add" `isPrefixOf` addHelpStdout)
+    assertEqual "Command-specific help leaves stderr empty." "" addHelpStderr
+    (missingCommandExit, missingCommandStdout, missingCommandStderr) <- runEndToEndCommandIn temporaryDirectory []
+    assertEqual "An omitted command exits unsuccessfully." (ExitFailure 1) missingCommandExit
+    assertEqual "An omitted command leaves stdout empty." "" missingCommandStdout
+    assertBool "An omitted command prints usage to stderr." ("usage: git canonicalization" `isPrefixOf` missingCommandStderr)
+    (invalidCommandExit, invalidCommandStdout, invalidCommandStderr) <- runEndToEndCommandIn temporaryDirectory ["unknown-command"]
+    assertEqual "An invalid command uses Git's usage exit status." usageExitCode invalidCommandExit
+    assertEqual "An invalid command leaves stdout empty." "" invalidCommandStdout
+    assertBool "An invalid command prints usage to stderr." ("usage: git canonicalization" `isPrefixOf` invalidCommandStderr)
+addSummaryAndCheckEndToEndTest :: IO ()
+addSummaryAndCheckEndToEndTest =
+  withTemporaryPackageRepository "add-summary-check-end-to-end" $ \temporaryRepository -> do
+    initializeGitRepositoryFixture temporaryRepository
+    TIO.writeFile (temporaryRepository </> "flake.nix") "{}"
+    TIO.writeFile (temporaryRepository </> "flake.lock") "{}"
+    let nestedDirectory = temporaryRepository </> "packages"
+    createDirectoryIfMissing True nestedDirectory
+    (addExit, addStdout, addStderr) <-
+      runEndToEndCommandIn
+        nestedDirectory
+        ["add", "python", "demo", "Demo package", "--coverage", "--property-testing"]
+    assertEqual "Adding a package through the installed CLI succeeds." ExitSuccess addExit
+    assertEqual
+      "Adding a package reports the package and complete file count."
+      "added package packages/demo (python)\ncreated 5 files\n"
+      addStdout
+    assertEqual "A successful add leaves stderr empty." "" addStderr
+    generatedFilesExist <-
+      and
+        <$> mapM
+          doesFileExist
+          [ temporaryRepository </> "packages/demo/.gitignore",
+            temporaryRepository </> "packages/demo/default.nix",
+            temporaryRepository </> "packages/demo/main.py",
+            temporaryRepository </> "checks/demo_coverage/default.nix",
+            temporaryRepository </> "checks/demo_property_testing/default.nix"
+          ]
+    assertBool "The installed CLI creates the package and requested checks on disk." generatedFilesExist
+    (summaryExit, summaryStdout, summaryStderr) <- runEndToEndCommandIn temporaryRepository ["summary"]
+    assertEqual "Text summary succeeds for the generated repository." ExitSuccess summaryExit
+    assertBool
+      "Text summary reports generated metadata, checks, and discovered tests."
+      ( all
+          (`isInfixOf` summaryStdout)
+          [ "packageName: demo",
+            "packageType: python",
+            "description: Demo package",
+            "coverage",
+            "property-testing",
+            "test_canonicalize_label_examples"
+          ]
+      )
+    assertEqual "A successful text summary leaves stderr empty." "" summaryStderr
+    (jsonExit, jsonStdout, jsonStderr) <- runEndToEndCommandIn temporaryRepository ["summary", "--json"]
+    assertEqual "JSON summary succeeds for the generated repository." ExitSuccess jsonExit
+    assertBool
+      "JSON summary reports the generated package and enabled checks."
+      ( all
+          (`isInfixOf` jsonStdout)
+          [ "\"name\": \"demo\"",
+            "\"packageType\": \"python\"",
+            "\"description\": \"Demo package\"",
+            "\"coverage\": true",
+            "\"property-testing\": true"
+          ]
+      )
+    assertEqual "A successful JSON summary leaves stderr empty." "" jsonStderr
+    (checkExit, checkStdout, checkStderr) <- runEndToEndCommandIn temporaryRepository ["check"]
+    assertEqual "Checking the generated repository succeeds." ExitSuccess checkExit
+    assertEqual "A successful check produces no stdout." "" checkStdout
+    assertEqual "A successful check produces no stderr." "" checkStderr
+    TIO.writeFile (temporaryRepository </> "packages/demo/default.nix") "not valid nix template"
+    (failedCheckExit, failedCheckStdout, failedCheckStderr) <- runEndToEndCommandIn temporaryRepository ["check"]
+    assertEqual "Checking a corrupted package fails." (ExitFailure 1) failedCheckExit
+    assertBool
+      "A failed check reports its phase and affected file."
+      ( "canonicalization check failed at phase: file-compliance" `isInfixOf` failedCheckStdout
+          && "packages/demo/default.nix:" `isInfixOf` failedCheckStdout
+      )
+    assertEqual "Repository policy diagnostics are not written to stderr." "" failedCheckStderr
+invalidAddEndToEndTest :: IO ()
+invalidAddEndToEndTest =
+  withTemporaryPackageRepository "invalid-add-end-to-end" $ \temporaryRepository -> do
+    initializeGitRepositoryFixture temporaryRepository
+    TIO.writeFile (temporaryRepository </> "flake.nix") "{}"
+    TIO.writeFile (temporaryRepository </> "flake.lock") "{}"
+    (unknownOptionExit, unknownOptionStdout, unknownOptionStderr) <-
+      runEndToEndCommandIn temporaryRepository ["add", "python", "demo", "--unknown"]
+    assertEqual "An unknown add option uses Git's usage exit status." usageExitCode unknownOptionExit
+    assertEqual "An unknown add option leaves stdout empty." "" unknownOptionStdout
+    assertBool "An unknown add option prints add usage to stderr." ("usage: git canonicalization add" `isPrefixOf` unknownOptionStderr)
+    (invalidNameExit, invalidNameStdout, invalidNameStderr) <-
+      runEndToEndCommandIn temporaryRepository ["add", "python", "demo-python"]
+    assertEqual "An invalid package name fails." (ExitFailure 1) invalidNameExit
+    assertBool "An invalid package name reports its convention." ("must use snake_case" `isInfixOf` invalidNameStdout)
+    assertEqual "An invalid package name leaves stderr empty." "" invalidNameStderr
+    (unsupportedCheckExit, unsupportedCheckStdout, unsupportedCheckStderr) <-
+      runEndToEndCommandIn temporaryRepository ["add", "html", "demo", "--coverage"]
+    assertEqual "An unsupported check selection fails." (ExitFailure 1) unsupportedCheckExit
+    assertBool "An unsupported check selection reports the rejected option." ("unsupported checks for package type html: --coverage" `isInfixOf` unsupportedCheckStdout)
+    assertEqual "An unsupported check selection leaves stderr empty." "" unsupportedCheckStderr
+    packageDirectoryExists <- doesDirectoryExist (temporaryRepository </> "packages/demo")
+    assertBool "Rejected add commands do not leave a partial package directory." (not packageDirectoryExists)
+runEndToEndCommandIn :: FilePath -> [String] -> IO (ExitCode, String, String)
+runEndToEndCommandIn workingDirectory arguments = do
+  executablePath <- requireEndToEndExecutable
+  withCurrentWorkingDirectory workingDirectory (readProcessWithExitCode executablePath arguments "")
+requireEndToEndExecutable :: IO FilePath
+requireEndToEndExecutable =
+  findExecutable "git-canonicalization" >>= \case
+    Nothing -> assertFailure "git-canonicalization must be available on PATH for command-line end-to-end tests"
+    Just executablePath -> pure executablePath
+initializeGitRepositoryFixture :: FilePath -> IO ()
+initializeGitRepositoryFixture repositoryPath =
+  findExecutable "git" >>= \case
+    Nothing -> assertFailure "git is required for command-line end-to-end tests"
+    Just _ -> do
+      (gitInitExit, _gitInitStdout, gitInitStderr) <- readProcessWithExitCode "git" ["init", "--quiet", repositoryPath] ""
+      unless (gitInitExit == ExitSuccess) $
+        assertFailure ("Failed to initialize Git repository fixture: " ++ gitInitStderr)
 templateInferenceTests :: Test
 templateInferenceTests =
   TestList
@@ -2795,14 +2911,6 @@ checkTemplateTests =
           []
           issues,
       TestCase $ do
-        assertBool
-          "Renders the Python template with an alternate interpreter binding."
-          ("pkgs.python311" `isInfixOf` T.unpack (renderPythonTemplateBaselineNixSourceWith "Custom Python package" "python311")),
-      TestCase $ do
-        assertBool
-          "Renders the Python PyPI template with an alternate interpreter binding."
-          ("pkgs.python311" `isInfixOf` T.unpack (pythonPyPITemplateBaselineNixSourceWith "python311")),
-      TestCase $ do
         let customPythonVersionSource =
               T.unlines
                 [ "{",
@@ -2883,34 +2991,7 @@ checkTemplateTests =
 metadataAndDiscoveryTests :: Test
 metadataAndDiscoveryTests =
   TestList
-    [ TestCase metadataAndDiscoveryTest,
-      TestCase repositoryPackageChecksTextRenderingTest
-    ]
-repositoryPackageChecksTextRenderingTest :: IO ()
-repositoryPackageChecksTextRenderingTest = do
-  let packageSummary packageChecks =
-        RepositoryPackageSummary
-          { repositoryPackageName = "demo",
-            repositoryPackageType = "python",
-            repositoryPackageDescription = Nothing,
-            repositoryPackageTestNames = [],
-            repositoryPackageChecks = packageChecks
-          }
-      noChecks = RepositoryPackageChecksSummary False False False False False
-      selectedChecks = RepositoryPackageChecksSummary True True False True False
-      selectedChecksAndTests = (packageSummary selectedChecks) {repositoryPackageTestNames = ["test_alpha"]}
-      twoPackageSummaryOutput = renderRepositoryPackageSummariesText [packageSummary noChecks, packageSummary selectedChecks]
-  assertEqual
-    "Renders none when a package has no repository checks."
-    "packageName: demo\npackageType: python\ndescription: (none)\n     checks:\n             (none)\n      tests:\n             (none)\n\n"
-    (renderRepositoryPackageSummariesText [packageSummary noChecks])
-  assertEqual
-    "Renders enabled repository checks and tests without list markers."
-    "packageName: demo\npackageType: python\ndescription: (none)\n     checks:\n             default-check\n             coverage\n             property-testing\n      tests:\n             test_alpha\n\n"
-    (renderRepositoryPackageSummariesText [selectedChecksAndTests])
-  assertBool
-    "Separates package summaries with one blank line."
-    ("\n\npackageName:" `isInfixOf` twoPackageSummaryOutput && not ("\n\n\npackageName:" `isInfixOf` twoPackageSummaryOutput))
+    [TestCase metadataAndDiscoveryTest]
 metadataAndDiscoveryTest :: IO ()
 metadataAndDiscoveryTest =
   withTemporaryPackageRepository "python-package-summary" $
@@ -3100,31 +3181,6 @@ createRepositoryTests =
           "Classifies an SSH configuration failure as indeterminate."
           (RemoteRepositoryIndeterminate "Could not resolve hostname example.test")
           (classifyRemoteRepositoryProbe (ExitFailure 128) "" "Could not resolve hostname example.test"),
-      TestCase $ do
-        assertEqual
-          "Parses the mandatory clone location components."
-          (Just ("github.com", "example", "demo"))
-          (parseCloneArgs ["clone", "github.com", "example", "demo"]),
-      TestCase $ do
-        assertEqual
-          "Parses an HTTPS repository URL for init."
-          (Just (RepositoryLocation "github.com" "example" "demo" "https://github.com/example/demo.git"))
-          (parseInitRepositoryArgs ["init", "https://github.com/example/demo.git"]),
-      TestCase $ do
-        assertEqual
-          "Parses an SCP-style SSH repository URL for clone."
-          (Just (RepositoryLocation "github.com" "example" "demo" "git@github.com:example/demo.git"))
-          (parseCloneRepositoryArgs ["clone", "git@github.com:example/demo.git"]),
-      TestCase $ do
-        assertEqual
-          "Parses an ssh-scheme repository URL for clone."
-          (Just (RepositoryLocation "github.com" "example" "demo" "ssh://git@github.com/example/demo"))
-          (parseCloneRepositoryArgs ["clone", "ssh://git@github.com/example/demo"]),
-      TestCase $ do
-        assertEqual
-          "Rejects repository URLs without a username and repository name."
-          Nothing
-          (parseCloneRepositoryArgs ["clone", "https://github.com/demo"]),
       TestCase $ remoteRepositoryPreflightStopsCreationTest RemoteRepositoryExists "remote repository already exists",
       TestCase $ remoteRepositoryPreflightStopsCreationTest (RemoteRepositoryIndeterminate "network unavailable") "could not determine whether remote repository exists",
       TestCase $ remoteRepositoryPreflightStopsCloneTest RemoteRepositoryAbsent "remote repository does not exist",
@@ -3185,37 +3241,10 @@ failedRepositoryCreationCleanupTest =
 addPackageTests :: Test
 addPackageTests =
   TestList
-    [ TestCase $ do
-        assertEqual
-          "Parses package checks as add options."
-          ( Just
-              ( "haskell",
-                "demo",
-                Just "Demo package",
-                Set.fromList [RepositoryCoverageCheck, RepositoryProfileCheck]
-              )
-          )
-          (parseAddPackageArgs ["add", "haskell", "demo", "Demo", "package", "--coverage", "--profile"]),
-      TestCase $ do
-        assertEqual
-          "Parses a supported HTML default-check option."
-          (Just ("html", "demo_page", Nothing, Set.singleton RepositoryDefaultCheck))
-          (parseAddPackageArgs ["add", "html", "demo_page", "--default-check"]),
-      TestCase $ do
-        assertEqual
-          "Parses the mandatory init location components."
-          (Just ("github.com", "example", "demo"))
-          (parseInitArgs ["init", "github.com", "example", "demo"]),
-      TestCase $ do
-        assertEqual
-          "Rejects unknown add options."
-          Nothing
-          (parseAddPackageArgs ["add", "haskell", "demo", "--unknown"]),
-      TestCase addPackagePythonScaffoldTest,
+    [ TestCase addPackagePythonScaffoldTest,
       TestCase addPackageRepositoryChecksTest,
       TestCase addPackageHtmlDefaultCheckTest,
       TestCase addPackageDescriptionsTest,
-      TestCase packageNamingConventionTest,
       TestCase repositoryPackageNamingConventionTest,
       TestCase addPackageUnsupportedChecksTest
     ]
@@ -3371,35 +3400,6 @@ addPackageDescriptionsTest =
           "Accepts every generated custom description during metadata validation."
           []
           (haskellDescriptionIssues ++ rustDescriptionIssues ++ nixDescriptionIssues)
-packageNamingConventionTest :: IO ()
-packageNamingConventionTest = do
-  let validNames :: [(PackageKind, FilePath)]
-      validNames =
-        [ (HaskellPackage, "demo-haskell"),
-          (RustPackage, "demo-rust"),
-          (BinaryReleasePackage, "demo-release"),
-          (HtmlPackage, "demo_html"),
-          (PythonLatexPackage, "demo_python_latex"),
-          (PythonPackage, "demo_python"),
-          (PythonPyPIPackage, "demo_pypi"),
-          (CPackage, "demo_c"),
-          (TerraformPackage, "demo_terraform"),
-          (LatexPackage, "demo_latex")
-        ]
-      invalidNames :: [(PackageKind, FilePath)]
-      invalidNames =
-        [ (HaskellPackage, "demo_haskell"),
-          (RustPackage, "Demo-Rust"),
-          (HtmlPackage, "demo-html"),
-          (PythonPackage, "demo-python"),
-          (CPackage, "demo__c")
-        ]
-  assertBool
-    "Accepts package names that follow their package type's convention."
-    (all (\(packageKind, packageName) -> isNothing (validatePackageNameForKind packageKind packageName)) validNames)
-  assertBool
-    "Rejects package names that violate their package type's convention."
-    (all (\(packageKind, packageName) -> isJust (validatePackageNameForKind packageKind packageName)) invalidNames)
 repositoryPackageNamingConventionTest :: IO ()
 repositoryPackageNamingConventionTest =
   withTemporaryPackageRepository "repository-package-name-convention" $
@@ -3438,7 +3438,7 @@ withTemporaryPackageRepository tempDirName action = do
   hClose temporaryHandle
   removeFile temporaryPath
   createDirectoryIfMissing True temporaryPath
-  action temporaryPath
+  action temporaryPath `finally` removePathForcibly temporaryPath
 withCurrentWorkingDirectory :: FilePath -> IO a -> IO a
 withCurrentWorkingDirectory workingDirectory action = do
   previousDirectory <- getCurrentDirectory

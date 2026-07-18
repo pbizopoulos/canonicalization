@@ -17,7 +17,6 @@ executable git-canonicalization
     , HUnit
     , prettyprinter
     , process
-    , QuickCheck
     , regex-tdfa
     , text
   ghc-options:   -O2 -Weverything -Werror -threaded
