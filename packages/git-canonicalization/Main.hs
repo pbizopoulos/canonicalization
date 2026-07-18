@@ -42,10 +42,10 @@ import Prettyprinter (defaultLayoutOptions, layoutPretty)
 import Prettyprinter.Render.Text (renderStrict)
 import System.Directory (canonicalizePath, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, doesPathExist, findExecutable, getCurrentDirectory, getHomeDirectory, listDirectory, removeFile, removePathForcibly, setCurrentDirectory)
 import System.Environment (getArgs)
-import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitFailure)
+import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitFailure, exitWith)
 import System.FilePath ((<.>), (</>))
 import System.FilePath.Posix (splitDirectories, takeBaseName, takeDirectory, takeFileName)
-import System.IO (hClose, openTempFile)
+import System.IO (hClose, hPutStr, openTempFile, stderr)
 import System.Process (readProcessWithExitCode)
 import Test.HUnit (Counts (errors, failures), Test (TestCase, TestList), assertBool, assertEqual, assertFailure, runTestTT)
 import Test.QuickCheck qualified as QC
@@ -421,68 +421,125 @@ runCli canonicalizationSettings commandLineArgs =
             packageSummaries <- forM packageNames (summarizeRepositoryPackage repositoryCheckNames)
             putStr (render packageSummaries)
    in case commandLineArgs of
-        ["check"] ->
-          runInGitRepositoryRoot "." $
-            collectRepositoryComplianceWith canonicalizationSettings >>= \case
-              Left (checkPhaseName, checkPhaseIssues) -> do
-                reportCheckRepositoryFailures checkPhaseName checkPhaseIssues
-                exitFailure
-              Right _ -> pure ()
-        ["summary"] -> runInGitRepositoryRoot "." (summarizeRepository renderRepositoryPackageSummariesText)
-        ["summary", "--json"] -> runInGitRepositoryRoot "." (summarizeRepository renderRepositoryPackageSummariesJson)
-        cloneArgs@("clone" : _) ->
-          case parseCloneRepositoryArgs cloneArgs of
-            Just repositoryLocation -> do
-              cloneResult <- cloneGitRepositoryFromLocation repositoryLocation
-              case cloneResult of
-                Left cloneError -> do
-                  putStrLn cloneError
+        [] -> printMainHelpAndExit (ExitFailure 1)
+        ["-h"] -> printMainHelpAndExit ExitSuccess
+        ["--help"] -> printMainHelpAndExit ExitSuccess
+        ["help"] -> printMainHelpAndExit ExitSuccess
+        _ | isHelpRequest commandLineArgs -> printCommandUsageAndExit commandLineArgs
+        _ -> case commandLineArgs of
+          ["check"] ->
+            runInGitRepositoryRoot "." $
+              collectRepositoryComplianceWith canonicalizationSettings >>= \case
+                Left (checkPhaseName, checkPhaseIssues) -> do
+                  reportCheckRepositoryFailures checkPhaseName checkPhaseIssues
                   exitFailure
-                Right repositoryPath ->
-                  putStrLn ("cloned git repository " ++ repositoryPath)
-            Nothing -> printUsageAndExit
-        commandArgs ->
-          case parseInitRepositoryArgs commandArgs of
-            Just repositoryLocation -> do
-              createResult <- createGitRepositoryFromLocation repositoryLocation
-              case createResult of
-                Left createError -> do
-                  putStrLn createError
-                  exitFailure
-                Right repositoryPath ->
-                  putStrLn ("created git repository " ++ repositoryPath)
-            Nothing ->
-              case commandArgs of
-                "init" : _ -> printUsageAndExit
-                _ ->
-                  case parseAddPackageArgs commandArgs of
-                    Just (packageKindName, packageName, packageDescription, requestedCheckKinds) ->
-                      runInGitRepositoryRoot "." $
-                        case parseSupportedAddPackageKind packageKindName of
-                          Nothing -> do
-                            putStrLn ("unsupported package type: " ++ packageKindName)
-                            putStrLn ("supported package types: " ++ intercalate ", " (map fst supportedAddPackageKinds))
-                            exitFailure
-                          Just packageKind -> do
-                            addResult <- addPackageToCurrentRepositoryWith canonicalizationSettings packageKind packageName packageDescription requestedCheckKinds
-                            case addResult of
-                              Left addError -> do
-                                putStrLn addError
-                                exitFailure
-                              Right createdFilePaths -> do
-                                putStrLn ("added package packages/" ++ packageName ++ " (" ++ renderPackageKind packageKind ++ ")")
-                                putStrLn ("created " ++ show (length createdFilePaths) ++ " files")
-                    Nothing -> printUsageAndExit
-printUsageAndExit :: IO a
-printUsageAndExit = do
-  putStrLn "Usage: git canonicalization check"
-  putStrLn "       git canonicalization summary [--json]"
-  putStrLn "       git canonicalization add <package-type> <package-name> [description] [--default-check] [--coverage] [--profile] [--property-testing] [--mutation-testing]"
-  putStrLn "       git canonicalization init <https-or-ssh-repository-url>"
-  putStrLn "       git canonicalization init <hostname> <username> <repository-name>"
-  putStrLn "       git canonicalization clone <https-or-ssh-repository-url>"
-  putStrLn "       git canonicalization clone <hostname> <username> <repository-name>"
-  exitFailure
+                Right _ -> pure ()
+          ["summary"] -> runInGitRepositoryRoot "." (summarizeRepository renderRepositoryPackageSummariesText)
+          ["summary", "--json"] -> runInGitRepositoryRoot "." (summarizeRepository renderRepositoryPackageSummariesJson)
+          cloneArgs@("clone" : _) ->
+            case parseCloneRepositoryArgs cloneArgs of
+              Just repositoryLocation -> do
+                cloneResult <- cloneGitRepositoryFromLocation repositoryLocation
+                case cloneResult of
+                  Left cloneError -> do
+                    putStrLn cloneError
+                    exitFailure
+                  Right repositoryPath ->
+                    putStrLn ("cloned git repository " ++ repositoryPath)
+              Nothing -> printCommandUsageAndExit cloneArgs
+          commandArgs ->
+            case parseInitRepositoryArgs commandArgs of
+              Just repositoryLocation -> do
+                createResult <- createGitRepositoryFromLocation repositoryLocation
+                case createResult of
+                  Left createError -> do
+                    putStrLn createError
+                    exitFailure
+                  Right repositoryPath ->
+                    putStrLn ("created git repository " ++ repositoryPath)
+              Nothing ->
+                case commandArgs of
+                  "init" : _ -> printCommandUsageAndExit commandArgs
+                  _ ->
+                    case parseAddPackageArgs commandArgs of
+                      Just (packageKindName, packageName, packageDescription, requestedCheckKinds) ->
+                        runInGitRepositoryRoot "." $
+                          case parseSupportedAddPackageKind packageKindName of
+                            Nothing -> do
+                              putStrLn ("unsupported package type: " ++ packageKindName)
+                              putStrLn ("supported package types: " ++ intercalate ", " (map fst supportedAddPackageKinds))
+                              exitFailure
+                            Just packageKind -> do
+                              addResult <- addPackageToCurrentRepositoryWith canonicalizationSettings packageKind packageName packageDescription requestedCheckKinds
+                              case addResult of
+                                Left addError -> do
+                                  putStrLn addError
+                                  exitFailure
+                                Right createdFilePaths -> do
+                                  putStrLn ("added package packages/" ++ packageName ++ " (" ++ renderPackageKind packageKind ++ ")")
+                                  putStrLn ("created " ++ show (length createdFilePaths) ++ " files")
+                      Nothing -> printCommandUsageAndExit commandArgs
+printMainHelpAndExit :: ExitCode -> IO a
+printMainHelpAndExit exitCode = do
+  if exitCode == ExitSuccess then putStr mainHelpText else hPutStr stderr mainHelpText
+  exitWith exitCode
+printCommandUsageAndExit :: [String] -> IO a
+printCommandUsageAndExit commandLineArgs = do
+  hPutStr stderr (usageTextForCommand (listToMaybe commandLineArgs))
+  exitWith usageExitCode
+isHelpRequest :: [String] -> Bool
+isHelpRequest = any (`elem` ["-h", "--help"])
+usageExitCode :: ExitCode
+usageExitCode = ExitFailure 129
+mainHelpText :: String
+mainHelpText =
+  unlines
+    [ "usage: git canonicalization [-h | --help] <command> [<args>]",
+      "",
+      "   add        Add a package and its requested checks",
+      "   check      Check whether the repository is canonical",
+      "   clone      Clone a canonical repository",
+      "   init       Create a canonical repository",
+      "   summary    Show a summary of packages and checks",
+      "",
+      "See 'git canonicalization <command> -h' for help on a specific command.",
+      ""
+    ]
+usageTextForCommand :: Maybe String -> String
+usageTextForCommand = \case
+  Just "add" ->
+    unlines
+      [ "usage: git canonicalization add [<options>] <package-type> <package-name> [<description>...]",
+        "",
+        "    --default-check       add the package's default check",
+        "    --coverage            add a coverage check",
+        "    --profile             add a profiling check",
+        "    --property-testing    add a property-testing check",
+        "    --mutation-testing    add a mutation-testing check",
+        ""
+      ]
+  Just "summary" ->
+    unlines
+      [ "usage: git canonicalization summary [--json]",
+        "",
+        "    --json                output the repository summary as JSON",
+        ""
+      ]
+  Just "check" -> singleCommandUsage "check"
+  Just "init" ->
+    unlines
+      [ "usage: git canonicalization init (<repository-url> | <hostname> <username> <repository-name>)",
+        ""
+      ]
+  Just "clone" ->
+    unlines
+      [ "usage: git canonicalization clone (<repository-url> | <hostname> <username> <repository-name>)",
+        ""
+      ]
+  _ -> unlines ["usage: git canonicalization [-h | --help] <command> [<args>]", ""]
+singleCommandUsage :: String -> String
+singleCommandUsage commandName =
+  unlines ["usage: git canonicalization " ++ commandName, ""]
 parseAddPackageArgs :: [String] -> Maybe (String, FilePath, Maybe String, Set.Set RepositoryCheckKind)
 parseAddPackageArgs commandLineArgs = do
   (packageKindName, packageName, remainingArguments) <-
@@ -2581,12 +2638,26 @@ prop_trimStringIdempotent inputText =
 hUnitPackageTests :: Test
 hUnitPackageTests =
   TestList
-    [ templateInferenceTests,
+    [ cliHelpTests,
+      templateInferenceTests,
       checkTemplateTests,
       metadataAndDiscoveryTests,
       repositoryPolicyTests,
       createRepositoryTests,
       addPackageTests
+    ]
+cliHelpTests :: Test
+cliHelpTests =
+  TestList
+    [ TestCase $ do
+        assertBool
+          "Recognizes Git-style short and long help requests."
+          (all isHelpRequest [["-h"], ["--help"], ["add", "-h"], ["summary", "--help"]]),
+      TestCase $ do
+        assertEqual
+          "Uses Git's usage exit status."
+          (ExitFailure 129)
+          usageExitCode
     ]
 templateInferenceTests :: Test
 templateInferenceTests =
