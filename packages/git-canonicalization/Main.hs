@@ -2613,10 +2613,8 @@ stripMetaDescriptionAssignment renderedMetaValue =
                 else renderedMetaValue
         Nothing -> renderedMetaValue
 runPackageTests :: IO ()
-runPackageTests = runPackageTestSuite productBehaviorTests
-runPackageTestSuite :: Test -> IO ()
-runPackageTestSuite packageTestSuite = do
-  hUnitCounts <- runTestTT packageTestSuite
+runPackageTests = do
+  hUnitCounts <- runTestTT productBehaviorTests
   if errors hUnitCounts == 0 && failures hUnitCounts == 0
     then putStrLn "test ... ok"
     else exitFailure
@@ -2895,17 +2893,8 @@ invalidAddEndToEndTest =
     packageDirectoryExists <- doesDirectoryExist (temporaryRepository </> "packages/demo")
     assertBool "Rejected add commands do not leave a partial package directory." (not packageDirectoryExists)
 runEndToEndCommandIn :: FilePath -> [String] -> IO (ExitCode, String, String)
-runEndToEndCommandIn workingDirectory arguments = do
-  requireProductCommand
+runEndToEndCommandIn workingDirectory arguments =
   withCurrentWorkingDirectory workingDirectory (readProcessWithExitCode "git" ("canonicalization" : arguments) "")
-requireProductCommand :: IO ()
-requireProductCommand = do
-  findExecutable "git" >>= \case
-    Nothing -> assertFailure "git is required for product behavior tests"
-    Just _ -> pure ()
-  findExecutable "git-canonicalization" >>= \case
-    Nothing -> assertFailure "git canonicalization must be available on PATH for product behavior tests"
-    Just _ -> pure ()
 initializeGitRepositoryFixture :: FilePath -> IO ()
 initializeGitRepositoryFixture repositoryPath =
   findExecutable "git" >>= \case
