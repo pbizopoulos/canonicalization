@@ -610,16 +610,22 @@ runInGitRepositoryRoot repositoryDirectory action = do
   withCurrentWorkingDirectory canonicalRepositoryRoot action
 discoverGitRepositoryRoot :: FilePath -> IO FilePath
 discoverGitRepositoryRoot repositoryDirectory = do
-  (repositoryRootExit, repositoryRootStdout, repositoryRootStderr) <-
-    captureGit ["-C", repositoryDirectory, "rev-parse", "--path-format=absolute", "--show-toplevel"]
-  if repositoryRootExit == ExitSuccess
-    then pure (T.unpack (T.strip (T.pack repositoryRootStdout)))
-    else do
-      putStr repositoryRootStdout
-      hPutStr stderr repositoryRootStderr
-      exitWith repositoryRootExit
+  repositoryRootStdout <-
+    captureGitOrExit (gitIn repositoryDirectory ["rev-parse", "--path-format=absolute", "--show-toplevel"])
+  pure (T.unpack (T.strip (T.pack repositoryRootStdout)))
+gitIn :: FilePath -> [String] -> [String]
+gitIn directory gitArguments = ["-C", directory] ++ gitArguments
 captureGit :: [String] -> IO (ExitCode, String, String)
 captureGit gitArguments = readProcessWithExitCode "git" gitArguments ""
+captureGitOrExit :: [String] -> IO String
+captureGitOrExit gitArguments = do
+  (gitExit, gitStdout, gitStderr) <- captureGit gitArguments
+  if gitExit == ExitSuccess
+    then pure gitStdout
+    else do
+      putStr gitStdout
+      hPutStr stderr gitStderr
+      exitWith gitExit
 runGitAndWait :: [String] -> IO ()
 runGitAndWait gitArguments = do
   gitExit <- rawSystem "git" gitArguments
@@ -656,10 +662,10 @@ checkHomeGitmodules homeDirectory = do
     then pure (Left ("missing file: " ++ gitmodulesPath))
     else do
       (gitConfigExit, gitConfigStdout, gitConfigStderr) <-
-        captureGit ["config", "--file", gitmodulesPath, "--null", "--get-regexp", "(^|\\.)path$"]
+        captureGit ["config", "get", "--file", gitmodulesPath, "--null", "--all", "--regexp", "(^|\\.)path$"]
       pathEntries <-
         case gitConfigExit of
-          ExitSuccess -> pure (parseNullSeparatedGitConfigValues gitConfigStdout)
+          ExitSuccess -> pure (parseNullSeparatedValues gitConfigStdout)
           ExitFailure 1
             | null gitConfigStdout && null gitConfigStderr -> pure []
           _ -> do
@@ -677,16 +683,13 @@ checkHomeGitmodules homeDirectory = do
                   | pathEntry <- invalidPathEntries
                   ]
               )
-parseNullSeparatedGitConfigValues :: String -> [T.Text]
-parseNullSeparatedGitConfigValues gitConfigOutput =
-  foldl collectValue [] (filter (not . T.null) (T.splitOn "\0" (T.pack gitConfigOutput)))
+parseNullSeparatedValues :: String -> [T.Text]
+parseNullSeparatedValues = foldl collectValue [] . filter (not . T.null) . T.splitOn "\0" . T.pack
   where
-    collectValue values configEntry =
-      let (_configKey, newlineAndValue) = T.breakOn "\n" configEntry
-          configValue = T.drop 1 newlineAndValue
-       in if T.null newlineAndValue || configValue `elem` values
-            then values
-            else values ++ [configValue]
+    collectValue :: [T.Text] -> T.Text -> [T.Text]
+    collectValue values value
+      | value `elem` values = values
+      | otherwise = values ++ [value]
 isCompatibleHomeGitmodulePath :: T.Text -> Bool
 isCompatibleHomeGitmodulePath pathEntry =
   not (T.isPrefixOf "/" pathEntry)
@@ -723,7 +726,7 @@ gitSubmoduleAddArguments homeDirectory repositoryLocation =
     [] ->
       let repositoryPathEntry = hostname </> username </> repositoryName
           repositoryUrl = repositoryLocationUrl repositoryLocation
-       in Right ["-C", homeDirectory, "submodule", "add", "--force", repositoryUrl, repositoryPathEntry]
+       in Right (gitIn homeDirectory ["submodule", "add", "--force", repositoryUrl, repositoryPathEntry])
   where
     hostname = repositoryLocationHostname repositoryLocation
     username = repositoryLocationUsername repositoryLocation
@@ -752,14 +755,9 @@ removeGitRepositoryCli repositoryPath = do
   runGitRemoval canonicalHomeDirectory ["--", repositoryPathEntry]
 isIndexedGitSubmodule :: FilePath -> FilePath -> IO Bool
 isIndexedGitSubmodule repositoryRoot repositoryPath = do
-  (lsFilesExit, lsFilesStdout, lsFilesStderr) <-
-    captureGit ["-C", repositoryRoot, "ls-files", "--stage", "--", repositoryPath]
-  if lsFilesExit == ExitSuccess
-    then pure (any ("160000 " `isPrefixOf`) (lines lsFilesStdout))
-    else do
-      putStr lsFilesStdout
-      hPutStr stderr lsFilesStderr
-      exitWith lsFilesExit
+  indexedObjectModes <-
+    lines <$> captureGitOrExit (gitIn repositoryRoot ["ls-files", "--format=%(objectmode)", "--", repositoryPath])
+  pure ("160000" `elem` indexedObjectModes)
 removePackageFromCurrentRepositoryCli :: FilePath -> IO ()
 removePackageFromCurrentRepositoryCli packageName = do
   let packagePath = "packages" </> packageName
@@ -785,7 +783,7 @@ removePackageFromCurrentRepositoryCli packageName = do
   runGitRemoval repositoryRoot (["-r", "--"] ++ removalPaths)
 runGitRemoval :: FilePath -> [String] -> IO ()
 runGitRemoval repositoryRoot removalArguments =
-  delegateToGit (["-C", repositoryRoot, "rm"] ++ removalArguments)
+  delegateToGit (gitIn repositoryRoot ("rm" : removalArguments))
 requiredRepositoryRootFiles :: [FilePath]
 requiredRepositoryRootFiles = ["flake.nix", "flake.lock"]
 checkRequiredRepositoryRootFiles :: IO [String]
@@ -3361,10 +3359,10 @@ createRepositoryTests =
         assertEqual
           "Parses Git config's null-separated path values and preserves first occurrences."
           ["github.com/owner/one", "gitlab.com/owner/two"]
-          ( parseNullSeparatedGitConfigValues
-              ( "submodule.one.path\ngithub.com/owner/one\0"
-                  ++ "submodule.one.path\ngithub.com/owner/one\0"
-                  ++ "submodule.two.path\ngitlab.com/owner/two\0"
+          ( parseNullSeparatedValues
+              ( "github.com/owner/one\0"
+                  ++ "github.com/owner/one\0"
+                  ++ "gitlab.com/owner/two\0"
               )
           ),
       TestCase $ do
