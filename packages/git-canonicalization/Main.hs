@@ -11,12 +11,11 @@ module Main (main, runPackageTests) where
 import Control.Applicative ((<|>))
 import Control.Exception (finally)
 import Control.Monad (filterM, forM, forM_, unless, when)
-import Data.Bool (bool)
 import Data.Char (isAlphaNum, isAsciiLower, isDigit, isSpace)
 import Data.Fix (Fix (Fix))
 import Data.Functor.Compose (Compose (Compose))
 import Data.Kind (Type)
-import Data.List (intercalate, isInfixOf, isPrefixOf, isSuffixOf, maximumBy, nub, partition, sort, sortBy, stripPrefix)
+import Data.List (find, intercalate, isInfixOf, isPrefixOf, isSuffixOf, mapAccumL, maximumBy, nub, partition, sort, sortOn, stripPrefix)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
@@ -46,7 +45,7 @@ import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitFailure, exitWith)
 import System.FilePath ((<.>), (</>))
 import System.FilePath.Posix (isRelative, makeRelative, splitDirectories, takeBaseName, takeDirectory, takeFileName)
 import System.FilePath.Windows qualified as Windows
-import System.IO (hClose, hPutStr, hPutStrLn, openTempFile, stderr)
+import System.IO (hClose, hPutStr, hPutStrLn, openTempFile, stderr, stdout)
 import System.Posix.Process (executeFile)
 import System.Process (rawSystem, readProcessWithExitCode)
 import Test.HUnit (Counts (errors, failures), Test (TestCase, TestList), assertBool, assertEqual, assertFailure, runTestTT)
@@ -388,8 +387,6 @@ runCli canonicalizationSettings commandLineArgs =
             putStr (render packageSummaries)
    in case commandLineArgs of
         [] -> printMainHelpAndExit (ExitFailure 1)
-        ["-h"] -> printMainHelpAndExit ExitSuccess
-        ["--help"] -> printMainHelpAndExit ExitSuccess
         ["help"] -> printMainHelpAndExit ExitSuccess
         _ | isHelpRequest commandLineArgs -> printCommandUsageAndExit ExitSuccess commandLineArgs
         ["check"] -> checkCanonicalizationLocation canonicalizationSettings "."
@@ -425,13 +422,13 @@ runCli canonicalizationSettings commandLineArgs =
             Nothing -> printCommandUsageAndExit usageExitCode commandLineArgs
 printMainHelpAndExit :: ExitCode -> IO a
 printMainHelpAndExit exitCode = do
-  if exitCode == ExitSuccess then putStr mainHelpText else hPutStr stderr mainHelpText
+  hPutStr (if exitCode == ExitSuccess then stdout else stderr) mainHelpText
   exitWith exitCode
 printCommandUsageAndExit :: ExitCode -> [String] -> IO a
 printCommandUsageAndExit exitCode commandLineArgs = do
-  if exitCode == ExitSuccess
-    then putStr (usageTextForCommand (listToMaybe commandLineArgs))
-    else hPutStr stderr (usageTextForCommand (listToMaybe commandLineArgs))
+  hPutStr
+    (if exitCode == ExitSuccess then stdout else stderr)
+    (usageTextForCommand (listToMaybe commandLineArgs))
   exitWith exitCode
 isHelpRequest :: [String] -> Bool
 isHelpRequest = any (`elem` ["-h", "--help"])
@@ -507,7 +504,7 @@ parseAddPackageArgs :: [String] -> Maybe (String, FilePath, Maybe String, Set.Se
 parseAddPackageArgs ("add" : packageKindName : packageName : remainingArguments) = do
   let (flagArguments, packageDescriptionArguments) =
         partition ("--" `isPrefixOf`) remainingArguments
-      packageDescription = case packageDescriptionArguments of [] -> Nothing; args -> Just (unwords args)
+      packageDescription = unwords . NE.toList <$> NE.nonEmpty packageDescriptionArguments
   requestedCheckKinds <- parseRepositoryCheckFlags flagArguments
   pure (packageKindName, packageName, packageDescription, requestedCheckKinds)
 parseAddPackageArgs _ = Nothing
@@ -855,7 +852,7 @@ renderRepositoryPackageChecksJson packageChecks =
   "{ "
     ++ intercalate
       ", "
-      [ "\"" ++ checkName ++ "\": " ++ bool "false" "true" isEnabled
+      [ "\"" ++ checkName ++ "\": " ++ if isEnabled then "true" else "false"
       | (checkName, isEnabled) <- repositoryPackageCheckEntries packageChecks
       ]
     ++ " }"
@@ -1911,31 +1908,31 @@ checkCargoToml packageName = do
           ]
 normalizeCargoTomlForBaselineComparison :: FilePath -> T.Text -> T.Text
 normalizeCargoTomlForBaselineComparison packageName tomlContents =
-  let step (currentTomlSectionHeader, normalizedLinesSoFar) sourceLine
+  let step currentTomlSectionHeader sourceLine
         | isTomlSectionHeader trimmedLine =
             ( Just trimmedLine,
               if isCargoDependencySectionHeader trimmedLine
-                then normalizedLinesSoFar
-                else normalizedLinesSoFar ++ [trimmedLine]
+                then Nothing
+                else Just trimmedLine
             )
         | maybe False isCargoDependencySectionHeader currentTomlSectionHeader =
-            (currentTomlSectionHeader, normalizedLinesSoFar)
+            (currentTomlSectionHeader, Nothing)
         | T.null trimmedLine =
-            (currentTomlSectionHeader, normalizedLinesSoFar)
+            (currentTomlSectionHeader, Nothing)
         | currentTomlSectionHeader == Just "[package]" && isTomlNameAssignment trimmedLine =
-            (currentTomlSectionHeader, normalizedLinesSoFar ++ [normalizedNameLine])
+            (currentTomlSectionHeader, Just normalizedNameLine)
         | currentTomlSectionHeader == Just "[package]"
             && (isTomlDescriptionAssignment trimmedLine || isTomlKeywordsAssignment trimmedLine) =
-            (currentTomlSectionHeader, normalizedLinesSoFar)
+            (currentTomlSectionHeader, Nothing)
         | currentTomlSectionHeader == Just "[[bin]]" && isTomlNameAssignment trimmedLine =
-            (currentTomlSectionHeader, normalizedLinesSoFar ++ [normalizedNameLine])
+            (currentTomlSectionHeader, Just normalizedNameLine)
         | otherwise =
-            (currentTomlSectionHeader, normalizedLinesSoFar ++ [trimmedLine])
+            (currentTomlSectionHeader, Just trimmedLine)
         where
           trimmedLine = T.strip sourceLine
-      (_, normalizedLines) = foldl' step (Nothing, []) (T.lines tomlContents)
+      (_, normalizedLines) = mapAccumL step Nothing (T.lines tomlContents)
       normalizedNameLine = "name = \"" <> T.pack packageName <> "\""
-   in T.unlines normalizedLines
+   in T.unlines (catMaybes normalizedLines)
 isCargoDependencySectionHeader :: T.Text -> Bool
 isCargoDependencySectionHeader trimmedLine =
   trimmedLine == "[dependencies]"
@@ -1967,7 +1964,7 @@ isTomlSectionHeader tomlLine =
 lookupTomlString :: T.Text -> T.Text -> Maybe T.Text
 lookupTomlString tomlKey sectionContents = do
   let keyPrefix = tomlKey <> " = "
-  matchingLine <- listToMaybe [T.strip sectionLine | sectionLine <- T.lines sectionContents, keyPrefix `T.isPrefixOf` T.strip sectionLine]
+  matchingLine <- find (T.isPrefixOf keyPrefix) (map T.strip (T.lines sectionContents))
   quotedValue <- T.stripPrefix keyPrefix matchingLine
   T.stripPrefix "\"" quotedValue >>= T.stripSuffix "\""
 checkCabalFile :: FilePath -> IO [String]
@@ -1998,26 +1995,26 @@ checkCabalFile packageName = do
           ]
 normalizeCabalForBaselineComparison :: FilePath -> T.Text -> T.Text
 normalizeCabalForBaselineComparison packageName cabalContents =
-  let step (insideBuildDependsSection, insideIgnoredMetadataField, normalizedLinesSoFar) sourceLine
+  let step (insideBuildDependsSection, insideIgnoredMetadataField) sourceLine
         | insideBuildDependsSection =
             if T.null trimmedLine || T.null (snd (T.breakOn ":" trimmedLine))
-              then (True, False, normalizedLinesSoFar)
-              else (False, False, normalizedLinesSoFar ++ [normalizedLine])
+              then ((True, False), Nothing)
+              else ((False, False), Just normalizedLine)
         | insideIgnoredMetadataField && isCabalIndentedContinuationLine sourceLine =
-            (False, True, normalizedLinesSoFar)
+            ((False, True), Nothing)
         | "build-depends:" `T.isPrefixOf` trimmedLine =
-            (True, False, normalizedLinesSoFar)
+            ((True, False), Nothing)
         | T.null trimmedLine =
-            (False, False, normalizedLinesSoFar)
+            ((False, False), Nothing)
         | isCabalSynopsisField trimmedLine || isCabalDescriptionField trimmedLine =
-            (False, True, normalizedLinesSoFar)
+            ((False, True), Nothing)
         | otherwise =
-            (False, False, normalizedLinesSoFar ++ [normalizedLine])
+            ((False, False), Just normalizedLine)
         where
           trimmedLine = T.strip sourceLine
           normalizedLine = normalizeCabalLineForBaselineComparison packageName trimmedLine
-      (_, _, normalizedLines) = foldl' step (False, False, []) (T.lines cabalContents)
-   in T.unlines normalizedLines
+      (_, normalizedLines) = mapAccumL step (False, False) (T.lines cabalContents)
+   in T.unlines (catMaybes normalizedLines)
 normalizeCabalLineForBaselineComparison :: FilePath -> T.Text -> T.Text
 normalizeCabalLineForBaselineComparison packageName trimmedLine
   | "name:" `T.isPrefixOf` trimmedLine = "name:          " <> T.pack packageName
@@ -2195,7 +2192,7 @@ filterIgnoredNixParams :: Set.Set T.Text -> [(VarName, Maybe NExprLoc)] -> [(Var
 filterIgnoredNixParams ignoredTopLevelFunctionParams =
   filter (\(VarName paramName, _) -> Set.notMember paramName ignoredTopLevelFunctionParams)
 sortNixParams :: [(VarName, Maybe NExprLoc)] -> [(VarName, Maybe NExprLoc)]
-sortNixParams = sortBy (comparing (\(VarName paramName, _) -> paramName))
+sortNixParams = sortOn (\(VarName paramName, _) -> paramName)
 normalizeNixBindings :: Set.Set T.Text -> [Binding NExprLoc] -> [Binding NExprLoc]
 normalizeNixBindings allowedNixDifferenceKeys bindings =
   [normalizeNixBinding allowedNixDifferenceKeys binding | binding <- bindings, not (isAllowedNixDifferenceBinding allowedNixDifferenceKeys binding)]
