@@ -46,6 +46,7 @@ import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitFailure, exitWith)
 import System.FilePath ((<.>), (</>))
 import System.FilePath.Posix (isRelative, makeRelative, splitDirectories, takeBaseName, takeDirectory, takeFileName)
 import System.IO (hClose, hPutStr, hPutStrLn, openTempFile, stderr)
+import System.Posix.Process (executeFile)
 import System.Process (rawSystem, readProcessWithExitCode)
 import Test.HUnit (Counts (errors, failures), Test (TestCase, TestList), assertBool, assertEqual, assertFailure, runTestTT)
 import Text.Regex.TDFA ((=~))
@@ -457,7 +458,7 @@ runCli canonicalizationSettings commandLineArgs =
                             Left addError -> do
                               hPutStrLn stderr ("error: " ++ addError)
                               exitFailure
-                            Right generatedPaths -> runGitPassthrough (["add", "--"] ++ generatedPaths)
+                            Right generatedPaths -> delegateToGit (["add", "--"] ++ generatedPaths)
                   Nothing -> printCommandUsageAndExit usageExitCode commandArgs
 printMainHelpAndExit :: ExitCode -> IO a
 printMainHelpAndExit exitCode = do
@@ -619,10 +620,12 @@ discoverGitRepositoryRoot repositoryDirectory = do
       exitWith repositoryRootExit
 captureGit :: [String] -> IO (ExitCode, String, String)
 captureGit gitArguments = readProcessWithExitCode "git" gitArguments ""
-runGitPassthrough :: [String] -> IO ()
-runGitPassthrough gitArguments = do
+runGitAndWait :: [String] -> IO ()
+runGitAndWait gitArguments = do
   gitExit <- rawSystem "git" gitArguments
   unless (gitExit == ExitSuccess) (exitWith gitExit)
+delegateToGit :: [String] -> IO a
+delegateToGit gitArguments = executeFile "git" True gitArguments Nothing
 checkCanonicalizationLocation :: CanonicalizationSettings -> FilePath -> IO ()
 checkCanonicalizationLocation canonicalizationSettings location = do
   repositoryRoot <- discoverGitRepositoryRoot location
@@ -700,7 +703,7 @@ initializeHomeGitRepository = do
     gitignoreContents <- TIO.readFile gitignorePath
     unless (homeGitignoreIsCompatible gitignoreContents) $
       dieWithFatal (gitignorePath ++ ": existing file must start with * and subsequent lines must start with !")
-  runGitPassthrough ["init", homeDirectory]
+  runGitAndWait ["init", homeDirectory]
   unless gitignoreExists (TIO.writeFile gitignorePath "*\n")
 homeGitignoreIsCompatible :: T.Text -> Bool
 homeGitignoreIsCompatible gitignoreContents =
@@ -712,7 +715,7 @@ addGitRepositoryFromLocation repositoryLocation = do
   homeDirectory <- getHomeDirectory
   case gitSubmoduleAddArguments homeDirectory repositoryLocation of
     Left validationError -> dieWithFatal validationError
-    Right gitArguments -> runGitPassthrough gitArguments
+    Right gitArguments -> delegateToGit gitArguments
 gitSubmoduleAddArguments :: FilePath -> RepositoryLocation -> Either String [String]
 gitSubmoduleAddArguments homeDirectory repositoryLocation =
   case catMaybes [validateNewName "hostname" hostname, validateNewName "username" username, validateNewName "repository" repositoryName] of
@@ -782,7 +785,7 @@ removePackageFromCurrentRepositoryCli packageName = do
   runGitRemoval repositoryRoot (["-r", "--"] ++ removalPaths)
 runGitRemoval :: FilePath -> [String] -> IO ()
 runGitRemoval repositoryRoot removalArguments =
-  runGitPassthrough (["-C", repositoryRoot, "rm"] ++ removalArguments)
+  delegateToGit (["-C", repositoryRoot, "rm"] ++ removalArguments)
 requiredRepositoryRootFiles :: [FilePath]
 requiredRepositoryRootFiles = ["flake.nix", "flake.lock"]
 checkRequiredRepositoryRootFiles :: IO [String]

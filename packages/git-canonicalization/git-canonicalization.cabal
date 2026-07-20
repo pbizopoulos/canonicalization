@@ -19,4 +19,5 @@ executable git-canonicalization
     , process
     , regex-tdfa
     , text
+    , unix
   ghc-options:   -O2 -Weverything -Werror -threaded

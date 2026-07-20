@@ -14,6 +14,7 @@ let
     pkgs.haskellPackages.process
     pkgs.haskellPackages.regex-tdfa
     pkgs.haskellPackages.text
+    pkgs.haskellPackages.unix
   ];
   ghcForTests = pkgs.haskellPackages.ghcWithPackages (_: executableHaskellDepends);
 in
