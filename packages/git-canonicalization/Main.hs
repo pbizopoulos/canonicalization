@@ -610,9 +610,9 @@ runInGitRepositoryRoot repositoryDirectory action = do
 discoverGitRepositoryRoot :: FilePath -> IO FilePath
 discoverGitRepositoryRoot repositoryDirectory = do
   (repositoryRootExit, repositoryRootStdout, repositoryRootStderr) <-
-    captureGit ["-C", repositoryDirectory, "rev-parse", "--show-toplevel"]
+    captureGit ["-C", repositoryDirectory, "rev-parse", "--path-format=absolute", "--show-toplevel"]
   if repositoryRootExit == ExitSuccess
-    then canonicalizePath (T.unpack (T.strip (T.pack repositoryRootStdout)))
+    then pure (T.unpack (T.strip (T.pack repositoryRootStdout)))
     else do
       putStr repositoryRootStdout
       hPutStr stderr repositoryRootStderr
@@ -781,8 +781,7 @@ removePackageFromCurrentRepositoryCli packageName = do
   repositoryRoot <- getCurrentDirectory
   runGitRemoval repositoryRoot (["-r", "--"] ++ removalPaths)
 runGitRemoval :: FilePath -> [String] -> IO ()
-runGitRemoval repositoryRoot removalArguments = do
-  runGitPassthrough (["-C", repositoryRoot, "rm", "--dry-run", "--quiet"] ++ removalArguments)
+runGitRemoval repositoryRoot removalArguments =
   runGitPassthrough (["-C", repositoryRoot, "rm"] ++ removalArguments)
 requiredRepositoryRootFiles :: [FilePath]
 requiredRepositoryRootFiles = ["flake.nix", "flake.lock"]
@@ -2780,7 +2779,7 @@ stagedSubmoduleRemovalRefusalEndToEndTest =
       (expectedExit, expectedStdout, expectedStderr) <-
         readProcessWithExitCode
           "git"
-          ["-C", temporaryHome, "rm", "--dry-run", "--quiet", "--", repositoryPathEntry]
+          ["-C", temporaryHome, "rm", "--", repositoryPathEntry]
           ""
       assertBool "Git refuses to remove a newly staged submodule without force." (expectedExit /= ExitSuccess)
       (actualExit, actualStdout, actualStderr) <-
