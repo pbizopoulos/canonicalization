@@ -6,7 +6,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneKindSignatures #-}
 {-# LANGUAGE Trustworthy #-}
-{-# OPTIONS_GHC -Wno-all-missed-specialisations -Wno-missing-import-lists -Wno-unsafe #-}
+{-# OPTIONS_GHC -Wno-missing-import-lists -Wno-unsafe #-}
 module Main (main, runPackageTests) where
 import Control.Applicative ((<|>))
 import Control.Exception (finally)
