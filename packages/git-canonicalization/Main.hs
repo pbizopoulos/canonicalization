@@ -39,7 +39,7 @@ import Nix.Pretty (prettyNix)
 import Nix.Utils (Path (Path))
 import Prettyprinter (defaultLayoutOptions, layoutPretty)
 import Prettyprinter.Render.Text (renderStrict)
-import System.Directory (canonicalizePath, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, doesPathExist, findExecutable, getCurrentDirectory, getHomeDirectory, listDirectory, makeAbsolute, removeFile, removePathForcibly, withCurrentDirectory)
+import System.Directory (canonicalizePath, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, doesPathExist, findExecutable, getCurrentDirectory, getHomeDirectory, getTemporaryDirectory, listDirectory, makeAbsolute, removeFile, removePathForcibly, withCurrentDirectory)
 import System.Environment (getArgs, lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitFailure, exitWith)
 import System.FilePath ((<.>), (</>))
@@ -871,36 +871,36 @@ summarizeRepositoryPackage repositoryCheckNames packageName = do
   packageKind <- detectPackageKindForPackage packageName
   let packageRoot = "packages" </> packageName
   repositoryPackageDescriptionValue <-
-    if packageKind `elem` [PythonPackage, PythonLatexPackage, PythonPyPIPackage]
-      then do
-        maybePyprojectTomlContents <- readTextFileIfExists (packageRoot </> "pyproject.toml")
+    case packageKind of
+      HaskellPackage -> do
+        maybeCabalContents <- readTextFileIfExists (packageRoot </> (packageName <.> "cabal"))
+        pure (maybeCabalContents >>= extractHaskellPackageDescription)
+      RustPackage -> do
+        maybeCargoTomlContents <- readTextFileIfExists (packageRoot </> "Cargo.toml")
+        pure (maybeCargoTomlContents >>= extractRustPackageDescription)
+      _
+        | packageKind `elem` [PythonPackage, PythonLatexPackage, PythonPyPIPackage] -> do
+            maybePyprojectTomlContents <- readTextFileIfExists (packageRoot </> "pyproject.toml")
+            maybeDefaultNixContents <- readTextFileIfExists (packageRoot </> "default.nix")
+            let maybePyprojectDescription = maybePyprojectTomlContents >>= extractPythonPackageDescriptionFromPyprojectToml
+                maybeDefaultNixDescription = maybeDefaultNixContents >>= extractDefaultNixPackageDescription
+            pure (maybePyprojectDescription <|> maybeDefaultNixDescription)
+      _ -> do
         maybeDefaultNixContents <- readTextFileIfExists (packageRoot </> "default.nix")
-        let maybePyprojectDescription = maybePyprojectTomlContents >>= extractPythonPackageDescriptionFromPyprojectToml
-            maybeDefaultNixDescription = maybeDefaultNixContents >>= extractDefaultNixPackageDescription
-        pure (maybePyprojectDescription <|> maybeDefaultNixDescription)
-      else case packageKind of
-        HaskellPackage -> do
-          maybeCabalContents <- readTextFileIfExists (packageRoot </> (packageName <.> "cabal"))
-          pure (extractHaskellPackageDescription =<< maybeCabalContents)
-        RustPackage -> do
-          maybeCargoTomlContents <- readTextFileIfExists (packageRoot </> "Cargo.toml")
-          pure (extractRustPackageDescription =<< maybeCargoTomlContents)
-        _ -> do
-          maybeDefaultNixContents <- readTextFileIfExists (packageRoot </> "default.nix")
-          pure (extractDefaultNixPackageDescription =<< maybeDefaultNixContents)
+        pure (maybeDefaultNixContents >>= extractDefaultNixPackageDescription)
   repositoryPackageTestNamesValue <-
-    if packageKind `elem` [PythonPackage, PythonLatexPackage]
-      then do
-        maybeMainPythonSourceText <- readTextFileIfExists (packageRoot </> "main.py")
-        pure (maybe [] (discoverPythonUnitTestNamesFromSource . T.unpack) maybeMainPythonSourceText)
-      else case packageKind of
-        HaskellPackage -> do
-          maybeMainHaskellSourceText <- readTextFileIfExists (packageRoot </> "Main.hs")
-          pure (maybe [] (discoverHaskellUnitTestNamesFromSource . T.unpack) maybeMainHaskellSourceText)
-        RustPackage -> do
-          maybeMainRustSourceText <- readTextFileIfExists (packageRoot </> "src/main.rs")
-          pure (maybe [] (discoverRustUnitTestNamesFromSource . T.unpack) maybeMainRustSourceText)
-        _ -> pure []
+    case packageKind of
+      HaskellPackage -> do
+        maybeMainHaskellSourceText <- readTextFileIfExists (packageRoot </> "Main.hs")
+        pure (maybe [] (discoverHaskellUnitTestNamesFromSource . T.unpack) maybeMainHaskellSourceText)
+      RustPackage -> do
+        maybeMainRustSourceText <- readTextFileIfExists (packageRoot </> "src/main.rs")
+        pure (maybe [] (discoverRustUnitTestNamesFromSource . T.unpack) maybeMainRustSourceText)
+      _
+        | packageKind `elem` [PythonPackage, PythonLatexPackage] -> do
+            maybeMainPythonSourceText <- readTextFileIfExists (packageRoot </> "main.py")
+            pure (maybe [] (discoverPythonUnitTestNamesFromSource . T.unpack) maybeMainPythonSourceText)
+      _ -> pure []
   let repositoryPackageChecksValue =
         RepositoryPackageChecksSummary
           { repositoryPackageHasCheck = maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName RepositoryDefaultCheck),
@@ -1560,10 +1560,10 @@ checkTemplateWith checkName = do
           pure
             [ "checks/" ++ checkName ++ "/default.nix: could not infer corresponding check template"
             ]
-        Just checkTemplateSpec ->
-          (++)
-            <$> validateCheckPackageAssociation checkName checkTemplatePath (checkTemplateName checkTemplateSpec)
-            <*> validateCheckTemplate checkName checkTemplatePath checkTemplateSpec
+        Just checkTemplateSpec -> do
+          packageAssociationIssues <- validateCheckPackageAssociation checkName checkTemplatePath (checkTemplateName checkTemplateSpec)
+          templateIssues <- validateCheckTemplate checkName checkTemplatePath checkTemplateSpec
+          pure (packageAssociationIssues ++ templateIssues)
 validateCheckPackageAssociation :: FilePath -> FilePath -> FilePath -> IO [String]
 validateCheckPackageAssociation checkName checkTemplatePath matchedCheckTemplateName =
   case checkPackageAssociation matchedCheckTemplateName checkName of
@@ -2158,18 +2158,15 @@ compareNixFileWithTemplate ignoredTopLevelFunctionParams subjectNixPath template
               normalizedTemplateBaselineExpr
 parseNixExprFromText :: T.Text -> IO (Either String NExprLoc)
 parseNixExprFromText nixSource = do
-  (temporaryNixPath, temporaryNixHandle) <- openTempFile "/tmp" "check-repository-template-override.nix"
+  temporaryDirectory <- getTemporaryDirectory
+  (temporaryNixPath, temporaryNixHandle) <- openTempFile temporaryDirectory "check-repository-template-override.nix"
   TIO.hPutStr temporaryNixHandle nixSource
   hClose temporaryNixHandle
   parseNixExprFromFile temporaryNixPath
-    `finally` removeFileIfExists temporaryNixPath
+    `finally` removeFile temporaryNixPath
 parseNixExprFromFile :: FilePath -> IO (Either String NExprLoc)
 parseNixExprFromFile nixFilePath =
   either (Left . show) Right <$> parseNixFileLoc (Path nixFilePath)
-removeFileIfExists :: FilePath -> IO ()
-removeFileIfExists filePath = do
-  fileExists <- doesFileExist filePath
-  when fileExists (removeFile filePath)
 inferTemplateSpec :: FilePath -> String -> IO (Maybe TemplateSpec)
 inferTemplateSpec packageName nixSource =
   listToMaybe <$> filterM (\templateSpec -> templateMatches templateSpec packageName nixSource) templateSpecs
@@ -2253,28 +2250,26 @@ formatBindingMapDifferences :: String -> Map.Map T.Text T.Text -> Map.Map T.Text
 formatBindingMapDifferences keyLabel packageBindingMap templateBindingMap =
   let missingBindingKeys = Map.keys (Map.difference templateBindingMap packageBindingMap)
       unexpectedBindingKeys = Map.keys (Map.difference packageBindingMap templateBindingMap)
-      sharedBindingKeys = Map.keys (Map.intersection packageBindingMap templateBindingMap)
-      changedBindingKeys =
-        [ bindingKey
-        | bindingKey <- sharedBindingKeys,
-          Map.lookup bindingKey packageBindingMap /= Map.lookup bindingKey templateBindingMap
-        ]
+      changedBindings =
+        Map.toList
+          ( Map.filter
+              (uncurry (/=))
+              (Map.intersectionWith (,) templateBindingMap packageBindingMap)
+          )
    in map (formatNixBindingDifferenceLine ("missing " ++ keyLabel)) missingBindingKeys
         ++ map (formatNixBindingDifferenceLine ("unexpected " ++ keyLabel)) unexpectedBindingKeys
         ++ map
-          ( \bindingKey ->
-              let expectedValue = compactTextToSingleLine (fromMaybe "" (Map.lookup bindingKey templateBindingMap))
-                  actualValue = compactTextToSingleLine (fromMaybe "" (Map.lookup bindingKey packageBindingMap))
-               in "  - changed "
-                    ++ keyLabel
-                    ++ ": "
-                    ++ T.unpack bindingKey
-                    ++ "\n    expected: "
-                    ++ truncateDiagnosticValue expectedValue
-                    ++ "\n    actual:   "
-                    ++ truncateDiagnosticValue actualValue
+          ( \(bindingKey, (expectedBindingValue, actualBindingValue)) ->
+              "  - changed "
+                ++ keyLabel
+                ++ ": "
+                ++ T.unpack bindingKey
+                ++ "\n    expected: "
+                ++ truncateDiagnosticValue (compactTextToSingleLine expectedBindingValue)
+                ++ "\n    actual:   "
+                ++ truncateDiagnosticValue (compactTextToSingleLine actualBindingValue)
           )
-          changedBindingKeys
+          changedBindings
 formatNixBindingDifferenceLine :: String -> T.Text -> String
 formatNixBindingDifferenceLine differenceKind bindingKey = "  - " ++ differenceKind ++ ": " ++ T.unpack bindingKey
 compactTextToSingleLine :: T.Text -> String
@@ -2629,7 +2624,8 @@ runGitFixtureCommand arguments = do
     assertFailure ("Git fixture command failed: git " ++ unwords arguments ++ if null gitStderr then "" else ": " ++ gitStderr)
 withTemporaryPackageRepository :: String -> (FilePath -> IO a) -> IO a
 withTemporaryPackageRepository tempDirName action = do
-  (temporaryPath, temporaryHandle) <- openTempFile "/tmp" tempDirName
+  temporaryDirectory <- getTemporaryDirectory
+  (temporaryPath, temporaryHandle) <- openTempFile temporaryDirectory tempDirName
   hClose temporaryHandle
   removeFile temporaryPath
   createDirectoryIfMissing True temporaryPath
