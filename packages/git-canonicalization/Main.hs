@@ -11,7 +11,7 @@ module Main (main, runPackageTests) where
 import Control.Applicative ((<|>))
 import Control.Exception (finally)
 import Control.Monad (filterM, forM, forM_, unless, when)
-import Data.Char (isAlphaNum, isAsciiLower, isDigit, isSpace)
+import Data.Char (isAlphaNum, isAsciiLower, isDigit, isLower, isSpace, isUpper, toLower, toUpper)
 import Data.Fix (Fix (Fix))
 import Data.Functor.Compose (Compose (Compose))
 import Data.Kind (Type)
@@ -1717,7 +1717,24 @@ checkPythonTestConventions packageName packageKind =
                     ]
 discoverPythonUnitTestNamesFromSource :: String -> [String]
 discoverPythonUnitTestNamesFromSource =
-  Set.toAscList . Set.fromList . mapMaybe extractPythonUnitTestName . lines
+  Set.toAscList . Set.fromList . discoverPythonTestSpecifications . lines
+discoverPythonTestSpecifications :: [String] -> [String]
+discoverPythonTestSpecifications [] = []
+discoverPythonTestSpecifications (sourceLine : remainingLines) =
+  case extractPythonUnitTestName sourceLine of
+    Nothing -> discoverPythonTestSpecifications remainingLines
+    Just testName ->
+      let (definitionLines, linesAfterDefinition) = break (isSuffixOf ":" . dropWhileEndIsSpace) (sourceLine : remainingLines)
+          sourceAfterDefinition = case linesAfterDefinition of
+            [] -> drop (length definitionLines) (sourceLine : remainingLines)
+            _ : sourceAfter -> sourceAfter
+          testSpecification =
+            fromMaybe
+              (testSpecificationFromIdentifier testName)
+              (listToMaybe (dropWhile (null . dropWhile isSpace) sourceAfterDefinition) >>= extractPythonTestDocstring)
+       in testSpecification : discoverPythonTestSpecifications sourceAfterDefinition
+  where
+    dropWhileEndIsSpace = reverse . dropWhile isSpace . reverse
 extractPythonUnitTestName :: String -> Maybe String
 extractPythonUnitTestName sourceLine =
   case stripPrefix "def " (dropWhile (== ' ') sourceLine) of
@@ -1726,6 +1743,55 @@ extractPythonUnitTestName sourceLine =
           let functionName = takeWhile (`notElem` ("( :" :: String)) functionDefinition
            in if null functionName then Nothing else Just functionName
     _ -> Nothing
+extractPythonTestDocstring :: String -> Maybe String
+extractPythonTestDocstring sourceLine =
+  let trimmedLine = dropWhile isSpace sourceLine
+      extractBetween delimiter = do
+        sourceAfterOpeningDelimiter <- stripPrefix delimiter trimmedLine
+        let (description, sourceAfterDescription) = breakOnString delimiter sourceAfterOpeningDelimiter
+        if null description || null sourceAfterDescription then Nothing else Just description
+   in extractBetween "\"\"\"" <|> extractBetween "'''"
+breakOnString :: String -> String -> (String, String)
+breakOnString delimiter = go []
+  where
+    go reversedPrefix remainingSource
+      | delimiter `isPrefixOf` remainingSource = (reverse reversedPrefix, remainingSource)
+    go reversedPrefix (character : remainingSource) = go (character : reversedPrefix) remainingSource
+    go reversedPrefix [] = (reverse reversedPrefix, [])
+testSpecificationFromIdentifier :: String -> String
+testSpecificationFromIdentifier identifier =
+  case wordsFromTestIdentifier (stripTestFrameworkPrefixes identifier) of
+    [] -> identifier
+    (firstCharacter : firstWordRest) : remainingWords ->
+      let sentence = unwords ((toUpper firstCharacter : firstWordRest) : remainingWords)
+       in case reverse sentence of
+            punctuation : _ | punctuation `elem` (".!?" :: String) -> sentence
+            _ -> sentence ++ "."
+    _ -> identifier
+stripTestFrameworkPrefixes :: String -> String
+stripTestFrameworkPrefixes identifier =
+  maybe
+    identifier
+    stripTestFrameworkPrefixes
+    (listToMaybe [remainder | prefix <- ["test_", "quickcheck_", "property_", "prop_"], Just remainder <- [stripPrefix prefix identifier]])
+wordsFromTestIdentifier :: String -> [String]
+wordsFromTestIdentifier = filter (not . null) . go [] []
+  where
+    go :: [String] -> String -> String -> [String]
+    go completed reversedWord [] = reverse (finishWord completed reversedWord)
+    go completed reversedWord (character : remainingCharacters)
+      | not (isAlphaNum character) = go (finishWord completed reversedWord) [] remainingCharacters
+      | startsCamelWord reversedWord character remainingCharacters =
+          go (finishWord completed reversedWord) [toLower character] remainingCharacters
+      | otherwise = go completed (toLower character : reversedWord) remainingCharacters
+    finishWord :: [String] -> String -> [String]
+    finishWord completed [] = completed
+    finishWord completed reversedWord = reverse reversedWord : completed
+    startsCamelWord :: String -> Char -> String -> Bool
+    startsCamelWord [] _ _ = False
+    startsCamelWord (previousCharacter : _) character remainingCharacters =
+      isUpper character
+        && (isLower previousCharacter || maybe False isLower (listToMaybe remainingCharacters))
 checkHaskellTestConventions :: FilePath -> PackageKind -> IO [String]
 checkHaskellTestConventions packageName packageKind =
   if packageKind /= HaskellPackage
@@ -1757,7 +1823,7 @@ discoverHaskellUnitTestNamesFromSource :: String -> [String]
 discoverHaskellUnitTestNamesFromSource haskellSource =
   Set.toAscList . Set.fromList $
     filter isMeaningfulTestLabel (discoverHaskellTestLabels haskellSource)
-      ++ discoverHaskellPropertyNames haskellSource
+      ++ map testSpecificationFromIdentifier (discoverHaskellPropertyNames haskellSource)
 isMeaningfulTestLabel :: String -> Bool
 isMeaningfulTestLabel label =
   case dropWhile isSpace label of
@@ -1851,7 +1917,7 @@ checkRustTestConventions packageName packageKind =
               else Just ("packages/" ++ packageName ++ "/src/main.rs: missing #[test] test cases")
           ]
 discoverRustUnitTestNamesFromSource :: String -> [String]
-discoverRustUnitTestNamesFromSource = extractRustUnitTestNames . lines
+discoverRustUnitTestNamesFromSource = map testSpecificationFromIdentifier . extractRustUnitTestNames . lines
 extractRustUnitTestNames :: [String] -> [String]
 extractRustUnitTestNames = Set.toAscList . Set.fromList . go False
   where
@@ -2372,8 +2438,10 @@ runPackageTests = do
 hUnitPackageTests :: Test
 hUnitPackageTests =
   TestList
-    [ TestLabel "Discovers conventional Haskell test labels and properties." (TestCase haskellTestDiscoveryTest),
+    [ TestLabel "Discovers conventional Haskell tests as behavioral specifications." (TestCase haskellTestDiscoveryTest),
       TestLabel "Ignores non-test Haskell strings and comments during discovery." (TestCase haskellTestDiscoveryFalsePositiveTest),
+      TestLabel "Uses Python test docstrings as behavioral specifications." (TestCase pythonTestDiscoveryTest),
+      TestLabel "Humanizes conventional test identifiers across frameworks." (TestCase testIdentifierSpecificationTest),
       TestLabel "Renders stable text and JSON repository summaries." (TestCase repositorySummaryRenderingTest),
       TestLabel "Documents top-level and command-specific usage." (TestCase commandLineHelpEndToEndTest),
       TestLabel "Rejects missing and unknown commands with usage on stderr." (TestCase invalidCommandEndToEndTest),
@@ -2399,7 +2467,7 @@ haskellTestDiscoveryTest :: IO ()
 haskellTestDiscoveryTest =
   assertEqual
     "Standard HUnit labels and QuickCheck declarations form the Haskell test specification."
-    ["Alpha behavior.", "Beta \"quoted\" behavior.", "prop_alpha", "prop_beta"]
+    ["Alpha behavior.", "Alpha.", "Beta \"quoted\" behavior.", "Beta."]
     ( discoverHaskellUnitTestNamesFromSource
         ( unlines
             [ "hUnitPackageTests =",
@@ -2432,6 +2500,36 @@ haskellTestDiscoveryFalsePositiveTest =
               "value = prop_not_a_declaration"
             ]
         )
+    )
+pythonTestDiscoveryTest :: IO ()
+pythonTestDiscoveryTest =
+  assertEqual
+    "A test's first statement supplies its specification, with an identifier fallback."
+    ["Handles a multiline definition.", "Undocumented behavior."]
+    ( discoverPythonUnitTestNamesFromSource
+        ( unlines
+            [ "def test_undocumented_behavior() -> None:",
+              "    assert True",
+              "",
+              "def test_multiline_definition(",
+              "    value: str,",
+              ") -> None:",
+              "    \"\"\"Handles a multiline definition.\"\"\"",
+              "    assert value"
+            ]
+        )
+    )
+testIdentifierSpecificationTest :: IO ()
+testIdentifierSpecificationTest =
+  assertEqual
+    "Framework prefixes, snake case, and camel case do not leak into specifications."
+    ["Canonicalization is idempotent.", "Strip empty lines matches filtered sequence.", "Attribute sets canonicalize by key order."]
+    ( map
+        testSpecificationFromIdentifier
+        [ "test_property_canonicalization_is_idempotent",
+          "quickcheck_strip_empty_lines_matches_filtered_sequence",
+          "prop_attributeSetsCanonicalizeByKeyOrder"
+        ]
     )
 repositorySummaryRenderingTest :: IO ()
 repositorySummaryRenderingTest = do
@@ -2828,14 +2926,14 @@ expectedGeneratedPythonPackageSummary =
       repositoryPackageType = "python",
       repositoryPackageDescription = Just "Demo package",
       repositoryPackageTestNames =
-        [ "test_canonicalize_label_examples",
-          "test_main_prints_message",
-          "test_property_canonicalization_is_idempotent",
-          "test_property_canonicalization_uses_restricted_character_set",
-          "test_property_unique_canonical_labels_is_idempotent",
-          "test_render_message_reports_empty_result_when_no_labels_survive",
-          "test_render_message_uses_canonical_unique_labels",
-          "test_unique_canonical_labels_keeps_first_surviving_occurrence"
+        [ "Canonical labels should only contain lowercase ASCII, digits, and hyphens.",
+          "Canonicalizing twice should not change the result.",
+          "Deduplicating canonical labels twice should be stable.",
+          "Deduplication should keep first surviving canonical labels in order.",
+          "Empty canonical labels should produce the fallback message.",
+          "Equivalent spellings should collapse to the same label.",
+          "The default message should summarize unique canonical labels.",
+          "main() should emit the canonical label summary."
         ],
       repositoryPackageChecks =
         RepositoryPackageChecksSummary
