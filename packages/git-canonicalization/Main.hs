@@ -12,7 +12,7 @@ import Control.Applicative ((<|>))
 import Control.Exception (finally)
 import Control.Monad (filterM, forM, forM_, unless, when)
 import Data.Bool (bool)
-import Data.Char (isAlphaNum, isAsciiLower, isDigit)
+import Data.Char (isAlphaNum, isAsciiLower, isDigit, isSpace)
 import Data.Fix (Fix (Fix))
 import Data.Functor.Compose (Compose (Compose))
 import Data.Kind (Type)
@@ -698,7 +698,7 @@ removeGitRepositoryCli repositoryPath = do
   unless repositoryIsBelowHome $
     dieWithFatal ("repository is not below " ++ canonicalHomeDirectory ++ ": " ++ absoluteRepositoryPath)
   homeGitRoot <- discoverGitRepositoryRoot canonicalHomeDirectory
-  unless (homeGitRoot == canonicalHomeDirectory) $
+  when (homeGitRoot /= canonicalHomeDirectory) $
     dieWithFatal ("not a git repository root directory: " ++ canonicalHomeDirectory)
   repositoryIsIndexedSubmodule <- isIndexedGitSubmodule canonicalHomeDirectory repositoryPathEntry
   unless repositoryIsIndexedSubmodule $
@@ -1769,10 +1769,9 @@ discoverHaskellUnitTestNamesFromSource haskellSource =
    in sort (Set.toList (Set.fromList meaningfulHaskellUnitTestNames))
 isMeaningfulTestLabel :: String -> Bool
 isMeaningfulTestLabel label =
-  let trimmedLabel = T.unpack (T.strip (T.pack label))
-   in case trimmedLabel of
-        firstCharacter : _ -> isAlphaNum firstCharacter
-        [] -> False
+  case dropWhile isSpace label of
+    firstCharacter : _ -> isAlphaNum firstCharacter
+    [] -> False
 extractAssertEqualTestLabels :: [String] -> [String]
 extractAssertEqualTestLabels = go False
   where
@@ -2040,16 +2039,15 @@ isCabalIndentedContinuationLine sourceLine =
 lookupCabalField :: T.Text -> T.Text -> Maybe T.Text
 lookupCabalField cabalField cabalContents =
   let fieldPrefix = cabalField <> ":"
-      go [] = Nothing
-      go (sourceLine : remainingLines)
-        | fieldPrefix `T.isPrefixOf` T.strip sourceLine =
-            let strippedValue = T.strip (T.drop (T.length fieldPrefix) (T.strip sourceLine))
-             in Just $
-                  if T.null strippedValue
-                    then T.intercalate "\n" (map T.strip (takeWhile isCabalIndentedContinuationLine remainingLines))
-                    else stripCabalQuotedValue strippedValue
-        | otherwise = go remainingLines
-   in go (T.lines cabalContents)
+      matchingLines = dropWhile (\sourceLine -> not (fieldPrefix `T.isPrefixOf` T.strip sourceLine)) (T.lines cabalContents)
+   in case matchingLines of
+        [] -> Nothing
+        sourceLine : remainingLines ->
+          let strippedValue = T.strip (T.drop (T.length fieldPrefix) (T.strip sourceLine))
+           in Just $
+                if T.null strippedValue
+                  then T.intercalate "\n" (map T.strip (takeWhile isCabalIndentedContinuationLine remainingLines))
+                  else stripCabalQuotedValue strippedValue
 stripCabalQuotedValue :: T.Text -> T.Text
 stripCabalQuotedValue quotedValue =
   fromMaybe quotedValue (T.stripPrefix "\"" quotedValue >>= T.stripSuffix "\"")
@@ -2459,7 +2457,7 @@ checkLocationRoutingEndToEndTest =
       TIO.writeFile (nestedRepository </> "flake.nix") "{}"
       TIO.writeFile (nestedRepository </> "flake.lock") "{}"
       (nestedCheckExit, nestedCheckStdout, nestedCheckStderr) <- runEndToEndCommandIn temporaryHome ["check", nestedRepository]
-      unless (nestedCheckExit == ExitSuccess) $
+      when (nestedCheckExit /= ExitSuccess) $
         assertFailure
           ( "A nested repository beneath home should use canonical repository checks, but exited with "
               ++ show nestedCheckExit
@@ -2631,12 +2629,12 @@ initializeGitRepositoryFixture repositoryPath =
     Nothing -> assertFailure "git is required for command-line end-to-end tests"
     Just _ -> do
       (gitInitExit, _gitInitStdout, gitInitStderr) <- readProcessWithExitCode "git" ["init", "--quiet", repositoryPath] ""
-      unless (gitInitExit == ExitSuccess) $
+      when (gitInitExit /= ExitSuccess) $
         assertFailure ("Failed to initialize Git repository fixture: " ++ gitInitStderr)
 runGitFixtureCommand :: [String] -> IO ()
 runGitFixtureCommand arguments = do
   (gitExit, _gitStdout, gitStderr) <- readProcessWithExitCode "git" arguments ""
-  unless (gitExit == ExitSuccess) $
+  when (gitExit /= ExitSuccess) $
     assertFailure ("Git fixture command failed: git " ++ unwords arguments ++ if null gitStderr then "" else ": " ++ gitStderr)
 withTemporaryPackageRepository :: String -> (FilePath -> IO a) -> IO a
 withTemporaryPackageRepository tempDirName action = do
