@@ -426,40 +426,37 @@ runCli canonicalizationSettings commandLineArgs =
         ["--help"] -> printMainHelpAndExit ExitSuccess
         ["help"] -> printMainHelpAndExit ExitSuccess
         _ | isHelpRequest commandLineArgs -> printCommandUsageAndExit ExitSuccess commandLineArgs
-        _ -> case commandLineArgs of
-          ["check"] -> checkCanonicalizationLocation canonicalizationSettings "."
-          ["check", location] -> checkCanonicalizationLocation canonicalizationSettings location
-          "check" : _ -> printCommandUsageAndExit usageExitCode commandLineArgs
-          ["summary"] -> runInGitRepositoryRoot "." (summarizeRepository renderRepositoryPackageSummariesText)
-          ["summary", "--json"] -> runInGitRepositoryRoot "." (summarizeRepository renderRepositoryPackageSummariesJson)
-          ["add", repositoryUrl] ->
-            case parseRepositoryUrl repositoryUrl of
-              Just repositoryLocation -> addGitRepositoryFromLocation repositoryLocation
-              Nothing -> printCommandUsageAndExit usageExitCode commandLineArgs
-          ["init"] -> initializeHomeGitRepository
-          commandArgs ->
-            case commandArgs of
-              "init" : _ -> printCommandUsageAndExit usageExitCode commandArgs
-              "clone" : _ -> printCommandUsageAndExit usageExitCode commandArgs
-              ["rm", removalTarget] -> removeCanonicalizationTargetCli removalTarget
-              "rm" : _ -> printCommandUsageAndExit usageExitCode commandArgs
-              _ ->
-                case parseAddPackageArgs commandArgs of
-                  Just (packageKindName, packageName, packageDescription, requestedCheckKinds) ->
-                    runInGitRepositoryRoot "." $
-                      case parseSupportedAddPackageKind packageKindName of
-                        Nothing -> do
-                          hPutStrLn stderr ("error: unsupported package type: " ++ packageKindName)
-                          hPutStrLn stderr ("hint: supported package types: " ++ intercalate ", " (map fst supportedAddPackageKinds))
-                          exitFailure
-                        Just packageKind -> do
-                          addResult <- addPackageToCurrentRepositoryWith canonicalizationSettings packageKind packageName packageDescription requestedCheckKinds
-                          case addResult of
-                            Left addError -> do
-                              hPutStrLn stderr ("error: " ++ addError)
-                              exitFailure
-                            Right generatedPaths -> delegateToGit (["add", "--"] ++ generatedPaths)
-                  Nothing -> printCommandUsageAndExit usageExitCode commandArgs
+        ["check"] -> checkCanonicalizationLocation canonicalizationSettings "."
+        ["check", location] -> checkCanonicalizationLocation canonicalizationSettings location
+        "check" : _ -> printCommandUsageAndExit usageExitCode commandLineArgs
+        ["summary"] -> runInGitRepositoryRoot "." (summarizeRepository renderRepositoryPackageSummariesText)
+        ["summary", "--json"] -> runInGitRepositoryRoot "." (summarizeRepository renderRepositoryPackageSummariesJson)
+        ["add", repositoryUrl] ->
+          case parseRepositoryUrl repositoryUrl of
+            Just repositoryLocation -> addGitRepositoryFromLocation repositoryLocation
+            Nothing -> printCommandUsageAndExit usageExitCode commandLineArgs
+        ["init"] -> initializeHomeGitRepository
+        "init" : _ -> printCommandUsageAndExit usageExitCode commandLineArgs
+        "clone" : _ -> printCommandUsageAndExit usageExitCode commandLineArgs
+        ["rm", removalTarget] -> removeCanonicalizationTargetCli removalTarget
+        "rm" : _ -> printCommandUsageAndExit usageExitCode commandLineArgs
+        _ ->
+          case parseAddPackageArgs commandLineArgs of
+            Just (packageKindName, packageName, packageDescription, requestedCheckKinds) ->
+              runInGitRepositoryRoot "." $
+                case parseSupportedAddPackageKind packageKindName of
+                  Nothing -> do
+                    hPutStrLn stderr ("error: unsupported package type: " ++ packageKindName)
+                    hPutStrLn stderr ("hint: supported package types: " ++ intercalate ", " (map fst supportedAddPackageKinds))
+                    exitFailure
+                  Just packageKind -> do
+                    addResult <- addPackageToCurrentRepositoryWith canonicalizationSettings packageKind packageName packageDescription requestedCheckKinds
+                    case addResult of
+                      Left addError -> do
+                        hPutStrLn stderr ("error: " ++ addError)
+                        exitFailure
+                      Right generatedPaths -> delegateToGit (["add", "--"] ++ generatedPaths)
+            Nothing -> printCommandUsageAndExit usageExitCode commandLineArgs
 printMainHelpAndExit :: ExitCode -> IO a
 printMainHelpAndExit exitCode = do
   if exitCode == ExitSuccess then putStr mainHelpText else hPutStr stderr mainHelpText
@@ -992,20 +989,13 @@ extractDefaultNixPackageDescription defaultNixContents =
   where
     go _ [] = Nothing
     go insideMetaBlock (sourceLine : remainingLines) =
-      case extractQuotedNixAssignmentValue "meta.description =" sourceLine of
+      case extractQuotedNixAssignmentValue "meta.description =" sourceLine
+        <|> if insideMetaBlock then extractQuotedNixAssignmentValue "description =" sourceLine else Nothing of
         Just description -> Just (T.unpack description)
-        Nothing ->
-          if insideMetaBlock
-            then case extractQuotedNixAssignmentValue "description =" sourceLine of
-              Just description -> Just (T.unpack description)
-              Nothing ->
-                if "};" `T.isPrefixOf` T.strip sourceLine
-                  then go False remainingLines
-                  else go insideMetaBlock remainingLines
-            else
-              if "meta = {" `T.isPrefixOf` T.strip sourceLine
-                then go True remainingLines
-                else go insideMetaBlock remainingLines
+        Nothing
+          | insideMetaBlock && "};" `T.isPrefixOf` T.strip sourceLine -> go False remainingLines
+          | not insideMetaBlock && "meta = {" `T.isPrefixOf` T.strip sourceLine -> go True remainingLines
+          | otherwise -> go insideMetaBlock remainingLines
 extractQuotedNixAssignmentValue :: T.Text -> T.Text -> Maybe T.Text
 extractQuotedNixAssignmentValue assignmentPrefix sourceLine = do
   quotedValue <- T.stripPrefix assignmentPrefix (T.strip sourceLine)
@@ -2162,21 +2152,28 @@ checkCargoToml packageName = do
           ]
 normalizeCargoTomlForBaselineComparison :: FilePath -> T.Text -> T.Text
 normalizeCargoTomlForBaselineComparison packageName tomlContents =
-  let step (currentTomlSectionHeader, normalizedLinesSoFar) sourceLine =
-        let trimmedLine = T.strip sourceLine
-         in if isTomlSectionHeader trimmedLine
-              then
-                if isCargoDependencySectionHeader trimmedLine
-                  then (Just trimmedLine, normalizedLinesSoFar)
-                  else (Just trimmedLine, normalizedLinesSoFar ++ [trimmedLine])
-              else case currentTomlSectionHeader of
-                Just header | isCargoDependencySectionHeader header -> (currentTomlSectionHeader, normalizedLinesSoFar)
-                _ | T.null trimmedLine -> (currentTomlSectionHeader, normalizedLinesSoFar)
-                Just "[package]" | isTomlNameAssignment trimmedLine -> (currentTomlSectionHeader, normalizedLinesSoFar ++ [normalizedNameLine])
-                Just "[package]" | isTomlDescriptionAssignment trimmedLine -> (currentTomlSectionHeader, normalizedLinesSoFar)
-                Just "[package]" | isTomlKeywordsAssignment trimmedLine -> (currentTomlSectionHeader, normalizedLinesSoFar)
-                Just "[[bin]]" | isTomlNameAssignment trimmedLine -> (currentTomlSectionHeader, normalizedLinesSoFar ++ [normalizedNameLine])
-                _ -> (currentTomlSectionHeader, normalizedLinesSoFar ++ [trimmedLine])
+  let step (currentTomlSectionHeader, normalizedLinesSoFar) sourceLine
+        | isTomlSectionHeader trimmedLine =
+            ( Just trimmedLine,
+              if isCargoDependencySectionHeader trimmedLine
+                then normalizedLinesSoFar
+                else normalizedLinesSoFar ++ [trimmedLine]
+            )
+        | maybe False isCargoDependencySectionHeader currentTomlSectionHeader =
+            (currentTomlSectionHeader, normalizedLinesSoFar)
+        | T.null trimmedLine =
+            (currentTomlSectionHeader, normalizedLinesSoFar)
+        | currentTomlSectionHeader == Just "[package]" && isTomlNameAssignment trimmedLine =
+            (currentTomlSectionHeader, normalizedLinesSoFar ++ [normalizedNameLine])
+        | currentTomlSectionHeader == Just "[package]"
+            && (isTomlDescriptionAssignment trimmedLine || isTomlKeywordsAssignment trimmedLine) =
+            (currentTomlSectionHeader, normalizedLinesSoFar)
+        | currentTomlSectionHeader == Just "[[bin]]" && isTomlNameAssignment trimmedLine =
+            (currentTomlSectionHeader, normalizedLinesSoFar ++ [normalizedNameLine])
+        | otherwise =
+            (currentTomlSectionHeader, normalizedLinesSoFar ++ [trimmedLine])
+        where
+          trimmedLine = T.strip sourceLine
       (_, normalizedLines) = foldl' step (Nothing, []) (T.lines tomlContents)
       normalizedNameLine = "name = \"" <> T.pack packageName <> "\""
    in T.unlines normalizedLines
@@ -2243,29 +2240,24 @@ checkCabalFile packageName = do
           ]
 normalizeCabalForBaselineComparison :: FilePath -> T.Text -> T.Text
 normalizeCabalForBaselineComparison packageName cabalContents =
-  let step (insideBuildDependsSection, insideIgnoredMetadataField, normalizedLinesSoFar) sourceLine =
-        let trimmedLine = T.strip sourceLine
-            normalizedLine = normalizeCabalLineForBaselineComparison packageName trimmedLine
-         in if insideBuildDependsSection
-              then
-                if T.null trimmedLine
-                  then (True, False, normalizedLinesSoFar)
-                  else case T.breakOn ":" trimmedLine of
-                    (_, "") -> (True, False, normalizedLinesSoFar)
-                    _ -> (False, False, normalizedLinesSoFar ++ [normalizedLine])
-              else
-                if insideIgnoredMetadataField && isCabalIndentedContinuationLine sourceLine
-                  then (False, True, normalizedLinesSoFar)
-                  else
-                    if "build-depends:" `T.isPrefixOf` trimmedLine
-                      then (True, False, normalizedLinesSoFar)
-                      else
-                        if T.null trimmedLine
-                          then (False, False, normalizedLinesSoFar)
-                          else
-                            if isCabalSynopsisField trimmedLine || isCabalDescriptionField trimmedLine
-                              then (False, True, normalizedLinesSoFar)
-                              else (False, False, normalizedLinesSoFar ++ [normalizedLine])
+  let step (insideBuildDependsSection, insideIgnoredMetadataField, normalizedLinesSoFar) sourceLine
+        | insideBuildDependsSection =
+            if T.null trimmedLine || T.null (snd (T.breakOn ":" trimmedLine))
+              then (True, False, normalizedLinesSoFar)
+              else (False, False, normalizedLinesSoFar ++ [normalizedLine])
+        | insideIgnoredMetadataField && isCabalIndentedContinuationLine sourceLine =
+            (False, True, normalizedLinesSoFar)
+        | "build-depends:" `T.isPrefixOf` trimmedLine =
+            (True, False, normalizedLinesSoFar)
+        | T.null trimmedLine =
+            (False, False, normalizedLinesSoFar)
+        | isCabalSynopsisField trimmedLine || isCabalDescriptionField trimmedLine =
+            (False, True, normalizedLinesSoFar)
+        | otherwise =
+            (False, False, normalizedLinesSoFar ++ [normalizedLine])
+        where
+          trimmedLine = T.strip sourceLine
+          normalizedLine = normalizeCabalLineForBaselineComparison packageName trimmedLine
       (_, _, normalizedLines) = foldl' step (False, False, []) (T.lines cabalContents)
    in T.unlines normalizedLines
 normalizeCabalLineForBaselineComparison :: FilePath -> T.Text -> T.Text
@@ -2429,16 +2421,12 @@ removeFileIfExists filePath = do
   when fileExists (removeFile filePath)
 inferTemplateName :: FilePath -> String -> IO (Maybe FilePath)
 inferTemplateName packageName nixSource = do
-  maybeMatchedTemplateNames <- forM templateSpecs $ \templateSpec -> do
-    matched <- templateMatches templateSpec packageName nixSource
-    pure (if matched then Just (templateName templateSpec) else Nothing)
-  pure (listToMaybe (catMaybes maybeMatchedTemplateNames))
+  matchedTemplateSpecs <- filterM (\templateSpec -> templateMatches templateSpec packageName nixSource) templateSpecs
+  pure (templateName <$> listToMaybe matchedTemplateSpecs)
 inferCheckTemplateName :: FilePath -> String -> IO (Maybe FilePath)
 inferCheckTemplateName checkName nixSource = do
-  maybeMatchedCheckTemplateNames <- forM checkTemplateSpecs $ \checkTemplateSpec -> do
-    matched <- checkTemplateMatches checkTemplateSpec checkName nixSource
-    pure (if matched then Just (checkTemplateName checkTemplateSpec) else Nothing)
-  pure (listToMaybe (catMaybes maybeMatchedCheckTemplateNames))
+  matchedCheckTemplateSpecs <- filterM (\checkTemplateSpec -> checkTemplateMatches checkTemplateSpec checkName nixSource) checkTemplateSpecs
+  pure (checkTemplateName <$> listToMaybe matchedCheckTemplateSpecs)
 normalizeNixExpr :: Set.Set T.Text -> Set.Set T.Text -> NExprLoc -> NExprLoc
 normalizeNixExpr ignoredTopLevelFunctionParams allowedNixDifferenceKeys (Fix (Compose (AnnUnit nixExprSpan expressionFunctor))) =
   let rebuiltExpressionFunctor = case expressionFunctor of
