@@ -19,7 +19,9 @@ let
   '';
   formatter = treefmtEval.config.build.wrapper;
   git-canonicalization-script = pkgs.writeShellScriptBin "git-canonicalization-check" ''
-    ${inputs.self.packages.${pkgs.stdenv.system}."git-canonicalization"}/bin/git-canonicalization check
+    ${
+      inputs.self.packages.${pkgs.stdenv.system}."git-canonicalization"
+    }/bin/git-canonicalization check .
   '';
   treefmtEval = inputs.treefmt-nix.lib.evalModule pkgs {
     programs = {

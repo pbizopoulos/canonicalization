@@ -9,7 +9,7 @@
 {-# OPTIONS_GHC -Wno-all-missed-specialisations -Wno-missing-import-lists -Wno-unsafe #-}
 module Main (main, runPackageEndToEndTests, runPackageTests) where
 import Control.Applicative ((<|>))
-import Control.Exception (finally, onException)
+import Control.Exception (IOException, finally, try)
 import Control.Monad (filterM, forM, forM_, unless, when)
 import Data.Bool (bool)
 import Data.Char (isAlphaNum, isAsciiLower, isDigit)
@@ -41,12 +41,12 @@ import Nix.Utils (Path (Path))
 import Prettyprinter (defaultLayoutOptions, layoutPretty)
 import Prettyprinter.Render.Text (renderStrict)
 import System.Directory (canonicalizePath, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, doesPathExist, findExecutable, getCurrentDirectory, getHomeDirectory, listDirectory, removeFile, removePathForcibly, setCurrentDirectory)
-import System.Environment (getArgs)
+import System.Environment (getArgs, lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitFailure, exitWith)
 import System.FilePath ((<.>), (</>))
 import System.FilePath.Posix (isRelative, makeRelative, splitDirectories, takeBaseName, takeDirectory, takeFileName)
-import System.IO (hClose, hPutStr, openTempFile, stderr)
-import System.Process (readProcessWithExitCode)
+import System.IO (hClose, hPutStr, hPutStrLn, openTempFile, stderr)
+import System.Process (rawSystem, readProcessWithExitCode)
 import Test.HUnit (Counts (errors, failures), Test (TestCase, TestList), assertBool, assertEqual, assertFailure, runTestTT)
 import Text.Regex.TDFA ((=~))
 import Prelude
@@ -426,61 +426,43 @@ runCli canonicalizationSettings commandLineArgs =
         ["help"] -> printMainHelpAndExit ExitSuccess
         _ | isHelpRequest commandLineArgs -> printCommandUsageAndExit ExitSuccess commandLineArgs
         _ -> case commandLineArgs of
-          ["check"] ->
-            runInGitRepositoryRoot "." $
-              collectRepositoryComplianceWith canonicalizationSettings >>= \case
-                Left (checkPhaseName, checkPhaseIssues) -> do
-                  reportCheckRepositoryFailures checkPhaseName checkPhaseIssues
-                  exitFailure
-                Right _ -> pure ()
+          ["check", location] -> checkCanonicalizationLocation canonicalizationSettings location
+          "check" : _ -> printCommandUsageAndExit usageExitCode commandLineArgs
           ["summary"] -> runInGitRepositoryRoot "." (summarizeRepository renderRepositoryPackageSummariesText)
           ["summary", "--json"] -> runInGitRepositoryRoot "." (summarizeRepository renderRepositoryPackageSummariesJson)
-          cloneArgs@("clone" : _) ->
-            case parseCloneRepositoryArgs cloneArgs of
-              Just repositoryLocation -> do
-                cloneResult <- cloneGitRepositoryFromLocation repositoryLocation
-                case cloneResult of
-                  Left cloneError -> do
-                    putStrLn cloneError
-                    exitFailure
-                  Right _ -> pure ()
-              Nothing -> printCommandUsageAndExit usageExitCode cloneArgs
+          ["add", repositoryUrl] ->
+            case parseRepositoryUrl repositoryUrl of
+              Just repositoryLocation -> addGitRepositoryFromLocation repositoryLocation
+              Nothing -> printCommandUsageAndExit usageExitCode commandLineArgs
+          ["init"] -> initializeHomeGitRepository
           commandArgs ->
-            case parseInitRepositoryArgs commandArgs of
-              Just repositoryLocation -> do
-                createResult <- createGitRepositoryFromLocation repositoryLocation
-                case createResult of
-                  Left createError -> do
-                    putStrLn createError
+            case commandArgs of
+              "init" : _ -> printCommandUsageAndExit usageExitCode commandArgs
+              "clone" : _ -> printCommandUsageAndExit usageExitCode commandArgs
+              ["rm", removalTarget] ->
+                removeCanonicalizationTarget removalTarget >>= \case
+                  Left removeError -> do
+                    hPutStrLn stderr removeError
                     exitFailure
-                  Right _ -> pure ()
-              Nothing ->
-                case commandArgs of
-                  "init" : _ -> printCommandUsageAndExit usageExitCode commandArgs
-                  ["rm", removalTarget] ->
-                    removeCanonicalizationTarget removalTarget >>= \case
-                      Left removeError -> do
-                        putStrLn removeError
-                        exitFailure
-                      Right () -> pure ()
-                  "rm" : _ -> printCommandUsageAndExit usageExitCode commandArgs
-                  _ ->
-                    case parseAddPackageArgs commandArgs of
-                      Just (packageKindName, packageName, packageDescription, requestedCheckKinds) ->
-                        runInGitRepositoryRoot "." $
-                          case parseSupportedAddPackageKind packageKindName of
-                            Nothing -> do
-                              putStrLn ("unsupported package type: " ++ packageKindName)
-                              putStrLn ("supported package types: " ++ intercalate ", " (map fst supportedAddPackageKinds))
+                  Right () -> pure ()
+              "rm" : _ -> printCommandUsageAndExit usageExitCode commandArgs
+              _ ->
+                case parseAddPackageArgs commandArgs of
+                  Just (packageKindName, packageName, packageDescription, requestedCheckKinds) ->
+                    runInGitRepositoryRoot "." $
+                      case parseSupportedAddPackageKind packageKindName of
+                        Nothing -> do
+                          hPutStrLn stderr ("unsupported package type: " ++ packageKindName)
+                          hPutStrLn stderr ("supported package types: " ++ intercalate ", " (map fst supportedAddPackageKinds))
+                          exitFailure
+                        Just packageKind -> do
+                          addResult <- addPackageToCurrentRepositoryWith canonicalizationSettings packageKind packageName packageDescription requestedCheckKinds
+                          case addResult of
+                            Left addError -> do
+                              hPutStrLn stderr addError
                               exitFailure
-                            Just packageKind -> do
-                              addResult <- addPackageToCurrentRepositoryWith canonicalizationSettings packageKind packageName packageDescription requestedCheckKinds
-                              case addResult of
-                                Left addError -> do
-                                  putStrLn addError
-                                  exitFailure
-                                Right _ -> pure ()
-                      Nothing -> printCommandUsageAndExit usageExitCode commandArgs
+                            Right _ -> pure ()
+                  Nothing -> printCommandUsageAndExit usageExitCode commandArgs
 printMainHelpAndExit :: ExitCode -> IO a
 printMainHelpAndExit exitCode = do
   if exitCode == ExitSuccess then putStr mainHelpText else hPutStr stderr mainHelpText
@@ -500,10 +482,9 @@ mainHelpText =
   unlines
     [ "usage: git canonicalization [-h | --help] <command> [<args>]",
       "",
-      "   add        Add a package and its requested checks",
-      "   check      Check whether the repository is canonical",
-      "   clone      Add a canonical repository as a submodule below $HOME",
-      "   init       Create and add a canonical repository as a submodule below $HOME",
+      "   add        Add a repository or a package and its requested checks",
+      "   check      Check a canonicalization location",
+      "   init       Initialize $HOME as a Git repository",
       "   rm         Remove a package or local repository submodule",
       "   summary    Show a summary of packages and checks",
       "",
@@ -514,7 +495,10 @@ usageTextForCommand :: Maybe String -> String
 usageTextForCommand = \case
   Just "add" ->
     unlines
-      [ "usage: git canonicalization add [<options>] <package-type> <package-name> [<description>...]",
+      [ "usage: git canonicalization add <https-or-ssh-repository-url>",
+        "   or: git canonicalization add [<options>] <package-type> <package-name> [<description>...]",
+        "",
+        "Repository URLs are added below $HOME as <hostname>/<username>/<repository-name>.",
         "",
         "    --default-check       add the package's default check",
         "    --coverage            add a coverage check",
@@ -530,21 +514,19 @@ usageTextForCommand = \case
         "    --json                output the repository summary as JSON",
         ""
       ]
-  Just "check" -> singleCommandUsage "check"
-  Just "init" ->
+  Just "check" ->
     unlines
-      [ "usage: git canonicalization init (<repository-url> | <hostname> <username> <repository-name>)",
+      [ "usage: git canonicalization check <location>",
         "",
-        "Create $HOME/<hostname>/<username>/<repository-name> and add it as a submodule",
-        "of the Git repository rooted at $HOME. The remote repository must not yet exist.",
+        "Check the nearest Git repository. The repository rooted at $HOME uses",
+        "the home .gitmodules path policy; other repositories use canonical checks.",
         ""
       ]
-  Just "clone" ->
+  Just "init" ->
     unlines
-      [ "usage: git canonicalization clone (<repository-url> | <hostname> <username> <repository-name>)",
+      [ "usage: git canonicalization init",
         "",
-        "Clone into $HOME/<hostname>/<username>/<repository-name> by adding the repository",
-        "as a submodule of the Git repository rooted at $HOME.",
+        "Initialize $HOME as a Git repository and ensure its .gitignore contains *.",
         ""
       ]
   Just "rm" ->
@@ -557,9 +539,6 @@ usageTextForCommand = \case
         ""
       ]
   _ -> unlines ["usage: git canonicalization [-h | --help] <command> [<args>]", ""]
-singleCommandUsage :: String -> String
-singleCommandUsage commandName =
-  unlines ["usage: git canonicalization " ++ commandName, ""]
 parseAddPackageArgs :: [String] -> Maybe (String, FilePath, Maybe String, Set.Set RepositoryCheckKind)
 parseAddPackageArgs commandLineArgs = do
   (packageKindName, packageName, remainingArguments) <-
@@ -574,26 +553,6 @@ parseAddPackageArgs commandLineArgs = do
       packageDescription = case packageDescriptionArguments of [] -> Nothing; args -> Just (unwords args)
   requestedCheckKinds <- parseRepositoryCheckFlags flagArguments
   pure (packageKindName, packageName, packageDescription, requestedCheckKinds)
-parseInitArgs :: [String] -> Maybe (String, String, FilePath)
-parseInitArgs commandLineArgs =
-  case commandLineArgs of
-    ["init", hostname, username, repositoryName] -> Just (hostname, username, repositoryName)
-    _ -> Nothing
-parseCloneArgs :: [String] -> Maybe (String, String, FilePath)
-parseCloneArgs commandLineArgs =
-  case commandLineArgs of
-    ["clone", hostname, username, repositoryName] -> Just (hostname, username, repositoryName)
-    _ -> Nothing
-parseInitRepositoryArgs :: [String] -> Maybe RepositoryLocation
-parseInitRepositoryArgs commandLineArgs =
-  case commandLineArgs of
-    ["init", repositoryUrl] -> parseRepositoryUrl repositoryUrl
-    _ -> repositoryLocationFromComponents <$> parseInitArgs commandLineArgs
-parseCloneRepositoryArgs :: [String] -> Maybe RepositoryLocation
-parseCloneRepositoryArgs commandLineArgs =
-  case commandLineArgs of
-    ["clone", repositoryUrl] -> parseRepositoryUrl repositoryUrl
-    _ -> repositoryLocationFromComponents <$> parseCloneArgs commandLineArgs
 parseRepositoryUrl :: String -> Maybe RepositoryLocation
 parseRepositoryUrl repositoryUrl =
   parseHttpsRepositoryUrl repositoryUrl
@@ -629,9 +588,6 @@ repositoryLocationFromUrlParts repositoryUrl hostname repositoryPath =
         then Nothing
         else Just location
     _ -> Nothing
-repositoryLocationFromComponents :: (String, String, FilePath) -> RepositoryLocation
-repositoryLocationFromComponents (hostname, username, repositoryName) =
-  RepositoryLocation hostname username repositoryName ("git@" ++ hostname ++ ":" ++ username ++ "/" ++ repositoryName)
 parseRepositoryCheckFlags :: [String] -> Maybe (Set.Set RepositoryCheckKind)
 parseRepositoryCheckFlags flagArguments =
   Set.fromList
@@ -649,98 +605,110 @@ parseRepositoryCheckFlags flagArguments =
       flagArguments
 runInGitRepositoryRoot :: FilePath -> IO a -> IO a
 runInGitRepositoryRoot repositoryDirectory action = do
-  isDirectory <- doesDirectoryExist repositoryDirectory
-  unless isDirectory $ do
-    putStrLn ("not a directory: " ++ repositoryDirectory)
-    exitFailure
-  (insideWorkTreeExit, insideWorkTreeStdout, _insideWorkTreeStderr) <- readProcessWithExitCode "git" ["-C", repositoryDirectory, "rev-parse", "--is-inside-work-tree"] ""
-  unless (insideWorkTreeExit == ExitSuccess && T.unpack (T.strip (T.pack insideWorkTreeStdout)) == "true") $ do
-    putStrLn ("not a git directory: " ++ repositoryDirectory)
-    exitFailure
-  (repositoryRootExit, repositoryRootStdout, _repositoryRootStderr) <- readProcessWithExitCode "git" ["-C", repositoryDirectory, "rev-parse", "--show-toplevel"] ""
-  unless (repositoryRootExit == ExitSuccess) $ do
-    putStrLn ("not a git directory: " ++ repositoryDirectory)
-    exitFailure
-  canonicalRepositoryRoot <- canonicalizePath (T.unpack (T.strip (T.pack repositoryRootStdout)))
+  canonicalRepositoryRoot <- discoverGitRepositoryRoot repositoryDirectory
   previousDirectory <- getCurrentDirectory
   setCurrentDirectory canonicalRepositoryRoot
   action `finally` setCurrentDirectory previousDirectory
-createGitRepositoryFromLocation :: RepositoryLocation -> IO (Either String FilePath)
-createGitRepositoryFromLocation repositoryLocation = do
+discoverGitRepositoryRoot :: FilePath -> IO FilePath
+discoverGitRepositoryRoot repositoryDirectory = do
+  (repositoryRootExit, repositoryRootStdout, repositoryRootStderr) <-
+    readProcessWithExitCode "git" ["-C", repositoryDirectory, "rev-parse", "--show-toplevel"] ""
+  if repositoryRootExit == ExitSuccess
+    then canonicalizePath (T.unpack (T.strip (T.pack repositoryRootStdout)))
+    else do
+      putStr repositoryRootStdout
+      hPutStr stderr repositoryRootStderr
+      exitWith repositoryRootExit
+checkCanonicalizationLocation :: CanonicalizationSettings -> FilePath -> IO ()
+checkCanonicalizationLocation canonicalizationSettings location = do
+  repositoryRoot <- discoverGitRepositoryRoot location
   homeDirectory <- getHomeDirectory
-  createGitRepositoryLocationInHome homeDirectory repositoryLocation
-type RemoteRepositoryProbeResult :: Type
-data RemoteRepositoryProbeResult
-  = RemoteRepositoryExists
-  | RemoteRepositoryAbsent
-  | RemoteRepositoryIndeterminate String
-  deriving stock (Eq, Show)
-classifyRemoteRepositoryProbe :: ExitCode -> String -> String -> RemoteRepositoryProbeResult
-classifyRemoteRepositoryProbe probeExit probeStdout probeStderr
-  | probeExit == ExitSuccess = RemoteRepositoryExists
-  | isRecognizedRepositoryNotFoundDiagnostic probeDiagnostic = RemoteRepositoryAbsent
-  | otherwise = RemoteRepositoryIndeterminate probeDiagnostic
+  canonicalHomeDirectory <- canonicalizePath homeDirectory
+  if repositoryRoot == canonicalHomeDirectory
+    then checkHomeGitmodules canonicalHomeDirectory >>= either failCanonicalizationCheck pure
+    else
+      runInGitRepositoryRoot repositoryRoot $
+        collectRepositoryComplianceWith canonicalizationSettings >>= \case
+          Left (checkPhaseName, checkPhaseIssues) -> do
+            reportCheckRepositoryFailures checkPhaseName checkPhaseIssues
+            exitFailure
+          Right _ -> pure ()
+failCanonicalizationCheck :: String -> IO a
+failCanonicalizationCheck diagnostic = do
+  hPutStrLn stderr diagnostic
+  exitFailure
+checkHomeGitmodules :: FilePath -> IO (Either String ())
+checkHomeGitmodules homeDirectory = do
+  let gitmodulesPath = homeDirectory </> ".gitmodules"
+  gitmodulesExists <- doesFileExist gitmodulesPath
+  if not gitmodulesExists
+    then pure (Left ("missing file: " ++ gitmodulesPath))
+    else do
+      readResult <- try (TIO.readFile gitmodulesPath)
+      pure $
+        case readResult of
+          Left (readError :: IOException) -> Left ("failed to read " ++ gitmodulesPath ++ ": " ++ show readError)
+          Right contents ->
+            case filter (not . isCompatibleHomeGitmodulePath) (parseHomeGitmodulePathEntries contents) of
+              [] -> Right ()
+              invalidPathEntries ->
+                Left
+                  ( intercalate
+                      "\n"
+                      [ T.unpack pathEntry ++ ": must be exactly <host>/<owner>/<repo>"
+                      | pathEntry <- invalidPathEntries
+                      ]
+                  )
+parseHomeGitmodulePathEntries :: T.Text -> [T.Text]
+parseHomeGitmodulePathEntries contents =
+  foldl collectPathEntry [] (T.lines contents)
   where
-    probeDiagnostic = T.unpack (T.strip (T.pack (if null probeStderr then probeStdout else probeStderr)))
-isRecognizedRepositoryNotFoundDiagnostic :: String -> Bool
-isRecognizedRepositoryNotFoundDiagnostic probeDiagnostic =
-  let normalizedDiagnostic = T.unpack (T.toLower (T.pack probeDiagnostic))
-   in "repository not found" `isInfixOf` normalizedDiagnostic
-        || "repository does not exist" `isInfixOf` normalizedDiagnostic
-probeRemoteRepository :: String -> IO RemoteRepositoryProbeResult
-probeRemoteRepository repositoryUrl = do
-  (probeExit, probeStdout, probeStderr) <-
-    readProcessWithExitCode
-      "git"
-      ["-c", "core.sshCommand=ssh -oBatchMode=yes -oConnectTimeout=10", "ls-remote", repositoryUrl]
-      ""
-  pure (classifyRemoteRepositoryProbe probeExit probeStdout probeStderr)
-cloneGitRepositoryFromLocation :: RepositoryLocation -> IO (Either String FilePath)
-cloneGitRepositoryFromLocation repositoryLocation = do
+    collectPathEntry pathEntries sourceLine =
+      let (rawKey, rawValueWithEquals) = T.breakOn "=" (T.strip sourceLine)
+          pathEntry = T.strip (T.drop 1 rawValueWithEquals)
+       in if T.strip rawKey == "path"
+            && not (T.null rawValueWithEquals)
+            && not (T.null pathEntry)
+            && pathEntry `notElem` pathEntries
+            then pathEntries ++ [pathEntry]
+            else pathEntries
+isCompatibleHomeGitmodulePath :: T.Text -> Bool
+isCompatibleHomeGitmodulePath pathEntry =
+  not (T.isPrefixOf "/" pathEntry)
+    && case T.splitOn "/" pathEntry of
+      [hostname, username, repositoryName] ->
+        all (\component -> not (T.null component) && component `notElem` [".", ".."]) [hostname, username, repositoryName]
+      _ -> False
+initializeHomeGitRepository :: IO ()
+initializeHomeGitRepository = do
   homeDirectory <- getHomeDirectory
-  cloneGitRepositoryLocationInHome homeDirectory repositoryLocation
-cloneGitRepositoryInHomeWith :: (String -> IO RemoteRepositoryProbeResult) -> FilePath -> String -> String -> FilePath -> IO (Either String FilePath)
-cloneGitRepositoryInHomeWith probeRepository homeDirectory hostname username repositoryName =
-  cloneGitRepositoryLocationInHomeWith probeRepository homeDirectory (repositoryLocationFromComponents (hostname, username, repositoryName))
-cloneGitRepositoryLocationInHome :: FilePath -> RepositoryLocation -> IO (Either String FilePath)
-cloneGitRepositoryLocationInHome = cloneGitRepositoryLocationInHomeWith probeRemoteRepository
-cloneGitRepositoryLocationInHomeWith :: (String -> IO RemoteRepositoryProbeResult) -> FilePath -> RepositoryLocation -> IO (Either String FilePath)
-cloneGitRepositoryLocationInHomeWith probeRepository homeDirectory repositoryLocation =
+  let gitignorePath = homeDirectory </> ".gitignore"
+  gitignoreExists <- doesFileExist gitignorePath
+  when gitignoreExists $ do
+    gitignoreContents <- TIO.readFile gitignorePath
+    unless (homeGitignoreIsCompatible gitignoreContents) $
+      failCanonicalizationCheck (gitignorePath ++ ": existing file must contain only *")
+  gitInitExit <- rawSystem "git" ["init", homeDirectory]
+  unless (gitInitExit == ExitSuccess) (exitWith gitInitExit)
+  unless gitignoreExists (TIO.writeFile gitignorePath "*\n")
+homeGitignoreIsCompatible :: T.Text -> Bool
+homeGitignoreIsCompatible gitignoreContents = gitignoreContents == "*" || gitignoreContents == "*\n"
+addGitRepositoryFromLocation :: RepositoryLocation -> IO ()
+addGitRepositoryFromLocation repositoryLocation = do
+  homeDirectory <- getHomeDirectory
+  case gitSubmoduleAddArguments homeDirectory repositoryLocation of
+    Left validationError -> failCanonicalizationCheck validationError
+    Right gitArguments -> do
+      gitAddExit <- rawSystem "git" gitArguments
+      unless (gitAddExit == ExitSuccess) (exitWith gitAddExit)
+gitSubmoduleAddArguments :: FilePath -> RepositoryLocation -> Either String [String]
+gitSubmoduleAddArguments homeDirectory repositoryLocation =
   case catMaybes [validateNewName "hostname" hostname, validateNewName "username" username, validateNewName "repository" repositoryName] of
-    validationError : _ -> pure (Left validationError)
-    [] -> do
+    validationError : _ -> Left validationError
+    [] ->
       let repositoryPathEntry = hostname </> username </> repositoryName
-          repositoryPath = homeDirectory </> repositoryPathEntry
           repositoryUrl = repositoryLocationUrl repositoryLocation
-      (homeGitRootExit, homeGitRootStdout, _homeGitRootStderr) <- readProcessWithExitCode "git" ["-C", homeDirectory, "rev-parse", "--show-toplevel"] ""
-      canonicalHomeDirectory <- canonicalizePath homeDirectory
-      let reportedHomeGitRoot = T.unpack (T.strip (T.pack homeGitRootStdout))
-      canonicalHomeGitRoot <- if homeGitRootExit == ExitSuccess then canonicalizePath reportedHomeGitRoot else pure reportedHomeGitRoot
-      if homeGitRootExit /= ExitSuccess || canonicalHomeGitRoot /= canonicalHomeDirectory
-        then pure (Left ("not a git repository root directory: " ++ homeDirectory))
-        else do
-          repositoryPathExists <- doesPathExist repositoryPath
-          if repositoryPathExists
-            then pure (Left ("path already exists: " ++ repositoryPath))
-            else
-              probeRepository repositoryUrl >>= \case
-                RemoteRepositoryAbsent -> pure (Left ("remote repository does not exist: " ++ repositoryUrl))
-                RemoteRepositoryIndeterminate probeDiagnostic ->
-                  pure
-                    ( Left
-                        ( "could not determine whether remote repository exists: "
-                            ++ repositoryUrl
-                            ++ if null probeDiagnostic then "" else ": " ++ probeDiagnostic
-                        )
-                    )
-                RemoteRepositoryExists -> do
-                  createDirectoryIfMissing True (takeDirectory repositoryPath)
-                  runRepositoryCreationCommand
-                    "could not clone repository as a submodule"
-                    ["-C", homeDirectory, "submodule", "add", "--force", repositoryUrl, repositoryPathEntry]
-                    >>= \case
-                      Just cloneError -> pure (Left cloneError)
-                      Nothing -> pure (Right repositoryPath)
+       in Right ["-C", homeDirectory, "submodule", "add", "--force", repositoryUrl, repositoryPathEntry]
   where
     hostname = repositoryLocationHostname repositoryLocation
     username = repositoryLocationUsername repositoryLocation
@@ -817,82 +785,6 @@ removePackageFromCurrentRepository packageName = do
                   removalPathExists <- doesPathExist removalPath
                   when removalPathExists (removePathForcibly removalPath)
                 pure (Right ())
-createGitRepositoryInHomeWith :: (String -> IO RemoteRepositoryProbeResult) -> FilePath -> String -> String -> FilePath -> IO (Either String FilePath)
-createGitRepositoryInHomeWith probeRepository homeDirectory hostname username repositoryName =
-  createGitRepositoryLocationInHomeWith probeRepository homeDirectory (repositoryLocationFromComponents (hostname, username, repositoryName))
-createGitRepositoryLocationInHome :: FilePath -> RepositoryLocation -> IO (Either String FilePath)
-createGitRepositoryLocationInHome = createGitRepositoryLocationInHomeWith probeRemoteRepository
-createGitRepositoryLocationInHomeWith :: (String -> IO RemoteRepositoryProbeResult) -> FilePath -> RepositoryLocation -> IO (Either String FilePath)
-createGitRepositoryLocationInHomeWith probeRepository homeDirectory repositoryLocation =
-  case catMaybes [validateNewName "hostname" hostname, validateNewName "username" username, validateNewName "repository" repositoryName] of
-    validationError : _ -> pure (Left validationError)
-    [] -> do
-      let repositoryPathEntry = hostname </> username </> repositoryName
-          repositoryPath = homeDirectory </> repositoryPathEntry
-          repositoryUrl = repositoryLocationUrl repositoryLocation
-      (homeGitRootExit, homeGitRootStdout, _homeGitRootStderr) <- readProcessWithExitCode "git" ["-C", homeDirectory, "rev-parse", "--show-toplevel"] ""
-      canonicalHomeDirectory <- canonicalizePath homeDirectory
-      let reportedHomeGitRoot = T.unpack (T.strip (T.pack homeGitRootStdout))
-      canonicalHomeGitRoot <- if homeGitRootExit == ExitSuccess then canonicalizePath reportedHomeGitRoot else pure reportedHomeGitRoot
-      if homeGitRootExit /= ExitSuccess || canonicalHomeGitRoot /= canonicalHomeDirectory
-        then pure (Left ("not a git repository root directory: " ++ homeDirectory))
-        else do
-          repositoryPathExists <- doesPathExist repositoryPath
-          if repositoryPathExists
-            then pure (Left ("path already exists: " ++ repositoryPath))
-            else
-              probeRepository repositoryUrl >>= \case
-                RemoteRepositoryExists -> pure (Left ("remote repository already exists: " ++ repositoryUrl))
-                RemoteRepositoryIndeterminate probeDiagnostic ->
-                  pure
-                    ( Left
-                        ( "could not determine whether remote repository exists: "
-                            ++ repositoryUrl
-                            ++ if null probeDiagnostic then "" else ": " ++ probeDiagnostic
-                        )
-                    )
-                RemoteRepositoryAbsent -> cleanupRepositoryOnException repositoryPath $ do
-                  createDirectoryIfMissing True (takeDirectory repositoryPath)
-                  runRepositoryCreationCommand
-                    "could not initialize git repository"
-                    ["init", "--initial-branch=main", repositoryPath]
-                    >>= \case
-                      Just createError -> cleanupFailedRepositoryCreation repositoryPath createError
-                      Nothing -> do
-                        TIO.writeFile (repositoryPath </> "flake.nix") newRepositoryFlakeNixSource
-                        runRepositoryCreationProgram "could not generate flake.lock" "nix" ["flake", "lock", repositoryPath] >>= \case
-                          Just createError -> cleanupFailedRepositoryCreation repositoryPath createError
-                          Nothing ->
-                            runRepositoryCreationCommand "could not stage flake.nix and flake.lock" ["-C", repositoryPath, "add", "flake.nix", "flake.lock"] >>= \case
-                              Just createError -> cleanupFailedRepositoryCreation repositoryPath createError
-                              Nothing ->
-                                runRepositoryCreationCommand "could not create initial commit" ["-C", repositoryPath, "commit", "-m", "Initial commit"] >>= \case
-                                  Just createError -> cleanupFailedRepositoryCreation repositoryPath createError
-                                  Nothing ->
-                                    runRepositoryCreationCommand "could not configure origin" ["-C", repositoryPath, "remote", "add", "origin", repositoryUrl] >>= \case
-                                      Just createError -> cleanupFailedRepositoryCreation repositoryPath createError
-                                      Nothing ->
-                                        runRepositoryCreationCommand
-                                          "could not add repository as a submodule"
-                                          ["-C", homeDirectory, "submodule", "add", "--force", repositoryUrl, repositoryPathEntry]
-                                          >>= \case
-                                            Just createError -> cleanupFailedRepositoryCreation repositoryPath createError
-                                            Nothing -> pure (Right repositoryPath)
-  where
-    hostname = repositoryLocationHostname repositoryLocation
-    username = repositoryLocationUsername repositoryLocation
-    repositoryName = repositoryLocationName repositoryLocation
-cleanupFailedRepositoryCreation :: FilePath -> String -> IO (Either String FilePath)
-cleanupFailedRepositoryCreation repositoryPath createError = do
-  removeRepositoryPathIfExists repositoryPath
-  pure (Left createError)
-cleanupRepositoryOnException :: FilePath -> IO a -> IO a
-cleanupRepositoryOnException repositoryPath action =
-  action `onException` removeRepositoryPathIfExists repositoryPath
-removeRepositoryPathIfExists :: FilePath -> IO ()
-removeRepositoryPathIfExists repositoryPath = do
-  repositoryPathExists <- doesPathExist repositoryPath
-  when repositoryPathExists (removePathForcibly repositoryPath)
 runRepositoryCreationCommand :: String -> [String] -> IO (Maybe String)
 runRepositoryCreationCommand errorContext = runRepositoryCreationProgram errorContext "git"
 runRepositoryCreationProgram :: String -> FilePath -> [String] -> IO (Maybe String)
@@ -903,24 +795,6 @@ runRepositoryCreationProgram errorContext executable arguments = do
     if commandExit == ExitSuccess
       then Nothing
       else Just (errorContext ++ if null commandDiagnostic then "" else ": " ++ commandDiagnostic)
-newRepositoryFlakeNixSource :: T.Text
-newRepositoryFlakeNixSource =
-  T.unlines
-    [ "{",
-      "  inputs = {",
-      "    canonicalization.url = \"github:pbizopoulos/canonicalization\";",
-      "    nixpkgs.follows = \"canonicalization/nixpkgs\";",
-      "  };",
-      "  outputs =",
-      "    inputs:",
-      "    inputs.canonicalization.blueprint {",
-      "      inherit inputs;",
-      "    }",
-      "    // {",
-      "      inherit (inputs.canonicalization) formatter;",
-      "    };",
-      "}"
-    ]
 requiredRepositoryRootFiles :: [FilePath]
 requiredRepositoryRootFiles = ["flake.nix", "flake.lock"]
 checkRequiredRepositoryRootFiles :: IO [String]
@@ -962,16 +836,16 @@ collectRepositoryContentComplianceWith canonicalizationSettings = do
             )
 reportCheckRepositoryFailures :: String -> [String] -> IO ()
 reportCheckRepositoryFailures checkPhaseName checkPhaseIssues = do
-  putStrLn ("canonicalization check failed at phase: " ++ checkPhaseName)
+  hPutStrLn stderr ("canonicalization check failed at phase: " ++ checkPhaseName)
   forM_ checkPhaseIssues $ \issue ->
-    putStrLn ("- [" ++ checkPhaseName ++ "] " ++ issue)
+    hPutStrLn stderr ("- [" ++ checkPhaseName ++ "] " ++ issue)
   case checkPhaseName of
     "required-root-files" ->
-      putStrLn "hint: add flake.nix and run 'nix flake update' to create or update flake.lock."
+      hPutStrLn stderr "hint: add flake.nix and run 'nix flake update' to create or update flake.lock."
     "directory-structure" ->
-      putStrLn "hint: fix directory and required-file layout under packages/, hosts/, checks/, and repository root."
+      hPutStrLn stderr "hint: fix directory and required-file layout under packages/, hosts/, checks/, and repository root."
     "file-compliance" ->
-      putStrLn "hint: align package files with the expected internal templates and language-specific policy checks."
+      hPutStrLn stderr "hint: align package files with the expected internal templates and language-specific policy checks."
     _ -> pure ()
 type RepositoryPackageChecksSummary :: Type
 data RepositoryPackageChecksSummary = RepositoryPackageChecksSummary
@@ -2773,6 +2647,8 @@ commandLineEndToEndTests :: Test
 commandLineEndToEndTests =
   TestList
     [ TestCase commandLineHelpEndToEndTest,
+      TestCase initHomeEndToEndTest,
+      TestCase checkLocationRoutingEndToEndTest,
       TestCase addSummaryAndCheckEndToEndTest,
       TestCase invalidAddEndToEndTest
     ]
@@ -2787,17 +2663,17 @@ commandLineHelpEndToEndTest =
     assertEqual "Command-specific help succeeds." ExitSuccess addHelpExit
     assertBool "Command-specific help prints the add usage to stdout." ("usage: git canonicalization add" `isPrefixOf` addHelpStdout)
     assertEqual "Command-specific help leaves stderr empty." "" addHelpStderr
-    (cloneHelpExit, cloneHelpStdout, cloneHelpStderr) <- runEndToEndCommandIn temporaryDirectory ["clone", "--help"]
-    assertEqual "Clone help succeeds." ExitSuccess cloneHelpExit
+    (checkHelpExit, checkHelpStdout, checkHelpStderr) <- runEndToEndCommandIn temporaryDirectory ["check", "--help"]
+    assertEqual "Check help succeeds." ExitSuccess checkHelpExit
     assertBool
-      "Clone help explains the destination and submodule behavior."
-      ("$HOME/<hostname>/<username>/<repository-name>" `isInfixOf` cloneHelpStdout && "as a submodule" `isInfixOf` cloneHelpStdout)
-    assertEqual "Clone help leaves stderr empty." "" cloneHelpStderr
+      "Check help requires a location and explains home routing."
+      ("<location>" `isInfixOf` checkHelpStdout && ".gitmodules" `isInfixOf` checkHelpStdout)
+    assertEqual "Check help leaves stderr empty." "" checkHelpStderr
     (initHelpExit, initHelpStdout, initHelpStderr) <- runEndToEndCommandIn temporaryDirectory ["init", "--help"]
     assertEqual "Init help succeeds." ExitSuccess initHelpExit
     assertBool
-      "Init help explains the home Git repository and absent-remote precondition."
-      ("Git repository rooted at $HOME" `isInfixOf` initHelpStdout && "remote repository must not yet exist" `isInfixOf` initHelpStdout)
+      "Init help explains the home Git repository and .gitignore policy."
+      ("$HOME" `isInfixOf` initHelpStdout && ".gitignore" `isInfixOf` initHelpStdout)
     assertEqual "Init help leaves stderr empty." "" initHelpStderr
     (rmHelpExit, rmHelpStdout, rmHelpStderr) <- runEndToEndCommandIn temporaryDirectory ["rm", "--help"]
     assertEqual "Rm help succeeds." ExitSuccess rmHelpExit
@@ -2813,6 +2689,73 @@ commandLineHelpEndToEndTest =
     assertEqual "An invalid command uses Git's usage exit status." usageExitCode invalidCommandExit
     assertEqual "An invalid command leaves stdout empty." "" invalidCommandStdout
     assertBool "An invalid command prints usage to stderr." ("usage: git canonicalization" `isPrefixOf` invalidCommandStderr)
+    (missingCheckLocationExit, missingCheckLocationStdout, missingCheckLocationStderr) <-
+      runEndToEndCommandIn temporaryDirectory ["check"]
+    assertEqual "Check requires a location." usageExitCode missingCheckLocationExit
+    assertEqual "A missing check location leaves stdout empty." "" missingCheckLocationStdout
+    assertBool "A missing check location prints check usage to stderr." ("usage: git canonicalization check <location>" `isPrefixOf` missingCheckLocationStderr)
+    (legacyCloneExit, legacyCloneStdout, legacyCloneStderr) <-
+      runEndToEndCommandIn temporaryDirectory ["clone", "https://example.test/owner/demo"]
+    assertEqual "The legacy clone command is rejected." usageExitCode legacyCloneExit
+    assertEqual "The legacy clone command leaves stdout empty." "" legacyCloneStdout
+    assertBool "The legacy clone command prints usage to stderr." ("usage: git canonicalization" `isPrefixOf` legacyCloneStderr)
+    (parameterizedInitExit, parameterizedInitStdout, parameterizedInitStderr) <-
+      runEndToEndCommandIn temporaryDirectory ["init", "https://example.test/owner/demo"]
+    assertEqual "Parameterized init is rejected." usageExitCode parameterizedInitExit
+    assertEqual "Parameterized init leaves stdout empty." "" parameterizedInitStdout
+    assertBool "Parameterized init prints init usage to stderr." ("usage: git canonicalization init" `isPrefixOf` parameterizedInitStderr)
+initHomeEndToEndTest :: IO ()
+initHomeEndToEndTest = do
+  withTemporaryPackageRepository "init-home-end-to-end" $ \temporaryHome ->
+    withEnvironmentVariable "HOME" temporaryHome $ do
+      (initExit, _initStdout, _initStderr) <- runEndToEndCommandIn temporaryHome ["init"]
+      assertEqual "Home initialization succeeds." ExitSuccess initExit
+      doesDirectoryExist (temporaryHome </> ".git")
+        >>= assertBool "Home initialization creates a Git repository."
+      TIO.readFile (temporaryHome </> ".gitignore")
+        >>= assertEqual "Home initialization creates the canonical ignore rule." "*\n"
+      (reinitExit, _reinitStdout, _reinitStderr) <- runEndToEndCommandIn temporaryHome ["init"]
+      assertEqual "Home initialization may safely reinitialize a compatible repository." ExitSuccess reinitExit
+  withTemporaryPackageRepository "init-home-conflict-end-to-end" $ \temporaryHome ->
+    withEnvironmentVariable "HOME" temporaryHome $ do
+      TIO.writeFile (temporaryHome </> ".gitignore") "*.tmp\n"
+      (initExit, initStdout, initStderr) <- runEndToEndCommandIn temporaryHome ["init"]
+      assertEqual "An incompatible home .gitignore fails before Git initialization." (ExitFailure 1) initExit
+      assertEqual "An incompatible home .gitignore leaves stdout empty." "" initStdout
+      assertBool "An incompatible home .gitignore is reported on stderr." ("existing file must contain only *" `isInfixOf` initStderr)
+      doesPathExist (temporaryHome </> ".git")
+        >>= assertBool "A rejected home initialization does not create a Git repository." . not
+checkLocationRoutingEndToEndTest :: IO ()
+checkLocationRoutingEndToEndTest =
+  withTemporaryPackageRepository "check-routing-home" $ \temporaryHome -> do
+    initializeGitRepositoryFixture temporaryHome
+    TIO.writeFile (temporaryHome </> ".gitmodules") ""
+    let homeChild = temporaryHome </> "not-a-repository" </> "child"
+    createDirectoryIfMissing True homeChild
+    withEnvironmentVariable "HOME" temporaryHome $ do
+      (homeCheckExit, homeCheckStdout, homeCheckStderr) <- runEndToEndCommandIn temporaryHome ["check", homeChild]
+      assertEqual "A home descendant without its own repository uses the home check." ExitSuccess homeCheckExit
+      assertEqual "A successful home check leaves stdout empty." "" homeCheckStdout
+      assertEqual "A successful home check leaves stderr empty." "" homeCheckStderr
+      TIO.writeFile (temporaryHome </> ".gitmodules") "path = owner/repository\n"
+      (failedHomeExit, failedHomeStdout, failedHomeStderr) <- runEndToEndCommandIn temporaryHome ["check", homeChild]
+      assertEqual "A malformed home submodule path fails." (ExitFailure 1) failedHomeExit
+      assertEqual "A malformed home check leaves stdout empty." "" failedHomeStdout
+      assertBool "A malformed home path is reported on stderr." ("must be exactly <host>/<owner>/<repo>" `isInfixOf` failedHomeStderr)
+      let nestedRepository = temporaryHome </> "example.test" </> "owner" </> "demo"
+      initializeGitRepositoryFixture nestedRepository
+      TIO.writeFile (nestedRepository </> "flake.nix") "{}"
+      TIO.writeFile (nestedRepository </> "flake.lock") "{}"
+      (nestedCheckExit, nestedCheckStdout, nestedCheckStderr) <- runEndToEndCommandIn temporaryHome ["check", nestedRepository]
+      unless (nestedCheckExit == ExitSuccess) $
+        assertFailure
+          ( "A nested repository beneath home should use canonical repository checks, but exited with "
+              ++ show nestedCheckExit
+              ++ ": "
+              ++ nestedCheckStderr
+          )
+      assertEqual "A successful nested repository check leaves stdout empty." "" nestedCheckStdout
+      assertEqual "A successful nested repository check leaves stderr empty." "" nestedCheckStderr
 addSummaryAndCheckEndToEndTest :: IO ()
 addSummaryAndCheckEndToEndTest =
   withTemporaryPackageRepository "add-summary-check-end-to-end" $ \temporaryRepository -> do
@@ -2868,19 +2811,19 @@ addSummaryAndCheckEndToEndTest =
           ]
       )
     assertEqual "A successful JSON summary leaves stderr empty." "" jsonStderr
-    (checkExit, checkStdout, checkStderr) <- runEndToEndCommandIn temporaryRepository ["check"]
+    (checkExit, checkStdout, checkStderr) <- runEndToEndCommandIn temporaryRepository ["check", "."]
     assertEqual "Checking the generated repository succeeds." ExitSuccess checkExit
     assertEqual "A successful check produces no stdout." "" checkStdout
     assertEqual "A successful check produces no stderr." "" checkStderr
     TIO.writeFile (temporaryRepository </> "packages/demo/default.nix") "not valid nix template"
-    (failedCheckExit, failedCheckStdout, failedCheckStderr) <- runEndToEndCommandIn temporaryRepository ["check"]
+    (failedCheckExit, failedCheckStdout, failedCheckStderr) <- runEndToEndCommandIn temporaryRepository ["check", "."]
     assertEqual "Checking a corrupted package fails." (ExitFailure 1) failedCheckExit
+    assertEqual "A failed check leaves stdout empty." "" failedCheckStdout
     assertBool
       "A failed check reports its phase and affected file."
-      ( "canonicalization check failed at phase: file-compliance" `isInfixOf` failedCheckStdout
-          && "packages/demo/default.nix:" `isInfixOf` failedCheckStdout
+      ( "canonicalization check failed at phase: file-compliance" `isInfixOf` failedCheckStderr
+          && "packages/demo/default.nix:" `isInfixOf` failedCheckStderr
       )
-    assertEqual "Repository policy diagnostics are not written to stderr." "" failedCheckStderr
     (rmExit, rmStdout, rmStderr) <- runEndToEndCommandIn temporaryRepository ["rm", "demo"]
     assertEqual "Removing the generated package succeeds." ExitSuccess rmExit
     assertEqual "A successful package removal produces no stdout." "" rmStdout
@@ -2905,13 +2848,13 @@ invalidAddEndToEndTest =
     (invalidNameExit, invalidNameStdout, invalidNameStderr) <-
       runEndToEndCommandIn temporaryRepository ["add", "python", "demo-python"]
     assertEqual "An invalid package name fails." (ExitFailure 1) invalidNameExit
-    assertBool "An invalid package name reports its convention." ("must use snake_case" `isInfixOf` invalidNameStdout)
-    assertEqual "An invalid package name leaves stderr empty." "" invalidNameStderr
+    assertEqual "An invalid package name leaves stdout empty." "" invalidNameStdout
+    assertBool "An invalid package name reports its convention." ("must use snake_case" `isInfixOf` invalidNameStderr)
     (unsupportedCheckExit, unsupportedCheckStdout, unsupportedCheckStderr) <-
       runEndToEndCommandIn temporaryRepository ["add", "html", "demo", "--coverage"]
     assertEqual "An unsupported check selection fails." (ExitFailure 1) unsupportedCheckExit
-    assertBool "An unsupported check selection reports the rejected option." ("unsupported checks for package type html: --coverage" `isInfixOf` unsupportedCheckStdout)
-    assertEqual "An unsupported check selection leaves stderr empty." "" unsupportedCheckStderr
+    assertEqual "An unsupported check selection leaves stdout empty." "" unsupportedCheckStdout
+    assertBool "An unsupported check selection reports the rejected option." ("unsupported checks for package type html: --coverage" `isInfixOf` unsupportedCheckStderr)
     packageDirectoryExists <- doesDirectoryExist (temporaryRepository </> "packages/demo")
     assertBool "Rejected add commands do not leave a partial package directory." (not packageDirectoryExists)
 runEndToEndCommandIn :: FilePath -> [String] -> IO (ExitCode, String, String)
@@ -3365,77 +3308,54 @@ createRepositoryTests =
   TestList
     [ TestCase $ do
         assertEqual
-          "Classifies a successful remote probe as an existing repository."
-          RemoteRepositoryExists
-          (classifyRemoteRepositoryProbe ExitSuccess "" ""),
+          "Parses paths and preserves their first occurrences."
+          ["github.com/owner/one", "gitlab.com/owner/two"]
+          ( parseHomeGitmodulePathEntries
+              ( T.unlines
+                  [ "[submodule \"one\"]",
+                    "  path = github.com/owner/one  ",
+                    "  url = git@example.test:owner/one",
+                    "path = github.com/owner/one",
+                    "pathname = gitlab.com/owner/ignored",
+                    "path = gitlab.com/owner/two",
+                    "path =    "
+                  ]
+              )
+          ),
       TestCase $ do
+        forM_ ["github.com/owner/repository", "host/a/b"] $ \pathEntry ->
+          assertBool ("Accepts canonical home path " ++ T.unpack pathEntry) (isCompatibleHomeGitmodulePath pathEntry)
+        forM_
+          [ "repository",
+            "owner/repository",
+            "host/owner/repository/extra",
+            "/host/owner",
+            "host//repository",
+            "host/./repository",
+            "host/../repository"
+          ]
+          $ \pathEntry ->
+            assertBool ("Rejects noncanonical home path " ++ T.unpack pathEntry) (not (isCompatibleHomeGitmodulePath pathEntry)),
+      TestCase $
+        withTemporaryPackageRepository "home-gitmodules-check" $ \tempHome -> do
+          missingResult <- checkHomeGitmodules tempHome
+          assertBool "Reports a missing home .gitmodules file." (either ("missing file:" `isPrefixOf`) (const False) missingResult)
+          TIO.writeFile (tempHome </> ".gitmodules") "[submodule \"demo\"]\n  path = github.com/owner/demo\n"
+          checkHomeGitmodules tempHome >>= assertEqual "Accepts a canonical home .gitmodules file." (Right ()),
+      TestCase $
+        assertBool
+          "Only a single star rule with an optional trailing newline is compatible."
+          (homeGitignoreIsCompatible "*" && homeGitignoreIsCompatible "*\n" && not (homeGitignoreIsCompatible "*.tmp\n*\n")),
+      TestCase $
         assertEqual
-          "Classifies a recognized repository-not-found response as absence."
-          RemoteRepositoryAbsent
-          (classifyRemoteRepositoryProbe (ExitFailure 128) "" "ERROR: Repository not found."),
-      TestCase $ do
-        assertEqual
-          "Classifies an SSH configuration failure as indeterminate."
-          (RemoteRepositoryIndeterminate "Could not resolve hostname example.test")
-          (classifyRemoteRepositoryProbe (ExitFailure 128) "" "Could not resolve hostname example.test"),
-      TestCase $ remoteRepositoryPreflightStopsCreationTest RemoteRepositoryExists "remote repository already exists",
-      TestCase $ remoteRepositoryPreflightStopsCreationTest (RemoteRepositoryIndeterminate "network unavailable") "could not determine whether remote repository exists",
-      TestCase $ remoteRepositoryPreflightStopsCloneTest RemoteRepositoryAbsent "remote repository does not exist",
-      TestCase $ remoteRepositoryPreflightStopsCloneTest (RemoteRepositoryIndeterminate "network unavailable") "could not determine whether remote repository exists",
-      TestCase failedRepositoryCreationCleanupTest,
+          "Repository adds delegate to git submodule add with the canonical home-relative path."
+          (Right ["-C", "/home/test", "submodule", "add", "--force", "https://example.test/owner/demo.git", "example.test/owner/demo"])
+          ( gitSubmoduleAddArguments
+              "/home/test"
+              (RepositoryLocation "example.test" "owner" "demo" "https://example.test/owner/demo.git")
+          ),
       TestCase removeRepositorySubmoduleTest
     ]
-remoteRepositoryPreflightStopsCreationTest :: RemoteRepositoryProbeResult -> String -> IO ()
-remoteRepositoryPreflightStopsCreationTest probeResult expectedErrorPrefix =
-  findExecutable "git" >>= \case
-    Nothing -> pure ()
-    Just _ ->
-      withTemporaryPackageRepository "create-repository-preflight" $
-        \tempHome -> do
-          (gitInitExit, _gitInitStdout, gitInitStderr) <- readProcessWithExitCode "git" ["init", "--quiet", tempHome] ""
-          unless (gitInitExit == ExitSuccess) $
-            assertFailure ("Failed to initialize home Git repository fixture: " ++ gitInitStderr)
-          createResult <- createGitRepositoryInHomeWith (\_ -> pure probeResult) tempHome "example.test" "owner" "demo"
-          targetExists <- doesPathExist (tempHome </> "example.test" </> "owner" </> "demo")
-          assertBool
-            "Stops repository creation during the remote preflight without writing the target path."
-            ( case createResult of
-                Left createError -> expectedErrorPrefix `isPrefixOf` createError && not targetExists
-                Right _ -> False
-            )
-remoteRepositoryPreflightStopsCloneTest :: RemoteRepositoryProbeResult -> String -> IO ()
-remoteRepositoryPreflightStopsCloneTest probeResult expectedErrorPrefix =
-  findExecutable "git" >>= \case
-    Nothing -> pure ()
-    Just _ ->
-      withTemporaryPackageRepository "clone-repository-preflight" $
-        \tempHome -> do
-          (gitInitExit, _gitInitStdout, gitInitStderr) <- readProcessWithExitCode "git" ["init", "--quiet", tempHome] ""
-          unless (gitInitExit == ExitSuccess) $
-            assertFailure ("Failed to initialize home Git repository fixture: " ++ gitInitStderr)
-          cloneResult <- cloneGitRepositoryInHomeWith (\_ -> pure probeResult) tempHome "example.test" "owner" "demo"
-          targetExists <- doesPathExist (tempHome </> "example.test" </> "owner" </> "demo")
-          assertBool
-            "Stops repository cloning during the remote preflight without writing the target path."
-            ( case cloneResult of
-                Left cloneError -> expectedErrorPrefix `isPrefixOf` cloneError && not targetExists
-                Right _ -> False
-            )
-failedRepositoryCreationCleanupTest :: IO ()
-failedRepositoryCreationCleanupTest =
-  withTemporaryPackageRepository "failed-repository-creation-cleanup" $ \tempHome -> do
-    let partialRepositoryPath = tempHome </> "example.test" </> "owner" </> "demo"
-    createDirectoryIfMissing True partialRepositoryPath
-    TIO.writeFile (partialRepositoryPath </> "flake.nix") "{}"
-    cleanupResult <- cleanupFailedRepositoryCreation partialRepositoryPath "simulated creation failure"
-    partialRepositoryPathExists <- doesPathExist partialRepositoryPath
-    assertEqual
-      "Returns the original repository-creation failure after cleanup."
-      (Left "simulated creation failure")
-      cleanupResult
-    assertBool
-      "Removes a partially created repository so init can be retried."
-      (not partialRepositoryPathExists)
 removeRepositorySubmoduleTest :: IO ()
 removeRepositorySubmoduleTest =
   findExecutable "git" >>= \case
@@ -3710,6 +3630,14 @@ withCurrentWorkingDirectory workingDirectory action = do
   previousDirectory <- getCurrentDirectory
   setCurrentDirectory workingDirectory
   action `finally` setCurrentDirectory previousDirectory
+withEnvironmentVariable :: String -> String -> IO a -> IO a
+withEnvironmentVariable variableName variableValue action = do
+  previousValue <- lookupEnv variableName
+  setEnv variableName variableValue
+  action
+    `finally` case previousValue of
+      Nothing -> unsetEnv variableName
+      Just value -> setEnv variableName value
 rustNixFixture :: String
 rustNixFixture =
   "{ pkgs ? import <nixpkgs> { }, }:\n"
