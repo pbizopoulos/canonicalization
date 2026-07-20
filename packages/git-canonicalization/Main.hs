@@ -48,7 +48,7 @@ import System.FilePath.Windows qualified as Windows
 import System.IO (hClose, hPutStr, hPutStrLn, openTempFile, stderr, stdout)
 import System.Posix.Process (executeFile)
 import System.Process (rawSystem, readProcessWithExitCode)
-import Test.HUnit (Counts (errors, failures), Test (TestCase, TestList), assertBool, assertEqual, assertFailure, runTestTT)
+import Test.HUnit (Counts (errors, failures), Test (TestCase, TestLabel, TestList), assertBool, assertEqual, assertFailure, runTestTT)
 import Text.Regex.TDFA ((=~))
 import Prelude
 defaultAllowedNixDifferenceKeys :: Set.Set T.Text
@@ -1753,32 +1753,41 @@ checkHaskellTestConventions packageName packageKind =
 discoverHaskellUnitTestNamesFromSource :: String -> [String]
 discoverHaskellUnitTestNamesFromSource haskellSource =
   let haskellSourceLines = lines haskellSource
+      labelsFromSpecificationTest = extractSpecificationTestLabels haskellSourceLines
       labelsFromMakeFormattingTest = extractMakeFormattingTestLabels haskellSourceLines
-      labelsFromAssertEqual = extractAssertEqualTestLabels haskellSourceLines
    in Set.toAscList
         ( Set.fromList
-            (filter isMeaningfulTestLabel (labelsFromMakeFormattingTest ++ labelsFromAssertEqual))
+            (filter isMeaningfulTestLabel (labelsFromSpecificationTest ++ labelsFromMakeFormattingTest))
         )
 isMeaningfulTestLabel :: String -> Bool
 isMeaningfulTestLabel label =
   case dropWhile isSpace label of
     firstCharacter : _ -> isAlphaNum firstCharacter
     [] -> False
-extractAssertEqualTestLabels :: [String] -> [String]
-extractAssertEqualTestLabels = go False
+extractSpecificationTestLabels :: [String] -> [String]
+extractSpecificationTestLabels = go False
   where
     go _ [] = []
-    go awaitingAssertEqualLabel (line : rest)
-      | "assertEqual" `isInfixOf` line = go True rest
-      | not awaitingAssertEqualLabel = go False rest
+    go awaitingSpecificationTestLabel (line : rest)
+      | isSpecificationTestInvocationLine line =
+          case firstQuotedToken line of
+            Just label -> label : go False rest
+            Nothing -> go True rest
+      | not awaitingSpecificationTestLabel = go False rest
       | null trimmed = go True rest
-      | startsWithQuote trimmed && not ("++" `isInfixOf` trimmed) =
+      | startsWithQuote trimmed =
           case firstQuotedToken trimmed of
             Just label -> label : go False rest
             Nothing -> go False rest
       | otherwise = go False rest
       where
         trimmed = dropWhile (== ' ') line
+    isSpecificationTestInvocationLine line =
+      let trimmed = dropWhile (== ' ') line
+       in "specificationTest " `isPrefixOf` trimmed
+            || "specificationTest" == trimmed
+            || ", specificationTest " `isPrefixOf` trimmed
+            || "[ specificationTest " `isPrefixOf` trimmed
     startsWithQuote [] = False
     startsWithQuote (ch : _) = ch == '"'
 extractMakeFormattingTestLabels :: [String] -> [String]
@@ -1797,7 +1806,11 @@ extractMakeFormattingTestLabels = go False
         trimmed = dropWhile (== ' ') line
     isMakeFormattingTestInvocationLine line =
       let trimmed = dropWhile (== ' ') line
-       in ", makeFormattingTest" `isPrefixOf` trimmed || "makeFormattingTest" `isPrefixOf` trimmed
+          isInvocationPrefix =
+            ", makeFormattingTest" `isPrefixOf` trimmed
+              || "[ makeFormattingTest" `isPrefixOf` trimmed
+              || "makeFormattingTest" `isPrefixOf` trimmed
+       in isInvocationPrefix && not ("=" `isInfixOf` trimmed || "::" `isInfixOf` trimmed)
 firstQuotedToken :: String -> Maybe String
 firstQuotedToken inputText =
   case dropWhile (/= '"') inputText of
@@ -2345,13 +2358,126 @@ runPackageTests = do
 productBehaviorTests :: Test
 productBehaviorTests =
   TestList
-    [ TestCase commandLineHelpEndToEndTest,
-      TestCase initHomeEndToEndTest,
-      TestCase checkLocationRoutingEndToEndTest,
-      TestCase stagedSubmoduleRemovalRefusalEndToEndTest,
-      TestCase addSummaryAndCheckEndToEndTest,
-      TestCase invalidAddEndToEndTest
+    [ specificationTest "Discovers only explicit Haskell specification tests." haskellSpecificationDiscoveryTest,
+      specificationTest "Discovers Haskell formatting tests without treating helper internals as tests." haskellFormattingTestDiscoveryTest,
+      specificationTest "Renders stable text and JSON repository summaries." repositorySummaryRenderingTest,
+      specificationTest "Documents top-level and command-specific usage." commandLineHelpEndToEndTest,
+      specificationTest "Rejects missing and unknown commands with usage on stderr." invalidCommandEndToEndTest,
+      specificationTest "Initializes and safely reinitializes a compatible home repository." initCompatibleHomeEndToEndTest,
+      specificationTest "Rejects initialization when the home ignore policy conflicts." initConflictingHomeEndToEndTest,
+      specificationTest "Checks the current directory by default and routes home descendants to the home repository." checkHomeRoutingEndToEndTest,
+      specificationTest "Rejects malformed home submodule paths." checkMalformedHomePathEndToEndTest,
+      specificationTest "Checks nested Git repositories independently from the home repository." checkNestedRepositoryEndToEndTest,
+      specificationTest "Propagates Git refusal without changing a staged submodule." stagedSubmoduleRemovalRefusalEndToEndTest,
+      specificationTest "Scaffolds a package and its requested checks from a nested directory." addPackageEndToEndTest,
+      specificationTest "Reports generated package behavior in the text summary." textSummaryEndToEndTest,
+      specificationTest "Reports generated package behavior in the JSON summary." jsonSummaryEndToEndTest,
+      specificationTest "Accepts a generated package during repository checks." generatedPackageCheckEndToEndTest,
+      specificationTest "Reports the phase and file when a package check fails." corruptedPackageCheckEndToEndTest,
+      specificationTest "Removes a package together with its associated checks." removePackageEndToEndTest,
+      specificationTest "Rejects unknown package options without creating partial output." unknownAddOptionEndToEndTest,
+      specificationTest "Rejects package names that violate the package convention." invalidPackageNameEndToEndTest,
+      specificationTest "Rejects unsupported checks without creating partial output." unsupportedPackageCheckEndToEndTest
     ]
+specificationTest :: String -> IO () -> Test
+specificationTest testName testAction = TestLabel testName (TestCase testAction)
+haskellSpecificationDiscoveryTest :: IO ()
+haskellSpecificationDiscoveryTest =
+  assertEqual
+    "Only explicit specification labels are part of the package specification."
+    ["Alpha behavior.", "Beta behavior."]
+    ( discoverHaskellUnitTestNamesFromSource
+        ( unlines
+            [ "productBehaviorTests =",
+              "  TestList",
+              "    [ specificationTest \"Beta behavior.\" betaTest,",
+              "      specificationTest",
+              "        \"Alpha behavior.\"",
+              "        alphaTest,",
+              "      specificationTest \"Beta behavior.\" duplicateTest",
+              "    ]",
+              "assertEqual \"Failure diagnostic.\" expected actual",
+              "embedded = \"specificationTest \\\"Embedded template behavior.\\\" action\""
+            ]
+        )
+    )
+haskellFormattingTestDiscoveryTest :: IO ()
+haskellFormattingTestDiscoveryTest =
+  assertEqual
+    "Formatting-test discovery recognizes the first list entry and ignores the helper body."
+    ["Formats the first example.", "Formats the second example."]
+    ( discoverHaskellUnitTestNamesFromSource
+        ( unlines
+            [ "makeFormattingTest :: String -> Text -> Text -> Test",
+              "makeFormattingTest testName input expectedOutput = TestCase $ do",
+              "  withSystemTempFile \"test.nix\" action",
+              "formattingTests =",
+              "  TestList",
+              "    [ makeFormattingTest",
+              "        \"Formats the first example.\"",
+              "        firstInput",
+              "        firstOutput,",
+              "      makeFormattingTest",
+              "        \"Formats the second example.\"",
+              "        secondInput",
+              "        secondOutput",
+              "    ]"
+            ]
+        )
+    )
+repositorySummaryRenderingTest :: IO ()
+repositorySummaryRenderingTest = do
+  let packageSummary =
+        RepositoryPackageSummary
+          { repositoryPackageName = "demo",
+            repositoryPackageType = "python",
+            repositoryPackageDescription = Nothing,
+            repositoryPackageTestNames = ["Reports \"quoted\" behavior."],
+            repositoryPackageChecks =
+              RepositoryPackageChecksSummary
+                { repositoryPackageHasCheck = False,
+                  repositoryPackageHasCoverageCheck = True,
+                  repositoryPackageHasProfileCheck = False,
+                  repositoryPackageHasPropertyTestingCheck = False,
+                  repositoryPackageHasMutationTestingCheck = False
+                }
+          }
+  assertEqual
+    "Text rendering has stable fields, indentation, and fallbacks."
+    ( unlines
+        [ "packageName: demo",
+          "packageType: python",
+          "description: (none)",
+          "     checks:",
+          "             coverage",
+          "      tests:",
+          "             Reports \"quoted\" behavior.",
+          ""
+        ]
+    )
+    (renderRepositoryPackageSummariesText [packageSummary])
+  assertEqual
+    "JSON rendering preserves the schema and escapes strings."
+    ( unlines
+        [ "{",
+          "  \"packages\": [",
+          "    {",
+          "      \"name\": \"demo\",",
+          "      \"packageType\": \"python\",",
+          "      \"description\": null,",
+          "      \"checks\": { \"default-check\": false, \"coverage\": true, \"profile\": false, \"property-testing\": false, \"mutation-testing\": false },",
+          "      \"tests\": [\"Reports \\\"quoted\\\" behavior.\"]",
+          "    }",
+          "",
+          "  ]",
+          "}"
+        ]
+    )
+    (renderRepositoryPackageSummariesJson [packageSummary])
+  assertEqual
+    "JSON string rendering escapes embedded newlines."
+    "\"line one\\nline two\""
+    (renderJsonString "line one\nline two")
 commandLineHelpEndToEndTest :: IO ()
 commandLineHelpEndToEndTest =
   withTemporaryPackageRepository "command-line-help" $ \temporaryDirectory -> do
@@ -2381,6 +2507,9 @@ commandLineHelpEndToEndTest =
       "Rm help explains the local repository and .gitmodules behavior."
       ("<local-repository>" `isInfixOf` rmHelpStdout && ".gitmodules" `isInfixOf` rmHelpStdout)
     assertEqual "Rm help leaves stderr empty." "" rmHelpStderr
+invalidCommandEndToEndTest :: IO ()
+invalidCommandEndToEndTest =
+  withTemporaryPackageRepository "invalid-command" $ \temporaryDirectory -> do
     (missingCommandExit, missingCommandStdout, missingCommandStderr) <- runEndToEndCommandIn temporaryDirectory []
     assertEqual "An omitted command exits unsuccessfully." (ExitFailure 1) missingCommandExit
     assertEqual "An omitted command leaves stdout empty." "" missingCommandStdout
@@ -2389,8 +2518,8 @@ commandLineHelpEndToEndTest =
     assertEqual "An invalid command uses Git's usage exit status." usageExitCode invalidCommandExit
     assertEqual "An invalid command leaves stdout empty." "" invalidCommandStdout
     assertBool "An invalid command prints usage to stderr." ("usage: git canonicalization" `isPrefixOf` invalidCommandStderr)
-initHomeEndToEndTest :: IO ()
-initHomeEndToEndTest = do
+initCompatibleHomeEndToEndTest :: IO ()
+initCompatibleHomeEndToEndTest =
   withTemporaryPackageRepository "init-home-end-to-end" $ \temporaryHome ->
     withEnvironmentVariable "HOME" temporaryHome $ do
       (initExit, _initStdout, _initStderr) <- runEndToEndCommandIn temporaryHome ["init"]
@@ -2408,6 +2537,8 @@ initHomeEndToEndTest = do
       assertEqual "Home initialization accepts appended whitelist rules." ExitSuccess whitelistReinitExit
       TIO.readFile (temporaryHome </> ".gitignore")
         >>= assertEqual "Home initialization preserves existing whitelist rules." whitelistGitignore
+initConflictingHomeEndToEndTest :: IO ()
+initConflictingHomeEndToEndTest =
   withTemporaryPackageRepository "init-home-conflict-end-to-end" $ \temporaryHome ->
     withEnvironmentVariable "HOME" temporaryHome $ do
       TIO.writeFile (temporaryHome </> ".gitignore") "*.tmp\n"
@@ -2417,8 +2548,8 @@ initHomeEndToEndTest = do
       assertBool "An incompatible home .gitignore is reported on stderr." ("existing file must start with *" `isInfixOf` initStderr)
       doesPathExist (temporaryHome </> ".git")
         >>= assertBool "A rejected home initialization does not create a Git repository." . not
-checkLocationRoutingEndToEndTest :: IO ()
-checkLocationRoutingEndToEndTest =
+checkHomeRoutingEndToEndTest :: IO ()
+checkHomeRoutingEndToEndTest =
   withTemporaryPackageRepository "check-routing-home" $ \temporaryHome -> do
     initializeGitRepositoryFixture temporaryHome
     TIO.writeFile (temporaryHome </> ".gitmodules") ""
@@ -2433,11 +2564,25 @@ checkLocationRoutingEndToEndTest =
       assertEqual "A home descendant without its own repository uses the home check." ExitSuccess homeCheckExit
       assertEqual "A successful home check leaves stdout empty." "" homeCheckStdout
       assertEqual "A successful home check leaves stderr empty." "" homeCheckStderr
+checkMalformedHomePathEndToEndTest :: IO ()
+checkMalformedHomePathEndToEndTest =
+  withTemporaryPackageRepository "check-malformed-home" $ \temporaryHome -> do
+    initializeGitRepositoryFixture temporaryHome
+    TIO.writeFile (temporaryHome </> ".gitmodules") ""
+    let homeChild = temporaryHome </> "not-a-repository" </> "child"
+    createDirectoryIfMissing True homeChild
+    withEnvironmentVariable "HOME" temporaryHome $ do
       TIO.writeFile (temporaryHome </> ".gitmodules") "path = owner/repository\n"
       (failedHomeExit, failedHomeStdout, failedHomeStderr) <- runEndToEndCommandIn temporaryHome ["check", homeChild]
       assertEqual "A malformed home submodule path fails." (ExitFailure 1) failedHomeExit
       assertEqual "A malformed home check leaves stdout empty." "" failedHomeStdout
       assertBool "A malformed home path is reported on stderr." ("must be exactly <host>/<owner>/<repo>" `isInfixOf` failedHomeStderr)
+checkNestedRepositoryEndToEndTest :: IO ()
+checkNestedRepositoryEndToEndTest =
+  withTemporaryPackageRepository "check-nested-home" $ \temporaryHome -> do
+    initializeGitRepositoryFixture temporaryHome
+    TIO.writeFile (temporaryHome </> ".gitmodules") ""
+    withEnvironmentVariable "HOME" temporaryHome $ do
       let nestedRepository = temporaryHome </> "example.test" </> "owner" </> "demo"
       initializeGitRepositoryFixture nestedRepository
       TIO.writeFile (nestedRepository </> "flake.nix") "{}"
@@ -2493,9 +2638,9 @@ stagedSubmoduleRemovalRefusalEndToEndTest =
         >>= assertEqual "A refused removal leaves .gitmodules unchanged." originalGitmodules
       doesPathExist repositoryPath
         >>= assertBool "A refused removal leaves the submodule worktree intact."
-addSummaryAndCheckEndToEndTest :: IO ()
-addSummaryAndCheckEndToEndTest =
-  withTemporaryPackageRepository "add-summary-check-end-to-end" $ \temporaryRepository -> do
+addPackageEndToEndTest :: IO ()
+addPackageEndToEndTest =
+  withTemporaryPackageRepository "add-package-end-to-end" $ \temporaryRepository -> do
     initializeGitRepositoryFixture temporaryRepository
     TIO.writeFile (temporaryRepository </> "flake.nix") "{}"
     TIO.writeFile (temporaryRepository </> "flake.lock") "{}"
@@ -2519,42 +2664,36 @@ addSummaryAndCheckEndToEndTest =
             temporaryRepository </> "checks/demo_property_testing/default.nix"
           ]
     assertBool "The installed CLI creates the package and requested checks on disk." generatedFilesExist
-    runGitFixtureCommand ["-C", temporaryRepository, "config", "user.name", "Canonicalization Tests"]
-    runGitFixtureCommand ["-C", temporaryRepository, "config", "user.email", "canonicalization@example.test"]
-    runGitFixtureCommand ["-C", temporaryRepository, "commit", "--quiet", "-m", "Add generated package"]
+textSummaryEndToEndTest :: IO ()
+textSummaryEndToEndTest =
+  withGeneratedPythonPackageRepository "text-summary-end-to-end" $ \temporaryRepository -> do
     (summaryExit, summaryStdout, summaryStderr) <- runEndToEndCommandIn temporaryRepository ["summary"]
     assertEqual "Text summary succeeds for the generated repository." ExitSuccess summaryExit
-    assertBool
-      "Text summary reports generated metadata, checks, and discovered tests."
-      ( all
-          (`isInfixOf` summaryStdout)
-          [ "packageName: demo",
-            "packageType: python",
-            "description: Demo package",
-            "coverage",
-            "property-testing",
-            "test_canonicalize_label_examples"
-          ]
-      )
+    assertEqual
+      "Text summary exactly reports generated metadata, checks, and discovered tests."
+      (renderRepositoryPackageSummariesText [expectedGeneratedPythonPackageSummary])
+      summaryStdout
     assertEqual "A successful text summary leaves stderr empty." "" summaryStderr
+jsonSummaryEndToEndTest :: IO ()
+jsonSummaryEndToEndTest =
+  withGeneratedPythonPackageRepository "json-summary-end-to-end" $ \temporaryRepository -> do
     (jsonExit, jsonStdout, jsonStderr) <- runEndToEndCommandIn temporaryRepository ["summary", "--json"]
     assertEqual "JSON summary succeeds for the generated repository." ExitSuccess jsonExit
-    assertBool
-      "JSON summary reports the generated package and enabled checks."
-      ( all
-          (`isInfixOf` jsonStdout)
-          [ "\"name\": \"demo\"",
-            "\"packageType\": \"python\"",
-            "\"description\": \"Demo package\"",
-            "\"coverage\": true",
-            "\"property-testing\": true"
-          ]
-      )
+    assertEqual
+      "JSON summary exactly reports generated metadata, checks, and discovered tests."
+      (renderRepositoryPackageSummariesJson [expectedGeneratedPythonPackageSummary])
+      jsonStdout
     assertEqual "A successful JSON summary leaves stderr empty." "" jsonStderr
+generatedPackageCheckEndToEndTest :: IO ()
+generatedPackageCheckEndToEndTest =
+  withGeneratedPythonPackageRepository "generated-check-end-to-end" $ \temporaryRepository -> do
     (checkExit, checkStdout, checkStderr) <- runEndToEndCommandIn temporaryRepository ["check", "."]
     assertEqual "Checking the generated repository succeeds." ExitSuccess checkExit
     assertEqual "A successful check produces no stdout." "" checkStdout
     assertEqual "A successful check produces no stderr." "" checkStderr
+corruptedPackageCheckEndToEndTest :: IO ()
+corruptedPackageCheckEndToEndTest =
+  withGeneratedPythonPackageRepository "corrupted-check-end-to-end" $ \temporaryRepository -> do
     TIO.writeFile (temporaryRepository </> "packages/demo/default.nix") "not valid nix template"
     (failedCheckExit, failedCheckStdout, failedCheckStderr) <- runEndToEndCommandIn temporaryRepository ["check", "."]
     assertEqual "Checking a corrupted package fails." (ExitFailure 1) failedCheckExit
@@ -2564,7 +2703,9 @@ addSummaryAndCheckEndToEndTest =
       ( "canonicalization check failed at phase: file-compliance" `isInfixOf` failedCheckStderr
           && "packages/demo/default.nix:" `isInfixOf` failedCheckStderr
       )
-    runGitFixtureCommand ["-C", temporaryRepository, "restore", "--", "packages/demo/default.nix"]
+removePackageEndToEndTest :: IO ()
+removePackageEndToEndTest =
+  withGeneratedPythonPackageRepository "remove-package-end-to-end" $ \temporaryRepository -> do
     (rmExit, rmStdout, rmStderr) <- runEndToEndCommandIn temporaryRepository ["rm", "demo"]
     assertEqual "Removing the generated package succeeds." ExitSuccess rmExit
     assertBool
@@ -2583,29 +2724,83 @@ addSummaryAndCheckEndToEndTest =
     assertBool "Package removal deletes the package directory." (not removedPackageExists)
     assertBool "Package removal deletes its coverage check." (not removedCoverageCheckExists)
     assertBool "Package removal deletes its property-testing check." (not removedPropertyTestingCheckExists)
-invalidAddEndToEndTest :: IO ()
-invalidAddEndToEndTest =
-  withTemporaryPackageRepository "invalid-add-end-to-end" $ \temporaryRepository -> do
-    initializeGitRepositoryFixture temporaryRepository
-    TIO.writeFile (temporaryRepository </> "flake.nix") "{}"
-    TIO.writeFile (temporaryRepository </> "flake.lock") "{}"
+unknownAddOptionEndToEndTest :: IO ()
+unknownAddOptionEndToEndTest =
+  withEmptyCanonicalRepository "unknown-add-option-end-to-end" $ \temporaryRepository -> do
     (unknownOptionExit, unknownOptionStdout, unknownOptionStderr) <-
       runEndToEndCommandIn temporaryRepository ["add", "python", "demo", "--unknown"]
     assertEqual "An unknown add option uses Git's usage exit status." usageExitCode unknownOptionExit
     assertEqual "An unknown add option leaves stdout empty." "" unknownOptionStdout
     assertBool "An unknown add option prints add usage to stderr." ("usage: git canonicalization add" `isPrefixOf` unknownOptionStderr)
+    packageDirectoryExists <- doesDirectoryExist (temporaryRepository </> "packages/demo")
+    assertBool "An unknown option does not leave a partial package directory." (not packageDirectoryExists)
+invalidPackageNameEndToEndTest :: IO ()
+invalidPackageNameEndToEndTest =
+  withEmptyCanonicalRepository "invalid-package-name-end-to-end" $ \temporaryRepository -> do
     (invalidNameExit, invalidNameStdout, invalidNameStderr) <-
       runEndToEndCommandIn temporaryRepository ["add", "python", "demo-python"]
     assertEqual "An invalid package name fails." (ExitFailure 1) invalidNameExit
     assertEqual "An invalid package name leaves stdout empty." "" invalidNameStdout
     assertBool "An invalid package name reports its convention." ("must use snake_case" `isInfixOf` invalidNameStderr)
+    packageDirectoryExists <- doesDirectoryExist (temporaryRepository </> "packages/demo-python")
+    assertBool "An invalid name does not leave a partial package directory." (not packageDirectoryExists)
+unsupportedPackageCheckEndToEndTest :: IO ()
+unsupportedPackageCheckEndToEndTest =
+  withEmptyCanonicalRepository "unsupported-package-check-end-to-end" $ \temporaryRepository -> do
     (unsupportedCheckExit, unsupportedCheckStdout, unsupportedCheckStderr) <-
       runEndToEndCommandIn temporaryRepository ["add", "html", "demo", "--coverage"]
     assertEqual "An unsupported check selection fails." (ExitFailure 1) unsupportedCheckExit
     assertEqual "An unsupported check selection leaves stdout empty." "" unsupportedCheckStdout
     assertBool "An unsupported check selection reports the rejected option." ("unsupported checks for package type html: --coverage" `isInfixOf` unsupportedCheckStderr)
     packageDirectoryExists <- doesDirectoryExist (temporaryRepository </> "packages/demo")
-    assertBool "Rejected add commands do not leave a partial package directory." (not packageDirectoryExists)
+    assertBool "An unsupported check does not leave a partial package directory." (not packageDirectoryExists)
+withEmptyCanonicalRepository :: String -> (FilePath -> IO a) -> IO a
+withEmptyCanonicalRepository temporaryName action =
+  withTemporaryPackageRepository temporaryName $ \temporaryRepository -> do
+    initializeGitRepositoryFixture temporaryRepository
+    TIO.writeFile (temporaryRepository </> "flake.nix") "{}"
+    TIO.writeFile (temporaryRepository </> "flake.lock") "{}"
+    action temporaryRepository
+withGeneratedPythonPackageRepository :: String -> (FilePath -> IO a) -> IO a
+withGeneratedPythonPackageRepository temporaryName action =
+  withEmptyCanonicalRepository temporaryName $ \temporaryRepository -> do
+    let nestedDirectory = temporaryRepository </> "packages"
+    createDirectoryIfMissing True nestedDirectory
+    (addExit, _addStdout, addStderr) <-
+      runEndToEndCommandIn
+        nestedDirectory
+        ["add", "python", "demo", "Demo package", "--coverage", "--property-testing"]
+    when (addExit /= ExitSuccess) $
+      assertFailure ("Failed to generate the Python package fixture: " ++ addStderr)
+    runGitFixtureCommand ["-C", temporaryRepository, "config", "user.name", "Canonicalization Tests"]
+    runGitFixtureCommand ["-C", temporaryRepository, "config", "user.email", "canonicalization@example.test"]
+    runGitFixtureCommand ["-C", temporaryRepository, "commit", "--quiet", "-m", "Add generated package"]
+    action temporaryRepository
+expectedGeneratedPythonPackageSummary :: RepositoryPackageSummary
+expectedGeneratedPythonPackageSummary =
+  RepositoryPackageSummary
+    { repositoryPackageName = "demo",
+      repositoryPackageType = "python",
+      repositoryPackageDescription = Just "Demo package",
+      repositoryPackageTestNames =
+        [ "test_canonicalize_label_examples",
+          "test_main_prints_message",
+          "test_property_canonicalization_is_idempotent",
+          "test_property_canonicalization_uses_restricted_character_set",
+          "test_property_unique_canonical_labels_is_idempotent",
+          "test_render_message_reports_empty_result_when_no_labels_survive",
+          "test_render_message_uses_canonical_unique_labels",
+          "test_unique_canonical_labels_keeps_first_surviving_occurrence"
+        ],
+      repositoryPackageChecks =
+        RepositoryPackageChecksSummary
+          { repositoryPackageHasCheck = False,
+            repositoryPackageHasCoverageCheck = True,
+            repositoryPackageHasProfileCheck = False,
+            repositoryPackageHasPropertyTestingCheck = True,
+            repositoryPackageHasMutationTestingCheck = False
+          }
+    }
 runEndToEndCommandIn :: FilePath -> [String] -> IO (ExitCode, String, String)
 runEndToEndCommandIn workingDirectory arguments =
   withCurrentDirectory workingDirectory (readProcessWithExitCode "git" ("canonicalization" : arguments) "")
