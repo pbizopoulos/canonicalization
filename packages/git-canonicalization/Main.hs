@@ -16,7 +16,7 @@ import Data.Char (isAlphaNum, isAsciiLower, isDigit)
 import Data.Fix (Fix (Fix))
 import Data.Functor.Compose (Compose (Compose))
 import Data.Kind (Type)
-import Data.List (intercalate, isInfixOf, isPrefixOf, isSuffixOf, maximumBy, nub, sort, sortBy, stripPrefix)
+import Data.List (intercalate, isInfixOf, isPrefixOf, isSuffixOf, maximumBy, nub, partition, sort, sortBy, stripPrefix)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
@@ -505,9 +505,7 @@ usageTextForCommand = \case
 parseAddPackageArgs :: [String] -> Maybe (String, FilePath, Maybe String, Set.Set RepositoryCheckKind)
 parseAddPackageArgs ("add" : packageKindName : packageName : remainingArguments) = do
   let (flagArguments, packageDescriptionArguments) =
-        ( filter ("--" `isPrefixOf`) remainingArguments,
-          filter (not . ("--" `isPrefixOf`)) remainingArguments
-        )
+        partition ("--" `isPrefixOf`) remainingArguments
       packageDescription = case packageDescriptionArguments of [] -> Nothing; args -> Just (unwords args)
   requestedCheckKinds <- parseRepositoryCheckFlags flagArguments
   pure (packageKindName, packageName, packageDescription, requestedCheckKinds)
@@ -2183,7 +2181,7 @@ parseNixExprFromText nixSource = do
     `finally` removeFileIfExists temporaryNixPath
 parseNixExprFromFile :: FilePath -> IO (Either String NExprLoc)
 parseNixExprFromFile nixFilePath =
-  fmap (either (Left . show) Right) (parseNixFileLoc (Path nixFilePath))
+  either (Left . show) Right <$> parseNixFileLoc (Path nixFilePath)
 removeFileIfExists :: FilePath -> IO ()
 removeFileIfExists filePath = do
   fileExists <- doesFileExist filePath
@@ -2310,14 +2308,12 @@ firstMismatchedLine :: [T.Text] -> [T.Text] -> Maybe (Int, T.Text, T.Text)
 firstMismatchedLine actualLines expectedLines =
   listToMaybe
     [ (lineNumber, actualLine, expectedLine)
-    | (lineNumber, (actualLine, expectedLine)) <- zip [1 ..] (zip actualLines expectedLines),
+    | (lineNumber, actualLine, expectedLine) <- zip3 [1 ..] actualLines expectedLines,
       actualLine /= expectedLine
     ]
 extractPrimaryNixBindings :: NExprLoc -> Maybe (Map.Map T.Text T.Text)
-extractPrimaryNixBindings nixExpression = do
-  bindingGroups <- collectNixSetBindingGroups nixExpression
-  primaryBindingGroup <- maximumByLength bindingGroups
-  pure (Map.fromList primaryBindingGroup)
+extractPrimaryNixBindings nixExpression =
+  Map.fromList <$> maximumByLength (collectNixSetBindingGroups nixExpression)
 extractOutermostLetBindings :: NExprLoc -> Maybe (Map.Map T.Text T.Text)
 extractOutermostLetBindings (Fix (Compose (AnnUnit _ expressionFunctor))) =
   case expressionFunctor of
@@ -2327,23 +2323,22 @@ extractOutermostLetBindings (Fix (Compose (AnnUnit _ expressionFunctor))) =
 maximumByLength :: [[a]] -> Maybe [a]
 maximumByLength [] = Nothing
 maximumByLength bindingGroups = Just (maximumBy (comparing length) bindingGroups)
-collectNixSetBindingGroups :: NExprLoc -> Maybe [[(T.Text, T.Text)]]
+collectNixSetBindingGroups :: NExprLoc -> [[(T.Text, T.Text)]]
 collectNixSetBindingGroups (Fix (Compose (AnnUnit _ expressionFunctor))) =
   case expressionFunctor of
     NSet _ bindings ->
       let currentSetBindings = extractNamedNixBindings bindings
           nestedBindings = concatMap collectNixSetBindingGroupsFromBinding bindings
-       in Just (currentSetBindings : nestedBindings)
+       in currentSetBindings : nestedBindings
     NLet bindings body ->
       let nestedFromBindings = concatMap collectNixSetBindingGroupsFromBinding bindings
-          nestedFromBodyExpr = fromMaybe [] (collectNixSetBindingGroups body)
-       in Just (nestedFromBindings ++ nestedFromBodyExpr)
+       in nestedFromBindings ++ collectNixSetBindingGroups body
     NAbs _ body -> collectNixSetBindingGroups body
     otherNixExpr ->
-      Just (concatMap (fromMaybe [] . collectNixSetBindingGroups) otherNixExpr)
+      concatMap collectNixSetBindingGroups otherNixExpr
 collectNixSetBindingGroupsFromBinding :: Binding NExprLoc -> [[(T.Text, T.Text)]]
-collectNixSetBindingGroupsFromBinding (NamedVar _ bindingValue _) = fromMaybe [] (collectNixSetBindingGroups bindingValue)
-collectNixSetBindingGroupsFromBinding (Inherit maybeBoundNixExpr _ _) = maybe [] (fromMaybe [] . collectNixSetBindingGroups) maybeBoundNixExpr
+collectNixSetBindingGroupsFromBinding (NamedVar _ bindingValue _) = collectNixSetBindingGroups bindingValue
+collectNixSetBindingGroupsFromBinding (Inherit maybeBoundNixExpr _ _) = maybe [] collectNixSetBindingGroups maybeBoundNixExpr
 extractNamedNixBindings :: [Binding NExprLoc] -> [(T.Text, T.Text)]
 extractNamedNixBindings bindings =
   [ (bindingKey, normalizeRenderedNixBindingValue bindingKey (renderNixExpr bindingValue))
