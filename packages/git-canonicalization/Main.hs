@@ -40,7 +40,7 @@ import Nix.Pretty (prettyNix)
 import Nix.Utils (Path (Path))
 import Prettyprinter (defaultLayoutOptions, layoutPretty)
 import Prettyprinter.Render.Text (renderStrict)
-import System.Directory (canonicalizePath, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, doesPathExist, findExecutable, getCurrentDirectory, getHomeDirectory, listDirectory, makeAbsolute, removeFile, removePathForcibly, setCurrentDirectory)
+import System.Directory (canonicalizePath, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, doesPathExist, findExecutable, getCurrentDirectory, getHomeDirectory, listDirectory, makeAbsolute, removeFile, removePathForcibly, withCurrentDirectory)
 import System.Environment (getArgs, lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitFailure, exitWith)
 import System.FilePath ((<.>), (</>))
@@ -563,7 +563,7 @@ parseRepositoryCheckFlags flagArguments =
 runInGitRepositoryRoot :: FilePath -> IO a -> IO a
 runInGitRepositoryRoot repositoryDirectory action = do
   canonicalRepositoryRoot <- discoverGitRepositoryRoot repositoryDirectory
-  withCurrentWorkingDirectory canonicalRepositoryRoot action
+  withCurrentDirectory canonicalRepositoryRoot action
 discoverGitRepositoryRoot :: FilePath -> IO FilePath
 discoverGitRepositoryRoot repositoryDirectory = do
   repositoryRootStdout <-
@@ -596,7 +596,7 @@ checkCanonicalizationLocation canonicalizationSettings location = do
   if repositoryRoot == canonicalHomeDirectory
     then checkHomeGitmodules canonicalHomeDirectory >>= either failCanonicalizationCheck pure
     else
-      withCurrentWorkingDirectory repositoryRoot $
+      withCurrentDirectory repositoryRoot $
         collectRepositoryComplianceWith canonicalizationSettings >>= \case
           Left (checkPhaseName, checkPhaseIssues) -> do
             reportCheckRepositoryFailures checkPhaseName checkPhaseIssues
@@ -1018,19 +1018,12 @@ packageNameConventionForKind packageKind =
     UnknownPackage -> Nothing
 isDelimitedLowercaseName :: Char -> String -> Bool
 isDelimitedLowercaseName separator packageName =
-  all isValidNamePart (splitOnCharacter separator packageName)
+  all isValidNamePart (T.split (== separator) (T.pack packageName))
   where
-    isValidNamePart :: String -> Bool
+    isValidNamePart :: T.Text -> Bool
     isValidNamePart namePart =
-      not (null namePart)
-        && all (\character -> isAsciiLower character || isDigit character) namePart
-splitOnCharacter :: Char -> String -> [String]
-splitOnCharacter separator = go
-  where
-    go remainingValue =
-      case break (== separator) remainingValue of
-        (namePart, []) -> [namePart]
-        (namePart, _ : remainingParts) -> namePart : go remainingParts
+      not (T.null namePart)
+        && T.all (\character -> isAsciiLower character || isDigit character) namePart
 validateNewName :: String -> FilePath -> Maybe String
 validateNewName nameKind name
   | null name = Just (nameKind ++ " name must not be empty")
@@ -2313,16 +2306,14 @@ firstMismatchedLine actualLines expectedLines =
     ]
 extractPrimaryNixBindings :: NExprLoc -> Maybe (Map.Map T.Text T.Text)
 extractPrimaryNixBindings nixExpression =
-  Map.fromList <$> maximumByLength (collectNixSetBindingGroups nixExpression)
+  Map.fromList . maximumBy (comparing length) . NE.toList
+    <$> NE.nonEmpty (collectNixSetBindingGroups nixExpression)
 extractOutermostLetBindings :: NExprLoc -> Maybe (Map.Map T.Text T.Text)
 extractOutermostLetBindings (Fix (Compose (AnnUnit _ expressionFunctor))) =
   case expressionFunctor of
     NAbs _ body -> extractOutermostLetBindings body
     NLet bindings _ -> Just (Map.fromList (extractNamedNixBindings bindings))
     _ -> Nothing
-maximumByLength :: [[a]] -> Maybe [a]
-maximumByLength [] = Nothing
-maximumByLength bindingGroups = Just (maximumBy (comparing length) bindingGroups)
 collectNixSetBindingGroups :: NExprLoc -> [[(T.Text, T.Text)]]
 collectNixSetBindingGroups (Fix (Compose (AnnUnit _ expressionFunctor))) =
   case expressionFunctor of
@@ -2633,7 +2624,7 @@ invalidAddEndToEndTest =
     assertBool "Rejected add commands do not leave a partial package directory." (not packageDirectoryExists)
 runEndToEndCommandIn :: FilePath -> [String] -> IO (ExitCode, String, String)
 runEndToEndCommandIn workingDirectory arguments =
-  withCurrentWorkingDirectory workingDirectory (readProcessWithExitCode "git" ("canonicalization" : arguments) "")
+  withCurrentDirectory workingDirectory (readProcessWithExitCode "git" ("canonicalization" : arguments) "")
 initializeGitRepositoryFixture :: FilePath -> IO ()
 initializeGitRepositoryFixture repositoryPath =
   findExecutable "git" >>= \case
@@ -2654,11 +2645,6 @@ withTemporaryPackageRepository tempDirName action = do
   removeFile temporaryPath
   createDirectoryIfMissing True temporaryPath
   action temporaryPath `finally` removePathForcibly temporaryPath
-withCurrentWorkingDirectory :: FilePath -> IO a -> IO a
-withCurrentWorkingDirectory workingDirectory action = do
-  previousDirectory <- getCurrentDirectory
-  setCurrentDirectory workingDirectory
-  action `finally` setCurrentDirectory previousDirectory
 withEnvironmentVariable :: String -> String -> IO a -> IO a
 withEnvironmentVariable variableName variableValue action = do
   previousValue <- lookupEnv variableName
