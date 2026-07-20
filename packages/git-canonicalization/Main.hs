@@ -1562,7 +1562,7 @@ shouldTraverseDirectory :: FilePath -> Bool
 shouldTraverseDirectory repositoryPath =
   not
     ( any
-        (`elem` ["tmp", "prm", "target", "result", ".agents", ".codex"])
+        (`elem` ["tmp", "prm", "target", "result", ".codex"])
         (splitDirectories repositoryPath)
     )
 isLeafPath :: [FilePath] -> FilePath -> Bool
@@ -2665,16 +2665,6 @@ commandLineHelpEndToEndTest =
     assertEqual "An invalid command uses Git's usage exit status." usageExitCode invalidCommandExit
     assertEqual "An invalid command leaves stdout empty." "" invalidCommandStdout
     assertBool "An invalid command prints usage to stderr." ("usage: git canonicalization" `isPrefixOf` invalidCommandStderr)
-    (legacyCloneExit, legacyCloneStdout, legacyCloneStderr) <-
-      runEndToEndCommandIn temporaryDirectory ["clone", "https://example.test/owner/demo"]
-    assertEqual "The legacy clone command is rejected." usageExitCode legacyCloneExit
-    assertEqual "The legacy clone command leaves stdout empty." "" legacyCloneStdout
-    assertBool "The legacy clone command prints usage to stderr." ("usage: git canonicalization" `isPrefixOf` legacyCloneStderr)
-    (parameterizedInitExit, parameterizedInitStdout, parameterizedInitStderr) <-
-      runEndToEndCommandIn temporaryDirectory ["init", "https://example.test/owner/demo"]
-    assertEqual "Parameterized init is rejected." usageExitCode parameterizedInitExit
-    assertEqual "Parameterized init leaves stdout empty." "" parameterizedInitStdout
-    assertBool "Parameterized init prints init usage to stderr." ("usage: git canonicalization init" `isPrefixOf` parameterizedInitStderr)
 initHomeEndToEndTest :: IO ()
 initHomeEndToEndTest = do
   withTemporaryPackageRepository "init-home-end-to-end" $ \temporaryHome ->

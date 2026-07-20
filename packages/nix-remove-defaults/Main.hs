@@ -191,7 +191,6 @@ findNixFiles directoryPath = do
 shouldSkipDirectory :: FilePath -> Bool
 shouldSkipDirectory directoryName =
   directoryName == ".git"
-    || directoryName == ".agents"
     || directoryName == ".codex"
     || directoryName == "result"
     || directoryName == "tmp"
