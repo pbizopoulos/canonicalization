@@ -14,6 +14,7 @@ pkgs.runCommand "${checkName}"
   {
     nativeBuildInputs = rustBaseInputs ++ [
       pkgs.cargo-llvm-cov
+      pkgs.jq
       pkgs.llvmPackages.llvm
     ];
     src = ../.. + "/packages/${packageName}";
@@ -27,6 +28,10 @@ pkgs.runCommand "${checkName}"
     substituteInPlace "$workspace/.cargo/config.toml" \
       --replace-fail "@vendor@" "${cargoDeps}"
     cd "$workspace"
-    cargo llvm-cov
-    touch "$out"
+    mkdir -p "$out"
+    cargo llvm-cov --json --summary-only --output-path "$out/report.json"
+    covered="$(jq -r '.data[0].totals.lines.covered' "$out/report.json")"
+    total="$(jq -r '.data[0].totals.lines.count' "$out/report.json")"
+    test "$covered" != null -a "$total" != null
+    printf 'coverage-v1\tlines\t%s\t%s\n' "$covered" "$total" > "$out/coverage-summary.tsv"
   ''

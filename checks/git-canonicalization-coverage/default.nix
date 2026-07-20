@@ -22,7 +22,7 @@ pkgs.runCommand checkName
   ''
     export HOME="$PWD"
     workspace="$PWD/workspace"
-    mkdir -p "$workspace/coverage/html" "$workspace/hpc"
+    mkdir -p "$out/html" "$workspace/coverage" "$workspace/hpc"
     cd "$workspace"
     cat > TestMain.hs <<EOF
     module TestMain (main) where
@@ -34,7 +34,10 @@ pkgs.runCommand checkName
       -i"$src" -outputdir "$workspace" -odir "$workspace" -hidir "$workspace" \
       -o "${packageName}" TestMain.hs "$src/Main.hs"
     HPCTIXFILE="$workspace/coverage/${packageName}.tix" "./${packageName}"
-    hpc markup "$workspace/coverage/${packageName}.tix" --hpcdir="$workspace/hpc" --destdir="$workspace/coverage/html"
-    hpc report "$workspace/coverage/${packageName}.tix" --hpcdir="$workspace/hpc" | tee "$workspace/coverage/summary.txt"
-    touch "$out"
+    hpc markup "$workspace/coverage/${packageName}.tix" --hpcdir="$workspace/hpc" --destdir="$out/html"
+    hpc report "$workspace/coverage/${packageName}.tix" --hpcdir="$workspace/hpc" | tee "$out/report.txt"
+    coverageCounts="$(sed -n 's/.*expressions used (\([0-9][0-9]*\)\/\([0-9][0-9]*\)).*/\1 \2/p' "$out/report.txt")"
+    read -r covered total <<< "$coverageCounts"
+    test -n "$covered" -a -n "$total"
+    printf 'coverage-v1\texpressions\t%s\t%s\n' "$covered" "$total" > "$out/coverage-summary.tsv"
   ''

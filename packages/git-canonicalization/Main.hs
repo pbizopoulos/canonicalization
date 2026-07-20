@@ -9,7 +9,7 @@
 {-# OPTIONS_GHC -Wno-missing-import-lists -Wno-unsafe #-}
 module Main (main, runPackageTests) where
 import Control.Applicative ((<|>))
-import Control.Exception (finally)
+import Control.Exception (IOException, finally, try)
 import Control.Monad (filterM, forM, forM_, unless, when)
 import Data.Char (isAlphaNum, isAsciiLower, isDigit, isLower, isSpace, isUpper, toLower, toUpper)
 import Data.Fix (Fix (Fix))
@@ -37,6 +37,7 @@ import Nix.Expr.Types.Annotated (AnnUnit (AnnUnit), NExprLoc, stripAnnotation)
 import Nix.Parser (parseNixFileLoc)
 import Nix.Pretty (prettyNix)
 import Nix.Utils (Path (Path))
+import Numeric (showFFloat)
 import Prettyprinter (defaultLayoutOptions, layoutPretty)
 import Prettyprinter.Render.Text (renderStrict)
 import System.Directory (canonicalizePath, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, doesPathExist, findExecutable, getCurrentDirectory, getHomeDirectory, getTemporaryDirectory, listDirectory, makeAbsolute, removeFile, removePathForcibly, withCurrentDirectory)
@@ -49,6 +50,7 @@ import System.IO (hClose, hPutStr, hPutStrLn, openTempFile, stderr, stdout)
 import System.Posix.Process (executeFile)
 import System.Process (rawSystem, readProcessWithExitCode)
 import Test.HUnit (Counts (errors, failures), Test (TestCase, TestLabel, TestList), assertBool, assertEqual, assertFailure, runTestTT)
+import Text.Read (readMaybe)
 import Text.Regex.TDFA ((=~))
 import Prelude
 defaultAllowedNixDifferenceKeys :: Set.Set T.Text
@@ -383,7 +385,9 @@ runCli canonicalizationSettings commandLineArgs =
             exitFailure
           Right (RepositoryComplianceSuccess packageNames checkNames) -> do
             let repositoryCheckNames = Set.fromList checkNames
-            packageSummaries <- forM packageNames (summarizeRepositoryPackage repositoryCheckNames)
+                coverageCheckNames = filter (\checkName -> "-coverage" `isSuffixOf` checkName || "_coverage" `isSuffixOf` checkName) checkNames
+            coverageOutputPaths <- resolveRepositoryCoverageOutputPaths coverageCheckNames
+            packageSummaries <- forM packageNames (summarizeRepositoryPackage coverageOutputPaths repositoryCheckNames)
             putStr (render packageSummaries)
    in case commandLineArgs of
         [] -> printMainHelpAndExit (ExitFailure 1)
@@ -787,6 +791,13 @@ data RepositoryPackageChecksSummary = RepositoryPackageChecksSummary
     repositoryPackageHasMutationTestingCheck :: Bool
   }
   deriving stock (Eq, Show)
+type RepositoryPackageCoverageSummary :: Type
+data RepositoryPackageCoverageSummary
+  = RepositoryCoverageNotConfigured
+  | RepositoryCoverageNotRun
+  | RepositoryCoverageUnavailable
+  | RepositoryCoverageMeasured String Integer Integer
+  deriving stock (Eq, Show)
 type RepositoryComplianceSuccess :: Type
 data RepositoryComplianceSuccess = RepositoryComplianceSuccess
   { repositoryCompliancePackageNames :: [FilePath],
@@ -799,7 +810,8 @@ data RepositoryPackageSummary = RepositoryPackageSummary
     repositoryPackageType :: String,
     repositoryPackageDescription :: Maybe String,
     repositoryPackageTestNames :: [String],
-    repositoryPackageChecks :: RepositoryPackageChecksSummary
+    repositoryPackageChecks :: RepositoryPackageChecksSummary,
+    repositoryPackageCoverage :: RepositoryPackageCoverageSummary
   }
 renderRepositoryPackageSummariesText :: [RepositoryPackageSummary] -> String
 renderRepositoryPackageSummariesText packageSummaries =
@@ -815,7 +827,7 @@ renderRepositoryPackageSummariesText packageSummaries =
                 ++ case enabledRepositoryPackageCheckNames packageChecks of
                   [] -> [repositoryPackageValueIndent ++ "(none)"]
                   checkNames -> [repositoryPackageValueIndent ++ checkName | checkName <- checkNames]
-                ++ [renderRepositoryPackageFieldName "tests"]
+                ++ [renderRepositoryPackageFieldName "coverage" ++ " " ++ renderRepositoryPackageCoverageText (repositoryPackageCoverage packageSummary), renderRepositoryPackageFieldName "tests"]
                 ++ case repositoryPackageTestNames packageSummary of
                   [] -> [repositoryPackageValueIndent ++ "(none)"]
                   testNames -> [repositoryPackageValueIndent ++ testName | testName <- testNames]
@@ -844,6 +856,7 @@ renderRepositoryPackageSummaryJson packageSummary =
       "      \"packageType\": " ++ renderJsonString (repositoryPackageType packageSummary) ++ ",",
       "      \"description\": " ++ maybe "null" renderJsonString (repositoryPackageDescription packageSummary) ++ ",",
       "      \"checks\": " ++ renderRepositoryPackageChecksJson (repositoryPackageChecks packageSummary) ++ ",",
+      "      \"coverage\": " ++ renderRepositoryPackageCoverageJson (repositoryPackageCoverage packageSummary) ++ ",",
       "      \"tests\": " ++ "[" ++ intercalate ", " (map renderJsonString (repositoryPackageTestNames packageSummary)) ++ "]",
       "    }"
     ]
@@ -866,8 +879,33 @@ repositoryPackageCheckEntries packageChecks =
   ]
 enabledRepositoryPackageCheckNames :: RepositoryPackageChecksSummary -> [String]
 enabledRepositoryPackageCheckNames = map fst . filter snd . repositoryPackageCheckEntries
-summarizeRepositoryPackage :: Set.Set FilePath -> FilePath -> IO RepositoryPackageSummary
-summarizeRepositoryPackage repositoryCheckNames packageName = do
+renderRepositoryPackageCoverageText :: RepositoryPackageCoverageSummary -> String
+renderRepositoryPackageCoverageText = \case
+  RepositoryCoverageNotConfigured -> "(not configured)"
+  RepositoryCoverageNotRun -> "(not run)"
+  RepositoryCoverageUnavailable -> "(unavailable)"
+  RepositoryCoverageMeasured metric covered total ->
+    metric ++ " " ++ show covered ++ "/" ++ show total ++ " (" ++ renderCoveragePercent covered total ++ "%)"
+renderRepositoryPackageCoverageJson :: RepositoryPackageCoverageSummary -> String
+renderRepositoryPackageCoverageJson = \case
+  RepositoryCoverageNotConfigured -> "{ \"status\": \"not-configured\" }"
+  RepositoryCoverageNotRun -> "{ \"status\": \"not-run\" }"
+  RepositoryCoverageUnavailable -> "{ \"status\": \"unavailable\" }"
+  RepositoryCoverageMeasured metric covered total ->
+    "{ \"status\": \"measured\", \"metric\": "
+      ++ renderJsonString metric
+      ++ ", \"covered\": "
+      ++ show covered
+      ++ ", \"total\": "
+      ++ show total
+      ++ ", \"percent\": "
+      ++ renderCoveragePercent covered total
+      ++ " }"
+renderCoveragePercent :: Integer -> Integer -> String
+renderCoveragePercent covered total =
+  showFFloat (Just 1) (100 * fromIntegral covered / fromIntegral total :: Double) ""
+summarizeRepositoryPackage :: Maybe (Map.Map FilePath FilePath) -> Set.Set FilePath -> FilePath -> IO RepositoryPackageSummary
+summarizeRepositoryPackage coverageOutputPaths repositoryCheckNames packageName = do
   packageKind <- detectPackageKindForPackage packageName
   let packageRoot = "packages" </> packageName
   repositoryPackageDescriptionValue <-
@@ -909,14 +947,75 @@ summarizeRepositoryPackage repositoryCheckNames packageName = do
             repositoryPackageHasPropertyTestingCheck = maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName RepositoryPropertyTestingCheck),
             repositoryPackageHasMutationTestingCheck = maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName RepositoryMutationTestingCheck)
           }
+  repositoryPackageCoverageValue <-
+    summarizeRepositoryPackageCoverage coverageOutputPaths packageKind packageName (repositoryPackageHasCoverageCheck repositoryPackageChecksValue)
   pure
     RepositoryPackageSummary
       { repositoryPackageName = packageName,
         repositoryPackageType = renderPackageKind packageKind,
         repositoryPackageDescription = repositoryPackageDescriptionValue,
         repositoryPackageTestNames = repositoryPackageTestNamesValue,
-        repositoryPackageChecks = repositoryPackageChecksValue
+        repositoryPackageChecks = repositoryPackageChecksValue,
+        repositoryPackageCoverage = repositoryPackageCoverageValue
       }
+resolveRepositoryCoverageOutputPaths :: [FilePath] -> IO (Maybe (Map.Map FilePath FilePath))
+resolveRepositoryCoverageOutputPaths [] = pure (Just Map.empty)
+resolveRepositoryCoverageOutputPaths coverageCheckNames = do
+  repositoryRoot <- getCurrentDirectory
+  let nixExpression =
+        unlines
+          [ "let",
+            "  flake = builtins.getFlake " ++ renderJsonString ("path:" ++ repositoryRoot) ++ ";",
+            "  checks = flake.checks.${builtins.currentSystem};",
+            "  checkNames = [ " ++ unwords (map renderJsonString coverageCheckNames) ++ " ];",
+            "in",
+            "builtins.concatStringsSep \"\\n\" (map (checkName: \"${checkName}\\t${checks.${checkName}.outPath}\") checkNames)"
+          ]
+  commandResult <- try (readProcessWithExitCode "nix" ["eval", "--raw", "--impure", "--expr", nixExpression] "")
+  pure $
+    case commandResult of
+      Right (ExitSuccess, outputPathsText, _) -> parseRepositoryCoverageOutputPaths coverageCheckNames (T.pack outputPathsText)
+      Right _ -> Nothing
+      Left (_ :: IOException) -> Nothing
+parseRepositoryCoverageOutputPaths :: [FilePath] -> T.Text -> Maybe (Map.Map FilePath FilePath)
+parseRepositoryCoverageOutputPaths expectedCheckNames outputPathsText = do
+  entries <- mapM parseEntry (T.lines outputPathsText)
+  let outputPaths = Map.fromList entries
+  if Set.fromList (Map.keys outputPaths) == Set.fromList expectedCheckNames && Map.size outputPaths == length expectedCheckNames
+    then Just outputPaths
+    else Nothing
+  where
+    parseEntry outputPathLine =
+      case T.splitOn "\t" outputPathLine of
+        [checkName, outputPath] | not (T.null checkName) && not (T.null outputPath) -> Just (T.unpack checkName, T.unpack outputPath)
+        _ -> Nothing
+summarizeRepositoryPackageCoverage :: Maybe (Map.Map FilePath FilePath) -> PackageKind -> FilePath -> Bool -> IO RepositoryPackageCoverageSummary
+summarizeRepositoryPackageCoverage _ _ _ False = pure RepositoryCoverageNotConfigured
+summarizeRepositoryPackageCoverage Nothing _ _ True = pure RepositoryCoverageUnavailable
+summarizeRepositoryPackageCoverage (Just coverageOutputPaths) packageKind packageName True =
+  case repositoryCheckNameForKind packageKind packageName RepositoryCoverageCheck of
+    Nothing -> pure RepositoryCoverageUnavailable
+    Just coverageCheckName ->
+      case Map.lookup coverageCheckName coverageOutputPaths of
+        Nothing -> pure RepositoryCoverageUnavailable
+        Just outputPath -> do
+          outputExists <- doesDirectoryExist outputPath
+          if not outputExists
+            then pure RepositoryCoverageNotRun
+            else do
+              maybeCoverageText <- readTextFileIfExists (outputPath </> "coverage-summary.tsv")
+              pure (maybe RepositoryCoverageUnavailable (fromMaybe RepositoryCoverageUnavailable . parseRepositoryCoverageSummary) maybeCoverageText)
+parseRepositoryCoverageSummary :: T.Text -> Maybe RepositoryPackageCoverageSummary
+parseRepositoryCoverageSummary coverageText =
+  case T.splitOn "\t" (T.strip coverageText) of
+    ["coverage-v1", metricText, coveredText, totalText] -> do
+      let metric = T.unpack metricText
+      covered <- readMaybe (T.unpack coveredText)
+      total <- readMaybe (T.unpack totalText)
+      if metric `elem` ["expressions", "statements", "lines"] && covered >= 0 && total > 0 && covered <= total
+        then Just (RepositoryCoverageMeasured metric covered total)
+        else Nothing
+    _ -> Nothing
 extractHaskellPackageDescription :: T.Text -> Maybe String
 extractHaskellPackageDescription cabalContents =
   (T.unpack <$> lookupCabalField "description" cabalContents)
@@ -2442,6 +2541,7 @@ hUnitPackageTests =
       TestLabel "Ignores non-test Haskell strings and comments during discovery." (TestCase haskellTestDiscoveryFalsePositiveTest),
       TestLabel "Uses Python test docstrings as behavioral specifications." (TestCase pythonTestDiscoveryTest),
       TestLabel "Humanizes conventional test identifiers across frameworks." (TestCase testIdentifierSpecificationTest),
+      TestLabel "Parses versioned coverage summaries strictly." (TestCase repositoryCoverageParsingTest),
       TestLabel "Renders stable text and JSON repository summaries." (TestCase repositorySummaryRenderingTest),
       TestLabel "Documents top-level and command-specific usage." (TestCase commandLineHelpEndToEndTest),
       TestLabel "Rejects missing and unknown commands with usage on stderr." (TestCase invalidCommandEndToEndTest),
@@ -2531,6 +2631,31 @@ testIdentifierSpecificationTest =
           "prop_attributeSetsCanonicalizeByKeyOrder"
         ]
     )
+repositoryCoverageParsingTest :: IO ()
+repositoryCoverageParsingTest = do
+  assertEqual
+    "A valid coverage artifact preserves its labeled numerator and denominator."
+    (Just (RepositoryCoverageMeasured "lines" 91 100))
+    (parseRepositoryCoverageSummary "coverage-v1\tlines\t91\t100\n")
+  forM_
+    [ "coverage-v2\tlines\t91\t100",
+      "coverage-v1\tunknown\t91\t100",
+      "coverage-v1\tlines\t101\t100",
+      "coverage-v1\tlines\t0\t0",
+      "coverage-v1\tlines\tnan\t100"
+    ]
+    (assertEqual "Malformed coverage artifacts are rejected." Nothing . parseRepositoryCoverageSummary)
+  assertEqual
+    "A batched Nix result maps every requested check to its output path."
+    (Just (Map.fromList [("demo-coverage", "/nix/store/demo"), ("sample_coverage", "/nix/store/sample")]))
+    ( parseRepositoryCoverageOutputPaths
+        ["demo-coverage", "sample_coverage"]
+        "demo-coverage\t/nix/store/demo\nsample_coverage\t/nix/store/sample"
+    )
+  assertEqual
+    "Incomplete batched Nix results are rejected."
+    Nothing
+    (parseRepositoryCoverageOutputPaths ["demo-coverage", "sample_coverage"] "demo-coverage\t/nix/store/demo")
 repositorySummaryRenderingTest :: IO ()
 repositorySummaryRenderingTest = do
   let packageSummary =
@@ -2546,7 +2671,8 @@ repositorySummaryRenderingTest = do
                   repositoryPackageHasProfileCheck = False,
                   repositoryPackageHasPropertyTestingCheck = False,
                   repositoryPackageHasMutationTestingCheck = False
-                }
+                },
+            repositoryPackageCoverage = RepositoryCoverageMeasured "statements" 19 20
           }
   assertEqual
     "Text rendering has stable fields, indentation, and fallbacks."
@@ -2556,6 +2682,7 @@ repositorySummaryRenderingTest = do
           "description: (none)",
           "     checks:",
           "             coverage",
+          "   coverage: statements 19/20 (95.0%)",
           "      tests:",
           "             Reports \"quoted\" behavior.",
           ""
@@ -2572,6 +2699,7 @@ repositorySummaryRenderingTest = do
           "      \"packageType\": \"python\",",
           "      \"description\": null,",
           "      \"checks\": { \"default-check\": false, \"coverage\": true, \"profile\": false, \"property-testing\": false, \"mutation-testing\": false },",
+          "      \"coverage\": { \"status\": \"measured\", \"metric\": \"statements\", \"covered\": 19, \"total\": 20, \"percent\": 95.0 },",
           "      \"tests\": [\"Reports \\\"quoted\\\" behavior.\"]",
           "    }",
           "",
@@ -2942,7 +3070,8 @@ expectedGeneratedPythonPackageSummary =
             repositoryPackageHasProfileCheck = False,
             repositoryPackageHasPropertyTestingCheck = True,
             repositoryPackageHasMutationTestingCheck = False
-          }
+          },
+      repositoryPackageCoverage = RepositoryCoverageUnavailable
     }
 expectedGeneratedHaskellPackageSummary :: RepositoryPackageSummary
 expectedGeneratedHaskellPackageSummary =
@@ -2958,7 +3087,8 @@ expectedGeneratedHaskellPackageSummary =
             repositoryPackageHasProfileCheck = False,
             repositoryPackageHasPropertyTestingCheck = False,
             repositoryPackageHasMutationTestingCheck = False
-          }
+          },
+      repositoryPackageCoverage = RepositoryCoverageNotConfigured
     }
 runEndToEndCommandIn :: FilePath -> [String] -> IO (ExitCode, String, String)
 runEndToEndCommandIn workingDirectory arguments =
@@ -4187,7 +4317,7 @@ haskellCoverageCheckBaselineNixSource =
       "  ''",
       "    export HOME=\"$PWD\"",
       "    workspace=\"$PWD/workspace\"",
-      "    mkdir -p \"$workspace/coverage/html\" \"$workspace/hpc\"",
+      "    mkdir -p \"$out/html\" \"$workspace/coverage\" \"$workspace/hpc\"",
       "    cd \"$workspace\"",
       "    cat > TestMain.hs <<EOF",
       "    module TestMain (main) where",
@@ -4199,9 +4329,12 @@ haskellCoverageCheckBaselineNixSource =
       "      -i\"$src\" -outputdir \"$workspace\" -odir \"$workspace\" -hidir \"$workspace\" \\",
       "      -o \"${packageName}\" TestMain.hs \"$src/Main.hs\"",
       "    HPCTIXFILE=\"$workspace/coverage/${packageName}.tix\" \"./${packageName}\"",
-      "    hpc markup \"$workspace/coverage/${packageName}.tix\" --hpcdir=\"$workspace/hpc\" --destdir=\"$workspace/coverage/html\"",
-      "    hpc report \"$workspace/coverage/${packageName}.tix\" --hpcdir=\"$workspace/hpc\" | tee \"$workspace/coverage/summary.txt\"",
-      "    touch \"$out\"",
+      "    hpc markup \"$workspace/coverage/${packageName}.tix\" --hpcdir=\"$workspace/hpc\" --destdir=\"$out/html\"",
+      "    hpc report \"$workspace/coverage/${packageName}.tix\" --hpcdir=\"$workspace/hpc\" | tee \"$out/report.txt\"",
+      "    coverageCounts=\"$(sed -n 's/.*expressions used (\\([0-9][0-9]*\\)\\/\\([0-9][0-9]*\\)).*/\\1 \\2/p' \"$out/report.txt\")\"",
+      "    read -r covered total <<< \"$coverageCounts\"",
+      "    test -n \"$covered\" -a -n \"$total\"",
+      "    printf 'coverage-v1\\texpressions\\t%s\\t%s\\n' \"$covered\" \"$total\" > \"$out/coverage-summary.tsv\"",
       "  ''"
     ]
 haskellProfileCheckBaselineNixSource :: T.Text
@@ -4337,10 +4470,17 @@ pythonCoverageCheckBaselineNixSource =
       "  }",
       "  ''",
       "    export HOME=\"$(mktemp -d)\"",
-      "    coverageDir=\"$PWD/coverage\"",
-      "    mkdir -p \"$coverageDir\"",
-      "    python -m pytest --cov=\"$src\" --cov-report term --cov-report \"html:$coverageDir/html\" \"$src/main.py\"",
-      "    touch \"$out\"",
+      "    mkdir -p \"$out/html\"",
+      "    python -m pytest --cov=\"$src\" --cov-report term --cov-report \"json:$out/report.json\" --cov-report \"html:$out/html\" \"$src/main.py\"",
+      "    python - \"$out/report.json\" \"$out/coverage-summary.tsv\" <<'PY'",
+      "    import json",
+      "    import pathlib",
+      "    import sys",
+      "    totals = json.loads(pathlib.Path(sys.argv[1]).read_text())[\"totals\"]",
+      "    pathlib.Path(sys.argv[2]).write_text(",
+      "        f\"coverage-v1\\tstatements\\t{totals['covered_lines']}\\t{totals['num_statements']}\\n\"",
+      "    )",
+      "    PY",
       "  ''"
     ]
 pythonProfileCheckBaselineNixSource :: T.Text
@@ -4434,6 +4574,7 @@ rustCoverageCheckBaselineNixSource =
       "  {",
       "    nativeBuildInputs = rustBaseInputs ++ [",
       "      pkgs.cargo-llvm-cov",
+      "      pkgs.jq",
       "      pkgs.llvmPackages.llvm",
       "    ];",
       "    src = ../.. + \"/packages/${packageName}\";",
@@ -4447,8 +4588,12 @@ rustCoverageCheckBaselineNixSource =
       "    substituteInPlace \"$workspace/.cargo/config.toml\" \\",
       "      --replace-fail \"@vendor@\" \"${cargoDeps}\"",
       "    cd \"$workspace\"",
-      "    cargo llvm-cov",
-      "    touch \"$out\"",
+      "    mkdir -p \"$out\"",
+      "    cargo llvm-cov --json --summary-only --output-path \"$out/report.json\"",
+      "    covered=\"$(jq -r '.data[0].totals.lines.covered' \"$out/report.json\")\"",
+      "    total=\"$(jq -r '.data[0].totals.lines.count' \"$out/report.json\")\"",
+      "    test \"$covered\" != null -a \"$total\" != null",
+      "    printf 'coverage-v1\\tlines\\t%s\\t%s\\n' \"$covered\" \"$total\" > \"$out/coverage-summary.tsv\"",
       "  ''"
     ]
 rustMutationTestingCheckBaselineNixSource :: T.Text
