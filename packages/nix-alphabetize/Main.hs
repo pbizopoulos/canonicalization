@@ -48,7 +48,7 @@ import System.IO (hClose)
 import System.IO.Temp (withSystemTempFile)
 import Test.HUnit
   ( Counts (errors, failures),
-    Test (TestCase, TestList),
+    Test (TestCase, TestLabel, TestList),
     assertEqual,
     assertFailure,
     runTestTT,
@@ -162,8 +162,8 @@ nextLevelBindings (NamedVar (_ :| bindingKey : restKeys) valExpr bindingPos) =
   [NamedVar (bindingKey :| restKeys) valExpr bindingPos]
 nextLevelBindings (NamedVar (_ :| []) (Fix (Compose (AnnUnit _ (NSet _ nested)))) _) = nested
 nextLevelBindings _ = []
-makeFormattingTest :: String -> Text -> Text -> Test
-makeFormattingTest testName input expectedOutput = TestCase $ do
+makeFormattingTest :: Text -> Text -> Test
+makeFormattingTest input expectedOutput = TestCase $ do
   withSystemTempFile "test.nix" $ \tmpFile tmpHandle -> do
     hClose tmpHandle
     TIO.writeFile tmpFile input
@@ -172,9 +172,9 @@ makeFormattingTest testName input expectedOutput = TestCase $ do
       Right expr -> do
         writeFormattedFile tmpFile expr
         formatted <- TIO.readFile tmpFile
-        assertEqual testName expectedOutput formatted
+        assertEqual "formatted output" expectedOutput formatted
       Left parseError ->
-        assertFailure $ "Parse error in test '" ++ testName ++ "': " ++ show parseError
+        assertFailure $ "Parse error in formatting test: " ++ show parseError
 formatText :: Text -> IO Text
 formatText input =
   withSystemTempFile "property.nix" $ \tmpFile tmpHandle -> do
@@ -189,7 +189,7 @@ formatText input =
         assertFailure ("Property fixture failed to parse: " ++ show parseError)
 runPackageTests :: IO ()
 runPackageTests = do
-  counts <- runTestTT getAllFormattingTests
+  counts <- runTestTT hUnitPackageTests
   propertySuccess <- quickCheckFormattingProperties
   if errors counts == 0 && failures counts == 0 && propertySuccess
     then putStrLn "test ... ok"
@@ -317,71 +317,71 @@ extractQuotedStrings = go [] [] False . unpack
             else go collected [] True rest
       | insideQuotes = go collected (character : currentToken) True rest
       | otherwise = go collected currentToken False rest
-getAllFormattingTests :: Test
-getAllFormattingTests =
+hUnitPackageTests :: Test
+hUnitPackageTests =
   TestList
-    [ makeFormattingTest
-        "Sorts non-string lists."
-        (pack "[ 3 1 2 ]")
-        (pack "[\n  1\n  2\n  3\n]"),
-      makeFormattingTest
-        "Preserves string-list order."
-        (pack "[ \"c\" \"a\" \"b\" ]")
-        (pack "[\n  \"c\"\n  \"a\"\n  \"b\"\n]"),
-      makeFormattingTest
-        "Sorts function parameters."
-        (pack "{ x = { z, x, y }: x + y + z; }")
-        (pack "{\n  x = { x\n    , y\n    , z }:\n    x + y + z;\n}"),
-      makeFormattingTest
-        "Sorts attribute sets."
-        (pack "{ c = 1; a = 2; b = 3; }")
-        (pack "{\n  a = 2;\n  b = 3;\n  c = 1;\n}"),
-      makeFormattingTest
-        "Sorts nested attribute sets."
-        (pack "{ b = { z = 1; x = 2; }; a = 1; }")
-        (pack "{\n  a = 1;\n  b = {\n    x = 2;\n    z = 1;\n  };\n}"),
-      makeFormattingTest
-        "Collapses dotted list assignments."
-        (pack "{ a = { b = [ \"c\" ]; }; }")
-        (pack "{\n  a.b = [\n    \"c\"\n  ];\n}"),
-      makeFormattingTest
-        "Collapses dotted nested assignments."
-        (pack "{ b = { z = 1; }; a = 1; }")
-        (pack "{\n  a = 1;\n  b.z = 1;\n}"),
-      makeFormattingTest
-        "Preserves dotted attribute assignments."
-        (pack "{ b.z = 1; a = 1; }")
-        (pack "{\n  a = 1;\n  b.z = 1;\n}"),
-      makeFormattingTest
-        "Converts dotted assignments to nested sets."
-        (pack "{ b.z = 1; b.x = 2; a = 1; }")
-        (pack "{\n  a = 1;\n  b = {\n    x = 2;\n    z = 1;\n  };\n}"),
-      makeFormattingTest
-        "Converts multi-dotted assignments to nested sets."
-        (pack "{ b.z.b = 1; b.z.a = 2; }")
-        (pack "{\n  b.z = {\n    a = 2;\n    b = 1;\n  };\n}"),
-      makeFormattingTest
-        "Sorts let expressions."
-        (pack "let c = 1; a = 2; b = 3; in a + b + c")
-        (pack "let\n  a = 2;\n  b = 3;\n  c = 1;\nin a + b + c"),
-      makeFormattingTest
-        "Sorts let expressions with nested sets."
-        (pack "let c = { z = 1; x = 2; }; a = 1; in a + c.x + c.z")
-        (pack "let\n  a = 1;\n  c = {\n    x = 2;\n    z = 1;\n  };\nin a + c.x + c.z"),
-      makeFormattingTest
-        "Collapses deep nested assignments."
-        (pack "{ c = { z = { x = 2; }; }; }")
-        (pack "{\n  c.z.x = 2;\n}"),
-      makeFormattingTest
-        "Sorts string-key assignments."
-        (pack "{ \"b\".val1 = 1; \"a\".val2 = 2; }")
-        (pack "{\n  \"a\".val2 = 2;\n  \"b\".val1 = 1;\n}"),
-      makeFormattingTest
-        "Preserves multiline string formatting."
-        (pack "{ a = ''\n  line1\n  line2\n''; }")
-        (pack "{\n  a = ''\n    line1\n    line2\n    '';\n}"),
-      makeFormattingTest
-        "Preserves python template installPhase formatting."
-        (pack "{ installPhase = ''\nmkdir -p $out/bin\ncp ./main.py $out/bin/${pname}\n''; }")
-        (pack "{\n  installPhase = ''\n    mkdir -p $out/bin\n    cp ./main.py $out/bin/${pname}\n    '';\n}")
+    [ TestLabel "Sorts non-string lists." $
+        makeFormattingTest
+          (pack "[ 3 1 2 ]")
+          (pack "[\n  1\n  2\n  3\n]"),
+      TestLabel "Preserves string-list order." $
+        makeFormattingTest
+          (pack "[ \"c\" \"a\" \"b\" ]")
+          (pack "[\n  \"c\"\n  \"a\"\n  \"b\"\n]"),
+      TestLabel "Sorts function parameters." $
+        makeFormattingTest
+          (pack "{ x = { z, x, y }: x + y + z; }")
+          (pack "{\n  x = { x\n    , y\n    , z }:\n    x + y + z;\n}"),
+      TestLabel "Sorts attribute sets." $
+        makeFormattingTest
+          (pack "{ c = 1; a = 2; b = 3; }")
+          (pack "{\n  a = 2;\n  b = 3;\n  c = 1;\n}"),
+      TestLabel "Sorts nested attribute sets." $
+        makeFormattingTest
+          (pack "{ b = { z = 1; x = 2; }; a = 1; }")
+          (pack "{\n  a = 1;\n  b = {\n    x = 2;\n    z = 1;\n  };\n}"),
+      TestLabel "Collapses dotted list assignments." $
+        makeFormattingTest
+          (pack "{ a = { b = [ \"c\" ]; }; }")
+          (pack "{\n  a.b = [\n    \"c\"\n  ];\n}"),
+      TestLabel "Collapses dotted nested assignments." $
+        makeFormattingTest
+          (pack "{ b = { z = 1; }; a = 1; }")
+          (pack "{\n  a = 1;\n  b.z = 1;\n}"),
+      TestLabel "Preserves dotted attribute assignments." $
+        makeFormattingTest
+          (pack "{ b.z = 1; a = 1; }")
+          (pack "{\n  a = 1;\n  b.z = 1;\n}"),
+      TestLabel "Converts dotted assignments to nested sets." $
+        makeFormattingTest
+          (pack "{ b.z = 1; b.x = 2; a = 1; }")
+          (pack "{\n  a = 1;\n  b = {\n    x = 2;\n    z = 1;\n  };\n}"),
+      TestLabel "Converts multi-dotted assignments to nested sets." $
+        makeFormattingTest
+          (pack "{ b.z.b = 1; b.z.a = 2; }")
+          (pack "{\n  b.z = {\n    a = 2;\n    b = 1;\n  };\n}"),
+      TestLabel "Sorts let expressions." $
+        makeFormattingTest
+          (pack "let c = 1; a = 2; b = 3; in a + b + c")
+          (pack "let\n  a = 2;\n  b = 3;\n  c = 1;\nin a + b + c"),
+      TestLabel "Sorts let expressions with nested sets." $
+        makeFormattingTest
+          (pack "let c = { z = 1; x = 2; }; a = 1; in a + c.x + c.z")
+          (pack "let\n  a = 1;\n  c = {\n    x = 2;\n    z = 1;\n  };\nin a + c.x + c.z"),
+      TestLabel "Collapses deep nested assignments." $
+        makeFormattingTest
+          (pack "{ c = { z = { x = 2; }; }; }")
+          (pack "{\n  c.z.x = 2;\n}"),
+      TestLabel "Sorts string-key assignments." $
+        makeFormattingTest
+          (pack "{ \"b\".val1 = 1; \"a\".val2 = 2; }")
+          (pack "{\n  \"a\".val2 = 2;\n  \"b\".val1 = 1;\n}"),
+      TestLabel "Preserves multiline string formatting." $
+        makeFormattingTest
+          (pack "{ a = ''\n  line1\n  line2\n''; }")
+          (pack "{\n  a = ''\n    line1\n    line2\n    '';\n}"),
+      TestLabel "Preserves python template installPhase formatting." $
+        makeFormattingTest
+          (pack "{ installPhase = ''\nmkdir -p $out/bin\ncp ./main.py $out/bin/${pname}\n''; }")
+          (pack "{\n  installPhase = ''\n    mkdir -p $out/bin\n    cp ./main.py $out/bin/${pname}\n    '';\n}")
     ]

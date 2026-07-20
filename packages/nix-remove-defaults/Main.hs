@@ -50,7 +50,7 @@ import System.IO.Temp (withSystemTempFile)
 import System.Process (readProcessWithExitCode)
 import Test.HUnit
   ( Counts (errors, failures),
-    Test (TestCase, TestList),
+    Test (TestCase, TestLabel, TestList),
     assertBool,
     assertEqual,
     assertFailure,
@@ -637,14 +637,14 @@ formatTreefmtWithDefaults defaults input =
         removals <- resolveLiteralRemovals (pure . (`Map.lookup` defaults)) (collectTreefmtCandidates expr)
         pure (renderExpression (rewriteTreefmtEvalModuleArguments removals expr))
       Left parseError -> assertFailure ("Test fixture failed to parse: " ++ show parseError)
-makeRemovalTest :: String -> Map OptionPath Literal -> Text -> Text -> Test
-makeRemovalTest testName defaults input expectedOutput = TestCase $ do
+makeRemovalTest :: Map OptionPath Literal -> Text -> Text -> Test
+makeRemovalTest defaults input expectedOutput = TestCase $ do
   actualOutput <- formatWithDefaults defaults input
-  assertEqual testName expectedOutput actualOutput
-makeTreefmtRemovalTest :: String -> Map OptionPath Literal -> Text -> Text -> Test
-makeTreefmtRemovalTest testName defaults input expectedOutput = TestCase $ do
+  assertEqual "formatted output" expectedOutput actualOutput
+makeTreefmtRemovalTest :: Map OptionPath Literal -> Text -> Text -> Test
+makeTreefmtRemovalTest defaults input expectedOutput = TestCase $ do
   actualOutput <- formatTreefmtWithDefaults defaults input
-  assertEqual testName expectedOutput actualOutput
+  assertEqual "formatted output" expectedOutput actualOutput
 runPackageTests :: IO ()
 runPackageTests = do
   counts <- runTestTT hUnitPackageTests
@@ -654,77 +654,89 @@ runPackageTests = do
 hUnitPackageTests :: Test
 hUnitPackageTests =
   TestList
-    [ makeRemovalTest
-        "Removes a literal assignment equal to its default."
-        (Map.singleton ["boot", "enabled"] (LiteralBool False))
-        (pack "{ boot.enabled = false; keep = true; }")
-        (pack "{ keep = true; }"),
-      makeRemovalTest
-        "Preserves a literal assignment different from its default."
-        (Map.singleton ["boot", "enabled"] (LiteralBool True))
-        (pack "{ boot.enabled = false; }")
-        (pack "{ boot.enabled = false; }"),
-      makeRemovalTest
-        "Removes now-empty structural parent sets."
-        (Map.singleton ["services", "example", "enable"] (LiteralBool False))
-        (pack "{ services = { example = { enable = false; }; }; keep = 1; }")
-        (pack "{ keep = 1; }"),
-      makeRemovalTest
-        "Removes literal list defaults."
-        (Map.singleton ["environment", "systemPackages"] (LiteralList []))
-        (pack "{ environment.systemPackages = [ ]; }")
-        (pack "{}"),
-      makeRemovalTest
-        "Removes string, integer, null, and attribute-set defaults."
-        ( Map.fromList
-            [ (["example", "count"], LiteralInteger 3),
-              (["example", "label"], LiteralString "default"),
-              (["example", "optional"], LiteralNull),
-              (["example", "settings"], LiteralSet [("enabled", LiteralBool True)])
-            ]
-        )
-        (pack "{ example.count = 3; example.label = \"default\"; example.optional = null; example.settings = { enabled = true; }; }")
-        (pack "{}"),
-      makeRemovalTest
-        "Preserves context-dependent expressions."
-        (Map.singleton ["example", "value"] (LiteralInteger 1))
-        (pack "{ example.value = let x = 1; in x; }")
-        (pack "{ example.value = let   x = 1; in x; }"),
-      makeRemovalTest
-        "Treats a top-level config attribute as the option root."
-        (Map.singleton ["networking", "useDHCP"] (LiteralBool True))
-        (pack "{ config.networking.useDHCP = true; options.example = { }; }")
-        (pack "{ options.example = {}; }"),
-      makeRemovalTest
-        "Traverses the returned set of a let-wrapped module."
-        (Map.singleton ["boot", "initrd", "systemd", "enable"] (LiteralBool True))
-        (pack "{ pkgs, ... }: let hostName = \"default\"; in { boot.initrd.systemd.enable = true; networking.hostName = hostName; }")
-        (pack "{ pkgs, ... }:\n  let   hostName = \"default\"; in { networking.hostName = hostName; }"),
-      TestCase $ do
+    [ TestLabel "Removes a literal assignment equal to its default." $
+        makeRemovalTest
+          (Map.singleton ["boot", "enabled"] (LiteralBool False))
+          (pack "{ boot.enabled = false; keep = true; }")
+          (pack "{ keep = true; }"),
+      TestLabel "Preserves a literal assignment different from its default." $
+        makeRemovalTest
+          (Map.singleton ["boot", "enabled"] (LiteralBool True))
+          (pack "{ boot.enabled = false; }")
+          (pack "{ boot.enabled = false; }"),
+      TestLabel "Removes now-empty structural parent sets." $
+        makeRemovalTest
+          (Map.singleton ["services", "example", "enable"] (LiteralBool False))
+          (pack "{ services = { example = { enable = false; }; }; keep = 1; }")
+          (pack "{ keep = 1; }"),
+      TestLabel "Removes literal list defaults." $
+        makeRemovalTest
+          (Map.singleton ["environment", "systemPackages"] (LiteralList []))
+          (pack "{ environment.systemPackages = [ ]; }")
+          (pack "{}"),
+      TestLabel "Removes string, integer, null, and attribute-set defaults." $
+        makeRemovalTest
+          ( Map.fromList
+              [ (["example", "count"], LiteralInteger 3),
+                (["example", "label"], LiteralString "default"),
+                (["example", "optional"], LiteralNull),
+                (["example", "settings"], LiteralSet [("enabled", LiteralBool True)])
+              ]
+          )
+          (pack "{ example.count = 3; example.label = \"default\"; example.optional = null; example.settings = { enabled = true; }; }")
+          (pack "{}"),
+      TestLabel "Preserves context-dependent expressions." $
+        makeRemovalTest
+          (Map.singleton ["example", "value"] (LiteralInteger 1))
+          (pack "{ example.value = let x = 1; in x; }")
+          (pack "{ example.value = let   x = 1; in x; }"),
+      TestLabel "Treats a top-level config attribute as the option root." $
+        makeRemovalTest
+          (Map.singleton ["networking", "useDHCP"] (LiteralBool True))
+          (pack "{ config.networking.useDHCP = true; options.example = { }; }")
+          (pack "{ options.example = {}; }"),
+      TestLabel "Traverses the returned set of a let-wrapped module." $
+        makeRemovalTest
+          (Map.singleton ["boot", "initrd", "systemd", "enable"] (LiteralBool True))
+          (pack "{ pkgs, ... }: let hostName = \"default\"; in { boot.initrd.systemd.enable = true; networking.hostName = hostName; }")
+          (pack "{ pkgs, ... }:\n  let   hostName = \"default\"; in { networking.hostName = hostName; }"),
+      TestLabel "Transformation is idempotent." $ TestCase $ do
         let defaults :: Map OptionPath Literal
             defaults = Map.singleton ["example", "enable"] (LiteralBool False)
             input = pack "{ example.enable = false; keep = true; }"
         once <- formatWithDefaults defaults input
         twice <- formatWithDefaults defaults once
-        assertEqual "Transformation is idempotent." once twice,
-      makeTreefmtRemovalTest
-        "Removes defaults inside a treefmt evalModule argument."
-        (Map.singleton ["programs", "shfmt", "simplify"] (LiteralBool True))
-        (pack "{ inputs, pkgs, ... }: let treefmtEval = inputs.treefmt-nix.lib.evalModule pkgs { programs.shfmt.simplify = true; keep = false; }; in treefmtEval.config.build.wrapper")
-        (pack "{ inputs, pkgs, ... }:\n  let\n    treefmtEval = inputs.treefmt-nix.lib.evalModule pkgs { keep = false; };\n  in treefmtEval.config.build.wrapper"),
-      TestCase $ do
+        assertEqual "second transformation" once twice,
+      TestLabel "Removes defaults inside a treefmt evalModule argument." $
+        makeTreefmtRemovalTest
+          (Map.singleton ["programs", "shfmt", "simplify"] (LiteralBool True))
+          (pack "{ inputs, pkgs, ... }: let treefmtEval = inputs.treefmt-nix.lib.evalModule pkgs { programs.shfmt.simplify = true; keep = false; }; in treefmtEval.config.build.wrapper")
+          (pack "{ inputs, pkgs, ... }:\n  let\n    treefmtEval = inputs.treefmt-nix.lib.evalModule pkgs { keep = false; };\n  in treefmtEval.config.build.wrapper"),
+      TestLabel "Builds candidate records into the NixOS default-definition lookup expression." $ TestCase $ do
         let expression =
               nixosDefaultDefinitionFilesExpression
                 "/repository"
                 ["default"]
                 [(["boot", "initrd", "systemd", "enable"], LiteralBool True)]
         assertBool
-          "Builds candidate records into the NixOS default-definition lookup expression."
-          ("candidates = [ { path = [ \"boot\" \"initrd\" \"systemd\" \"enable\" ]; value = true; } ]" `isInfixOf` expression)
+          "candidate records"
+          ("candidates = [ { path = [ \"boot\" \"initrd\" \"systemd\" \"enable\" ]; value = true; } ]" `isInfixOf` expression),
+      TestLabel "Compares defaults using the parsed literal shape." $ TestCase $ do
+        let expression =
+              nixosDefaultDefinitionFilesExpression
+                "/repository"
+                ["default"]
+                [(["boot", "initrd", "systemd", "enable"], LiteralBool True)]
         assertBool
-          "Compares defaults using the parsed literal shape."
-          ("literalEquals = expected: actual:" `isInfixOf` expression)
+          "literal comparison"
+          ("literalEquals = expected: actual:" `isInfixOf` expression),
+      TestLabel "Returns path, value, and matching definition files for each candidate." $ TestCase $ do
+        let expression =
+              nixosDefaultDefinitionFilesExpression
+                "/repository"
+                ["default"]
+                [(["boot", "initrd", "systemd", "enable"], LiteralBool True)]
         assertBool
-          "Returns path, value, and matching definition files for each candidate."
+          "candidate result"
           ("candidateFiles = candidate: { inherit (candidate) path value; files =" `isInfixOf` expression)
     ]

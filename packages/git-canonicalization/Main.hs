@@ -1737,10 +1737,10 @@ checkHaskellTestConventions packageName packageKind =
         Nothing -> pure []
         Just mainHaskellSourceText -> do
           let haskellSource = T.unpack mainHaskellSourceText
-              hasHUnitTestRunner = "runTestTT" `isInfixOf` haskellSource
-              hasNamedTestSuite =
-                "hUnitPackageTests" `isInfixOf` haskellSource
-                  || "getAllFormattingTests" `isInfixOf` haskellSource
+              haskellIdentifiers = [identifier | HaskellIdentifier identifier <- lexHaskellSource haskellSource]
+              hasHUnitTestRunner = "runTestTT" `elem` haskellIdentifiers
+              hasNamedTestSuite = "hUnitPackageTests" `elem` haskellIdentifiers
+              hasDiscoverableHUnitTest = any isMeaningfulTestLabel (discoverHaskellTestLabels haskellSource)
           pure $
             catMaybes
               [ if hasHUnitTestRunner
@@ -1748,76 +1748,90 @@ checkHaskellTestConventions packageName packageKind =
                   else Just ("packages/" ++ packageName ++ "/Main.hs: must run HUnit tests with runTestTT"),
                 if hasNamedTestSuite
                   then Nothing
-                  else Just ("packages/" ++ packageName ++ "/Main.hs: missing discoverable HUnit test suite")
+                  else Just ("packages/" ++ packageName ++ "/Main.hs: HUnit tests must use hUnitPackageTests"),
+                if hasDiscoverableHUnitTest
+                  then Nothing
+                  else Just ("packages/" ++ packageName ++ "/Main.hs: HUnit tests must use literal TestLabel descriptions")
               ]
 discoverHaskellUnitTestNamesFromSource :: String -> [String]
 discoverHaskellUnitTestNamesFromSource haskellSource =
-  let haskellSourceLines = lines haskellSource
-      labelsFromSpecificationTest = extractSpecificationTestLabels haskellSourceLines
-      labelsFromMakeFormattingTest = extractMakeFormattingTestLabels haskellSourceLines
-   in Set.toAscList
-        ( Set.fromList
-            (filter isMeaningfulTestLabel (labelsFromSpecificationTest ++ labelsFromMakeFormattingTest))
-        )
+  Set.toAscList . Set.fromList $
+    filter isMeaningfulTestLabel (discoverHaskellTestLabels haskellSource)
+      ++ discoverHaskellPropertyNames haskellSource
 isMeaningfulTestLabel :: String -> Bool
 isMeaningfulTestLabel label =
   case dropWhile isSpace label of
     firstCharacter : _ -> isAlphaNum firstCharacter
     [] -> False
-extractSpecificationTestLabels :: [String] -> [String]
-extractSpecificationTestLabels = go False
+type HaskellSourceToken :: Type
+data HaskellSourceToken
+  = HaskellIdentifier String
+  | HaskellStringLiteral String
+  | HaskellSymbol String
+  deriving stock (Eq, Show)
+discoverHaskellTestLabels :: String -> [String]
+discoverHaskellTestLabels = go . lexHaskellSource
   where
-    go _ [] = []
-    go awaitingSpecificationTestLabel (line : rest)
-      | isSpecificationTestInvocationLine line =
-          case firstQuotedToken line of
-            Just label -> label : go False rest
-            Nothing -> go True rest
-      | not awaitingSpecificationTestLabel = go False rest
-      | null trimmed = go True rest
-      | startsWithQuote trimmed =
-          case firstQuotedToken trimmed of
-            Just label -> label : go False rest
-            Nothing -> go False rest
-      | otherwise = go False rest
-      where
-        trimmed = dropWhile (== ' ') line
-    isSpecificationTestInvocationLine line =
-      let trimmed = dropWhile (== ' ') line
-       in "specificationTest " `isPrefixOf` trimmed
-            || "specificationTest" == trimmed
-            || ", specificationTest " `isPrefixOf` trimmed
-            || "[ specificationTest " `isPrefixOf` trimmed
-    startsWithQuote [] = False
-    startsWithQuote (ch : _) = ch == '"'
-extractMakeFormattingTestLabels :: [String] -> [String]
-extractMakeFormattingTestLabels = go False
+    go (HaskellIdentifier "TestLabel" : HaskellStringLiteral label : remainingTokens) = label : go remainingTokens
+    go (_ : remainingTokens) = go remainingTokens
+    go [] = []
+discoverHaskellPropertyNames :: String -> [String]
+discoverHaskellPropertyNames = go . lexHaskellSource
   where
-    go _ [] = []
-    go awaitingMakeFormattingTestLabel (line : rest)
-      | isMakeFormattingTestInvocationLine line = go True rest
-      | not awaitingMakeFormattingTestLabel = go False rest
-      | null trimmed = go True rest
-      | otherwise =
-          case firstQuotedToken line of
-            Just label -> label : go False rest
-            Nothing -> go False rest
-      where
-        trimmed = dropWhile (== ' ') line
-    isMakeFormattingTestInvocationLine line =
-      let trimmed = dropWhile (== ' ') line
-          isInvocationPrefix =
-            ", makeFormattingTest" `isPrefixOf` trimmed
-              || "[ makeFormattingTest" `isPrefixOf` trimmed
-              || "makeFormattingTest" `isPrefixOf` trimmed
-       in isInvocationPrefix && not ("=" `isInfixOf` trimmed || "::" `isInfixOf` trimmed)
-firstQuotedToken :: String -> Maybe String
-firstQuotedToken inputText =
-  case dropWhile (/= '"') inputText of
-    _ : rest ->
-      let token = takeWhile (/= '"') rest
-       in if null token then Nothing else Just token
-    _ -> Nothing
+    go (HaskellIdentifier propertyName : HaskellSymbol declarationSymbol : remainingTokens)
+      | "prop_" `isPrefixOf` propertyName && declarationSymbol `elem` ["::", "="] = propertyName : go remainingTokens
+    go (_ : remainingTokens) = go remainingTokens
+    go [] = []
+lexHaskellSource :: String -> [HaskellSourceToken]
+lexHaskellSource = go
+  where
+    go [] = []
+    go ('-' : '-' : remainingSource) = go (dropHaskellLineComment remainingSource)
+    go ('{' : '-' : remainingSource) = go (dropHaskellBlockComment 1 remainingSource)
+    go ('"' : remainingSource) =
+      case consumeHaskellString ['"'] remainingSource of
+        Just (literalSource, sourceAfterLiteral) ->
+          case reads literalSource of
+            [(literalValue, "")] -> HaskellStringLiteral literalValue : go sourceAfterLiteral
+            _ -> go sourceAfterLiteral
+        Nothing -> []
+    go ('\'' : remainingSource) = go (dropHaskellCharacterLiteral remainingSource)
+    go (':' : ':' : remainingSource) = HaskellSymbol "::" : go remainingSource
+    go ('=' : remainingSource) = HaskellSymbol "=" : go remainingSource
+    go (firstCharacter : remainingSource)
+      | isHaskellIdentifierStart firstCharacter =
+          let (identifierTail, sourceAfterIdentifier) = span isHaskellIdentifierCharacter remainingSource
+           in HaskellIdentifier (firstCharacter : identifierTail) : go sourceAfterIdentifier
+      | otherwise = go remainingSource
+isHaskellIdentifierStart :: Char -> Bool
+isHaskellIdentifierStart character = isAlphaNum character || character == '_'
+isHaskellIdentifierCharacter :: Char -> Bool
+isHaskellIdentifierCharacter character = isHaskellIdentifierStart character || character == '\''
+dropHaskellLineComment :: String -> String
+dropHaskellLineComment source =
+  case dropWhile (/= '\n') source of
+    [] -> []
+    _ : remainingSource -> remainingSource
+dropHaskellBlockComment :: Int -> String -> String
+dropHaskellBlockComment _ [] = []
+dropHaskellBlockComment nestingDepth ('{' : '-' : remainingSource) = dropHaskellBlockComment (nestingDepth + 1) remainingSource
+dropHaskellBlockComment nestingDepth ('-' : '}' : remainingSource)
+  | nestingDepth == 1 = remainingSource
+  | otherwise = dropHaskellBlockComment (nestingDepth - 1) remainingSource
+dropHaskellBlockComment nestingDepth (_ : remainingSource) = dropHaskellBlockComment nestingDepth remainingSource
+consumeHaskellString :: String -> String -> Maybe (String, String)
+consumeHaskellString _ [] = Nothing
+consumeHaskellString reversedLiteral ('\\' : escapedCharacter : remainingSource) =
+  consumeHaskellString (escapedCharacter : '\\' : reversedLiteral) remainingSource
+consumeHaskellString reversedLiteral ('"' : remainingSource) =
+  Just (reverse ('"' : reversedLiteral), remainingSource)
+consumeHaskellString reversedLiteral (character : remainingSource) =
+  consumeHaskellString (character : reversedLiteral) remainingSource
+dropHaskellCharacterLiteral :: String -> String
+dropHaskellCharacterLiteral [] = []
+dropHaskellCharacterLiteral ('\\' : _ : remainingSource) = dropHaskellCharacterLiteral remainingSource
+dropHaskellCharacterLiteral ('\'' : remainingSource) = remainingSource
+dropHaskellCharacterLiteral (_ : remainingSource) = dropHaskellCharacterLiteral remainingSource
 checkRustTestConventions :: FilePath -> PackageKind -> IO [String]
 checkRustTestConventions packageName packageKind =
   if packageKind /= RustPackage
@@ -2351,77 +2365,71 @@ stripMetaDescriptionAssignment renderedMetaValue =
         Nothing -> renderedMetaValue
 runPackageTests :: IO ()
 runPackageTests = do
-  hUnitCounts <- runTestTT productBehaviorTests
+  hUnitCounts <- runTestTT hUnitPackageTests
   if errors hUnitCounts == 0 && failures hUnitCounts == 0
     then putStrLn "test ... ok"
     else exitFailure
-productBehaviorTests :: Test
-productBehaviorTests =
+hUnitPackageTests :: Test
+hUnitPackageTests =
   TestList
-    [ specificationTest "Discovers only explicit Haskell specification tests." haskellSpecificationDiscoveryTest,
-      specificationTest "Discovers Haskell formatting tests without treating helper internals as tests." haskellFormattingTestDiscoveryTest,
-      specificationTest "Renders stable text and JSON repository summaries." repositorySummaryRenderingTest,
-      specificationTest "Documents top-level and command-specific usage." commandLineHelpEndToEndTest,
-      specificationTest "Rejects missing and unknown commands with usage on stderr." invalidCommandEndToEndTest,
-      specificationTest "Initializes and safely reinitializes a compatible home repository." initCompatibleHomeEndToEndTest,
-      specificationTest "Rejects initialization when the home ignore policy conflicts." initConflictingHomeEndToEndTest,
-      specificationTest "Checks the current directory by default and routes home descendants to the home repository." checkHomeRoutingEndToEndTest,
-      specificationTest "Rejects malformed home submodule paths." checkMalformedHomePathEndToEndTest,
-      specificationTest "Checks nested Git repositories independently from the home repository." checkNestedRepositoryEndToEndTest,
-      specificationTest "Propagates Git refusal without changing a staged submodule." stagedSubmoduleRemovalRefusalEndToEndTest,
-      specificationTest "Scaffolds a package and its requested checks from a nested directory." addPackageEndToEndTest,
-      specificationTest "Reports generated package behavior in the text summary." textSummaryEndToEndTest,
-      specificationTest "Reports generated package behavior in the JSON summary." jsonSummaryEndToEndTest,
-      specificationTest "Accepts a generated package during repository checks." generatedPackageCheckEndToEndTest,
-      specificationTest "Reports the phase and file when a package check fails." corruptedPackageCheckEndToEndTest,
-      specificationTest "Removes a package together with its associated checks." removePackageEndToEndTest,
-      specificationTest "Rejects unknown package options without creating partial output." unknownAddOptionEndToEndTest,
-      specificationTest "Rejects package names that violate the package convention." invalidPackageNameEndToEndTest,
-      specificationTest "Rejects unsupported checks without creating partial output." unsupportedPackageCheckEndToEndTest
+    [ TestLabel "Discovers conventional Haskell test labels and properties." (TestCase haskellTestDiscoveryTest),
+      TestLabel "Ignores non-test Haskell strings and comments during discovery." (TestCase haskellTestDiscoveryFalsePositiveTest),
+      TestLabel "Renders stable text and JSON repository summaries." (TestCase repositorySummaryRenderingTest),
+      TestLabel "Documents top-level and command-specific usage." (TestCase commandLineHelpEndToEndTest),
+      TestLabel "Rejects missing and unknown commands with usage on stderr." (TestCase invalidCommandEndToEndTest),
+      TestLabel "Initializes and safely reinitializes a compatible home repository." (TestCase initCompatibleHomeEndToEndTest),
+      TestLabel "Rejects initialization when the home ignore policy conflicts." (TestCase initConflictingHomeEndToEndTest),
+      TestLabel "Checks the current directory by default and routes home descendants to the home repository." (TestCase checkHomeRoutingEndToEndTest),
+      TestLabel "Rejects malformed home submodule paths." (TestCase checkMalformedHomePathEndToEndTest),
+      TestLabel "Checks nested Git repositories independently from the home repository." (TestCase checkNestedRepositoryEndToEndTest),
+      TestLabel "Propagates Git refusal without changing a staged submodule." (TestCase stagedSubmoduleRemovalRefusalEndToEndTest),
+      TestLabel "Scaffolds a package and its requested checks from a nested directory." (TestCase addPackageEndToEndTest),
+      TestLabel "Reports generated package behavior in the text summary." (TestCase textSummaryEndToEndTest),
+      TestLabel "Reports generated package behavior in the JSON summary." (TestCase jsonSummaryEndToEndTest),
+      TestLabel "Reports conventional tests for generated Haskell packages." (TestCase haskellSummaryEndToEndTest),
+      TestLabel "Accepts a generated package during repository checks." (TestCase generatedPackageCheckEndToEndTest),
+      TestLabel "Rejects unlabeled HUnit cases in generated Haskell packages." (TestCase unlabeledHaskellPackageCheckEndToEndTest),
+      TestLabel "Reports the phase and file when a package check fails." (TestCase corruptedPackageCheckEndToEndTest),
+      TestLabel "Removes a package together with its associated checks." (TestCase removePackageEndToEndTest),
+      TestLabel "Rejects unknown package options without creating partial output." (TestCase unknownAddOptionEndToEndTest),
+      TestLabel "Rejects package names that violate the package convention." (TestCase invalidPackageNameEndToEndTest),
+      TestLabel "Rejects unsupported checks without creating partial output." (TestCase unsupportedPackageCheckEndToEndTest)
     ]
-specificationTest :: String -> IO () -> Test
-specificationTest testName testAction = TestLabel testName (TestCase testAction)
-haskellSpecificationDiscoveryTest :: IO ()
-haskellSpecificationDiscoveryTest =
+haskellTestDiscoveryTest :: IO ()
+haskellTestDiscoveryTest =
   assertEqual
-    "Only explicit specification labels are part of the package specification."
-    ["Alpha behavior.", "Beta behavior."]
+    "Standard HUnit labels and QuickCheck declarations form the Haskell test specification."
+    ["Alpha behavior.", "Beta \"quoted\" behavior.", "prop_alpha", "prop_beta"]
     ( discoverHaskellUnitTestNamesFromSource
         ( unlines
-            [ "productBehaviorTests =",
+            [ "hUnitPackageTests =",
               "  TestList",
-              "    [ specificationTest \"Beta behavior.\" betaTest,",
-              "      specificationTest",
+              "    [ TestLabel \"Beta \\\"quoted\\\" behavior.\" betaTest,",
+              "      TestLabel",
               "        \"Alpha behavior.\"",
               "        alphaTest,",
-              "      specificationTest \"Beta behavior.\" duplicateTest",
+              "      TestLabel \"Alpha behavior.\" duplicateTest",
               "    ]",
-              "assertEqual \"Failure diagnostic.\" expected actual",
-              "embedded = \"specificationTest \\\"Embedded template behavior.\\\" action\""
+              "prop_beta :: Property",
+              "prop_beta = property True",
+              "prop_alpha = property True"
             ]
         )
     )
-haskellFormattingTestDiscoveryTest :: IO ()
-haskellFormattingTestDiscoveryTest =
+haskellTestDiscoveryFalsePositiveTest :: IO ()
+haskellTestDiscoveryFalsePositiveTest =
   assertEqual
-    "Formatting-test discovery recognizes the first list entry and ignores the helper body."
-    ["Formats the first example.", "Formats the second example."]
+    "Comments, diagnostics, helper variables, character literals, and embedded source stay out of the specification."
+    []
     ( discoverHaskellUnitTestNamesFromSource
         ( unlines
-            [ "makeFormattingTest :: String -> Text -> Text -> Test",
-              "makeFormattingTest testName input expectedOutput = TestCase $ do",
-              "  withSystemTempFile \"test.nix\" action",
-              "formattingTests =",
-              "  TestList",
-              "    [ makeFormattingTest",
-              "        \"Formats the first example.\"",
-              "        firstInput",
-              "        firstOutput,",
-              "      makeFormattingTest",
-              "        \"Formats the second example.\"",
-              "        secondInput",
-              "        secondOutput",
-              "    ]"
+            [ "-- TestLabel \"Commented behavior.\" ignoredTest",
+              "{- TestLabel \"Block-comment behavior.\" ignoredTest -}",
+              "makeTest name = TestLabel name (TestCase action)",
+              "assertEqual \"Failure diagnostic.\" expected actual",
+              "embedded = \"TestLabel \\\"Embedded behavior.\\\" ignoredTest\"",
+              "marker = 'x'",
+              "value = prop_not_a_declaration"
             ]
         )
     )
@@ -2684,6 +2692,16 @@ jsonSummaryEndToEndTest =
       (renderRepositoryPackageSummariesJson [expectedGeneratedPythonPackageSummary])
       jsonStdout
     assertEqual "A successful JSON summary leaves stderr empty." "" jsonStderr
+haskellSummaryEndToEndTest :: IO ()
+haskellSummaryEndToEndTest =
+  withGeneratedHaskellPackageRepository "haskell-summary-end-to-end" $ \temporaryRepository -> do
+    (summaryExit, summaryStdout, summaryStderr) <- runEndToEndCommandIn temporaryRepository ["summary"]
+    assertEqual "A generated Haskell package summary succeeds." ExitSuccess summaryExit
+    assertEqual
+      "The summary reports its conventional HUnit label."
+      (renderRepositoryPackageSummariesText [expectedGeneratedHaskellPackageSummary])
+      summaryStdout
+    assertEqual "A successful Haskell summary leaves stderr empty." "" summaryStderr
 generatedPackageCheckEndToEndTest :: IO ()
 generatedPackageCheckEndToEndTest =
   withGeneratedPythonPackageRepository "generated-check-end-to-end" $ \temporaryRepository -> do
@@ -2691,6 +2709,18 @@ generatedPackageCheckEndToEndTest =
     assertEqual "Checking the generated repository succeeds." ExitSuccess checkExit
     assertEqual "A successful check produces no stdout." "" checkStdout
     assertEqual "A successful check produces no stderr." "" checkStderr
+unlabeledHaskellPackageCheckEndToEndTest :: IO ()
+unlabeledHaskellPackageCheckEndToEndTest =
+  withGeneratedHaskellPackageRepository "unlabeled-haskell-check-end-to-end" $ \temporaryRepository -> do
+    let mainPath = temporaryRepository </> "packages/demo/Main.hs"
+    mainSource <- TIO.readFile mainPath
+    TIO.writeFile mainPath (T.replace "TestLabel \"Renders the sample message.\" $ " "" mainSource)
+    (checkExit, checkStdout, checkStderr) <- runEndToEndCommandIn temporaryRepository ["check", "."]
+    assertEqual "An unlabeled HUnit package fails its repository check." (ExitFailure 1) checkExit
+    assertEqual "An unlabeled HUnit package produces no stdout." "" checkStdout
+    assertBool
+      "The check explains the literal TestLabel convention."
+      ("HUnit tests must use literal TestLabel descriptions" `isInfixOf` checkStderr)
 corruptedPackageCheckEndToEndTest :: IO ()
 corruptedPackageCheckEndToEndTest =
   withGeneratedPythonPackageRepository "corrupted-check-end-to-end" $ \temporaryRepository -> do
@@ -2776,6 +2806,21 @@ withGeneratedPythonPackageRepository temporaryName action =
     runGitFixtureCommand ["-C", temporaryRepository, "config", "user.email", "canonicalization@example.test"]
     runGitFixtureCommand ["-C", temporaryRepository, "commit", "--quiet", "-m", "Add generated package"]
     action temporaryRepository
+withGeneratedHaskellPackageRepository :: String -> (FilePath -> IO a) -> IO a
+withGeneratedHaskellPackageRepository temporaryName action =
+  withEmptyCanonicalRepository temporaryName $ \temporaryRepository -> do
+    let nestedDirectory = temporaryRepository </> "packages"
+    createDirectoryIfMissing True nestedDirectory
+    (addExit, _addStdout, addStderr) <-
+      runEndToEndCommandIn
+        nestedDirectory
+        ["add", "haskell", "demo", "Demo package"]
+    when (addExit /= ExitSuccess) $
+      assertFailure ("Failed to generate the Haskell package fixture: " ++ addStderr)
+    runGitFixtureCommand ["-C", temporaryRepository, "config", "user.name", "Canonicalization Tests"]
+    runGitFixtureCommand ["-C", temporaryRepository, "config", "user.email", "canonicalization@example.test"]
+    runGitFixtureCommand ["-C", temporaryRepository, "commit", "--quiet", "-m", "Add generated package"]
+    action temporaryRepository
 expectedGeneratedPythonPackageSummary :: RepositoryPackageSummary
 expectedGeneratedPythonPackageSummary =
   RepositoryPackageSummary
@@ -2798,6 +2843,22 @@ expectedGeneratedPythonPackageSummary =
             repositoryPackageHasCoverageCheck = True,
             repositoryPackageHasProfileCheck = False,
             repositoryPackageHasPropertyTestingCheck = True,
+            repositoryPackageHasMutationTestingCheck = False
+          }
+    }
+expectedGeneratedHaskellPackageSummary :: RepositoryPackageSummary
+expectedGeneratedHaskellPackageSummary =
+  RepositoryPackageSummary
+    { repositoryPackageName = "demo",
+      repositoryPackageType = "haskell",
+      repositoryPackageDescription = Just "Demo package",
+      repositoryPackageTestNames = ["Renders the sample message."],
+      repositoryPackageChecks =
+        RepositoryPackageChecksSummary
+          { repositoryPackageHasCheck = False,
+            repositoryPackageHasCoverageCheck = False,
+            repositoryPackageHasProfileCheck = False,
+            repositoryPackageHasPropertyTestingCheck = False,
             repositoryPackageHasMutationTestingCheck = False
           }
     }
@@ -3234,7 +3295,7 @@ haskellMainSource =
       "{-# OPTIONS_GHC -Wno-unsafe #-}",
       "module Main (main) where",
       "import System.Exit (exitFailure)",
-      "import Test.HUnit (Counts (errors, failures), Test (TestCase, TestList), assertEqual, runTestTT)",
+      "import Test.HUnit (Counts (errors, failures), Test (TestCase, TestLabel, TestList), assertEqual, runTestTT)",
       "",
       "renderMessage :: String",
       "renderMessage = \"Hello World Haskell\"",
@@ -3249,8 +3310,8 @@ haskellMainSource =
       "hUnitPackageTests :: Test",
       "hUnitPackageTests =",
       "  TestList",
-      "    [ TestCase $ do",
-      "        assertEqual \"renders the sample message\" \"Hello World Haskell\" renderMessage",
+      "    [ TestLabel \"Renders the sample message.\" $ TestCase $ do",
+      "        assertEqual \"sample message\" \"Hello World Haskell\" renderMessage",
       "    ]",
       "",
       "main :: IO ()",
