@@ -16,7 +16,7 @@ import Data.Char (isAlphaNum, isAsciiLower, isDigit)
 import Data.Fix (Fix (Fix))
 import Data.Functor.Compose (Compose (Compose))
 import Data.Kind (Type)
-import Data.List (find, intercalate, isInfixOf, isPrefixOf, isSuffixOf, maximumBy, sort, sortBy, stripPrefix)
+import Data.List (intercalate, isInfixOf, isPrefixOf, isSuffixOf, maximumBy, sort, sortBy, stripPrefix)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
@@ -74,7 +74,7 @@ data TemplateSpec = TemplateSpec
   { templateName :: FilePath,
     templateMatches :: FilePath -> String -> IO Bool,
     templateAllowedDifferenceKeys :: Set.Set T.Text,
-    templateBaselineSource :: Maybe T.Text
+    templateBaselineSource :: T.Text
   }
 type CheckTemplateSpec :: Type
 data CheckTemplateSpec = CheckTemplateSpec
@@ -93,49 +93,49 @@ templateSpecs =
       { templateName = "haskell_package_baseline",
         templateMatches = \_ nixSource -> pure ("haskellPackages.mkDerivation" `isInfixOf` nixSource),
         templateAllowedDifferenceKeys = Set.insert "passthru" defaultAllowedNixDifferenceKeys,
-        templateBaselineSource = Just haskellTemplateBaselineNixSource
+        templateBaselineSource = haskellTemplateBaselineNixSource
       },
     TemplateSpec
       { templateName = "rust_package_baseline",
         templateMatches = \_ nixSource -> pure ("rustPlatform.buildRustPackage" `isInfixOf` nixSource),
         templateAllowedDifferenceKeys = Set.insert "passthru" defaultAllowedNixDifferenceKeys,
-        templateBaselineSource = Just rustTemplateBaselineNixSource
+        templateBaselineSource = rustTemplateBaselineNixSource
       },
     TemplateSpec
       { templateName = "html_template",
         templateMatches = \_ nixSource -> pure ("writeShellApplication" `isInfixOf` nixSource && "http-server" `isInfixOf` nixSource),
         templateAllowedDifferenceKeys = Set.insert "text" defaultAllowedNixDifferenceKeys,
-        templateBaselineSource = Just htmlTemplateBaselineNixSource
+        templateBaselineSource = htmlTemplateBaselineNixSource
       },
     TemplateSpec
       { templateName = "python_latex_template",
         templateMatches = matchesPythonLatexTemplate,
         templateAllowedDifferenceKeys = Set.fromList ["meta", "propagatedBuildInputs", "version"],
-        templateBaselineSource = Just pythonLatexTemplateBaselineNixSource
+        templateBaselineSource = pythonLatexTemplateBaselineNixSource
       },
     TemplateSpec
       { templateName = "python_pypi_application_template",
         templateMatches = matchesPythonPyPIApplicationTemplate,
         templateAllowedDifferenceKeys = Set.fromList ["installCheckPhase", "meta", "nativeBuildInputs", "propagatedBuildInputs", "python", "src", "version"],
-        templateBaselineSource = Just pythonPyPIApplicationTemplateBaselineNixSource
+        templateBaselineSource = pythonPyPIApplicationTemplateBaselineNixSource
       },
     TemplateSpec
       { templateName = "python_pypi_template",
         templateMatches = matchesPythonPyPITemplate,
         templateAllowedDifferenceKeys = Set.fromList ["format", "installCheckPhase", "meta", "nativeBuildInputs", "propagatedBuildInputs", "python", "src", "version"],
-        templateBaselineSource = Just pythonPyPITemplateBaselineNixSource
+        templateBaselineSource = pythonPyPITemplateBaselineNixSource
       },
     TemplateSpec
       { templateName = "binary_release_template",
         templateMatches = matchesBinaryReleaseTemplate,
         templateAllowedDifferenceKeys = Set.fromList ["installCheckPhase", "src", "version"],
-        templateBaselineSource = Just binaryReleaseTemplateBaselineNixSource
+        templateBaselineSource = binaryReleaseTemplateBaselineNixSource
       },
     TemplateSpec
       { templateName = "python_template",
         templateMatches = \_ nixSource -> pure ("buildPythonPackage" `isInfixOf` nixSource),
         templateAllowedDifferenceKeys = Set.fromList ["meta", "propagatedBuildInputs", "python", "shellHook", "version"],
-        templateBaselineSource = Just pythonTemplateBaselineNixSource
+        templateBaselineSource = pythonTemplateBaselineNixSource
       },
     TemplateSpec
       { templateName = "deploy_host_template",
@@ -145,7 +145,7 @@ templateSpecs =
                 && ("opentofu" `isInfixOf` nixSource || "agenix-shell" `isInfixOf` nixSource)
             ),
         templateAllowedDifferenceKeys = Set.insert "meta.description" defaultAllowedNixDifferenceKeys,
-        templateBaselineSource = Just deployHostTemplateBaselineNixSource
+        templateBaselineSource = deployHostTemplateBaselineNixSource
       },
     TemplateSpec
       { templateName = "latex_template",
@@ -155,7 +155,7 @@ templateSpecs =
                 && "latexmk -pdf ms.tex" `isInfixOf` nixSource
             ),
         templateAllowedDifferenceKeys = defaultAllowedNixDifferenceKeys,
-        templateBaselineSource = Just latexTemplateBaselineNixSource
+        templateBaselineSource = latexTemplateBaselineNixSource
       },
     TemplateSpec
       { templateName = "c_template",
@@ -165,7 +165,7 @@ templateSpecs =
                 && "cc -o ${pname} main.c -std=c89" `isInfixOf` nixSource
             ),
         templateAllowedDifferenceKeys = Set.union defaultAllowedNixDifferenceKeys (Set.fromList ["buildPhase", "checkPhase"]),
-        templateBaselineSource = Just cTemplateBaselineNixSource
+        templateBaselineSource = cTemplateBaselineNixSource
       },
     TemplateSpec
       { templateName = "uncomment_template",
@@ -176,7 +176,7 @@ templateSpecs =
                 && "Goldziher" `isInfixOf` nixSource
             ),
         templateAllowedDifferenceKeys = Set.union defaultAllowedNixDifferenceKeys (Set.fromList ["pname", "src"]),
-        templateBaselineSource = Just uncommentTemplateBaselineNixSource
+        templateBaselineSource = uncommentTemplateBaselineNixSource
       }
   ]
 matchesPythonLatexTemplate :: FilePath -> String -> IO Bool
@@ -213,8 +213,6 @@ matchesCheckNameSuffixAndSourceContains suffix requiredNeedles checkName nixSour
     ( suffix `isSuffixOf` checkName
         && all (`isInfixOf` nixSource) requiredNeedles
     )
-templateSpecByName :: FilePath -> Maybe TemplateSpec
-templateSpecByName templateNameToFind = find ((== templateNameToFind) . templateName) templateSpecs
 checkTemplateSpecs :: [CheckTemplateSpec]
 checkTemplateSpecs =
   [ CheckTemplateSpec
@@ -308,8 +306,6 @@ checkTemplateSpecs =
         checkTemplateComparisonMode = ExactCheckTemplate
       }
   ]
-checkTemplateSpecByName :: FilePath -> Maybe CheckTemplateSpec
-checkTemplateSpecByName checkTemplateNameToFind = find ((== checkTemplateNameToFind) . checkTemplateName) checkTemplateSpecs
 matchesHaskellCoverageCheck :: FilePath -> String -> IO Bool
 matchesHaskellCoverageCheck = matchesCheckNameSuffixAndSourceContains "-coverage" ["ghcWithPackages", "-fhpc"]
 matchesHaskellProfileCheck :: FilePath -> String -> IO Bool
@@ -1560,38 +1556,26 @@ checkPackageWith canonicalizationSettings allRepositoryStructureIssues packageNa
       then pure []
       else do
         packageDefaultNixSource <- TIO.readFile packageDefaultNixPath
-        inferredTemplateName <- inferTemplateName packageName (T.unpack packageDefaultNixSource)
-        case inferredTemplateName of
+        inferredTemplateSpec <- inferTemplateSpec packageName (T.unpack packageDefaultNixSource)
+        case inferredTemplateSpec of
           Nothing ->
             pure ["packages/" ++ packageName ++ "/default.nix: could not infer corresponding template"]
-          Just matchedTemplateName ->
-            case templateSpecByName matchedTemplateName of
-              Nothing ->
-                pure ["packages/" ++ packageName ++ "/default.nix: unsupported template " ++ matchedTemplateName]
-              Just templateSpec ->
-                case templateBaselineSource templateSpec of
-                  Just templateSource -> do
-                    let allowedNixDifferenceKeysForPackage =
-                          if packageName == "c_template" && matchedTemplateName == "c_template"
-                            then defaultAllowedNixDifferenceKeys
-                            else templateAllowedDifferenceKeys templateSpec
-                        templateSourceOverride =
-                          case matchedTemplateName of
-                            "python_template" ->
-                              Just (renderPythonTemplateBaselineNixSourceWith defaultPythonTemplateDescription (canonicalizationPythonPackageAttribute canonicalizationSettings))
-                            "python_pypi_template" ->
-                              Just (pythonPyPITemplateBaselineNixSourceWith (canonicalizationPythonPackageAttribute canonicalizationSettings))
-                            "python_pypi_application_template" ->
-                              Just (pythonPyPIApplicationTemplateBaselineNixSourceWith (canonicalizationPythonPackageAttribute canonicalizationSettings))
-                            _ -> Just templateSource
-                    comparePackageDefaultNixWithTemplate packageName packageDefaultNixPath ("packages" </> matchedTemplateName </> "default.nix") allowedNixDifferenceKeysForPackage templateSourceOverride
-                  Nothing ->
-                    pure
-                      [ "packages/"
-                          ++ packageName
-                          ++ "/default.nix: internal error: missing embedded template baseline for "
-                          ++ matchedTemplateName
-                      ]
+          Just templateSpec -> do
+            let matchedTemplateName = templateName templateSpec
+                allowedNixDifferenceKeysForPackage =
+                  if packageName == "c_template" && matchedTemplateName == "c_template"
+                    then defaultAllowedNixDifferenceKeys
+                    else templateAllowedDifferenceKeys templateSpec
+                templateSource =
+                  case matchedTemplateName of
+                    "python_template" ->
+                      renderPythonTemplateBaselineNixSourceWith defaultPythonTemplateDescription (canonicalizationPythonPackageAttribute canonicalizationSettings)
+                    "python_pypi_template" ->
+                      pythonPyPITemplateBaselineNixSourceWith (canonicalizationPythonPackageAttribute canonicalizationSettings)
+                    "python_pypi_application_template" ->
+                      pythonPyPIApplicationTemplateBaselineNixSourceWith (canonicalizationPythonPackageAttribute canonicalizationSettings)
+                    _ -> templateBaselineSource templateSpec
+            comparePackageDefaultNixWithTemplate packageName packageDefaultNixPath ("packages" </> matchedTemplateName </> "default.nix") allowedNixDifferenceKeysForPackage templateSource
   cargoTomlIssues <- checkCargoToml packageName
   cabalFileIssues <- checkCabalFile packageName
   defaultNixConventionIssues <- checkDefaultNixConventions packageName packageKind
@@ -1615,22 +1599,16 @@ checkTemplateWith checkName = do
   case maybeCheckTemplateText of
     Nothing -> pure []
     Just checkTemplateText -> do
-      inferredCheckTemplateName <- inferCheckTemplateName checkName (T.unpack checkTemplateText)
-      case inferredCheckTemplateName of
+      inferredCheckTemplateSpec <- inferCheckTemplateSpec checkName (T.unpack checkTemplateText)
+      case inferredCheckTemplateSpec of
         Nothing ->
           pure
             [ "checks/" ++ checkName ++ "/default.nix: could not infer corresponding check template"
             ]
-        Just matchedCheckTemplateName ->
-          case checkTemplateSpecByName matchedCheckTemplateName of
-            Nothing ->
-              pure
-                [ "checks/" ++ checkName ++ "/default.nix: unsupported check template " ++ matchedCheckTemplateName
-                ]
-            Just checkTemplateSpec ->
-              (++)
-                <$> validateCheckPackageAssociation checkName checkTemplatePath matchedCheckTemplateName
-                <*> validateCheckTemplate checkName checkTemplatePath checkTemplateSpec
+        Just checkTemplateSpec ->
+          (++)
+            <$> validateCheckPackageAssociation checkName checkTemplatePath (checkTemplateName checkTemplateSpec)
+            <*> validateCheckTemplate checkName checkTemplatePath checkTemplateSpec
 validateCheckPackageAssociation :: FilePath -> FilePath -> FilePath -> IO [String]
 validateCheckPackageAssociation checkName checkTemplatePath matchedCheckTemplateName =
   case checkPackageAssociation matchedCheckTemplateName checkName of
@@ -2121,15 +2099,15 @@ lookupCabalField cabalField cabalContents =
 stripCabalQuotedValue :: T.Text -> T.Text
 stripCabalQuotedValue quotedValue =
   fromMaybe quotedValue (T.stripPrefix "\"" quotedValue >>= T.stripSuffix "\"")
-comparePackageDefaultNixWithTemplate :: FilePath -> FilePath -> FilePath -> Set.Set T.Text -> Maybe T.Text -> IO [String]
-comparePackageDefaultNixWithTemplate packageName subjectNixPath templateBaselineNixPath allowedNixDifferenceKeys maybeTemplateBaselineSourceOverride = do
+comparePackageDefaultNixWithTemplate :: FilePath -> FilePath -> FilePath -> Set.Set T.Text -> T.Text -> IO [String]
+comparePackageDefaultNixWithTemplate packageName subjectNixPath templateBaselineNixPath allowedNixDifferenceKeys templateBaselineSourceText = do
   packageKind <- detectPackageKindForPackage packageName
   let ignoredTopLevelFunctionParams :: Set.Set T.Text
       ignoredTopLevelFunctionParams =
         case packageKind of
           CPackage -> Set.singleton "inputs"
           _ -> Set.empty
-  compareNixFileWithTemplate ignoredTopLevelFunctionParams subjectNixPath templateBaselineNixPath allowedNixDifferenceKeys maybeTemplateBaselineSourceOverride
+  compareNixFileWithTemplate ignoredTopLevelFunctionParams subjectNixPath templateBaselineNixPath allowedNixDifferenceKeys templateBaselineSourceText
 compareCheckTemplateWithBaseline :: FilePath -> T.Text -> IO [String]
 compareCheckTemplateWithBaseline checkTemplatePath templateBaselineText = do
   checkTemplateSource <- TIO.readFile checkTemplatePath
@@ -2215,13 +2193,10 @@ validateCPackageVmCheckSource packageKind checkName checkTemplatePath checkTempl
             then Nothing
             else Just (checkTemplatePath ++ ": generic C VM checks must install or override the same-name package from inputs.self.packages")
         ]
-compareNixFileWithTemplate :: Set.Set T.Text -> FilePath -> FilePath -> Set.Set T.Text -> Maybe T.Text -> IO [String]
-compareNixFileWithTemplate ignoredTopLevelFunctionParams subjectNixPath templateBaselineNixPath allowedNixDifferenceKeys maybeTemplateBaselineSourceOverride = do
+compareNixFileWithTemplate :: Set.Set T.Text -> FilePath -> FilePath -> Set.Set T.Text -> T.Text -> IO [String]
+compareNixFileWithTemplate ignoredTopLevelFunctionParams subjectNixPath templateBaselineNixPath allowedNixDifferenceKeys templateBaselineSourceText = do
   subjectNixParseResult <- parseNixExprFromFile subjectNixPath
-  templateBaselineParseResult <-
-    case maybeTemplateBaselineSourceOverride of
-      Just templateBaselineText -> parseNixExprFromText templateBaselineText
-      Nothing -> parseNixExprFromFile templateBaselineNixPath
+  templateBaselineParseResult <- parseNixExprFromText templateBaselineSourceText
   case (subjectNixParseResult, templateBaselineParseResult) of
     (Left parseError, _) ->
       pure [subjectNixPath ++ ": parse error: " ++ show parseError]
@@ -2250,14 +2225,14 @@ removeFileIfExists :: FilePath -> IO ()
 removeFileIfExists filePath = do
   fileExists <- doesFileExist filePath
   when fileExists (removeFile filePath)
-inferTemplateName :: FilePath -> String -> IO (Maybe FilePath)
-inferTemplateName packageName nixSource = do
+inferTemplateSpec :: FilePath -> String -> IO (Maybe TemplateSpec)
+inferTemplateSpec packageName nixSource = do
   matchedTemplateSpecs <- filterM (\templateSpec -> templateMatches templateSpec packageName nixSource) templateSpecs
-  pure (templateName <$> listToMaybe matchedTemplateSpecs)
-inferCheckTemplateName :: FilePath -> String -> IO (Maybe FilePath)
-inferCheckTemplateName checkName nixSource = do
+  pure (listToMaybe matchedTemplateSpecs)
+inferCheckTemplateSpec :: FilePath -> String -> IO (Maybe CheckTemplateSpec)
+inferCheckTemplateSpec checkName nixSource = do
   matchedCheckTemplateSpecs <- filterM (\checkTemplateSpec -> checkTemplateMatches checkTemplateSpec checkName nixSource) checkTemplateSpecs
-  pure (checkTemplateName <$> listToMaybe matchedCheckTemplateSpecs)
+  pure (listToMaybe matchedCheckTemplateSpecs)
 normalizeNixExpr :: Set.Set T.Text -> Set.Set T.Text -> NExprLoc -> NExprLoc
 normalizeNixExpr ignoredTopLevelFunctionParams allowedNixDifferenceKeys (Fix (Compose (AnnUnit nixExprSpan expressionFunctor))) =
   let rebuiltExpressionFunctor = case expressionFunctor of
