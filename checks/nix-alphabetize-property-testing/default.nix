@@ -13,6 +13,8 @@ in
 pkgs.runCommand "${checkName}"
   {
     nativeBuildInputs = [
+      packageDrv
+      pkgs.git
       testGhc
     ];
     src = ../.. + "/packages/${packageName}";

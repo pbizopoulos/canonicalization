@@ -37,8 +37,7 @@ pkgs.haskellPackages.mkDerivation rec {
         pkgs.python3
       ]
     } --run "rm -f tmp/${pname}.tix" --set-default HPCTIXFILE tmp/${pname}.tix
-    ${ghcForTests}/bin/ghc -i. -e 'Main.runPackageTests' Main.hs
-    PATH="$out/bin:$PATH" ${ghcForTests}/bin/ghc -i. -e 'Main.runPackageEndToEndTests' Main.hs
+    PATH="$out/bin:$PATH" ${ghcForTests}/bin/ghc -i. -e 'Main.runPackageTests' Main.hs
   '';
   src = ./.;
   version = "0.0.0";
