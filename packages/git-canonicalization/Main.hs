@@ -426,6 +426,7 @@ runCli canonicalizationSettings commandLineArgs =
         ["help"] -> printMainHelpAndExit ExitSuccess
         _ | isHelpRequest commandLineArgs -> printCommandUsageAndExit ExitSuccess commandLineArgs
         _ -> case commandLineArgs of
+          ["check"] -> checkCanonicalizationLocation canonicalizationSettings "."
           ["check", location] -> checkCanonicalizationLocation canonicalizationSettings location
           "check" : _ -> printCommandUsageAndExit usageExitCode commandLineArgs
           ["summary"] -> runInGitRepositoryRoot "." (summarizeRepository renderRepositoryPackageSummariesText)
@@ -512,9 +513,10 @@ usageTextForCommand = \case
       ]
   Just "check" ->
     unlines
-      [ "usage: git canonicalization check <location>",
+      [ "usage: git canonicalization check [<location>]",
         "",
-        "Check the nearest Git repository. The repository rooted at $HOME uses",
+        "Check the nearest Git repository, defaulting to the current directory.",
+        "The repository rooted at $HOME uses",
         "the home .gitmodules path policy; other repositories use canonical checks.",
         ""
       ]
@@ -522,7 +524,8 @@ usageTextForCommand = \case
     unlines
       [ "usage: git canonicalization init",
         "",
-        "Initialize $HOME as a Git repository and ensure its .gitignore contains *.",
+        "Initialize $HOME as a Git repository and ensure its .gitignore starts with *.",
+        "Additional whitelist rules must start with !.",
         ""
       ]
   Just "rm" ->
@@ -696,11 +699,14 @@ initializeHomeGitRepository = do
   when gitignoreExists $ do
     gitignoreContents <- TIO.readFile gitignorePath
     unless (homeGitignoreIsCompatible gitignoreContents) $
-      dieWithFatal (gitignorePath ++ ": existing file must contain only *")
+      dieWithFatal (gitignorePath ++ ": existing file must start with * and subsequent lines must start with !")
   runGitPassthrough ["init", homeDirectory]
   unless gitignoreExists (TIO.writeFile gitignorePath "*\n")
 homeGitignoreIsCompatible :: T.Text -> Bool
-homeGitignoreIsCompatible gitignoreContents = gitignoreContents == "*" || gitignoreContents == "*\n"
+homeGitignoreIsCompatible gitignoreContents =
+  case T.lines gitignoreContents of
+    "*" : whitelistRules -> all (T.isPrefixOf "!") whitelistRules
+    _ -> False
 addGitRepositoryFromLocation :: RepositoryLocation -> IO ()
 addGitRepositoryFromLocation repositoryLocation = do
   homeDirectory <- getHomeDirectory
@@ -2673,11 +2679,6 @@ commandLineHelpEndToEndTest =
     assertEqual "An invalid command uses Git's usage exit status." usageExitCode invalidCommandExit
     assertEqual "An invalid command leaves stdout empty." "" invalidCommandStdout
     assertBool "An invalid command prints usage to stderr." ("usage: git canonicalization" `isPrefixOf` invalidCommandStderr)
-    (missingCheckLocationExit, missingCheckLocationStdout, missingCheckLocationStderr) <-
-      runEndToEndCommandIn temporaryDirectory ["check"]
-    assertEqual "Check requires a location." usageExitCode missingCheckLocationExit
-    assertEqual "A missing check location leaves stdout empty." "" missingCheckLocationStdout
-    assertBool "A missing check location prints check usage to stderr." ("usage: git canonicalization check <location>" `isPrefixOf` missingCheckLocationStderr)
     (legacyCloneExit, legacyCloneStdout, legacyCloneStderr) <-
       runEndToEndCommandIn temporaryDirectory ["clone", "https://example.test/owner/demo"]
     assertEqual "The legacy clone command is rejected." usageExitCode legacyCloneExit
@@ -2700,13 +2701,20 @@ initHomeEndToEndTest = do
         >>= assertEqual "Home initialization creates the canonical ignore rule." "*\n"
       (reinitExit, _reinitStdout, _reinitStderr) <- runEndToEndCommandIn temporaryHome ["init"]
       assertEqual "Home initialization may safely reinitialize a compatible repository." ExitSuccess reinitExit
+      let whitelistGitignore :: T.Text
+          whitelistGitignore = "*\n!.gitmodules\n!github.com/\n"
+      TIO.writeFile (temporaryHome </> ".gitignore") whitelistGitignore
+      (whitelistReinitExit, _whitelistReinitStdout, _whitelistReinitStderr) <- runEndToEndCommandIn temporaryHome ["init"]
+      assertEqual "Home initialization accepts appended whitelist rules." ExitSuccess whitelistReinitExit
+      TIO.readFile (temporaryHome </> ".gitignore")
+        >>= assertEqual "Home initialization preserves existing whitelist rules." whitelistGitignore
   withTemporaryPackageRepository "init-home-conflict-end-to-end" $ \temporaryHome ->
     withEnvironmentVariable "HOME" temporaryHome $ do
       TIO.writeFile (temporaryHome </> ".gitignore") "*.tmp\n"
       (initExit, initStdout, initStderr) <- runEndToEndCommandIn temporaryHome ["init"]
       assertEqual "An incompatible home .gitignore uses Git's fatal exit status." (ExitFailure 128) initExit
       assertEqual "An incompatible home .gitignore leaves stdout empty." "" initStdout
-      assertBool "An incompatible home .gitignore is reported on stderr." ("existing file must contain only *" `isInfixOf` initStderr)
+      assertBool "An incompatible home .gitignore is reported on stderr." ("existing file must start with *" `isInfixOf` initStderr)
       doesPathExist (temporaryHome </> ".git")
         >>= assertBool "A rejected home initialization does not create a Git repository." . not
 checkLocationRoutingEndToEndTest :: IO ()
@@ -2717,6 +2725,10 @@ checkLocationRoutingEndToEndTest =
     let homeChild = temporaryHome </> "not-a-repository" </> "child"
     createDirectoryIfMissing True homeChild
     withEnvironmentVariable "HOME" temporaryHome $ do
+      (defaultHomeCheckExit, defaultHomeCheckStdout, defaultHomeCheckStderr) <- runEndToEndCommandIn temporaryHome ["check"]
+      assertEqual "Checking without a location defaults to the current directory." ExitSuccess defaultHomeCheckExit
+      assertEqual "A successful default-location check leaves stdout empty." "" defaultHomeCheckStdout
+      assertEqual "A successful default-location check leaves stderr empty." "" defaultHomeCheckStderr
       (homeCheckExit, homeCheckStdout, homeCheckStderr) <- runEndToEndCommandIn temporaryHome ["check", homeChild]
       assertEqual "A home descendant without its own repository uses the home check." ExitSuccess homeCheckExit
       assertEqual "A successful home check leaves stdout empty." "" homeCheckStdout
@@ -3378,8 +3390,16 @@ createRepositoryTests =
               checkHomeGitmodules tempHome >>= assertEqual "Uses Git config parsing for a canonical quoted path." (Right ()),
       TestCase $
         assertBool
-          "Only a single star rule with an optional trailing newline is compatible."
-          (homeGitignoreIsCompatible "*" && homeGitignoreIsCompatible "*\n" && not (homeGitignoreIsCompatible "*.tmp\n*\n")),
+          "A star rule followed only by negated whitelist rules is compatible."
+          ( and
+              [ homeGitignoreIsCompatible "*",
+                homeGitignoreIsCompatible "*\n",
+                homeGitignoreIsCompatible "*\n!.gitmodules\n!github.com/",
+                not (homeGitignoreIsCompatible "*.tmp\n*\n"),
+                not (homeGitignoreIsCompatible "*\nREADME.md\n"),
+                not (homeGitignoreIsCompatible "!README.md\n*\n")
+              ]
+          ),
       TestCase $
         assertEqual
           "Repository adds delegate to git submodule add with the canonical home-relative path."
