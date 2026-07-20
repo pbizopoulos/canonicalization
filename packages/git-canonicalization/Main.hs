@@ -45,6 +45,7 @@ import System.Environment (getArgs, lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitFailure, exitWith)
 import System.FilePath ((<.>), (</>))
 import System.FilePath.Posix (isRelative, makeRelative, splitDirectories, takeBaseName, takeDirectory, takeFileName)
+import System.FilePath.Windows qualified as Windows
 import System.IO (hClose, hPutStr, hPutStrLn, openTempFile, stderr)
 import System.Posix.Process (executeFile)
 import System.Process (rawSystem, readProcessWithExitCode)
@@ -1028,12 +1029,11 @@ validateNewName :: String -> FilePath -> Maybe String
 validateNewName nameKind name
   | null name = Just (nameKind ++ " name must not be empty")
   | name `elem` [".", ".."] = Just (nameKind ++ " name must not be '.' or '..'")
-  | any isPathSeparator name = Just (nameKind ++ " name must not contain path separators")
+  | any Windows.isPathSeparator name = Just (nameKind ++ " name must not contain path separators")
   | not (all isAllowedNameCharacter name) = Just (nameKind ++ " name must contain only letters, digits, '.', '-', or '_'")
   | otherwise = Nothing
   where
     isAllowedNameCharacter character = isAlphaNum character || character `elem` ("._-" :: String)
-    isPathSeparator character = character == '/' || character == '\\'
 type ScaffoldFile :: Type
 data ScaffoldFile = ScaffoldFile
   { scaffoldFileRelativePath :: FilePath,
@@ -1607,32 +1607,33 @@ detectPackageKindForPackage :: FilePath -> IO PackageKind
 detectPackageKindForPackage packageName = do
   let packageRootDirectory = "packages" </> packageName
       packageFileExists relativePath = doesFileExist (packageRootDirectory </> relativePath)
-  hasMainHaskellFile <- packageFileExists "Main.hs"
-  hasCargoTomlFile <- packageFileExists "Cargo.toml"
-  hasIndexHtmlFile <- packageFileExists "index.html"
-  hasMainPythonFile <- packageFileExists "main.py"
-  hasManuscriptTexFile <- packageFileExists "ms.tex"
-  hasMainCFile <- packageFileExists "main.c"
-  hasMainTerraformFile <- packageFileExists "main.tf"
+  packageMarkerFiles <-
+    Set.fromList
+      <$> filterM
+        packageFileExists
+        ["Main.hs", "Cargo.toml", "index.html", "main.py", "ms.tex", "main.c", "main.tf"]
   maybePackageDefaultNixSource <- readTextFileIfExists (packageRootDirectory </> "default.nix")
-  let isPythonPyPIPackage =
-        case maybePackageDefaultNixSource of
-          Nothing -> False
-          Just packageDefaultNixSource ->
-            let packageDefaultNixSourceString = T.unpack packageDefaultNixSource
-             in ("buildPythonPackage" `isInfixOf` packageDefaultNixSourceString || "buildPythonApplication" `isInfixOf` packageDefaultNixSourceString)
-                  && not ("src = ./.;" `isInfixOf` packageDefaultNixSourceString)
-                  && ("fetchPypi" `isInfixOf` packageDefaultNixSourceString || "fetchurl" `isInfixOf` packageDefaultNixSourceString)
+  let hasMarkerFile = (`Set.member` packageMarkerFiles)
+      isPythonPyPIPackage =
+        maybe
+          False
+          ( \packageDefaultNixSource ->
+              let packageDefaultNixSourceString = T.unpack packageDefaultNixSource
+               in ("buildPythonPackage" `isInfixOf` packageDefaultNixSourceString || "buildPythonApplication" `isInfixOf` packageDefaultNixSourceString)
+                    && not ("src = ./.;" `isInfixOf` packageDefaultNixSourceString)
+                    && ("fetchPypi" `isInfixOf` packageDefaultNixSourceString || "fetchurl" `isInfixOf` packageDefaultNixSourceString)
+          )
+          maybePackageDefaultNixSource
       packageKind
-        | hasMainHaskellFile = HaskellPackage
-        | hasCargoTomlFile = RustPackage
-        | hasIndexHtmlFile = HtmlPackage
-        | hasMainPythonFile && hasManuscriptTexFile = PythonLatexPackage
-        | hasMainPythonFile = PythonPackage
+        | hasMarkerFile "Main.hs" = HaskellPackage
+        | hasMarkerFile "Cargo.toml" = RustPackage
+        | hasMarkerFile "index.html" = HtmlPackage
+        | hasMarkerFile "main.py" && hasMarkerFile "ms.tex" = PythonLatexPackage
+        | hasMarkerFile "main.py" = PythonPackage
         | isPythonPyPIPackage = PythonPyPIPackage
-        | hasMainCFile = CPackage
-        | hasMainTerraformFile = TerraformPackage
-        | hasManuscriptTexFile = LatexPackage
+        | hasMarkerFile "main.c" = CPackage
+        | hasMarkerFile "main.tf" = TerraformPackage
+        | hasMarkerFile "ms.tex" = LatexPackage
         | otherwise = BinaryReleasePackage
   pure packageKind
 readTextFileIfExists :: FilePath -> IO (Maybe T.Text)
@@ -1718,23 +1719,16 @@ checkPythonTestConventions packageName packageKind =
                         ++ compactTextToSingleLine (T.pack validatorStderr)
                     ]
 discoverPythonUnitTestNamesFromSource :: String -> [String]
-discoverPythonUnitTestNamesFromSource pythonSource =
-  let extractedPythonUnitTestNames =
-        [ functionName
-        | sourceLine <- lines pythonSource,
-          Just functionName <- [extractPythonUnitTestName sourceLine]
-        ]
-   in sort (Set.toList (Set.fromList extractedPythonUnitTestNames))
+discoverPythonUnitTestNamesFromSource =
+  Set.toAscList . Set.fromList . mapMaybe extractPythonUnitTestName . lines
 extractPythonUnitTestName :: String -> Maybe String
 extractPythonUnitTestName sourceLine =
-  let trimmedSourceLine = dropWhile (== ' ') sourceLine
-      defPrefix :: String
-      defPrefix = "def test_"
-   in if defPrefix `isPrefixOf` trimmedSourceLine
-        then
-          let testFunctionName = takeWhile (\character -> character /= '(' && character /= ' ' && character /= ':') (drop 4 trimmedSourceLine)
-           in if null testFunctionName then Nothing else Just testFunctionName
-        else Nothing
+  case stripPrefix "def " (dropWhile (== ' ') sourceLine) of
+    Just functionDefinition
+      | "test_" `isPrefixOf` functionDefinition ->
+          let functionName = takeWhile (`notElem` ("( :" :: String)) functionDefinition
+           in if null functionName then Nothing else Just functionName
+    _ -> Nothing
 checkHaskellTestConventions :: FilePath -> PackageKind -> IO [String]
 checkHaskellTestConventions packageName packageKind =
   if packageKind /= HaskellPackage
@@ -1764,9 +1758,10 @@ discoverHaskellUnitTestNamesFromSource haskellSource =
   let haskellSourceLines = lines haskellSource
       labelsFromMakeFormattingTest = extractMakeFormattingTestLabels haskellSourceLines
       labelsFromAssertEqual = extractAssertEqualTestLabels haskellSourceLines
-      discoveredHaskellUnitTestNames = labelsFromMakeFormattingTest ++ labelsFromAssertEqual
-      meaningfulHaskellUnitTestNames = filter isMeaningfulTestLabel discoveredHaskellUnitTestNames
-   in sort (Set.toList (Set.fromList meaningfulHaskellUnitTestNames))
+   in Set.toAscList
+        ( Set.fromList
+            (filter isMeaningfulTestLabel (labelsFromMakeFormattingTest ++ labelsFromAssertEqual))
+        )
 isMeaningfulTestLabel :: String -> Bool
 isMeaningfulTestLabel label =
   case dropWhile isSpace label of
@@ -1832,10 +1827,9 @@ checkRustTestConventions packageName packageKind =
               else Just ("packages/" ++ packageName ++ "/src/main.rs: missing #[test] test cases")
           ]
 discoverRustUnitTestNamesFromSource :: String -> [String]
-discoverRustUnitTestNamesFromSource rustSource =
-  extractRustUnitTestNames (lines rustSource)
+discoverRustUnitTestNamesFromSource = extractRustUnitTestNames . lines
 extractRustUnitTestNames :: [String] -> [String]
-extractRustUnitTestNames sourceLines = sort (Set.toList (Set.fromList (go False sourceLines)))
+extractRustUnitTestNames = Set.toAscList . Set.fromList . go False
   where
     go _ [] = []
     go awaitingFunctionAfterTestAttribute (line : rest)
@@ -1967,7 +1961,9 @@ extractTomlSection sectionName tomlContents =
    in T.unlines (takeWhile (not . isTomlSectionHeader . T.strip) sectionBody)
 isTomlSectionHeader :: T.Text -> Bool
 isTomlSectionHeader tomlLine =
-  T.length tomlLine >= 3 && T.head tomlLine == '[' && T.last tomlLine == ']'
+  T.length tomlLine >= 3
+    && "[" `T.isPrefixOf` tomlLine
+    && "]" `T.isSuffixOf` tomlLine
 lookupTomlString :: T.Text -> T.Text -> Maybe T.Text
 lookupTomlString tomlKey sectionContents = do
   let keyPrefix = tomlKey <> " = "
@@ -2199,7 +2195,7 @@ filterIgnoredNixParams :: Set.Set T.Text -> [(VarName, Maybe NExprLoc)] -> [(Var
 filterIgnoredNixParams ignoredTopLevelFunctionParams =
   filter (\(VarName paramName, _) -> Set.notMember paramName ignoredTopLevelFunctionParams)
 sortNixParams :: [(VarName, Maybe NExprLoc)] -> [(VarName, Maybe NExprLoc)]
-sortNixParams = sortBy (\(VarName leftName, _) (VarName rightName, _) -> compare leftName rightName)
+sortNixParams = sortBy (comparing (\(VarName paramName, _) -> paramName))
 normalizeNixBindings :: Set.Set T.Text -> [Binding NExprLoc] -> [Binding NExprLoc]
 normalizeNixBindings allowedNixDifferenceKeys bindings =
   [normalizeNixBinding allowedNixDifferenceKeys binding | binding <- bindings, not (isAllowedNixDifferenceBinding allowedNixDifferenceKeys binding)]
@@ -2210,9 +2206,7 @@ normalizeNixBinding allowedNixDifferenceKeys = \case
 isAllowedNixDifferenceBinding :: Set.Set T.Text -> Binding NExprLoc -> Bool
 isAllowedNixDifferenceBinding allowedNixDifferenceKeys = \case
   NamedVar (bindingKey :| _) _ _ ->
-    case nixKeyNameText bindingKey of
-      Just keyText -> Set.member keyText allowedNixDifferenceKeys
-      Nothing -> False
+    maybe False (`Set.member` allowedNixDifferenceKeys) (nixKeyNameText bindingKey)
   _ -> False
 nixKeyNameText :: NKeyName NExprLoc -> Maybe T.Text
 nixKeyNameText = \case
