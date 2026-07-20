@@ -1588,55 +1588,43 @@ checkPackageWith canonicalizationSettings allRepositoryStructureIssues packageNa
         ]
   packageKind <- detectPackageKindForPackage packageName
   packageDefaultNixExists <- doesFileExist packageDefaultNixPath
-  (templateIssues, _) <-
+  templateIssues <-
     if not packageDefaultNixExists
-      then pure ([], Nothing)
+      then pure []
       else do
         packageDefaultNixSource <- TIO.readFile packageDefaultNixPath
         inferredTemplateName <- inferTemplateName packageName (T.unpack packageDefaultNixSource)
         case inferredTemplateName of
           Nothing ->
-            pure
-              ( [ "packages/" ++ packageName ++ "/default.nix: could not infer corresponding template"
-                ],
-                Nothing
-              )
-          Just matchedTemplateName -> do
+            pure ["packages/" ++ packageName ++ "/default.nix: could not infer corresponding template"]
+          Just matchedTemplateName ->
             case templateSpecByName matchedTemplateName of
               Nothing ->
-                pure
-                  ( [ "packages/" ++ packageName ++ "/default.nix: unsupported template " ++ matchedTemplateName
-                    ],
-                    Just matchedTemplateName
-                  )
+                pure ["packages/" ++ packageName ++ "/default.nix: unsupported template " ++ matchedTemplateName]
               Just templateSpec ->
                 case templateBaselineSource templateSpec of
-                  Just templateSource ->
-                    do
-                      let allowedNixDifferenceKeysForPackage =
-                            if packageName == "c_template" && matchedTemplateName == "c_template"
-                              then defaultAllowedNixDifferenceKeys
-                              else templateAllowedDifferenceKeys templateSpec
-                          templateSourceOverride =
-                            case matchedTemplateName of
-                              "python_template" ->
-                                Just (renderPythonTemplateBaselineNixSourceWith defaultPythonTemplateDescription (canonicalizationPythonPackageAttribute canonicalizationSettings))
-                              "python_pypi_template" ->
-                                Just (pythonPyPITemplateBaselineNixSourceWith (canonicalizationPythonPackageAttribute canonicalizationSettings))
-                              "python_pypi_application_template" ->
-                                Just (pythonPyPIApplicationTemplateBaselineNixSourceWith (canonicalizationPythonPackageAttribute canonicalizationSettings))
-                              _ -> Just templateSource
-                      templateComparisonIssues <- comparePackageDefaultNixWithTemplate packageName packageDefaultNixPath ("packages" </> matchedTemplateName </> "default.nix") allowedNixDifferenceKeysForPackage templateSourceOverride
-                      pure (templateComparisonIssues, Just matchedTemplateName)
+                  Just templateSource -> do
+                    let allowedNixDifferenceKeysForPackage =
+                          if packageName == "c_template" && matchedTemplateName == "c_template"
+                            then defaultAllowedNixDifferenceKeys
+                            else templateAllowedDifferenceKeys templateSpec
+                        templateSourceOverride =
+                          case matchedTemplateName of
+                            "python_template" ->
+                              Just (renderPythonTemplateBaselineNixSourceWith defaultPythonTemplateDescription (canonicalizationPythonPackageAttribute canonicalizationSettings))
+                            "python_pypi_template" ->
+                              Just (pythonPyPITemplateBaselineNixSourceWith (canonicalizationPythonPackageAttribute canonicalizationSettings))
+                            "python_pypi_application_template" ->
+                              Just (pythonPyPIApplicationTemplateBaselineNixSourceWith (canonicalizationPythonPackageAttribute canonicalizationSettings))
+                            _ -> Just templateSource
+                    comparePackageDefaultNixWithTemplate packageName packageDefaultNixPath ("packages" </> matchedTemplateName </> "default.nix") allowedNixDifferenceKeysForPackage templateSourceOverride
                   Nothing ->
                     pure
-                      ( [ "packages/"
-                            ++ packageName
-                            ++ "/default.nix: internal error: missing embedded template baseline for "
-                            ++ matchedTemplateName
-                        ],
-                        Just matchedTemplateName
-                      )
+                      [ "packages/"
+                          ++ packageName
+                          ++ "/default.nix: internal error: missing embedded template baseline for "
+                          ++ matchedTemplateName
+                      ]
   cargoTomlIssues <- checkCargoToml packageName
   cabalFileIssues <- checkCabalFile packageName
   defaultNixConventionIssues <- checkDefaultNixConventions packageName packageKind
@@ -1919,9 +1907,7 @@ discoverPythonUnitTestNames packageName packageKind =
     else do
       let mainPythonPath = "packages" </> packageName </> "main.py"
       maybeMainPythonSourceText <- readTextFileIfExists mainPythonPath
-      case maybeMainPythonSourceText of
-        Nothing -> pure []
-        Just mainPythonSourceText -> pure (discoverPythonUnitTestNamesFromSource (T.unpack mainPythonSourceText))
+      pure (maybe [] (discoverPythonUnitTestNamesFromSource . T.unpack) maybeMainPythonSourceText)
 discoverPythonUnitTestNamesFromSource :: String -> [String]
 discoverPythonUnitTestNamesFromSource pythonSource =
   let extractedPythonUnitTestNames =
@@ -1971,9 +1957,7 @@ discoverHaskellUnitTestNames packageName packageKind =
     else do
       let mainHaskellPath = "packages" </> packageName </> "Main.hs"
       maybeMainHaskellSourceText <- readTextFileIfExists mainHaskellPath
-      case maybeMainHaskellSourceText of
-        Nothing -> pure []
-        Just mainHaskellSourceText -> pure (discoverHaskellUnitTestNamesFromSource (T.unpack mainHaskellSourceText))
+      pure (maybe [] (discoverHaskellUnitTestNamesFromSource . T.unpack) maybeMainHaskellSourceText)
 discoverHaskellUnitTestNamesFromSource :: String -> [String]
 discoverHaskellUnitTestNamesFromSource haskellSource =
   let haskellSourceLines = lines haskellSource
@@ -1986,7 +1970,7 @@ isMeaningfulTestLabel :: String -> Bool
 isMeaningfulTestLabel label =
   let trimmedLabel = T.unpack (T.strip (T.pack label))
    in case trimmedLabel of
-        firstCharacter : _ -> isAlphaNum firstCharacter && any isAlphaNum trimmedLabel
+        firstCharacter : _ -> isAlphaNum firstCharacter
         [] -> False
 extractAssertEqualTestLabels :: [String] -> [String]
 extractAssertEqualTestLabels = go False
@@ -1994,17 +1978,15 @@ extractAssertEqualTestLabels = go False
     go _ [] = []
     go awaitingAssertEqualLabel (line : rest)
       | "assertEqual" `isInfixOf` line = go True rest
-      | awaitingAssertEqualLabel =
-          let trimmed = dropWhile (== ' ') line
-           in if null trimmed
-                then go True rest
-                else
-                  if startsWithQuote trimmed && not ("++" `isInfixOf` trimmed)
-                    then case firstQuotedToken trimmed of
-                      Just label -> label : go False rest
-                      Nothing -> go False rest
-                    else go False rest
+      | not awaitingAssertEqualLabel = go False rest
+      | null trimmed = go True rest
+      | startsWithQuote trimmed && not ("++" `isInfixOf` trimmed) =
+          case firstQuotedToken trimmed of
+            Just label -> label : go False rest
+            Nothing -> go False rest
       | otherwise = go False rest
+      where
+        trimmed = dropWhile (== ' ') line
     startsWithQuote [] = False
     startsWithQuote (ch : _) = ch == '"'
 extractMakeFormattingTestLabels :: [String] -> [String]
@@ -2013,14 +1995,14 @@ extractMakeFormattingTestLabels = go False
     go _ [] = []
     go awaitingMakeFormattingTestLabel (line : rest)
       | isMakeFormattingTestInvocationLine line = go True rest
-      | awaitingMakeFormattingTestLabel =
-          let trimmed = dropWhile (== ' ') line
-           in if null trimmed
-                then go True rest
-                else case firstQuotedToken line of
-                  Just label -> label : go False rest
-                  Nothing -> go False rest
-      | otherwise = go False rest
+      | not awaitingMakeFormattingTestLabel = go False rest
+      | null trimmed = go True rest
+      | otherwise =
+          case firstQuotedToken line of
+            Just label -> label : go False rest
+            Nothing -> go False rest
+      where
+        trimmed = dropWhile (== ' ') line
     isMakeFormattingTestInvocationLine line =
       let trimmed = dropWhile (== ' ') line
        in ", makeFormattingTest" `isPrefixOf` trimmed || "makeFormattingTest" `isPrefixOf` trimmed
@@ -2037,11 +2019,7 @@ checkRustTestConventions packageName packageKind =
     then pure []
     else do
       let mainRustPath = "packages" </> packageName </> "src/main.rs"
-      mainRustFileExists <- doesFileExist mainRustPath
-      mainRustSource <-
-        if mainRustFileExists
-          then T.unpack <$> TIO.readFile mainRustPath
-          else pure ""
+      mainRustSource <- maybe "" T.unpack <$> readTextFileIfExists mainRustPath
       let hasRustTestModule = "#[cfg(test)]" `isInfixOf` mainRustSource && "mod tests" `isInfixOf` mainRustSource
           hasRustTestCases = "#[test]" `isInfixOf` mainRustSource
       pure $
@@ -2060,9 +2038,7 @@ discoverRustUnitTestNames packageName packageKind =
     else do
       let mainRustPath = "packages" </> packageName </> "src/main.rs"
       maybeMainRustSourceText <- readTextFileIfExists mainRustPath
-      case maybeMainRustSourceText of
-        Nothing -> pure []
-        Just mainRustSourceText -> pure (discoverRustUnitTestNamesFromSource (T.unpack mainRustSourceText))
+      pure (maybe [] (discoverRustUnitTestNamesFromSource . T.unpack) maybeMainRustSourceText)
 discoverRustUnitTestNamesFromSource :: String -> [String]
 discoverRustUnitTestNamesFromSource rustSource =
   extractRustUnitTestNames (lines rustSource)
@@ -2070,16 +2046,14 @@ extractRustUnitTestNames :: [String] -> [String]
 extractRustUnitTestNames sourceLines = sort (Set.toList (Set.fromList (go False sourceLines)))
   where
     go _ [] = []
-    go awaitingFunctionAfterTestAttribute (line : rest) =
-      let trimmed = dropWhile (== ' ') line
-       in if "#[test]" `isPrefixOf` trimmed
-            then go True rest
-            else
-              if awaitingFunctionAfterTestAttribute && "fn " `isPrefixOf` trimmed
-                then
-                  let functionName = takeWhile (\character -> character /= '(' && character /= ' ') (drop 3 trimmed)
-                   in [functionName | not (null functionName)] ++ go False rest
-                else go False rest
+    go awaitingFunctionAfterTestAttribute (line : rest)
+      | "#[test]" `isPrefixOf` trimmed = go True rest
+      | awaitingFunctionAfterTestAttribute && "fn " `isPrefixOf` trimmed =
+          let functionName = takeWhile (\character -> character /= '(' && character /= ' ') (drop 3 trimmed)
+           in [functionName | not (null functionName)] ++ go False rest
+      | otherwise = go False rest
+      where
+        trimmed = dropWhile (== ' ') line
 formatPythonValidatorError :: FilePath -> String -> String
 formatPythonValidatorError packageName errorCode =
   let messagePrefix = "packages/" ++ packageName ++ "/main.py: "
