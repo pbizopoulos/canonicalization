@@ -16,7 +16,7 @@ import Data.Char (isAlphaNum, isAsciiLower, isDigit)
 import Data.Fix (Fix (Fix))
 import Data.Functor.Compose (Compose (Compose))
 import Data.Kind (Type)
-import Data.List (intercalate, isInfixOf, isPrefixOf, isSuffixOf, maximumBy, sort, sortBy, stripPrefix)
+import Data.List (intercalate, isInfixOf, isPrefixOf, isSuffixOf, maximumBy, nub, sort, sortBy, stripPrefix)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
@@ -503,12 +503,7 @@ usageTextForCommand = \case
       ]
   _ -> unlines ["usage: git canonicalization [-h | --help] <command> [<args>]", ""]
 parseAddPackageArgs :: [String] -> Maybe (String, FilePath, Maybe String, Set.Set RepositoryCheckKind)
-parseAddPackageArgs commandLineArgs = do
-  (packageKindName, packageName, remainingArguments) <-
-    case commandLineArgs of
-      "add" : packageKindName : packageName : remainingArguments ->
-        Just (packageKindName, packageName, remainingArguments)
-      _ -> Nothing
+parseAddPackageArgs ("add" : packageKindName : packageName : remainingArguments) = do
   let (flagArguments, packageDescriptionArguments) =
         ( filter ("--" `isPrefixOf`) remainingArguments,
           filter (not . ("--" `isPrefixOf`)) remainingArguments
@@ -516,6 +511,7 @@ parseAddPackageArgs commandLineArgs = do
       packageDescription = case packageDescriptionArguments of [] -> Nothing; args -> Just (unwords args)
   requestedCheckKinds <- parseRepositoryCheckFlags flagArguments
   pure (packageKindName, packageName, packageDescription, requestedCheckKinds)
+parseAddPackageArgs _ = Nothing
 parseRepositoryUrl :: String -> Maybe RepositoryLocation
 parseRepositoryUrl repositoryUrl =
   parseHttpsRepositoryUrl repositoryUrl
@@ -537,10 +533,10 @@ parseScpRepositoryUrl repositoryUrl = do
   repositoryPath <- stripPrefix ":" colonAndPath
   repositoryLocationFromUrlParts repositoryUrl hostname repositoryPath
 repositoryLocationFromUrlPath :: String -> String -> Maybe RepositoryLocation
-repositoryLocationFromUrlPath repositoryUrl hostnameAndPath =
-  case T.splitOn "/" (T.pack hostnameAndPath) of
-    hostname : repositoryPathParts -> repositoryLocationFromUrlParts repositoryUrl (T.unpack hostname) (T.unpack (T.intercalate "/" repositoryPathParts))
-    [] -> Nothing
+repositoryLocationFromUrlPath repositoryUrl hostnameAndPath = do
+  let (hostname, slashAndPath) = break (== '/') hostnameAndPath
+  repositoryPath <- stripPrefix "/" slashAndPath
+  repositoryLocationFromUrlParts repositoryUrl hostname repositoryPath
 repositoryLocationFromUrlParts :: String -> String -> String -> Maybe RepositoryLocation
 repositoryLocationFromUrlParts repositoryUrl hostname repositoryPath =
   case T.splitOn "/" (T.pack repositoryPath) of
@@ -646,12 +642,7 @@ checkHomeGitmodules homeDirectory = do
                   ]
               )
 parseNullSeparatedValues :: String -> [T.Text]
-parseNullSeparatedValues = foldl collectValue [] . filter (not . T.null) . T.splitOn "\0" . T.pack
-  where
-    collectValue :: [T.Text] -> T.Text -> [T.Text]
-    collectValue values value
-      | value `elem` values = values
-      | otherwise = values ++ [value]
+parseNullSeparatedValues = nub . filter (not . T.null) . T.splitOn "\0" . T.pack
 isCompatibleHomeGitmodulePath :: T.Text -> Bool
 isCompatibleHomeGitmodulePath pathEntry =
   not (T.isPrefixOf "/" pathEntry)
@@ -694,7 +685,7 @@ gitSubmoduleAddArguments homeDirectory repositoryLocation =
     username = repositoryLocationUsername repositoryLocation
     repositoryName = repositoryLocationName repositoryLocation
 removeCanonicalizationTargetCli :: FilePath -> IO ()
-removeCanonicalizationTargetCli removalTarget = do
+removeCanonicalizationTargetCli removalTarget =
   if any (`elem` ("/\\" :: String)) removalTarget
     then removeGitRepositoryCli removalTarget
     else runInGitRepositoryRoot "." (removePackageFromCurrentRepositoryCli removalTarget)
@@ -750,14 +741,8 @@ requiredRepositoryRootFiles :: [FilePath]
 requiredRepositoryRootFiles = ["flake.nix", "flake.lock"]
 checkRequiredRepositoryRootFiles :: IO [String]
 checkRequiredRepositoryRootFiles = do
-  requiredFilePresence <- forM requiredRepositoryRootFiles $ \requiredFile -> do
-    requiredFileExists <- doesFileExist requiredFile
-    pure (requiredFile, requiredFileExists)
-  pure
-    [ "missing required file: " ++ requiredFile
-    | (requiredFile, requiredFileExists) <- requiredFilePresence,
-      not requiredFileExists
-    ]
+  missingFiles <- filterM (fmap not . doesFileExist) requiredRepositoryRootFiles
+  pure ["missing required file: " ++ missingFile | missingFile <- missingFiles]
 collectRepositoryComplianceWith :: CanonicalizationSettings -> IO (Either (String, [String]) RepositoryComplianceSuccess)
 collectRepositoryComplianceWith canonicalizationSettings = do
   requiredRootFileIssues <- checkRequiredRepositoryRootFiles
@@ -1036,9 +1021,7 @@ packageNameConventionForKind packageKind =
     UnknownPackage -> Nothing
 isDelimitedLowercaseName :: Char -> String -> Bool
 isDelimitedLowercaseName separator packageName =
-  case splitOnCharacter separator packageName of
-    [] -> False
-    nameParts -> all isValidNamePart nameParts
+  all isValidNamePart (splitOnCharacter separator packageName)
   where
     isValidNamePart :: String -> Bool
     isValidNamePart namePart =
@@ -1496,15 +1479,15 @@ collectRepositoryPaths :: FilePath -> IO [FilePath]
 collectRepositoryPaths rootPath = do
   childNames <- listDirectory rootPath
   let childPaths = sort [rootPath </> childName | childName <- childNames]
-  keptChildren <- fmap catMaybes $
+  descendantPaths <- fmap concat $
     forM childPaths $ \childPath -> do
       isDirectory <- doesDirectoryExist childPath
       let relativeChildPath = toRelativePath childPath
       case (isDirectory, shouldTraverseDirectory relativeChildPath) of
-        (True, True) -> Just <$> collectRepositoryPaths childPath
-        (True, False) -> pure Nothing
-        (False, _) -> pure (Just [relativeChildPath])
-  pure (toRelativePath rootPath : concat keptChildren)
+        (True, True) -> collectRepositoryPaths childPath
+        (True, False) -> pure []
+        (False, _) -> pure [relativeChildPath]
+  pure (toRelativePath rootPath : descendantPaths)
 toRelativePath :: FilePath -> FilePath
 toRelativePath "." = "."
 toRelativePath filePath =
@@ -1539,8 +1522,7 @@ listSubdirectoryNames parentDirectory = do
     then pure []
     else do
       childNames <- listDirectory parentDirectory
-      childIsDirectoryFlags <- forM childNames $ \childName -> doesDirectoryExist (parentDirectory </> childName)
-      pure $ sort [childName | (childName, isDirectory) <- zip childNames childIsDirectoryFlags, isDirectory]
+      sort <$> filterM (doesDirectoryExist . (parentDirectory </>)) childNames
 checkPackageWith :: CanonicalizationSettings -> [String] -> FilePath -> IO [String]
 checkPackageWith canonicalizationSettings allRepositoryStructureIssues packageName = do
   let packageDefaultNixPath = "packages" </> packageName </> "default.nix"
@@ -2226,13 +2208,11 @@ removeFileIfExists filePath = do
   fileExists <- doesFileExist filePath
   when fileExists (removeFile filePath)
 inferTemplateSpec :: FilePath -> String -> IO (Maybe TemplateSpec)
-inferTemplateSpec packageName nixSource = do
-  matchedTemplateSpecs <- filterM (\templateSpec -> templateMatches templateSpec packageName nixSource) templateSpecs
-  pure (listToMaybe matchedTemplateSpecs)
+inferTemplateSpec packageName nixSource =
+  listToMaybe <$> filterM (\templateSpec -> templateMatches templateSpec packageName nixSource) templateSpecs
 inferCheckTemplateSpec :: FilePath -> String -> IO (Maybe CheckTemplateSpec)
-inferCheckTemplateSpec checkName nixSource = do
-  matchedCheckTemplateSpecs <- filterM (\checkTemplateSpec -> checkTemplateMatches checkTemplateSpec checkName nixSource) checkTemplateSpecs
-  pure (listToMaybe matchedCheckTemplateSpecs)
+inferCheckTemplateSpec checkName nixSource =
+  listToMaybe <$> filterM (\checkTemplateSpec -> checkTemplateMatches checkTemplateSpec checkName nixSource) checkTemplateSpecs
 normalizeNixExpr :: Set.Set T.Text -> Set.Set T.Text -> NExprLoc -> NExprLoc
 normalizeNixExpr ignoredTopLevelFunctionParams allowedNixDifferenceKeys (Fix (Compose (AnnUnit nixExprSpan expressionFunctor))) =
   let rebuiltExpressionFunctor = case expressionFunctor of
@@ -2337,9 +2317,7 @@ formatBindingMapDifferences keyLabel packageBindingMap templateBindingMap =
 formatNixBindingDifferenceLine :: String -> T.Text -> String
 formatNixBindingDifferenceLine differenceKind bindingKey = "  - " ++ differenceKind ++ ": " ++ T.unpack bindingKey
 compactTextToSingleLine :: T.Text -> String
-compactTextToSingleLine textValue =
-  let compactText = T.unwords (T.words textValue)
-   in T.unpack compactText
+compactTextToSingleLine = T.unpack . T.unwords . T.words
 truncateDiagnosticValue :: String -> String
 truncateDiagnosticValue textValue =
   let maxDiagnosticLength :: Int
