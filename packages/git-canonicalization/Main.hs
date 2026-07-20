@@ -439,12 +439,7 @@ runCli canonicalizationSettings commandLineArgs =
             case commandArgs of
               "init" : _ -> printCommandUsageAndExit usageExitCode commandArgs
               "clone" : _ -> printCommandUsageAndExit usageExitCode commandArgs
-              ["rm", removalTarget] ->
-                removeCanonicalizationTarget removalTarget >>= \case
-                  Left removeError -> do
-                    hPutStrLn stderr removeError
-                    exitFailure
-                  Right () -> pure ()
+              ["rm", removalTarget] -> removeCanonicalizationTargetCli removalTarget
               "rm" : _ -> printCommandUsageAndExit usageExitCode commandArgs
               _ ->
                 case parseAddPackageArgs commandArgs of
@@ -713,17 +708,61 @@ gitSubmoduleAddArguments homeDirectory repositoryLocation =
     hostname = repositoryLocationHostname repositoryLocation
     username = repositoryLocationUsername repositoryLocation
     repositoryName = repositoryLocationName repositoryLocation
-removeCanonicalizationTarget :: FilePath -> IO (Either String ())
-removeCanonicalizationTarget removalTarget = do
+removeCanonicalizationTargetCli :: FilePath -> IO ()
+removeCanonicalizationTargetCli removalTarget = do
   targetIsGitRepository <- doesDirectoryExist (removalTarget </> ".git")
   targetHasGitFile <- doesFileExist (removalTarget </> ".git")
   if targetIsGitRepository || targetHasGitFile || any (`elem` ("/\\" :: String)) removalTarget
-    then removeGitRepository removalTarget
-    else runInGitRepositoryRoot "." (removePackageFromCurrentRepository removalTarget)
-removeGitRepository :: FilePath -> IO (Either String ())
-removeGitRepository repositoryPath = do
+    then removeGitRepositoryCli removalTarget
+    else runInGitRepositoryRoot "." (removePackageFromCurrentRepositoryCli removalTarget)
+removeGitRepositoryCli :: FilePath -> IO ()
+removeGitRepositoryCli repositoryPath = do
   homeDirectory <- getHomeDirectory
-  removeGitRepositoryInHome homeDirectory repositoryPath
+  repositoryPathExists <- doesPathExist repositoryPath
+  unless repositoryPathExists (failCanonicalizationCheck ("path does not exist: " ++ repositoryPath))
+  canonicalHomeDirectory <- canonicalizePath homeDirectory
+  canonicalRepositoryPath <- canonicalizePath repositoryPath
+  let repositoryPathEntry = makeRelative canonicalHomeDirectory canonicalRepositoryPath
+      repositoryPathParts = splitDirectories repositoryPathEntry
+      repositoryIsBelowHome = isRelative repositoryPathEntry && repositoryPathEntry /= "." && ".." `notElem` repositoryPathParts
+  unless repositoryIsBelowHome $
+    failCanonicalizationCheck ("repository is not below " ++ canonicalHomeDirectory ++ ": " ++ canonicalRepositoryPath)
+  homeGitRoot <- discoverGitRepositoryRoot canonicalHomeDirectory
+  unless (homeGitRoot == canonicalHomeDirectory) $
+    failCanonicalizationCheck ("not a git repository root directory: " ++ canonicalHomeDirectory)
+  runGitRemoval canonicalHomeDirectory ["--quiet", "--", repositoryPathEntry]
+removePackageFromCurrentRepositoryCli :: FilePath -> IO ()
+removePackageFromCurrentRepositoryCli packageName = do
+  let packagePath = "packages" </> packageName
+  packageExists <- doesDirectoryExist packagePath
+  unless packageExists (failCanonicalizationCheck ("package does not exist: " ++ packageName))
+  packageKind <- detectPackageKindForPackage packageName
+  when (packageKind == UnknownPackage) (failCanonicalizationCheck ("could not determine package type: " ++ packageName))
+  let checkKinds =
+        [ RepositoryDefaultCheck,
+          RepositoryCoverageCheck,
+          RepositoryProfileCheck,
+          RepositoryPropertyTestingCheck,
+          RepositoryMutationTestingCheck
+        ]
+      associatedCheckPaths =
+        [ "checks" </> checkName
+        | checkKind <- checkKinds,
+          Just checkName <- [repositoryCheckNameForKind packageKind packageName checkKind]
+        ]
+  existingAssociatedCheckPaths <- filterM doesPathExist associatedCheckPaths
+  let removalPaths = packagePath : existingAssociatedCheckPaths
+  repositoryRoot <- getCurrentDirectory
+  runGitRemoval repositoryRoot (["-r", "--quiet", "--ignore-unmatch", "--"] ++ removalPaths)
+  forM_ removalPaths $ \removalPath -> do
+    removalPathExists <- doesPathExist removalPath
+    when removalPathExists (removePathForcibly removalPath)
+runGitRemoval :: FilePath -> [String] -> IO ()
+runGitRemoval repositoryRoot removalArguments = do
+  preflightExit <- rawSystem "git" (["-C", repositoryRoot, "rm", "--dry-run"] ++ removalArguments)
+  unless (preflightExit == ExitSuccess) (exitWith preflightExit)
+  removalExit <- rawSystem "git" (["-C", repositoryRoot, "rm"] ++ removalArguments)
+  unless (removalExit == ExitSuccess) (exitWith removalExit)
 removeGitRepositoryInHome :: FilePath -> FilePath -> IO (Either String ())
 removeGitRepositoryInHome homeDirectory repositoryPath = do
   repositoryPathExists <- doesPathExist repositoryPath
@@ -2649,6 +2688,7 @@ commandLineEndToEndTests =
     [ TestCase commandLineHelpEndToEndTest,
       TestCase initHomeEndToEndTest,
       TestCase checkLocationRoutingEndToEndTest,
+      TestCase stagedSubmoduleRemovalRefusalEndToEndTest,
       TestCase addSummaryAndCheckEndToEndTest,
       TestCase invalidAddEndToEndTest
     ]
@@ -2756,6 +2796,47 @@ checkLocationRoutingEndToEndTest =
           )
       assertEqual "A successful nested repository check leaves stdout empty." "" nestedCheckStdout
       assertEqual "A successful nested repository check leaves stderr empty." "" nestedCheckStderr
+stagedSubmoduleRemovalRefusalEndToEndTest :: IO ()
+stagedSubmoduleRemovalRefusalEndToEndTest =
+  withTemporaryPackageRepository "rm-staged-submodule-home" $ \temporaryHome ->
+    withTemporaryPackageRepository "rm-staged-submodule-remote" $ \temporaryRemote -> do
+      initializeGitRepositoryFixture temporaryRemote
+      runGitFixtureCommand ["-C", temporaryRemote, "config", "user.name", "Canonicalization Tests"]
+      runGitFixtureCommand ["-C", temporaryRemote, "config", "user.email", "canonicalization@example.test"]
+      TIO.writeFile (temporaryRemote </> "README.md") "test repository\n"
+      runGitFixtureCommand ["-C", temporaryRemote, "add", "README.md"]
+      runGitFixtureCommand ["-C", temporaryRemote, "commit", "--quiet", "-m", "Initial commit"]
+      initializeGitRepositoryFixture temporaryHome
+      let repositoryPathEntry = "example.test" </> "owner" </> "demo"
+          repositoryPath = temporaryHome </> repositoryPathEntry
+      runGitFixtureCommand
+        [ "-c",
+          "protocol.file.allow=always",
+          "-C",
+          temporaryHome,
+          "submodule",
+          "add",
+          "--quiet",
+          temporaryRemote,
+          repositoryPathEntry
+        ]
+      originalGitmodules <- TIO.readFile (temporaryHome </> ".gitmodules")
+      (expectedExit, expectedStdout, expectedStderr) <-
+        readProcessWithExitCode
+          "git"
+          ["-C", temporaryHome, "rm", "--dry-run", "--quiet", "--", repositoryPathEntry]
+          ""
+      assertBool "Git refuses to remove a newly staged submodule without force." (expectedExit /= ExitSuccess)
+      (actualExit, actualStdout, actualStderr) <-
+        withEnvironmentVariable "HOME" temporaryHome $
+          runEndToEndCommandIn temporaryHome ["rm", repositoryPath]
+      assertEqual "Canonicalization propagates git rm's exit status." expectedExit actualExit
+      assertEqual "Canonicalization propagates git rm's stdout." expectedStdout actualStdout
+      assertEqual "Canonicalization propagates git rm's stderr without a wrapper prefix." expectedStderr actualStderr
+      TIO.readFile (temporaryHome </> ".gitmodules")
+        >>= assertEqual "A refused removal leaves .gitmodules unchanged." originalGitmodules
+      doesPathExist repositoryPath
+        >>= assertBool "A refused removal leaves the submodule worktree intact."
 addSummaryAndCheckEndToEndTest :: IO ()
 addSummaryAndCheckEndToEndTest =
   withTemporaryPackageRepository "add-summary-check-end-to-end" $ \temporaryRepository -> do
