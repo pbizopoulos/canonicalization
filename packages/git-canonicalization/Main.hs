@@ -80,7 +80,6 @@ type CheckTemplateSpec :: Type
 data CheckTemplateSpec = CheckTemplateSpec
   { checkTemplateName :: FilePath,
     checkTemplateMatches :: FilePath -> String -> IO Bool,
-    checkTemplateAllowedDifferenceKeys :: Set.Set T.Text,
     checkTemplateBaselineSource :: T.Text,
     checkTemplateComparisonMode :: CheckTemplateComparisonMode
   }
@@ -221,105 +220,90 @@ checkTemplateSpecs =
   [ CheckTemplateSpec
       { checkTemplateName = "haskell_coverage_check",
         checkTemplateMatches = matchesHaskellCoverageCheck,
-        checkTemplateAllowedDifferenceKeys = Set.empty,
         checkTemplateBaselineSource = haskellCoverageCheckBaselineNixSource,
         checkTemplateComparisonMode = ExactCheckTemplate
       },
     CheckTemplateSpec
       { checkTemplateName = "haskell_profile_check",
         checkTemplateMatches = matchesHaskellProfileCheck,
-        checkTemplateAllowedDifferenceKeys = Set.empty,
         checkTemplateBaselineSource = haskellProfileCheckBaselineNixSource,
         checkTemplateComparisonMode = ExactCheckTemplate
       },
     CheckTemplateSpec
       { checkTemplateName = "haskell_property_testing_check",
         checkTemplateMatches = matchesHaskellPropertyTestingCheck,
-        checkTemplateAllowedDifferenceKeys = Set.empty,
         checkTemplateBaselineSource = haskellPropertyTestingCheckBaselineNixSource,
         checkTemplateComparisonMode = ExactCheckTemplate
       },
     CheckTemplateSpec
       { checkTemplateName = "python_coverage_check",
         checkTemplateMatches = matchesPythonCoverageCheck,
-        checkTemplateAllowedDifferenceKeys = Set.empty,
         checkTemplateBaselineSource = pythonCoverageCheckBaselineNixSource,
         checkTemplateComparisonMode = ExactCheckTemplate
       },
     CheckTemplateSpec
       { checkTemplateName = "python_profile_check",
         checkTemplateMatches = matchesPythonProfileCheck,
-        checkTemplateAllowedDifferenceKeys = Set.empty,
         checkTemplateBaselineSource = pythonProfileCheckBaselineNixSource,
         checkTemplateComparisonMode = ExactCheckTemplate
       },
     CheckTemplateSpec
       { checkTemplateName = "python_property_testing_check",
         checkTemplateMatches = matchesPythonPropertyTestingCheck,
-        checkTemplateAllowedDifferenceKeys = Set.empty,
         checkTemplateBaselineSource = pythonPropertyTestingCheckBaselineNixSource,
         checkTemplateComparisonMode = ExactCheckTemplate
       },
     CheckTemplateSpec
       { checkTemplateName = "rust_coverage_check",
         checkTemplateMatches = matchesRustCoverageCheck,
-        checkTemplateAllowedDifferenceKeys = Set.empty,
         checkTemplateBaselineSource = rustCoverageCheckBaselineNixSource,
         checkTemplateComparisonMode = ExactCheckTemplate
       },
     CheckTemplateSpec
       { checkTemplateName = "rust_profile_check",
         checkTemplateMatches = matchesRustProfileCheck,
-        checkTemplateAllowedDifferenceKeys = Set.empty,
         checkTemplateBaselineSource = rustProfileCheckBaselineNixSource,
         checkTemplateComparisonMode = ExactCheckTemplate
       },
     CheckTemplateSpec
       { checkTemplateName = "rust_property_testing_check",
         checkTemplateMatches = matchesRustPropertyTestingCheck,
-        checkTemplateAllowedDifferenceKeys = Set.empty,
         checkTemplateBaselineSource = rustPropertyTestingCheckBaselineNixSource,
         checkTemplateComparisonMode = ExactCheckTemplate
       },
     CheckTemplateSpec
       { checkTemplateName = "rust_mutation_testing_check",
         checkTemplateMatches = matchesRustMutationTestingCheck,
-        checkTemplateAllowedDifferenceKeys = Set.empty,
         checkTemplateBaselineSource = rustMutationTestingCheckBaselineNixSource,
         checkTemplateComparisonMode = ExactCheckTemplate
       },
     CheckTemplateSpec
       { checkTemplateName = "html_template_check",
         checkTemplateMatches = matchesHtmlPackageDefaultCheck,
-        checkTemplateAllowedDifferenceKeys = Set.empty,
         checkTemplateBaselineSource = htmlTemplateCheckBaselineNixSource,
         checkTemplateComparisonMode = ExactCheckTemplate
       },
     CheckTemplateSpec
       { checkTemplateName = "c_template_check",
         checkTemplateMatches = \checkName _ -> pure (checkName == "c_template"),
-        checkTemplateAllowedDifferenceKeys = Set.empty,
         checkTemplateBaselineSource = cTemplateCheckBaselineNixSource,
         checkTemplateComparisonMode = ExactCheckTemplate
       },
     CheckTemplateSpec
       { checkTemplateName = "c_package_vm_check",
         checkTemplateMatches = matchesCPackageVmCheck,
-        checkTemplateAllowedDifferenceKeys = Set.empty,
         checkTemplateBaselineSource = cTemplateCheckBaselineNixSource,
         checkTemplateComparisonMode = StructuralCPackageVm
       },
     CheckTemplateSpec
       { checkTemplateName = "default_vm_with_disko_check",
         checkTemplateMatches = matchesDefaultVmWithDiskoCheck,
-        checkTemplateAllowedDifferenceKeys = Set.empty,
         checkTemplateBaselineSource = defaultVmWithDiskoCheckBaselineNixSource,
         checkTemplateComparisonMode = ExactCheckTemplate
       },
     CheckTemplateSpec
       { checkTemplateName = "host_default_check",
         checkTemplateMatches = \checkName _ -> pure (checkName == "host_default"),
-        checkTemplateAllowedDifferenceKeys = Set.empty,
         checkTemplateBaselineSource = hostDefaultCheckBaselineNixSource,
         checkTemplateComparisonMode = ExactCheckTemplate
       }
@@ -367,21 +351,6 @@ isCPackageVmCheckShape packageKind nixSource =
     && "pkgs.testers.runNixOSTest" `isInfixOf` nixSource
     && "nodes.machine" `isInfixOf` nixSource
     && "testScript = ''" `isInfixOf` nixSource
-type CheckOutcome :: Type
-data CheckOutcome = CheckPassed | CheckFailed | CheckSkipped deriving stock (Eq, Show)
-checkOutcomeFromIssues :: [a] -> CheckOutcome
-checkOutcomeFromIssues = \case [] -> CheckPassed; _ -> CheckFailed
-type PackageTest :: Type
-data PackageTest = PackageTest String CheckOutcome [PackageTestCase]
-type PackageTestCase :: Type
-data PackageTestCase = PackageTestCase String CheckOutcome [String]
-type PackageCheck :: Type
-data PackageCheck = PackageCheck
-  { packageCheckName :: String,
-    packageCheckKind :: PackageKind,
-    packageCheckTests :: [PackageTest],
-    packageCheckIssues :: [String]
-  }
 type RepositoryCheckKind :: Type
 data RepositoryCheckKind
   = RepositoryDefaultCheck
@@ -806,10 +775,10 @@ collectRepositoryContentComplianceWith canonicalizationSettings = do
     then pure (Left ("directory-structure", repositoryStructureIssues))
     else do
       packageNames <- listSubdirectoryNames "packages"
-      packageChecks <- forM packageNames (checkPackageWith canonicalizationSettings [])
+      packageComplianceIssues <- concat <$> forM packageNames (checkPackageWith canonicalizationSettings [])
       checkNames <- listSubdirectoryNames "checks"
       checkComplianceIssues <- concat <$> forM checkNames checkTemplateWith
-      let fileComplianceIssues = concatMap packageCheckIssues packageChecks ++ checkComplianceIssues
+      let fileComplianceIssues = packageComplianceIssues ++ checkComplianceIssues
       if not (null fileComplianceIssues)
         then pure (Left ("file-compliance", fileComplianceIssues))
         else
@@ -1453,7 +1422,6 @@ type PackageInfo :: Type
 data PackageInfo = PackageInfo
   { packageRootPath :: FilePath,
     packageRootDirectoryName :: FilePath,
-    packageLeafPaths :: [FilePath],
     detectedPackageKind :: PackageKind,
     matchedPackageMarkers :: [String]
   }
@@ -1470,7 +1438,6 @@ buildPackageInfo leafPaths packageRootDirectory =
    in PackageInfo
         { packageRootPath = packageRootDirectory,
           packageRootDirectoryName = packageDirectoryName,
-          packageLeafPaths = packageRelativeLeafPaths,
           detectedPackageKind = detectPackageKindFromMarkers markers,
           matchedPackageMarkers = map fst markers
         }
@@ -1578,7 +1545,7 @@ listSubdirectoryNames parentDirectory = do
       childNames <- listDirectory parentDirectory
       childIsDirectoryFlags <- forM childNames $ \childName -> doesDirectoryExist (parentDirectory </> childName)
       pure $ sort [childName | (childName, isDirectory) <- zip childNames childIsDirectoryFlags, isDirectory]
-checkPackageWith :: CanonicalizationSettings -> [String] -> FilePath -> IO PackageCheck
+checkPackageWith :: CanonicalizationSettings -> [String] -> FilePath -> IO [String]
 checkPackageWith canonicalizationSettings allRepositoryStructureIssues packageName = do
   let packageDefaultNixPath = "packages" </> packageName </> "default.nix"
       packageStructureIssues =
@@ -1631,102 +1598,16 @@ checkPackageWith canonicalizationSettings allRepositoryStructureIssues packageNa
   pythonTestConventionIssues <- checkPythonTestConventions packageName packageKind
   haskellTestConventionIssues <- checkHaskellTestConventions packageName packageKind
   rustTestConventionIssues <- checkRustTestConventions packageName packageKind
-  pythonUnitTestNames <- discoverPythonUnitTestNames packageName packageKind
-  haskellUnitTestNames <- discoverHaskellUnitTestNames packageName packageKind
-  rustUnitTestNames <- discoverRustUnitTestNames packageName packageKind
-  let cargoTomlOutcome = checkOutcomeFromIssues cargoTomlIssues
-      cabalFileOutcome = checkOutcomeFromIssues cabalFileIssues
-      makePackageTestCase testCaseName outcome issues =
-        PackageTestCase
-          testCaseName
-          outcome
-          (if outcome == CheckFailed then issues else [])
-      makePackageTest testName outcome testCaseName issues =
-        PackageTest
-          testName
-          outcome
-          [makePackageTestCase testCaseName outcome issues]
-      defaultNixIssues =
-        [issue | issue <- packageStructureIssues, "/default.nix" `isInfixOf` issue]
-          ++ templateIssues
-      defaultNixOutcome =
-        if packageDefaultNixExists && null defaultNixIssues
-          then CheckPassed
-          else CheckFailed
-      pythonTestConventionOutcome = if packageKind `elem` [PythonPackage, PythonLatexPackage] then checkOutcomeFromIssues pythonTestConventionIssues else CheckSkipped
-      haskellTestConventionOutcome = if packageKind == HaskellPackage then checkOutcomeFromIssues haskellTestConventionIssues else CheckSkipped
-      rustTestConventionOutcome = if packageKind == RustPackage then checkOutcomeFromIssues rustTestConventionIssues else CheckSkipped
-      basePackageTests =
-        [ PackageTest
-            "directory structure"
-            (checkOutcomeFromIssues packageStructureIssues)
-            [],
-          makePackageTest "default.nix" defaultNixOutcome "matches template and policy" defaultNixIssues
-        ]
-      languageSpecificPackageTests =
-        concat
-          [ if packageKind == RustPackage
-              then
-                [ makePackageTest "Cargo.toml" cargoTomlOutcome "matches Cargo.toml conventions" cargoTomlIssues,
-                  PackageTest
-                    "src/main.rs"
-                    rustTestConventionOutcome
-                    ( makePackageTestCase
-                        "defines Rust test cases"
-                        rustTestConventionOutcome
-                        rustTestConventionIssues
-                        : [PackageTestCase rustUnitTestName CheckSkipped [] | rustUnitTestName <- rustUnitTestNames]
-                    )
-                ]
-              else [],
-            if packageKind == HaskellPackage
-              then
-                [ makePackageTest (packageName ++ ".cabal") cabalFileOutcome "matches Cabal conventions" cabalFileIssues,
-                  PackageTest
-                    "Main.hs"
-                    haskellTestConventionOutcome
-                    ( makePackageTestCase
-                        "defines HUnit test cases"
-                        haskellTestConventionOutcome
-                        haskellTestConventionIssues
-                        : [ PackageTestCase
-                              haskellUnitTestName
-                              CheckSkipped
-                              []
-                          | haskellUnitTestName <- if null haskellUnitTestNames then ["No named HUnit test labels discovered"] else haskellUnitTestNames
-                          ]
-                    )
-                ]
-              else [],
-            [ PackageTest
-                "main.py"
-                pythonTestConventionOutcome
-                ( makePackageTestCase
-                    "defines pytest tests"
-                    pythonTestConventionOutcome
-                    pythonTestConventionIssues
-                    : [PackageTestCase pythonUnitTestName CheckSkipped [] | pythonUnitTestName <- pythonUnitTestNames]
-                )
-            | packageKind `elem` [PythonPackage, PythonLatexPackage]
-            ]
-          ]
-      packageTests = basePackageTests ++ languageSpecificPackageTests
-      packageIssues =
-        packageStructureIssues
-          ++ templateIssues
-          ++ defaultNixConventionIssues
-          ++ cargoTomlIssues
-          ++ cabalFileIssues
-          ++ pythonTestConventionIssues
-          ++ haskellTestConventionIssues
-          ++ rustTestConventionIssues
   pure
-    PackageCheck
-      { packageCheckName = packageName,
-        packageCheckKind = packageKind,
-        packageCheckTests = packageTests,
-        packageCheckIssues = packageIssues
-      }
+    ( packageStructureIssues
+        ++ templateIssues
+        ++ defaultNixConventionIssues
+        ++ cargoTomlIssues
+        ++ cabalFileIssues
+        ++ pythonTestConventionIssues
+        ++ haskellTestConventionIssues
+        ++ rustTestConventionIssues
+    )
 checkTemplateWith :: FilePath -> IO [String]
 checkTemplateWith checkName = do
   let checkTemplatePath = "checks" </> checkName </> "default.nix"
@@ -1900,14 +1781,6 @@ checkPythonTestConventions packageName packageKind =
                         ++ "/main.py: python AST validator execution failed: "
                         ++ compactTextToSingleLine (T.pack validatorStderr)
                     ]
-discoverPythonUnitTestNames :: FilePath -> PackageKind -> IO [String]
-discoverPythonUnitTestNames packageName packageKind =
-  if packageKind `notElem` [PythonPackage, PythonLatexPackage]
-    then pure []
-    else do
-      let mainPythonPath = "packages" </> packageName </> "main.py"
-      maybeMainPythonSourceText <- readTextFileIfExists mainPythonPath
-      pure (maybe [] (discoverPythonUnitTestNamesFromSource . T.unpack) maybeMainPythonSourceText)
 discoverPythonUnitTestNamesFromSource :: String -> [String]
 discoverPythonUnitTestNamesFromSource pythonSource =
   let extractedPythonUnitTestNames =
@@ -1950,14 +1823,6 @@ checkHaskellTestConventions packageName packageKind =
                   then Nothing
                   else Just ("packages/" ++ packageName ++ "/Main.hs: missing discoverable HUnit test suite")
               ]
-discoverHaskellUnitTestNames :: FilePath -> PackageKind -> IO [String]
-discoverHaskellUnitTestNames packageName packageKind =
-  if packageKind /= HaskellPackage
-    then pure []
-    else do
-      let mainHaskellPath = "packages" </> packageName </> "Main.hs"
-      maybeMainHaskellSourceText <- readTextFileIfExists mainHaskellPath
-      pure (maybe [] (discoverHaskellUnitTestNamesFromSource . T.unpack) maybeMainHaskellSourceText)
 discoverHaskellUnitTestNamesFromSource :: String -> [String]
 discoverHaskellUnitTestNamesFromSource haskellSource =
   let haskellSourceLines = lines haskellSource
@@ -2031,14 +1896,6 @@ checkRustTestConventions packageName packageKind =
               then Nothing
               else Just ("packages/" ++ packageName ++ "/src/main.rs: missing #[test] test cases")
           ]
-discoverRustUnitTestNames :: FilePath -> PackageKind -> IO [String]
-discoverRustUnitTestNames packageName packageKind =
-  if packageKind /= RustPackage
-    then pure []
-    else do
-      let mainRustPath = "packages" </> packageName </> "src/main.rs"
-      maybeMainRustSourceText <- readTextFileIfExists mainRustPath
-      pure (maybe [] (discoverRustUnitTestNamesFromSource . T.unpack) maybeMainRustSourceText)
 discoverRustUnitTestNamesFromSource :: String -> [String]
 discoverRustUnitTestNamesFromSource rustSource =
   extractRustUnitTestNames (lines rustSource)
