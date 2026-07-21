@@ -25,14 +25,28 @@ pkgs.runCommand checkName
   ''
     export HOME="$(mktemp -d)"
     mkdir -p "$out/html"
-    python -m pytest --cov="$src" --cov-report term --cov-report "json:$out/report.json" --cov-report "html:$out/html" "$src/main.py"
-    python - "$out/report.json" "$out/coverage-summary.tsv" <<'PY'
+    python -m pytest --cov="$src" --cov-report term --cov-report "json:$out/report.json" --cov-report "html:$out/html" --junitxml="$out/junit.xml" "$src/main.py"
+    python - "$src/main.py" "$out/report.json" "$out/junit.xml" "$out/coverage-summary.tsv" "$out/test-timings.tsv" <<'PY'
+    import ast
     import json
     import pathlib
+    import re
     import sys
-    totals = json.loads(pathlib.Path(sys.argv[1]).read_text())["totals"]
-    pathlib.Path(sys.argv[2]).write_text(
+    import xml.etree.ElementTree as ET
+    source_path, report_path, junit_path, coverage_path, timings_path = map(pathlib.Path, sys.argv[1:])
+    totals = json.loads(report_path.read_text())["totals"]
+    coverage_path.write_text(
         f"coverage-v1\tstatements\t{totals['covered_lines']}\t{totals['num_statements']}\n"
     )
+    specifications = {}
+    for node in ast.parse(source_path.read_text()).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
+            words = re.sub(r"^test_(?:property_)?", "", node.name).replace("_", " ")
+            specifications[node.name] = ast.get_docstring(node) or words[:1].upper() + words[1:] + "."
+    timing_lines = []
+    for test_case in sorted(ET.parse(junit_path).iter("testcase"), key=lambda element: element.attrib["name"]):
+        test_name = test_case.attrib["name"].split("[", 1)[0]
+        timing_lines.append(f"test\t{test_case.attrib['time']}\t{specifications[test_name]}")
+    timings_path.write_text("\n".join(timing_lines) + "\n")
     PY
   ''

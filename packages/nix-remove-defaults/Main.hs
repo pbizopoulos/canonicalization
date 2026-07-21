@@ -4,7 +4,8 @@
 {-# LANGUAGE StandaloneKindSignatures #-}
 {-# LANGUAGE Trustworthy #-}
 {-# OPTIONS_GHC -Wno-all-missed-specialisations -Wno-missed-specialisations -Wno-unsafe #-}
-module Main (main, runPackageTests) where
+module Main (main, runPackageTests, runPackageTestsWithTimings) where
+import Control.Exception (finally)
 import Control.Monad (mapM_, unless, when)
 import Data.Aeson (Value (Array, Bool, Null, Number, Object, String), eitherDecodeStrict', encode)
 import Data.Aeson.Key qualified as Key
@@ -25,6 +26,7 @@ import Data.Scientific (floatingOrInteger)
 import Data.Text (Text, intercalate, pack, unpack)
 import Data.Text.Encoding qualified as Text
 import Data.Text.IO qualified as TIO
+import GHC.Clock (getMonotonicTimeNSec)
 import Nix.Atoms (NAtom (NBool, NFloat, NInt, NNull))
 import Nix.Expr.Types
   ( Antiquoted (Plain),
@@ -39,6 +41,7 @@ import Nix.Expr.Types.Annotated (AnnUnit (AnnUnit), NExprLoc, stripAnnotation)
 import Nix.Parser (parseNixFileLoc)
 import Nix.Pretty (prettyNix)
 import Nix.Utils (Path (Path))
+import Numeric (showFFloat)
 import Prettyprinter (defaultLayoutOptions, layoutPretty)
 import Prettyprinter.Render.Text (renderStrict)
 import System.Directory (doesDirectoryExist, doesFileExist, listDirectory, makeAbsolute)
@@ -58,6 +61,7 @@ import Test.HUnit
   )
 import Prelude
   ( Bool (False, True),
+    Double,
     Either (Left, Right),
     Eq,
     FilePath,
@@ -70,9 +74,11 @@ import Prelude
     String,
     and,
     any,
+    appendFile,
     concat,
     concatMap,
     fmap,
+    fromIntegral,
     fst,
     map,
     mapM,
@@ -82,10 +88,13 @@ import Prelude
     putStrLn,
     show,
     snd,
+    writeFile,
     ($),
     (&&),
     (++),
+    (-),
     (.),
+    (/),
     (<$>),
     (==),
     (>>=),
@@ -646,11 +655,30 @@ makeTreefmtRemovalTest defaults input expectedOutput = TestCase $ do
   actualOutput <- formatTreefmtWithDefaults defaults input
   assertEqual "formatted output" expectedOutput actualOutput
 runPackageTests :: IO ()
-runPackageTests = do
-  counts <- runTestTT hUnitPackageTests
+runPackageTests = runPackageTestsWith hUnitPackageTests
+runPackageTestsWithTimings :: FilePath -> IO ()
+runPackageTestsWithTimings timingsPath = do
+  writeFile timingsPath ""
+  runPackageTestsWith (timeHUnitTests timingsPath hUnitPackageTests)
+runPackageTestsWith :: Test -> IO ()
+runPackageTestsWith packageTests = do
+  counts <- runTestTT packageTests
   if errors counts == 0 && failures counts == 0
     then putStrLn "test ... ok"
     else exitFailure
+timeHUnitTests :: FilePath -> Test -> Test
+timeHUnitTests timingsPath (TestLabel testName (TestCase testAction)) = TestLabel testName (TestCase (timeTestAction timingsPath testName testAction))
+timeHUnitTests timingsPath (TestLabel testName nestedTest) = TestLabel testName (timeHUnitTests timingsPath nestedTest)
+timeHUnitTests timingsPath (TestList nestedTests) = TestList (map (timeHUnitTests timingsPath) nestedTests)
+timeHUnitTests _ testCase = testCase
+timeTestAction :: FilePath -> String -> IO a -> IO a
+timeTestAction timingsPath testName testAction = do
+  startedAt <- getMonotonicTimeNSec
+  testAction
+    `finally` do
+      finishedAt <- getMonotonicTimeNSec
+      let elapsedSeconds = fromIntegral (finishedAt - startedAt) / 1000000000 :: Double
+      appendFile timingsPath ("test\t" ++ showFFloat (Just 6) elapsedSeconds "" ++ "\t" ++ testName ++ "\n")
 hUnitPackageTests :: Test
 hUnitPackageTests =
   TestList

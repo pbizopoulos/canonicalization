@@ -818,6 +818,7 @@ data RepositoryPackageSummary = RepositoryPackageSummary
     repositoryPackageType :: String,
     repositoryPackageDescription :: Maybe String,
     repositoryPackageTestNames :: [String],
+    repositoryPackageTestDurations :: Map.Map String Double,
     repositoryPackageChecks :: RepositoryPackageChecksSummary,
     repositoryPackageCoverage :: RepositoryPackageCoverageSummary,
     repositoryPackageProfile :: RepositoryPackageProfileSummary
@@ -866,7 +867,7 @@ renderRepositoryPackageSummaryJson packageSummary =
       "      \"checks\": " ++ renderRepositoryPackageChecksJson (repositoryPackageChecks packageSummary) ++ ",",
       "      \"coverage\": " ++ renderRepositoryPackageCoverageJson (repositoryPackageCoverage packageSummary) ++ ",",
       "      \"profile\": " ++ renderRepositoryPackageProfileJson (repositoryPackageProfile packageSummary) ++ ",",
-      "      \"testDurationsSeconds\": " ++ renderRepositoryPackageTestDurationsJson (repositoryPackageProfile packageSummary) ++ ",",
+      "      \"testDurationsSeconds\": " ++ renderRepositoryPackageTestDurationsJson (repositoryPackageTestDurations packageSummary) ++ ",",
       "      \"tests\": " ++ "[" ++ intercalate ", " (map renderJsonString (repositoryPackageTestNames packageSummary)) ++ "]",
       "    }"
     ]
@@ -936,22 +937,21 @@ renderRepositoryPackageProfileJson = \case
   RepositoryProfileMeasured totalSeconds _ -> "{ \"status\": \"measured\", \"totalSeconds\": " ++ renderProfileSeconds totalSeconds ++ " }"
 renderRepositoryPackageTestText :: RepositoryPackageSummary -> String -> String
 renderRepositoryPackageTestText packageSummary testName =
-  case repositoryPackageProfile packageSummary of
-    RepositoryProfileMeasured _ testDurations ->
-      case Map.lookup testName testDurations of
-        Just seconds ->
-          let renderedSeconds = renderProfileSeconds seconds
-              durationWidth = maximum (map (length . renderProfileSeconds) (Map.elems testDurations))
-           in "(" ++ replicate (durationWidth - length renderedSeconds) ' ' ++ renderedSeconds ++ "s) " ++ testName
-        Nothing -> testName
-    _ -> testName
-renderRepositoryPackageTestDurationsJson :: RepositoryPackageProfileSummary -> String
-renderRepositoryPackageTestDurationsJson = \case
-  RepositoryProfileMeasured _ testDurations ->
-    "{ "
-      ++ intercalate ", " [renderJsonString testName ++ ": " ++ renderProfileSeconds seconds | (testName, seconds) <- Map.toAscList testDurations]
-      ++ " }"
-  _ -> "{}"
+  case Map.lookup testName testDurations of
+    Just seconds ->
+      let renderedSeconds = renderProfileSeconds seconds
+          durationWidth = maximum (map (length . renderProfileSeconds) (Map.elems testDurations))
+       in "(" ++ replicate (durationWidth - length renderedSeconds) ' ' ++ renderedSeconds ++ "s) " ++ testName
+    Nothing -> testName
+  where
+    testDurations = repositoryPackageTestDurations packageSummary
+renderRepositoryPackageTestDurationsJson :: Map.Map String Double -> String
+renderRepositoryPackageTestDurationsJson testDurations
+  | not (Map.null testDurations) =
+      "{ "
+        ++ intercalate ", " [renderJsonString testName ++ ": " ++ renderProfileSeconds seconds | (testName, seconds) <- Map.toAscList testDurations]
+        ++ " }"
+  | otherwise = "{}"
 renderProfileSeconds :: Double -> String
 renderProfileSeconds seconds = showFFloat (Just 3) seconds ""
 summarizeRepositoryPackage :: Maybe (Map.Map FilePath FilePath) -> Set.Set FilePath -> FilePath -> IO RepositoryPackageSummary
@@ -1001,12 +1001,20 @@ summarizeRepositoryPackage checkOutputPaths repositoryCheckNames packageName = d
     summarizeRepositoryPackageCoverage checkOutputPaths packageKind packageName (repositoryPackageHasCoverageCheck repositoryPackageChecksValue)
   repositoryPackageProfileValue <-
     summarizeRepositoryPackageProfile checkOutputPaths packageKind packageName (repositoryPackageHasProfileCheck repositoryPackageChecksValue)
+  repositoryPackageTestDurationsValue <-
+    summarizeRepositoryPackageTestDurations
+      checkOutputPaths
+      packageKind
+      packageName
+      repositoryPackageChecksValue
+      repositoryPackageProfileValue
   pure
     RepositoryPackageSummary
       { repositoryPackageName = packageName,
         repositoryPackageType = renderPackageKind packageKind,
         repositoryPackageDescription = repositoryPackageDescriptionValue,
         repositoryPackageTestNames = repositoryPackageTestNamesValue,
+        repositoryPackageTestDurations = repositoryPackageTestDurationsValue,
         repositoryPackageChecks = repositoryPackageChecksValue,
         repositoryPackageCoverage = repositoryPackageCoverageValue,
         repositoryPackageProfile = repositoryPackageProfileValue
@@ -1091,11 +1099,31 @@ parseRepositoryProfileSummary profileText =
       totalSeconds <- case T.splitOn "\t" headerLine of
         ["profile-v1", "total-seconds", secondsText] -> readMaybe (T.unpack secondsText)
         _ -> Nothing
-      testDurations <- Map.fromList <$> mapM parseTestLine testLines
-      if totalSeconds >= 0 && all (>= 0) (Map.elems testDurations) && Map.size testDurations == length testLines
+      testDurations <- parseRepositoryTestTimingLines testLines
+      if totalSeconds >= 0
         then Just (RepositoryProfileMeasured totalSeconds testDurations)
         else Nothing
     [] -> Nothing
+summarizeRepositoryPackageTestDurations :: Maybe (Map.Map FilePath FilePath) -> PackageKind -> FilePath -> RepositoryPackageChecksSummary -> RepositoryPackageProfileSummary -> IO (Map.Map String Double)
+summarizeRepositoryPackageTestDurations checkOutputPaths packageKind packageName packageChecks packageProfile =
+  case packageProfile of
+    RepositoryProfileMeasured _ testDurations -> pure testDurations
+    _
+      | repositoryPackageHasCoverageCheck packageChecks ->
+          case checkOutputPaths >>= \outputPaths -> repositoryCheckNameForKind packageKind packageName RepositoryCoverageCheck >>= (`Map.lookup` outputPaths) of
+            Nothing -> pure Map.empty
+            Just outputPath -> do
+              maybeTimingsText <- readTextFileIfExists (outputPath </> "test-timings.tsv")
+              pure (fromMaybe Map.empty (maybeTimingsText >>= parseRepositoryTestTimings))
+      | otherwise -> pure Map.empty
+parseRepositoryTestTimings :: T.Text -> Maybe (Map.Map String Double)
+parseRepositoryTestTimings = parseRepositoryTestTimingLines . T.lines
+parseRepositoryTestTimingLines :: [T.Text] -> Maybe (Map.Map String Double)
+parseRepositoryTestTimingLines testLines = do
+  testDurations <- Map.fromList <$> mapM parseTestLine testLines
+  if all (>= 0) (Map.elems testDurations) && Map.size testDurations == length testLines
+    then Just testDurations
+    else Nothing
   where
     parseTestLine :: T.Text -> Maybe (String, Double)
     parseTestLine testLine =
@@ -1667,7 +1695,7 @@ toRelativePath = makeRelative "."
 shouldTraverseDirectory :: FilePath -> Bool
 shouldTraverseDirectory repositoryPath =
   all
-    (`notElem` ["tmp", "prm", "target", "result", ".codex"])
+    (`notElem` ["tmp", "prm", "target", "result", ".agents", ".codex"])
     (splitDirectories repositoryPath)
 isLeafPath :: [FilePath] -> FilePath -> Bool
 isLeafPath repositoryPaths candidatePath =
@@ -2772,6 +2800,10 @@ repositoryCoverageParsingTest = do
     "A valid profile artifact preserves total and per-test durations."
     (Just (RepositoryProfileMeasured 1.25 (Map.fromList [("Reports behavior.", 0.125)])))
     (parseRepositoryProfileSummary "profile-v1\ttotal-seconds\t1.25\ntest\t0.125\tReports behavior.\n")
+  assertEqual
+    "A coverage timing artifact preserves per-test durations without a profile check."
+    (Just (Map.fromList [("Reports behavior.", 0.125)]))
+    (parseRepositoryTestTimings "test\t0.125\tReports behavior.\n")
 repositorySummaryRenderingTest :: IO ()
 repositorySummaryRenderingTest = do
   let packageSummary =
@@ -2780,6 +2812,7 @@ repositorySummaryRenderingTest = do
             repositoryPackageType = "python",
             repositoryPackageDescription = Nothing,
             repositoryPackageTestNames = ["Reports \"quoted\" behavior."],
+            repositoryPackageTestDurations = Map.fromList [("Reports \"quoted\" behavior.", 0.125)],
             repositoryPackageChecks =
               RepositoryPackageChecksSummary
                 { repositoryPackageHasCheck = False,
@@ -3182,6 +3215,7 @@ expectedGeneratedPythonPackageSummary =
           "The default message should summarize unique canonical labels.",
           "main() should emit the canonical label summary."
         ],
+      repositoryPackageTestDurations = Map.empty,
       repositoryPackageChecks =
         RepositoryPackageChecksSummary
           { repositoryPackageHasCheck = False,
@@ -3200,6 +3234,7 @@ expectedGeneratedHaskellPackageSummary =
       repositoryPackageType = "haskell",
       repositoryPackageDescription = Just "Demo package",
       repositoryPackageTestNames = ["Renders the sample message."],
+      repositoryPackageTestDurations = Map.empty,
       repositoryPackageChecks =
         RepositoryPackageChecksSummary
           { repositoryPackageHasCheck = False,
@@ -4618,15 +4653,29 @@ pythonCoverageCheckBaselineNixSource =
       "  ''",
       "    export HOME=\"$(mktemp -d)\"",
       "    mkdir -p \"$out/html\"",
-      "    python -m pytest --cov=\"$src\" --cov-report term --cov-report \"json:$out/report.json\" --cov-report \"html:$out/html\" \"$src/main.py\"",
-      "    python - \"$out/report.json\" \"$out/coverage-summary.tsv\" <<'PY'",
+      "    python -m pytest --cov=\"$src\" --cov-report term --cov-report \"json:$out/report.json\" --cov-report \"html:$out/html\" --junitxml=\"$out/junit.xml\" \"$src/main.py\"",
+      "    python - \"$src/main.py\" \"$out/report.json\" \"$out/junit.xml\" \"$out/coverage-summary.tsv\" \"$out/test-timings.tsv\" <<'PY'",
+      "    import ast",
       "    import json",
       "    import pathlib",
+      "    import re",
       "    import sys",
-      "    totals = json.loads(pathlib.Path(sys.argv[1]).read_text())[\"totals\"]",
-      "    pathlib.Path(sys.argv[2]).write_text(",
+      "    import xml.etree.ElementTree as ET",
+      "    source_path, report_path, junit_path, coverage_path, timings_path = map(pathlib.Path, sys.argv[1:])",
+      "    totals = json.loads(report_path.read_text())[\"totals\"]",
+      "    coverage_path.write_text(",
       "        f\"coverage-v1\\tstatements\\t{totals['covered_lines']}\\t{totals['num_statements']}\\n\"",
       "    )",
+      "    specifications = {}",
+      "    for node in ast.parse(source_path.read_text()).body:",
+      "        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith(\"test_\"):",
+      "            words = re.sub(r\"^test_(?:property_)?\", \"\", node.name).replace(\"_\", \" \")",
+      "            specifications[node.name] = ast.get_docstring(node) or words[:1].upper() + words[1:] + \".\"",
+      "    timing_lines = []",
+      "    for test_case in sorted(ET.parse(junit_path).iter(\"testcase\"), key=lambda element: element.attrib[\"name\"]):",
+      "        test_name = test_case.attrib[\"name\"].split(\"[\", 1)[0]",
+      "        timing_lines.append(f\"test\\t{test_case.attrib['time']}\\t{specifications[test_name]}\")",
+      "    timings_path.write_text(\"\\n\".join(timing_lines) + \"\\n\")",
       "    PY",
       "  ''"
     ]
