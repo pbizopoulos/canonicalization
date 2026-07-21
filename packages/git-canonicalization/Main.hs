@@ -1018,7 +1018,7 @@ resolveRepositoryCheckOutputPaths resultCheckNames = do
   let nixExpression =
         unlines
           [ "let",
-            "  flake = builtins.getFlake " ++ renderJsonString ("path:" ++ repositoryRoot) ++ ";",
+            "  flake = builtins.getFlake " ++ renderJsonString (localGitFlakeReference repositoryRoot) ++ ";",
             "  checks = flake.checks.${builtins.currentSystem};",
             "  checkNames = [ " ++ unwords (map renderJsonString resultCheckNames) ++ " ];",
             "in",
@@ -1030,6 +1030,8 @@ resolveRepositoryCheckOutputPaths resultCheckNames = do
       Right (ExitSuccess, outputPathsText, _) -> parseRepositoryCheckOutputPaths resultCheckNames (T.pack outputPathsText)
       Right _ -> Nothing
       Left (_ :: IOException) -> Nothing
+localGitFlakeReference :: FilePath -> String
+localGitFlakeReference repositoryRoot = "git+file://" ++ repositoryRoot
 parseRepositoryCheckOutputPaths :: [FilePath] -> T.Text -> Maybe (Map.Map FilePath FilePath)
 parseRepositoryCheckOutputPaths expectedCheckNames outputPathsText = do
   entries <- mapM parseEntry (T.lines outputPathsText)
@@ -2739,6 +2741,10 @@ testIdentifierSpecificationTest =
     )
 repositoryCoverageParsingTest :: IO ()
 repositoryCoverageParsingTest = do
+  assertEqual
+    "Local flake evaluation uses Git filtering so ignored repository files are excluded."
+    "git+file:///tmp/example-repository"
+    (localGitFlakeReference "/tmp/example-repository")
   assertEqual
     "A valid coverage artifact preserves its labeled numerator and denominator."
     (Just (RepositoryCoverageMeasured "lines" 91 100))
