@@ -15,6 +15,7 @@ pkgs.runCommand checkName
     nativeBuildInputs = [
       packageDrv
       pkgs.git
+      pkgs.time
       profileGhc
     ];
     src = ../.. + "/packages/${packageName}";
@@ -23,13 +24,14 @@ pkgs.runCommand checkName
     export HOME="$PWD"
     workspace="$PWD/workspace"
     packageName="${packageName}"
-    mkdir -p "$workspace"
+    mkdir -p "$out" "$workspace"
     cd "$workspace"
     cat > "$workspace/TestMain.hs" <<EOF
     module TestMain (main) where
     import qualified Main as PackageMain
+    import System.Environment (getEnv)
     main :: IO ()
-    main = PackageMain.runPackageTests
+    main = getEnv "PROFILE_TIMINGS_PATH" >>= PackageMain.runPackageTestsWithTimings
     EOF
     "${profileGhc}/bin/ghc" \
       -prof \
@@ -44,7 +46,9 @@ pkgs.runCommand checkName
       -o "$workspace/$packageName" \
       "$workspace/TestMain.hs" \
       "$src/Main.hs"
-    "$workspace/$packageName" +RTS -p -RTS
-    cat "$workspace/$packageName.prof"
-    touch "$out"
+    PROFILE_TIMINGS_PATH="$out/test-timings.tsv" ${pkgs.time}/bin/time -f %e -o "$out/total-seconds" \
+      "$workspace/$packageName" +RTS -p -RTS
+    mv "$workspace/$packageName.prof" "$out/report.prof"
+    printf 'profile-v1\ttotal-seconds\t%s\n' "$(cat "$out/total-seconds")" > "$out/profile-summary.tsv"
+    cat "$out/test-timings.tsv" >> "$out/profile-summary.tsv"
   ''

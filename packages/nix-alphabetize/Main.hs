@@ -1,7 +1,8 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE Trustworthy #-}
 {-# OPTIONS_GHC -Wno-unsafe #-}
-module Main (main, runPackageTests) where
+module Main (main, runPackageTests, runPackageTestsWithTimings) where
+import Control.Exception (finally)
 import Data.Fix (Fix (Fix))
 import Data.Function (on)
 import Data.Functor.Compose (Compose (Compose))
@@ -17,6 +18,7 @@ import Data.Text
     unpack,
   )
 import Data.Text.IO qualified as TIO
+import GHC.Clock (getMonotonicTimeNSec)
 import Nix.Expr.Types
   ( Antiquoted (Plain),
     Binding (NamedVar),
@@ -36,6 +38,7 @@ import Nix.Expr.Types.Annotated
 import Nix.Parser (parseNixFileLoc)
 import Nix.Pretty (prettyNix)
 import Nix.Utils (Path (Path))
+import Numeric (showFFloat)
 import Prettyprinter
   ( LayoutOptions (LayoutOptions),
     PageWidth (AvailablePerLine),
@@ -56,21 +59,26 @@ import Test.HUnit
 import Test.QuickCheck qualified as QC
 import Prelude
   ( Bool (False, True),
+    Double,
     Either (Left, Right),
     Eq ((==)),
     FilePath,
     IO,
     Int,
+    Maybe (Just, Nothing),
     Show (show),
     String,
     all,
     any,
+    appendFile,
     concatMap,
     elem,
     fmap,
+    fromIntegral,
     fst,
     map,
     mapM_,
+    maybe,
     notElem,
     otherwise,
     pure,
@@ -78,11 +86,14 @@ import Prelude
     reverse,
     sequence,
     unwords,
+    writeFile,
     zip,
     ($),
     (&&),
     (++),
+    (-),
     (.),
+    (/),
     (||),
   )
 main :: IO ()
@@ -188,19 +199,42 @@ formatText input =
       Left parseError ->
         assertFailure ("Property fixture failed to parse: " ++ show parseError)
 runPackageTests :: IO ()
-runPackageTests = do
-  counts <- runTestTT hUnitPackageTests
-  propertySuccess <- quickCheckFormattingProperties
+runPackageTests = runPackageTestsWith Nothing
+runPackageTestsWithTimings :: FilePath -> IO ()
+runPackageTestsWithTimings timingsPath = do
+  writeFile timingsPath ""
+  runPackageTestsWith (Just timingsPath)
+runPackageTestsWith :: Maybe FilePath -> IO ()
+runPackageTestsWith maybeTimingsPath = do
+  let packageTests = maybe hUnitPackageTests (`timeHUnitTests` hUnitPackageTests) maybeTimingsPath
+  counts <- runTestTT packageTests
+  propertySuccess <- quickCheckFormattingProperties maybeTimingsPath
   if errors counts == 0 && failures counts == 0 && propertySuccess
     then putStrLn "test ... ok"
     else exitFailure
-quickCheckFormattingProperties :: IO Bool
-quickCheckFormattingProperties = do
-  sortedListResult <- QC.quickCheckResult (QC.withMaxSuccess 100 prop_nonStringListsAreSorted)
-  stringOrderResult <- QC.quickCheckResult (QC.withMaxSuccess 100 prop_stringListsPreserveOrder)
-  attrSetResult <- QC.quickCheckResult (QC.withMaxSuccess 100 prop_attrSetsCanonicalizeByKeyOrder)
-  dottedCollapseResult <- QC.quickCheckResult (QC.withMaxSuccess 100 prop_dottedAssignmentsCollapseToCanonicalNestedSets)
+quickCheckFormattingProperties :: Maybe FilePath -> IO Bool
+quickCheckFormattingProperties maybeTimingsPath = do
+  sortedListResult <- timedQuickCheck "Non string lists are sorted." (QC.quickCheckResult (QC.withMaxSuccess 100 prop_nonStringListsAreSorted))
+  stringOrderResult <- timedQuickCheck "String lists preserve order." (QC.quickCheckResult (QC.withMaxSuccess 100 prop_stringListsPreserveOrder))
+  attrSetResult <- timedQuickCheck "Attr sets canonicalize by key order." (QC.quickCheckResult (QC.withMaxSuccess 100 prop_attrSetsCanonicalizeByKeyOrder))
+  dottedCollapseResult <- timedQuickCheck "Dotted assignments collapse to canonical nested sets." (QC.quickCheckResult (QC.withMaxSuccess 100 prop_dottedAssignmentsCollapseToCanonicalNestedSets))
   pure (all isQuickCheckSuccess [sortedListResult, stringOrderResult, attrSetResult, dottedCollapseResult])
+  where
+    timedQuickCheck :: String -> IO QC.Result -> IO QC.Result
+    timedQuickCheck testName testAction = maybe testAction (\timingsPath -> timeTestAction timingsPath testName testAction) maybeTimingsPath
+timeHUnitTests :: FilePath -> Test -> Test
+timeHUnitTests timingsPath (TestLabel testName (TestCase testAction)) = TestLabel testName (TestCase (timeTestAction timingsPath testName testAction))
+timeHUnitTests timingsPath (TestLabel testName nestedTest) = TestLabel testName (timeHUnitTests timingsPath nestedTest)
+timeHUnitTests timingsPath (TestList nestedTests) = TestList (map (timeHUnitTests timingsPath) nestedTests)
+timeHUnitTests _ testCase = testCase
+timeTestAction :: FilePath -> String -> IO a -> IO a
+timeTestAction timingsPath testName testAction = do
+  startedAt <- getMonotonicTimeNSec
+  testAction
+    `finally` do
+      finishedAt <- getMonotonicTimeNSec
+      let elapsedSeconds = fromIntegral (finishedAt - startedAt) / 1000000000 :: Double
+      appendFile timingsPath ("test\t" ++ showFFloat (Just 6) elapsedSeconds "" ++ "\t" ++ testName ++ "\n")
 isQuickCheckSuccess :: QC.Result -> Bool
 isQuickCheckSuccess QC.Success {} = True
 isQuickCheckSuccess _ = False

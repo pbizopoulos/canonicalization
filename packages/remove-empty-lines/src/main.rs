@@ -6,6 +6,9 @@ use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::Path;
 fn main() -> Result<()> {
     let input_paths: Vec<String> = std::env::args().skip(1).collect();
+    return run(input_paths);
+}
+fn run(input_paths: Vec<String>) -> Result<()> {
     if input_paths.is_empty() {
         process_root_path(Path::new("."));
     } else {
@@ -128,7 +131,7 @@ mod tests {
         fs::write(&file_path, "line1\n\nline2\n")?;
         let previous_dir = env::current_dir()?;
         env::set_current_dir(root)?;
-        let result = main();
+        let result = run(Vec::new());
         env::set_current_dir(previous_dir)?;
         result?;
         let content = fs::read_to_string(&file_path)?;

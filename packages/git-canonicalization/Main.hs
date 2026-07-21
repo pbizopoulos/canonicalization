@@ -7,7 +7,7 @@
 {-# LANGUAGE StandaloneKindSignatures #-}
 {-# LANGUAGE Trustworthy #-}
 {-# OPTIONS_GHC -Wno-missing-import-lists -Wno-unsafe #-}
-module Main (main, runPackageTests) where
+module Main (main, runPackageTests, runPackageTestsWithTimings) where
 import Control.Applicative ((<|>))
 import Control.Exception (IOException, finally, try)
 import Control.Monad (filterM, forM, forM_, unless, when)
@@ -24,6 +24,7 @@ import Data.Ord (comparing)
 import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
+import GHC.Clock (getMonotonicTimeNSec)
 import Nix.Expr.Types
   ( Antiquoted (Plain),
     Binding (Inherit, NamedVar),
@@ -385,9 +386,9 @@ runCli canonicalizationSettings commandLineArgs =
             exitFailure
           Right (RepositoryComplianceSuccess packageNames checkNames) -> do
             let repositoryCheckNames = Set.fromList checkNames
-                coverageCheckNames = filter (\checkName -> "-coverage" `isSuffixOf` checkName || "_coverage" `isSuffixOf` checkName) checkNames
-            coverageOutputPaths <- resolveRepositoryCoverageOutputPaths coverageCheckNames
-            packageSummaries <- forM packageNames (summarizeRepositoryPackage coverageOutputPaths repositoryCheckNames)
+                resultCheckNames = filter (\checkName -> any (`isSuffixOf` checkName) ["-coverage", "_coverage", "-profile", "_profile"]) checkNames
+            checkOutputPaths <- resolveRepositoryCheckOutputPaths resultCheckNames
+            packageSummaries <- forM packageNames (summarizeRepositoryPackage checkOutputPaths repositoryCheckNames)
             putStr (render packageSummaries)
    in case commandLineArgs of
         [] -> printMainHelpAndExit (ExitFailure 1)
@@ -798,6 +799,13 @@ data RepositoryPackageCoverageSummary
   | RepositoryCoverageUnavailable
   | RepositoryCoverageMeasured String Integer Integer
   deriving stock (Eq, Show)
+type RepositoryPackageProfileSummary :: Type
+data RepositoryPackageProfileSummary
+  = RepositoryProfileNotConfigured
+  | RepositoryProfileNotRun
+  | RepositoryProfileUnavailable
+  | RepositoryProfileMeasured Double (Map.Map String Double)
+  deriving stock (Eq, Show)
 type RepositoryComplianceSuccess :: Type
 data RepositoryComplianceSuccess = RepositoryComplianceSuccess
   { repositoryCompliancePackageNames :: [FilePath],
@@ -811,26 +819,26 @@ data RepositoryPackageSummary = RepositoryPackageSummary
     repositoryPackageDescription :: Maybe String,
     repositoryPackageTestNames :: [String],
     repositoryPackageChecks :: RepositoryPackageChecksSummary,
-    repositoryPackageCoverage :: RepositoryPackageCoverageSummary
+    repositoryPackageCoverage :: RepositoryPackageCoverageSummary,
+    repositoryPackageProfile :: RepositoryPackageProfileSummary
   }
 renderRepositoryPackageSummariesText :: [RepositoryPackageSummary] -> String
 renderRepositoryPackageSummariesText packageSummaries =
   intercalate
     "\n"
     [ unlines
-        ( let packageChecks = repositoryPackageChecks packageSummary
-           in [ renderRepositoryPackageFieldName "packageName" ++ " " ++ repositoryPackageName packageSummary,
-                renderRepositoryPackageFieldName "packageType" ++ " " ++ repositoryPackageType packageSummary,
-                renderRepositoryPackageFieldName "description" ++ " " ++ fromMaybe "(none)" (repositoryPackageDescription packageSummary),
-                renderRepositoryPackageFieldName "checks"
-              ]
-                ++ case enabledRepositoryPackageCheckNames packageChecks of
-                  [] -> [repositoryPackageValueIndent ++ "(none)"]
-                  checkNames -> [repositoryPackageValueIndent ++ checkName | checkName <- checkNames]
-                ++ [renderRepositoryPackageFieldName "coverage" ++ " " ++ renderRepositoryPackageCoverageText (repositoryPackageCoverage packageSummary), renderRepositoryPackageFieldName "tests"]
-                ++ case repositoryPackageTestNames packageSummary of
-                  [] -> [repositoryPackageValueIndent ++ "(none)"]
-                  testNames -> [repositoryPackageValueIndent ++ testName | testName <- testNames]
+        ( [ renderRepositoryPackageFieldName "packageName" ++ " " ++ repositoryPackageName packageSummary,
+            renderRepositoryPackageFieldName "packageType" ++ " " ++ repositoryPackageType packageSummary,
+            renderRepositoryPackageFieldName "description" ++ " " ++ fromMaybe "(none)" (repositoryPackageDescription packageSummary),
+            renderRepositoryPackageFieldName "checks"
+          ]
+            ++ case enabledRepositoryPackageCheckNames packageSummary of
+              [] -> [repositoryPackageValueIndent ++ "(none)"]
+              checkNames -> [repositoryPackageValueIndent ++ checkName | checkName <- checkNames]
+            ++ [renderRepositoryPackageFieldName "tests"]
+            ++ case repositoryPackageTestNames packageSummary of
+              [] -> [repositoryPackageValueIndent ++ "(none)"]
+              testNames -> [repositoryPackageValueIndent ++ renderRepositoryPackageTestText packageSummary testName | testName <- testNames]
         )
     | packageSummary <- packageSummaries
     ]
@@ -857,6 +865,8 @@ renderRepositoryPackageSummaryJson packageSummary =
       "      \"description\": " ++ maybe "null" renderJsonString (repositoryPackageDescription packageSummary) ++ ",",
       "      \"checks\": " ++ renderRepositoryPackageChecksJson (repositoryPackageChecks packageSummary) ++ ",",
       "      \"coverage\": " ++ renderRepositoryPackageCoverageJson (repositoryPackageCoverage packageSummary) ++ ",",
+      "      \"profile\": " ++ renderRepositoryPackageProfileJson (repositoryPackageProfile packageSummary) ++ ",",
+      "      \"testDurationsSeconds\": " ++ renderRepositoryPackageTestDurationsJson (repositoryPackageProfile packageSummary) ++ ",",
       "      \"tests\": " ++ "[" ++ intercalate ", " (map renderJsonString (repositoryPackageTestNames packageSummary)) ++ "]",
       "    }"
     ]
@@ -877,15 +887,23 @@ repositoryPackageCheckEntries packageChecks =
     ("property-testing", repositoryPackageHasPropertyTestingCheck packageChecks),
     ("mutation-testing", repositoryPackageHasMutationTestingCheck packageChecks)
   ]
-enabledRepositoryPackageCheckNames :: RepositoryPackageChecksSummary -> [String]
-enabledRepositoryPackageCheckNames = map fst . filter snd . repositoryPackageCheckEntries
-renderRepositoryPackageCoverageText :: RepositoryPackageCoverageSummary -> String
-renderRepositoryPackageCoverageText = \case
+enabledRepositoryPackageCheckNames :: RepositoryPackageSummary -> [String]
+enabledRepositoryPackageCheckNames packageSummary =
+  [ renderCheckName checkName
+  | (checkName, isEnabled) <- repositoryPackageCheckEntries (repositoryPackageChecks packageSummary),
+    isEnabled
+  ]
+  where
+    renderCheckName "coverage" = "coverage " ++ renderRepositoryPackageCoverageAnnotation (repositoryPackageCoverage packageSummary)
+    renderCheckName "profile" = "profile " ++ renderRepositoryPackageProfileAnnotation (repositoryPackageProfile packageSummary)
+    renderCheckName checkName = checkName
+renderRepositoryPackageCoverageAnnotation :: RepositoryPackageCoverageSummary -> String
+renderRepositoryPackageCoverageAnnotation = \case
   RepositoryCoverageNotConfigured -> "(not configured)"
   RepositoryCoverageNotRun -> "(not run)"
   RepositoryCoverageUnavailable -> "(unavailable)"
   RepositoryCoverageMeasured metric covered total ->
-    metric ++ " " ++ show covered ++ "/" ++ show total ++ " (" ++ renderCoveragePercent covered total ++ "%)"
+    "(" ++ metric ++ " " ++ show covered ++ "/" ++ show total ++ ", " ++ renderCoveragePercent covered total ++ "%)"
 renderRepositoryPackageCoverageJson :: RepositoryPackageCoverageSummary -> String
 renderRepositoryPackageCoverageJson = \case
   RepositoryCoverageNotConfigured -> "{ \"status\": \"not-configured\" }"
@@ -904,8 +922,40 @@ renderRepositoryPackageCoverageJson = \case
 renderCoveragePercent :: Integer -> Integer -> String
 renderCoveragePercent covered total =
   showFFloat (Just 1) (100 * fromIntegral covered / fromIntegral total :: Double) ""
+renderRepositoryPackageProfileAnnotation :: RepositoryPackageProfileSummary -> String
+renderRepositoryPackageProfileAnnotation = \case
+  RepositoryProfileNotConfigured -> "(not configured)"
+  RepositoryProfileNotRun -> "(not run)"
+  RepositoryProfileUnavailable -> "(unavailable)"
+  RepositoryProfileMeasured totalSeconds _ -> "(all tests: " ++ renderProfileSeconds totalSeconds ++ "s)"
+renderRepositoryPackageProfileJson :: RepositoryPackageProfileSummary -> String
+renderRepositoryPackageProfileJson = \case
+  RepositoryProfileNotConfigured -> "{ \"status\": \"not-configured\" }"
+  RepositoryProfileNotRun -> "{ \"status\": \"not-run\" }"
+  RepositoryProfileUnavailable -> "{ \"status\": \"unavailable\" }"
+  RepositoryProfileMeasured totalSeconds _ -> "{ \"status\": \"measured\", \"totalSeconds\": " ++ renderProfileSeconds totalSeconds ++ " }"
+renderRepositoryPackageTestText :: RepositoryPackageSummary -> String -> String
+renderRepositoryPackageTestText packageSummary testName =
+  case repositoryPackageProfile packageSummary of
+    RepositoryProfileMeasured _ testDurations ->
+      case Map.lookup testName testDurations of
+        Just seconds ->
+          let renderedSeconds = renderProfileSeconds seconds
+              durationWidth = maximum (map (length . renderProfileSeconds) (Map.elems testDurations))
+           in "(" ++ replicate (durationWidth - length renderedSeconds) ' ' ++ renderedSeconds ++ "s) " ++ testName
+        Nothing -> testName
+    _ -> testName
+renderRepositoryPackageTestDurationsJson :: RepositoryPackageProfileSummary -> String
+renderRepositoryPackageTestDurationsJson = \case
+  RepositoryProfileMeasured _ testDurations ->
+    "{ "
+      ++ intercalate ", " [renderJsonString testName ++ ": " ++ renderProfileSeconds seconds | (testName, seconds) <- Map.toAscList testDurations]
+      ++ " }"
+  _ -> "{}"
+renderProfileSeconds :: Double -> String
+renderProfileSeconds seconds = showFFloat (Just 3) seconds ""
 summarizeRepositoryPackage :: Maybe (Map.Map FilePath FilePath) -> Set.Set FilePath -> FilePath -> IO RepositoryPackageSummary
-summarizeRepositoryPackage coverageOutputPaths repositoryCheckNames packageName = do
+summarizeRepositoryPackage checkOutputPaths repositoryCheckNames packageName = do
   packageKind <- detectPackageKindForPackage packageName
   let packageRoot = "packages" </> packageName
   repositoryPackageDescriptionValue <-
@@ -948,7 +998,9 @@ summarizeRepositoryPackage coverageOutputPaths repositoryCheckNames packageName 
             repositoryPackageHasMutationTestingCheck = maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName RepositoryMutationTestingCheck)
           }
   repositoryPackageCoverageValue <-
-    summarizeRepositoryPackageCoverage coverageOutputPaths packageKind packageName (repositoryPackageHasCoverageCheck repositoryPackageChecksValue)
+    summarizeRepositoryPackageCoverage checkOutputPaths packageKind packageName (repositoryPackageHasCoverageCheck repositoryPackageChecksValue)
+  repositoryPackageProfileValue <-
+    summarizeRepositoryPackageProfile checkOutputPaths packageKind packageName (repositoryPackageHasProfileCheck repositoryPackageChecksValue)
   pure
     RepositoryPackageSummary
       { repositoryPackageName = packageName,
@@ -956,29 +1008,30 @@ summarizeRepositoryPackage coverageOutputPaths repositoryCheckNames packageName 
         repositoryPackageDescription = repositoryPackageDescriptionValue,
         repositoryPackageTestNames = repositoryPackageTestNamesValue,
         repositoryPackageChecks = repositoryPackageChecksValue,
-        repositoryPackageCoverage = repositoryPackageCoverageValue
+        repositoryPackageCoverage = repositoryPackageCoverageValue,
+        repositoryPackageProfile = repositoryPackageProfileValue
       }
-resolveRepositoryCoverageOutputPaths :: [FilePath] -> IO (Maybe (Map.Map FilePath FilePath))
-resolveRepositoryCoverageOutputPaths [] = pure (Just Map.empty)
-resolveRepositoryCoverageOutputPaths coverageCheckNames = do
+resolveRepositoryCheckOutputPaths :: [FilePath] -> IO (Maybe (Map.Map FilePath FilePath))
+resolveRepositoryCheckOutputPaths [] = pure (Just Map.empty)
+resolveRepositoryCheckOutputPaths resultCheckNames = do
   repositoryRoot <- getCurrentDirectory
   let nixExpression =
         unlines
           [ "let",
             "  flake = builtins.getFlake " ++ renderJsonString ("path:" ++ repositoryRoot) ++ ";",
             "  checks = flake.checks.${builtins.currentSystem};",
-            "  checkNames = [ " ++ unwords (map renderJsonString coverageCheckNames) ++ " ];",
+            "  checkNames = [ " ++ unwords (map renderJsonString resultCheckNames) ++ " ];",
             "in",
             "builtins.concatStringsSep \"\\n\" (map (checkName: \"${checkName}\\t${checks.${checkName}.outPath}\") checkNames)"
           ]
   commandResult <- try (readProcessWithExitCode "nix" ["eval", "--raw", "--impure", "--expr", nixExpression] "")
   pure $
     case commandResult of
-      Right (ExitSuccess, outputPathsText, _) -> parseRepositoryCoverageOutputPaths coverageCheckNames (T.pack outputPathsText)
+      Right (ExitSuccess, outputPathsText, _) -> parseRepositoryCheckOutputPaths resultCheckNames (T.pack outputPathsText)
       Right _ -> Nothing
       Left (_ :: IOException) -> Nothing
-parseRepositoryCoverageOutputPaths :: [FilePath] -> T.Text -> Maybe (Map.Map FilePath FilePath)
-parseRepositoryCoverageOutputPaths expectedCheckNames outputPathsText = do
+parseRepositoryCheckOutputPaths :: [FilePath] -> T.Text -> Maybe (Map.Map FilePath FilePath)
+parseRepositoryCheckOutputPaths expectedCheckNames outputPathsText = do
   entries <- mapM parseEntry (T.lines outputPathsText)
   let outputPaths = Map.fromList entries
   if Set.fromList (Map.keys outputPaths) == Set.fromList expectedCheckNames && Map.size outputPaths == length expectedCheckNames
@@ -1016,6 +1069,39 @@ parseRepositoryCoverageSummary coverageText =
         then Just (RepositoryCoverageMeasured metric covered total)
         else Nothing
     _ -> Nothing
+summarizeRepositoryPackageProfile :: Maybe (Map.Map FilePath FilePath) -> PackageKind -> FilePath -> Bool -> IO RepositoryPackageProfileSummary
+summarizeRepositoryPackageProfile _ _ _ False = pure RepositoryProfileNotConfigured
+summarizeRepositoryPackageProfile Nothing _ _ True = pure RepositoryProfileUnavailable
+summarizeRepositoryPackageProfile (Just checkOutputPaths) packageKind packageName True =
+  case repositoryCheckNameForKind packageKind packageName RepositoryProfileCheck >>= (`Map.lookup` checkOutputPaths) of
+    Nothing -> pure RepositoryProfileUnavailable
+    Just outputPath -> do
+      outputExists <- doesDirectoryExist outputPath
+      if not outputExists
+        then pure RepositoryProfileNotRun
+        else do
+          maybeProfileText <- readTextFileIfExists (outputPath </> "profile-summary.tsv")
+          pure (maybe RepositoryProfileUnavailable (fromMaybe RepositoryProfileUnavailable . parseRepositoryProfileSummary) maybeProfileText)
+parseRepositoryProfileSummary :: T.Text -> Maybe RepositoryPackageProfileSummary
+parseRepositoryProfileSummary profileText =
+  case T.lines profileText of
+    headerLine : testLines -> do
+      totalSeconds <- case T.splitOn "\t" headerLine of
+        ["profile-v1", "total-seconds", secondsText] -> readMaybe (T.unpack secondsText)
+        _ -> Nothing
+      testDurations <- Map.fromList <$> mapM parseTestLine testLines
+      if totalSeconds >= 0 && all (>= 0) (Map.elems testDurations) && Map.size testDurations == length testLines
+        then Just (RepositoryProfileMeasured totalSeconds testDurations)
+        else Nothing
+    [] -> Nothing
+  where
+    parseTestLine :: T.Text -> Maybe (String, Double)
+    parseTestLine testLine =
+      case T.splitOn "\t" testLine of
+        ["test", secondsText, testName] | not (T.null testName) -> do
+          seconds <- readMaybe (T.unpack secondsText)
+          pure (T.unpack testName, seconds)
+        _ -> Nothing
 extractHaskellPackageDescription :: T.Text -> Maybe String
 extractHaskellPackageDescription cabalContents =
   (T.unpack <$> lookupCabalField "description" cabalContents)
@@ -2529,11 +2615,31 @@ stripMetaDescriptionAssignment renderedMetaValue =
                 else renderedMetaValue
         Nothing -> renderedMetaValue
 runPackageTests :: IO ()
-runPackageTests = do
-  hUnitCounts <- runTestTT hUnitPackageTests
+runPackageTests = runPackageTestsWith hUnitPackageTests
+runPackageTestsWithTimings :: FilePath -> IO ()
+runPackageTestsWithTimings timingsPath = do
+  writeFile timingsPath ""
+  runPackageTestsWith (timeHUnitTests timingsPath hUnitPackageTests)
+runPackageTestsWith :: Test -> IO ()
+runPackageTestsWith packageTests = do
+  hUnitCounts <- runTestTT packageTests
   if errors hUnitCounts == 0 && failures hUnitCounts == 0
     then putStrLn "test ... ok"
     else exitFailure
+timeHUnitTests :: FilePath -> Test -> Test
+timeHUnitTests timingsPath = \case
+  TestLabel testName (TestCase testAction) -> TestLabel testName (TestCase (timeTestAction timingsPath testName testAction))
+  TestLabel testName nestedTest -> TestLabel testName (timeHUnitTests timingsPath nestedTest)
+  TestList nestedTests -> TestList (map (timeHUnitTests timingsPath) nestedTests)
+  testCase -> testCase
+timeTestAction :: FilePath -> String -> IO a -> IO a
+timeTestAction timingsPath testName testAction = do
+  startedAt <- getMonotonicTimeNSec
+  testAction
+    `finally` do
+      finishedAt <- getMonotonicTimeNSec
+      let elapsedSeconds = fromIntegral (finishedAt - startedAt) / 1000000000 :: Double
+      appendFile timingsPath ("test\t" ++ showFFloat (Just 6) elapsedSeconds "" ++ "\t" ++ testName ++ "\n")
 hUnitPackageTests :: Test
 hUnitPackageTests =
   TestList
@@ -2648,14 +2754,18 @@ repositoryCoverageParsingTest = do
   assertEqual
     "A batched Nix result maps every requested check to its output path."
     (Just (Map.fromList [("demo-coverage", "/nix/store/demo"), ("sample_coverage", "/nix/store/sample")]))
-    ( parseRepositoryCoverageOutputPaths
+    ( parseRepositoryCheckOutputPaths
         ["demo-coverage", "sample_coverage"]
         "demo-coverage\t/nix/store/demo\nsample_coverage\t/nix/store/sample"
     )
   assertEqual
     "Incomplete batched Nix results are rejected."
     Nothing
-    (parseRepositoryCoverageOutputPaths ["demo-coverage", "sample_coverage"] "demo-coverage\t/nix/store/demo")
+    (parseRepositoryCheckOutputPaths ["demo-coverage", "sample_coverage"] "demo-coverage\t/nix/store/demo")
+  assertEqual
+    "A valid profile artifact preserves total and per-test durations."
+    (Just (RepositoryProfileMeasured 1.25 (Map.fromList [("Reports behavior.", 0.125)])))
+    (parseRepositoryProfileSummary "profile-v1\ttotal-seconds\t1.25\ntest\t0.125\tReports behavior.\n")
 repositorySummaryRenderingTest :: IO ()
 repositorySummaryRenderingTest = do
   let packageSummary =
@@ -2668,11 +2778,12 @@ repositorySummaryRenderingTest = do
               RepositoryPackageChecksSummary
                 { repositoryPackageHasCheck = False,
                   repositoryPackageHasCoverageCheck = True,
-                  repositoryPackageHasProfileCheck = False,
+                  repositoryPackageHasProfileCheck = True,
                   repositoryPackageHasPropertyTestingCheck = False,
                   repositoryPackageHasMutationTestingCheck = False
                 },
-            repositoryPackageCoverage = RepositoryCoverageMeasured "statements" 19 20
+            repositoryPackageCoverage = RepositoryCoverageMeasured "statements" 19 20,
+            repositoryPackageProfile = RepositoryProfileMeasured 1.234 (Map.fromList [("Reports \"quoted\" behavior.", 0.125)])
           }
   assertEqual
     "Text rendering has stable fields, indentation, and fallbacks."
@@ -2681,10 +2792,10 @@ repositorySummaryRenderingTest = do
           "packageType: python",
           "description: (none)",
           "     checks:",
-          "             coverage",
-          "   coverage: statements 19/20 (95.0%)",
+          "             coverage (statements 19/20, 95.0%)",
+          "             profile (all tests: 1.234s)",
           "      tests:",
-          "             Reports \"quoted\" behavior.",
+          "             (0.125s) Reports \"quoted\" behavior.",
           ""
         ]
     )
@@ -2698,8 +2809,10 @@ repositorySummaryRenderingTest = do
           "      \"name\": \"demo\",",
           "      \"packageType\": \"python\",",
           "      \"description\": null,",
-          "      \"checks\": { \"default-check\": false, \"coverage\": true, \"profile\": false, \"property-testing\": false, \"mutation-testing\": false },",
+          "      \"checks\": { \"default-check\": false, \"coverage\": true, \"profile\": true, \"property-testing\": false, \"mutation-testing\": false },",
           "      \"coverage\": { \"status\": \"measured\", \"metric\": \"statements\", \"covered\": 19, \"total\": 20, \"percent\": 95.0 },",
+          "      \"profile\": { \"status\": \"measured\", \"totalSeconds\": 1.234 },",
+          "      \"testDurationsSeconds\": { \"Reports \\\"quoted\\\" behavior.\": 0.125 },",
           "      \"tests\": [\"Reports \\\"quoted\\\" behavior.\"]",
           "    }",
           "",
@@ -3071,7 +3184,8 @@ expectedGeneratedPythonPackageSummary =
             repositoryPackageHasPropertyTestingCheck = True,
             repositoryPackageHasMutationTestingCheck = False
           },
-      repositoryPackageCoverage = RepositoryCoverageUnavailable
+      repositoryPackageCoverage = RepositoryCoverageUnavailable,
+      repositoryPackageProfile = RepositoryProfileNotConfigured
     }
 expectedGeneratedHaskellPackageSummary :: RepositoryPackageSummary
 expectedGeneratedHaskellPackageSummary =
@@ -3088,7 +3202,8 @@ expectedGeneratedHaskellPackageSummary =
             repositoryPackageHasPropertyTestingCheck = False,
             repositoryPackageHasMutationTestingCheck = False
           },
-      repositoryPackageCoverage = RepositoryCoverageNotConfigured
+      repositoryPackageCoverage = RepositoryCoverageNotConfigured,
+      repositoryPackageProfile = RepositoryProfileNotConfigured
     }
 runEndToEndCommandIn :: FilePath -> [String] -> IO (ExitCode, String, String)
 runEndToEndCommandIn workingDirectory arguments =
@@ -3521,7 +3636,10 @@ haskellMainSource =
   T.unlines
     [ "{-# LANGUAGE Trustworthy #-}",
       "{-# OPTIONS_GHC -Wno-unsafe #-}",
-      "module Main (main) where",
+      "module Main (main, runPackageTests, runPackageTestsWithTimings) where",
+      "import Control.Exception (finally)",
+      "import GHC.Clock (getMonotonicTimeNSec)",
+      "import Numeric (showFFloat)",
       "import System.Exit (exitFailure)",
       "import Test.HUnit (Counts (errors, failures), Test (TestCase, TestLabel, TestList), assertEqual, runTestTT)",
       "",
@@ -3529,11 +3647,30 @@ haskellMainSource =
       "renderMessage = \"Hello World Haskell\"",
       "",
       "runPackageTests :: IO ()",
-      "runPackageTests = do",
-      "  counts <- runTestTT hUnitPackageTests",
+      "runPackageTests = runPackageTestsWith hUnitPackageTests",
+      "runPackageTestsWithTimings :: FilePath -> IO ()",
+      "runPackageTestsWithTimings timingsPath = do",
+      "  writeFile timingsPath \"\"",
+      "  runPackageTestsWith (timeHUnitTests timingsPath hUnitPackageTests)",
+      "runPackageTestsWith :: Test -> IO ()",
+      "runPackageTestsWith packageTests = do",
+      "  counts <- runTestTT packageTests",
       "  if errors counts == 0 && failures counts == 0",
       "    then putStrLn \"test ... ok\"",
       "    else exitFailure",
+      "",
+      "timeHUnitTests :: FilePath -> Test -> Test",
+      "timeHUnitTests timingsPath (TestLabel testName (TestCase testAction)) = TestLabel testName (TestCase (timeTestAction timingsPath testName testAction))",
+      "timeHUnitTests timingsPath (TestLabel testName nestedTest) = TestLabel testName (timeHUnitTests timingsPath nestedTest)",
+      "timeHUnitTests timingsPath (TestList nestedTests) = TestList (map (timeHUnitTests timingsPath) nestedTests)",
+      "timeHUnitTests _ testCase = testCase",
+      "timeTestAction :: FilePath -> String -> IO a -> IO a",
+      "timeTestAction timingsPath testName testAction = do",
+      "  startedAt <- getMonotonicTimeNSec",
+      "  testAction `finally` do",
+      "    finishedAt <- getMonotonicTimeNSec",
+      "    let elapsedSeconds = fromIntegral (finishedAt - startedAt) / 1000000000 :: Double",
+      "    appendFile timingsPath (\"test\\t\" ++ showFFloat (Just 6) elapsedSeconds \"\" ++ \"\\t\" ++ testName ++ \"\\n\")",
       "",
       "hUnitPackageTests :: Test",
       "hUnitPackageTests =",
@@ -4357,6 +4494,7 @@ haskellProfileCheckBaselineNixSource =
       "    nativeBuildInputs = [",
       "      packageDrv",
       "      pkgs.git",
+      "      pkgs.time",
       "      profileGhc",
       "    ];",
       "    src = ../.. + \"/packages/${packageName}\";",
@@ -4365,13 +4503,14 @@ haskellProfileCheckBaselineNixSource =
       "    export HOME=\"$PWD\"",
       "    workspace=\"$PWD/workspace\"",
       "    packageName=\"${packageName}\"",
-      "    mkdir -p \"$workspace\"",
+      "    mkdir -p \"$out\" \"$workspace\"",
       "    cd \"$workspace\"",
       "    cat > \"$workspace/TestMain.hs\" <<EOF",
       "    module TestMain (main) where",
       "    import qualified Main as PackageMain",
+      "    import System.Environment (getEnv)",
       "    main :: IO ()",
-      "    main = PackageMain.runPackageTests",
+      "    main = getEnv \"PROFILE_TIMINGS_PATH\" >>= PackageMain.runPackageTestsWithTimings",
       "    EOF",
       "    \"${profileGhc}/bin/ghc\" \\",
       "      -prof \\",
@@ -4386,9 +4525,11 @@ haskellProfileCheckBaselineNixSource =
       "      -o \"$workspace/$packageName\" \\",
       "      \"$workspace/TestMain.hs\" \\",
       "      \"$src/Main.hs\"",
-      "    \"$workspace/$packageName\" +RTS -p -RTS",
-      "    cat \"$workspace/$packageName.prof\"",
-      "    touch \"$out\"",
+      "    PROFILE_TIMINGS_PATH=\"$out/test-timings.tsv\" ${pkgs.time}/bin/time -f %e -o \"$out/total-seconds\" \\",
+      "      \"$workspace/$packageName\" +RTS -p -RTS",
+      "    mv \"$workspace/$packageName.prof\" \"$out/report.prof\"",
+      "    printf 'profile-v1\\ttotal-seconds\\t%s\\n' \"$(cat \"$out/total-seconds\")\" > \"$out/profile-summary.tsv\"",
+      "    cat \"$out/test-timings.tsv\" >> \"$out/profile-summary.tsv\"",
       "  ''"
     ]
 haskellPropertyTestingCheckBaselineNixSource :: T.Text
@@ -4506,14 +4647,34 @@ pythonProfileCheckBaselineNixSource =
       "pkgs.runCommand checkName",
       "  {",
       "    nativeBuildInputs = [",
+      "      pkgs.time",
       "      pythonEnv",
       "    ];",
       "    src = ../.. + \"/packages/${packageName}\";",
       "  }",
       "  ''",
       "    export HOME=\"$(mktemp -d)\"",
-      "    PYTHONWARNINGS=error pyinstrument \"$src/main.py\"",
-      "    touch \"$out\"",
+      "    mkdir -p \"$out\"",
+      "    PYTHONWARNINGS=error ${pkgs.time}/bin/time -f %e -o \"$out/total-seconds\" \\",
+      "      pyinstrument -r text -o \"$out/report.txt\" -m pytest -p no:cacheprovider --junitxml=\"$out/junit.xml\" \"$src/main.py\"",
+      "    python - \"$src/main.py\" \"$out/junit.xml\" \"$out/total-seconds\" \"$out/profile-summary.tsv\" <<'PY'",
+      "    import ast",
+      "    import pathlib",
+      "    import re",
+      "    import sys",
+      "    import xml.etree.ElementTree as ET",
+      "    source_path, junit_path, total_path, output_path = map(pathlib.Path, sys.argv[1:])",
+      "    specifications = {}",
+      "    for node in ast.parse(source_path.read_text()).body:",
+      "        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith(\"test_\"):",
+      "            words = re.sub(r\"^test_(?:property_)?\", \"\", node.name).replace(\"_\", \" \")",
+      "            specifications[node.name] = ast.get_docstring(node) or words[:1].upper() + words[1:] + \".\"",
+      "    lines = [f\"profile-v1\\ttotal-seconds\\t{total_path.read_text().strip()}\"]",
+      "    for test_case in sorted(ET.parse(junit_path).iter(\"testcase\"), key=lambda element: element.attrib[\"name\"]):",
+      "        test_name = test_case.attrib[\"name\"].split(\"[\", 1)[0]",
+      "        lines.append(f\"test\\t{test_case.attrib['time']}\\t{specifications[test_name]}\")",
+      "    output_path.write_text(\"\\n\".join(lines) + \"\\n\")",
+      "    PY",
       "  ''"
     ]
 pythonPropertyTestingCheckBaselineNixSource :: T.Text
@@ -4641,34 +4802,59 @@ rustProfileCheckBaselineNixSource =
       "  ...",
       "}:",
       "let",
+      "  inherit (packageDrv) cargoDeps;",
       "  checkName = builtins.baseNameOf ./.;",
       "  packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${packageName};",
       "  packageName = pkgs.lib.removeSuffix \"-profile\" checkName;",
+      "  rustBaseInputs = packageDrv.passthru.rustCheckNativeBuildInputs;",
       "in",
       "pkgs.runCommand \"${checkName}\"",
       "  {",
-      "    nativeBuildInputs = [",
-      "      packageDrv",
+      "    nativeBuildInputs = rustBaseInputs ++ [",
+      "      pkgs.cargo-nextest",
       "      pkgs.perf",
+      "      pkgs.python3",
+      "      pkgs.time",
       "    ];",
       "    src = ../.. + \"/packages/${packageName}\";",
       "  }",
       "  ''",
       "    workspace=\"$PWD/workspace\"",
-      "    mkdir -p \"$workspace\"",
-      "    printf 'line1\\n\\nline2\\n' > \"$workspace/test.txt\"",
-      "    run_cmd() {",
-      "      remove-empty-lines \"$workspace\"",
-      "    }",
+      "    cp -R --no-preserve=mode \"$src\" \"$workspace\"",
+      "    install -Dm644 \"${cargoDeps}/.cargo/config.toml\" \"$workspace/.cargo/config.toml\"",
+      "    substituteInPlace \"$workspace/.cargo/config.toml\" \\",
+      "      --replace-fail \"@vendor@\" \"${cargoDeps}\"",
+      "    mkdir -p \"$out\" \"$workspace/.config\"",
+      "    cat > \"$workspace/.config/nextest.toml\" <<EOF",
+      "    [profile.profile.junit]",
+      "    path = \"$out/junit.xml\"",
+      "    EOF",
+      "    cd \"$workspace\"",
+      "    cargo nextest list --profile profile >/dev/null",
       "    if perf stat -e cpu-clock true >/dev/null 2>&1; then",
-      "      perf record --no-buildid-mmap --call-graph dwarf -e cpu-clock -o perf.data -- \\",
-      "        run_cmd",
-      "      perf report --stdio -i perf.data",
+      "      NEXTEST_TEST_THREADS=1 ${pkgs.time}/bin/time -f %e -o \"$out/total-seconds\" \\",
+      "        perf record --no-buildid-mmap --call-graph dwarf -e cpu-clock -o \"$out/perf.data\" -- \\",
+      "        cargo nextest run --profile profile",
+      "      perf report --stdio -i \"$out/perf.data\" > \"$out/report.txt\"",
       "    else",
-      "      echo \"perf is unavailable in this environment; running without profiling.\"",
-      "      run_cmd",
+      "      echo \"perf is unavailable in this environment; timings were still recorded.\" > \"$out/report.txt\"",
+      "      NEXTEST_TEST_THREADS=1 ${pkgs.time}/bin/time -f %e -o \"$out/total-seconds\" \\",
+      "        cargo nextest run --profile profile",
       "    fi",
-      "    touch \"$out\"",
+      "    python - \"$out/junit.xml\" \"$out/total-seconds\" \"$out/profile-summary.tsv\" <<'PY'",
+      "    import pathlib",
+      "    import re",
+      "    import sys",
+      "    import xml.etree.ElementTree as ET",
+      "    junit_path, total_path, output_path = map(pathlib.Path, sys.argv[1:])",
+      "    lines = [f\"profile-v1\\ttotal-seconds\\t{total_path.read_text().strip()}\"]",
+      "    for test_case in sorted(ET.parse(junit_path).iter(\"testcase\"), key=lambda element: element.attrib[\"name\"]):",
+      "        identifier = test_case.attrib[\"name\"].rsplit(\"::\", 1)[-1]",
+      "        words = re.sub(r\"^(?:test|quickcheck)_\", \"\", identifier).replace(\"_\", \" \")",
+      "        test_name = words[:1].upper() + words[1:] + \".\"",
+      "        lines.append(f\"test\\t{test_case.attrib['time']}\\t{test_name}\")",
+      "    output_path.write_text(\"\\n\".join(lines) + \"\\n\")",
+      "    PY",
       "  ''"
     ]
 rustPropertyTestingCheckBaselineNixSource :: T.Text
