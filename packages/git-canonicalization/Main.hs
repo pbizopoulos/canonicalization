@@ -10,7 +10,7 @@
 module Main (main, runPackageTests, runPackageTestsWithTimings) where
 import Control.Applicative ((<|>))
 import Control.Exception (IOException, finally, try)
-import Control.Monad (filterM, forM, forM_, unless, when)
+import Control.Monad (filterM, forM, forM_, unless, void, when)
 import Data.Char (isAlphaNum, isAsciiLower, isDigit, isLower, isSpace, isUpper, toLower, toUpper)
 import Data.Fix (Fix (Fix))
 import Data.Functor.Compose (Compose (Compose))
@@ -379,52 +379,41 @@ main :: IO ()
 main = getArgs >>= runCli defaultCanonicalizationSettings
 runCli :: CanonicalizationSettings -> [String] -> IO ()
 runCli canonicalizationSettings commandLineArgs =
-  let summarizeRepository render =
-        collectRepositoryComplianceWith canonicalizationSettings >>= \case
-          Left (checkPhaseName, checkPhaseIssues) -> do
-            reportCheckRepositoryFailures checkPhaseName checkPhaseIssues
-            exitFailure
-          Right (RepositoryComplianceSuccess packageNames checkNames) -> do
-            let repositoryCheckNames = Set.fromList checkNames
-                resultCheckNames = filter (\checkName -> any (`isSuffixOf` checkName) ["-coverage", "_coverage", "-profile", "_profile"]) checkNames
-            checkOutputPaths <- resolveRepositoryCheckOutputPaths resultCheckNames
-            packageSummaries <- forM packageNames (summarizeRepositoryPackage checkOutputPaths repositoryCheckNames)
-            putStr (render packageSummaries)
-   in case commandLineArgs of
-        [] -> printMainHelpAndExit (ExitFailure 1)
-        ["help"] -> printMainHelpAndExit ExitSuccess
-        _ | isHelpRequest commandLineArgs -> printCommandUsageAndExit ExitSuccess commandLineArgs
-        ["check"] -> checkCanonicalizationLocation canonicalizationSettings "."
-        ["check", location] -> checkCanonicalizationLocation canonicalizationSettings location
-        "check" : _ -> printCommandUsageAndExit usageExitCode commandLineArgs
-        ["summary"] -> runInGitRepositoryRoot "." (summarizeRepository renderRepositoryPackageSummariesText)
-        ["summary", "--json"] -> runInGitRepositoryRoot "." (summarizeRepository renderRepositoryPackageSummariesJson)
-        ["add", repositoryUrl] ->
-          case parseRepositoryUrl repositoryUrl of
-            Just repositoryLocation -> addGitRepositoryFromLocation repositoryLocation
-            Nothing -> printCommandUsageAndExit usageExitCode commandLineArgs
-        ["init"] -> initializeHomeGitRepository
-        "init" : _ -> printCommandUsageAndExit usageExitCode commandLineArgs
-        "clone" : _ -> printCommandUsageAndExit usageExitCode commandLineArgs
-        ["rm", removalTarget] -> removeCanonicalizationTargetCli removalTarget
-        "rm" : _ -> printCommandUsageAndExit usageExitCode commandLineArgs
-        _ ->
-          case parseAddPackageArgs commandLineArgs of
-            Just (packageKindName, packageName, packageDescription, requestedCheckKinds) ->
-              runInGitRepositoryRoot "." $
-                case parseSupportedAddPackageKind packageKindName of
-                  Nothing -> do
-                    hPutStrLn stderr ("error: unsupported package type: " ++ packageKindName)
-                    hPutStrLn stderr ("hint: supported package types: " ++ intercalate ", " (map fst supportedAddPackageKinds))
+  case commandLineArgs of
+    [] -> printMainHelpAndExit (ExitFailure 1)
+    ["help"] -> printMainHelpAndExit ExitSuccess
+    _ | isHelpRequest commandLineArgs -> printCommandUsageAndExit ExitSuccess commandLineArgs
+    ["check"] -> checkCanonicalizationLocation canonicalizationSettings "."
+    ["check", location] -> checkCanonicalizationLocation canonicalizationSettings location
+    "check" : _ -> printCommandUsageAndExit usageExitCode commandLineArgs
+    ["summary"] -> summarizeCanonicalizationLocation canonicalizationSettings renderRepositorySummariesText "."
+    ["summary", "--json"] -> summarizeCanonicalizationLocation canonicalizationSettings renderRepositorySummariesJson "."
+    ["add", repositoryUrl] ->
+      case parseRepositoryUrl repositoryUrl of
+        Just repositoryLocation -> addGitRepositoryFromLocation repositoryLocation
+        Nothing -> printCommandUsageAndExit usageExitCode commandLineArgs
+    ["init"] -> initializeHomeGitRepository
+    "init" : _ -> printCommandUsageAndExit usageExitCode commandLineArgs
+    "clone" : _ -> printCommandUsageAndExit usageExitCode commandLineArgs
+    ["rm", removalTarget] -> removeCanonicalizationTargetCli removalTarget
+    "rm" : _ -> printCommandUsageAndExit usageExitCode commandLineArgs
+    _ ->
+      case parseAddPackageArgs commandLineArgs of
+        Just (packageKindName, packageName, packageDescription, requestedCheckKinds) ->
+          runInGitRepositoryRoot "." $
+            case parseSupportedAddPackageKind packageKindName of
+              Nothing -> do
+                hPutStrLn stderr ("error: unsupported package type: " ++ packageKindName)
+                hPutStrLn stderr ("hint: supported package types: " ++ intercalate ", " (map fst supportedAddPackageKinds))
+                exitFailure
+              Just packageKind -> do
+                addResult <- addPackageToCurrentRepositoryWith canonicalizationSettings packageKind packageName packageDescription requestedCheckKinds
+                case addResult of
+                  Left addError -> do
+                    hPutStrLn stderr ("error: " ++ addError)
                     exitFailure
-                  Just packageKind -> do
-                    addResult <- addPackageToCurrentRepositoryWith canonicalizationSettings packageKind packageName packageDescription requestedCheckKinds
-                    case addResult of
-                      Left addError -> do
-                        hPutStrLn stderr ("error: " ++ addError)
-                        exitFailure
-                      Right generatedPaths -> delegateToGit (["add", "--"] ++ generatedPaths)
-            Nothing -> printCommandUsageAndExit usageExitCode commandLineArgs
+                  Right generatedPaths -> delegateToGit (["add", "--"] ++ generatedPaths)
+        Nothing -> printCommandUsageAndExit usageExitCode commandLineArgs
 printMainHelpAndExit :: ExitCode -> IO a
 printMainHelpAndExit exitCode = do
   hPutStr (if exitCode == ExitSuccess then stdout else stderr) mainHelpText
@@ -473,6 +462,10 @@ usageTextForCommand = \case
   Just "summary" ->
     unlines
       [ "usage: git canonicalization summary [--json]",
+        "",
+        "Summarize the nearest Git repository. Use 'git -C <location>' to select it.",
+        "When the selected repository is $HOME, summarize every repository",
+        "registered in $HOME/.gitmodules.",
         "",
         "    --json                output the repository summary as JSON",
         ""
@@ -614,7 +607,9 @@ dieWithFatal diagnostic = do
   hPutStrLn stderr ("fatal: " ++ diagnostic)
   exitWith (ExitFailure 128)
 checkHomeGitmodules :: FilePath -> IO (Either String ())
-checkHomeGitmodules homeDirectory = do
+checkHomeGitmodules homeDirectory = fmap void (readHomeGitmodulePaths homeDirectory)
+readHomeGitmodulePaths :: FilePath -> IO (Either String [FilePath])
+readHomeGitmodulePaths homeDirectory = do
   let gitmodulesPath = homeDirectory </> ".gitmodules"
   gitmodulesExists <- doesFileExist gitmodulesPath
   if not gitmodulesExists
@@ -633,7 +628,7 @@ checkHomeGitmodules homeDirectory = do
             exitWith gitConfigExit
       pure $
         case filter (not . isCompatibleHomeGitmodulePath) pathEntries of
-          [] -> Right ()
+          [] -> Right (sort (map T.unpack pathEntries))
           invalidPathEntries ->
             Left
               ( intercalate
@@ -823,6 +818,105 @@ data RepositoryPackageSummary = RepositoryPackageSummary
     repositoryPackageCoverage :: RepositoryPackageCoverageSummary,
     repositoryPackageProfile :: RepositoryPackageProfileSummary
   }
+  deriving stock (Eq, Show)
+type RepositorySummary :: Type
+data RepositorySummary = RepositorySummary
+  { repositorySummaryPath :: FilePath,
+    repositorySummaryPackages :: [RepositoryPackageSummary]
+  }
+  deriving stock (Eq, Show)
+summarizeCanonicalizationLocation :: CanonicalizationSettings -> ([RepositorySummary] -> String) -> FilePath -> IO ()
+summarizeCanonicalizationLocation canonicalizationSettings render location = do
+  repositoryRoot <- discoverGitRepositoryRoot location
+  homeDirectory <- getHomeDirectory
+  canonicalHomeDirectory <- canonicalizePath homeDirectory
+  repositorySummaries <-
+    if repositoryRoot == canonicalHomeDirectory
+      then do
+        repositoryPaths <- readHomeGitmodulePaths canonicalHomeDirectory >>= either failCanonicalizationCheck pure
+        forM repositoryPaths $ \repositoryPath -> do
+          let absoluteRepositoryPath = canonicalHomeDirectory </> repositoryPath
+          repositoryExists <- doesDirectoryExist absoluteRepositoryPath
+          unless repositoryExists $ failCanonicalizationCheck (repositoryPath ++ ": missing repository directory: " ++ absoluteRepositoryPath)
+          canonicalRepositoryPath <- canonicalizePath absoluteRepositoryPath
+          discoveredRepositoryRoot <- discoverRegisteredRepositoryRoot repositoryPath canonicalRepositoryPath
+          unless (discoveredRepositoryRoot == canonicalRepositoryPath) $
+            failCanonicalizationCheck (repositoryPath ++ ": not a Git repository root: " ++ canonicalRepositoryPath)
+          summarizeRepositoryAt canonicalizationSettings repositoryPath canonicalRepositoryPath
+      else do
+        repositoryPath <- repositoryIdentifier canonicalHomeDirectory repositoryRoot
+        (: []) <$> summarizeRepositoryAt canonicalizationSettings repositoryPath repositoryRoot
+  putStr (render repositorySummaries)
+discoverRegisteredRepositoryRoot :: FilePath -> FilePath -> IO FilePath
+discoverRegisteredRepositoryRoot repositoryPath canonicalRepositoryPath = do
+  (gitExit, gitStdout, gitStderr) <- captureGit (gitIn canonicalRepositoryPath ["rev-parse", "--path-format=absolute", "--show-toplevel"])
+  case gitExit of
+    ExitSuccess -> pure (T.unpack (T.strip (T.pack gitStdout)))
+    _ ->
+      let gitDiagnostic = unwords (lines gitStderr)
+       in failCanonicalizationCheck
+            ( repositoryPath
+                ++ ": not a Git repository root: "
+                ++ canonicalRepositoryPath
+                ++ if null gitDiagnostic then "" else ": " ++ gitDiagnostic
+            )
+repositoryIdentifier :: FilePath -> FilePath -> IO FilePath
+repositoryIdentifier canonicalHomeDirectory repositoryRoot = do
+  canonicalRepositoryRoot <- canonicalizePath repositoryRoot
+  let relativeRepositoryPath = makeRelative canonicalHomeDirectory canonicalRepositoryRoot
+      repositoryPathParts = splitDirectories relativeRepositoryPath
+      repositoryIsBelowHome = isRelative relativeRepositoryPath && relativeRepositoryPath /= "." && ".." `notElem` repositoryPathParts
+  pure (if repositoryIsBelowHome then relativeRepositoryPath else canonicalRepositoryRoot)
+summarizeRepositoryAt :: CanonicalizationSettings -> FilePath -> FilePath -> IO RepositorySummary
+summarizeRepositoryAt canonicalizationSettings repositoryPath repositoryRoot =
+  withCurrentDirectory repositoryRoot $
+    collectRepositoryComplianceWith canonicalizationSettings >>= \case
+      Left (checkPhaseName, checkPhaseIssues) -> do
+        hPutStrLn stderr ("error: repository: " ++ repositoryPath)
+        reportCheckRepositoryFailures checkPhaseName checkPhaseIssues
+        exitFailure
+      Right (RepositoryComplianceSuccess packageNames checkNames) -> do
+        let repositoryCheckNames = Set.fromList checkNames
+            resultCheckNames = filter (\checkName -> any (`isSuffixOf` checkName) ["-coverage", "_coverage", "-profile", "_profile"]) checkNames
+        checkOutputPaths <- resolveRepositoryCheckOutputPaths resultCheckNames
+        packageSummaries <- forM packageNames (summarizeRepositoryPackage checkOutputPaths repositoryCheckNames)
+        pure
+          RepositorySummary
+            { repositorySummaryPath = repositoryPath,
+              repositorySummaryPackages = packageSummaries
+            }
+renderRepositorySummariesText :: [RepositorySummary] -> String
+renderRepositorySummariesText repositorySummaries =
+  intercalate
+    "\n"
+    [ "repository: "
+        ++ repositorySummaryPath repositorySummary
+        ++ "\n"
+        ++ renderRepositoryPackageSummariesText (repositorySummaryPackages repositorySummary)
+    | repositorySummary <- repositorySummaries
+    ]
+renderRepositorySummariesJson :: [RepositorySummary] -> String
+renderRepositorySummariesJson repositorySummaries =
+  unlines
+    [ "{",
+      "  \"repositories\": [",
+      intercalate ",\n" (map renderRepositorySummaryJson repositorySummaries),
+      "  ]",
+      "}"
+    ]
+renderRepositorySummaryJson :: RepositorySummary -> String
+renderRepositorySummaryJson repositorySummary =
+  intercalate
+    "\n"
+    [ "    {",
+      "      \"path\": " ++ renderJsonString (repositorySummaryPath repositorySummary) ++ ",",
+      "      \"packages\": [",
+      intercalate ",\n" (map (indentText 4 . renderRepositoryPackageSummaryJson) (repositorySummaryPackages repositorySummary)),
+      "      ]",
+      "    }"
+    ]
+indentText :: Int -> String -> String
+indentText indentation = intercalate "\n" . map (replicate indentation ' ' ++) . lines
 renderRepositoryPackageSummariesText :: [RepositoryPackageSummary] -> String
 renderRepositoryPackageSummariesText packageSummaries =
   intercalate
@@ -849,17 +943,10 @@ renderRepositoryPackageFieldName fieldName =
   replicate (length ("description" :: String) - length fieldName) ' ' ++ fieldName ++ ":"
 repositoryPackageValueIndent :: String
 repositoryPackageValueIndent = replicate (length ("description: " :: String)) ' '
-renderRepositoryPackageSummariesJson :: [RepositoryPackageSummary] -> String
-renderRepositoryPackageSummariesJson packageSummaries =
-  "{\n"
-    ++ "  \"packages\": [\n"
-    ++ intercalate ",\n" [renderRepositoryPackageSummaryJson packageSummary | packageSummary <- packageSummaries]
-    ++ "\n"
-    ++ "  ]\n"
-    ++ "}\n"
 renderRepositoryPackageSummaryJson :: RepositoryPackageSummary -> String
 renderRepositoryPackageSummaryJson packageSummary =
-  unlines
+  intercalate
+    "\n"
     [ "    {",
       "      \"name\": " ++ renderJsonString (repositoryPackageName packageSummary) ++ ",",
       "      \"packageType\": " ++ renderJsonString (repositoryPackageType packageSummary) ++ ",",
@@ -2690,6 +2777,7 @@ hUnitPackageTests =
       TestLabel "Scaffolds a package and its requested checks from a nested directory." (TestCase addPackageEndToEndTest),
       TestLabel "Reports generated package behavior in the text summary." (TestCase textSummaryEndToEndTest),
       TestLabel "Reports generated package behavior in the JSON summary." (TestCase jsonSummaryEndToEndTest),
+      TestLabel "Summarizes every registered home repository." (TestCase homeSummaryEndToEndTest),
       TestLabel "Reports conventional tests for generated Haskell packages." (TestCase haskellSummaryEndToEndTest),
       TestLabel "Accepts a generated package during repository checks." (TestCase generatedPackageCheckEndToEndTest),
       TestLabel "Rejects unlabeled HUnit cases in generated Haskell packages." (TestCase unlabeledHaskellPackageCheckEndToEndTest),
@@ -2824,10 +2912,16 @@ repositorySummaryRenderingTest = do
             repositoryPackageCoverage = RepositoryCoverageMeasured "statements" 19 20,
             repositoryPackageProfile = RepositoryProfileMeasured 1.234 (Map.fromList [("Reports \"quoted\" behavior.", 0.125)])
           }
+      repositorySummary =
+        RepositorySummary
+          { repositorySummaryPath = "example.test/owner/demo",
+            repositorySummaryPackages = [packageSummary]
+          }
   assertEqual
     "Text rendering has stable fields, indentation, and fallbacks."
     ( unlines
-        [ "packageName: demo",
+        [ "repository: example.test/owner/demo",
+          "packageName: demo",
           "packageType: python",
           "description: (none)",
           "     checks:",
@@ -2838,28 +2932,32 @@ repositorySummaryRenderingTest = do
           ""
         ]
     )
-    (renderRepositoryPackageSummariesText [packageSummary])
+    (renderRepositorySummariesText [repositorySummary])
   assertEqual
     "JSON rendering preserves the schema and escapes strings."
     ( unlines
         [ "{",
-          "  \"packages\": [",
+          "  \"repositories\": [",
           "    {",
-          "      \"name\": \"demo\",",
-          "      \"packageType\": \"python\",",
-          "      \"description\": null,",
-          "      \"checks\": { \"default-check\": false, \"coverage\": true, \"profile\": true, \"property-testing\": false, \"mutation-testing\": false },",
-          "      \"coverage\": { \"status\": \"measured\", \"metric\": \"statements\", \"covered\": 19, \"total\": 20, \"percent\": 95.0 },",
-          "      \"profile\": { \"status\": \"measured\", \"totalSeconds\": 1.234 },",
-          "      \"testDurationsSeconds\": { \"Reports \\\"quoted\\\" behavior.\": 0.125 },",
-          "      \"tests\": [\"Reports \\\"quoted\\\" behavior.\"]",
+          "      \"path\": \"example.test/owner/demo\",",
+          "      \"packages\": [",
+          "        {",
+          "          \"name\": \"demo\",",
+          "          \"packageType\": \"python\",",
+          "          \"description\": null,",
+          "          \"checks\": { \"default-check\": false, \"coverage\": true, \"profile\": true, \"property-testing\": false, \"mutation-testing\": false },",
+          "          \"coverage\": { \"status\": \"measured\", \"metric\": \"statements\", \"covered\": 19, \"total\": 20, \"percent\": 95.0 },",
+          "          \"profile\": { \"status\": \"measured\", \"totalSeconds\": 1.234 },",
+          "          \"testDurationsSeconds\": { \"Reports \\\"quoted\\\" behavior.\": 0.125 },",
+          "          \"tests\": [\"Reports \\\"quoted\\\" behavior.\"]",
+          "        }",
+          "      ]",
           "    }",
-          "",
           "  ]",
           "}"
         ]
     )
-    (renderRepositoryPackageSummariesJson [packageSummary])
+    (renderRepositorySummariesJson [repositorySummary])
   assertEqual
     "JSON string rendering escapes embedded newlines."
     "\"line one\\nline two\""
@@ -2881,6 +2979,12 @@ commandLineHelpEndToEndTest =
       "Check help requires a location and explains home routing."
       ("<location>" `isInfixOf` checkHelpStdout && ".gitmodules" `isInfixOf` checkHelpStdout)
     assertEqual "Check help leaves stderr empty." "" checkHelpStderr
+    (summaryHelpExit, summaryHelpStdout, summaryHelpStderr) <- runEndToEndCommandIn temporaryDirectory ["summary", "--help"]
+    assertEqual "Summary help succeeds." ExitSuccess summaryHelpExit
+    assertBool
+      "Summary help explains Git location selection and home aggregation."
+      ("git -C <location>" `isInfixOf` summaryHelpStdout && ".gitmodules" `isInfixOf` summaryHelpStdout)
+    assertEqual "Summary help leaves stderr empty." "" summaryHelpStderr
     (initHelpExit, initHelpStdout, initHelpStderr) <- runEndToEndCommandIn temporaryDirectory ["init", "--help"]
     assertEqual "Init help succeeds." ExitSuccess initHelpExit
     assertBool
@@ -3053,31 +3157,96 @@ addPackageEndToEndTest =
 textSummaryEndToEndTest :: IO ()
 textSummaryEndToEndTest =
   withGeneratedPythonPackageRepository "text-summary-end-to-end" $ \temporaryRepository -> do
+    canonicalHomeDirectory <- getHomeDirectory >>= canonicalizePath
+    repositoryPath <- repositoryIdentifier canonicalHomeDirectory temporaryRepository
     (summaryExit, summaryStdout, summaryStderr) <- runEndToEndCommandIn temporaryRepository ["summary"]
     assertEqual "Text summary succeeds for the generated repository." ExitSuccess summaryExit
     assertEqual
       "Text summary exactly reports generated metadata, checks, and discovered tests."
-      (renderRepositoryPackageSummariesText [expectedGeneratedPythonPackageSummary])
+      ( renderRepositorySummariesText
+          [RepositorySummary repositoryPath [expectedGeneratedPythonPackageSummary]]
+      )
       summaryStdout
     assertEqual "A successful text summary leaves stderr empty." "" summaryStderr
 jsonSummaryEndToEndTest :: IO ()
 jsonSummaryEndToEndTest =
   withGeneratedPythonPackageRepository "json-summary-end-to-end" $ \temporaryRepository -> do
+    canonicalHomeDirectory <- getHomeDirectory >>= canonicalizePath
+    repositoryPath <- repositoryIdentifier canonicalHomeDirectory temporaryRepository
     (jsonExit, jsonStdout, jsonStderr) <- runEndToEndCommandIn temporaryRepository ["summary", "--json"]
     assertEqual "JSON summary succeeds for the generated repository." ExitSuccess jsonExit
     assertEqual
       "JSON summary exactly reports generated metadata, checks, and discovered tests."
-      (renderRepositoryPackageSummariesJson [expectedGeneratedPythonPackageSummary])
+      ( renderRepositorySummariesJson
+          [RepositorySummary repositoryPath [expectedGeneratedPythonPackageSummary]]
+      )
       jsonStdout
     assertEqual "A successful JSON summary leaves stderr empty." "" jsonStderr
+homeSummaryEndToEndTest :: IO ()
+homeSummaryEndToEndTest =
+  withTemporaryPackageRepository "home-summary-end-to-end" $ \temporaryHome -> do
+    initializeGitRepositoryFixture temporaryHome
+    let firstRepositoryPath = "alpha.test" </> "owner" </> "first"
+        secondRepositoryPath = "zeta.test" </> "owner" </> "second"
+        firstRepository = temporaryHome </> firstRepositoryPath
+        secondRepository = temporaryHome </> secondRepositoryPath
+    initializeGitRepositoryFixture firstRepository
+    initializeGitRepositoryFixture secondRepository
+    forM_ [firstRepository, secondRepository] $ \repositoryPath -> do
+      TIO.writeFile (repositoryPath </> "flake.nix") "{}"
+      TIO.writeFile (repositoryPath </> "flake.lock") "{}"
+    let expectedSummaries =
+          [ RepositorySummary firstRepositoryPath [],
+            RepositorySummary secondRepositoryPath []
+          ]
+    withEnvironmentVariable "HOME" temporaryHome $ do
+      (missingGitmodulesExit, missingGitmodulesStdout, missingGitmodulesStderr) <- runEndToEndCommandIn temporaryHome ["summary"]
+      assertEqual "A home summary requires .gitmodules." (ExitFailure 1) missingGitmodulesExit
+      assertEqual "A missing .gitmodules summary leaves stdout empty." "" missingGitmodulesStdout
+      assertBool "A missing .gitmodules summary identifies the missing file." ("missing file:" `isInfixOf` missingGitmodulesStderr)
+      TIO.writeFile (temporaryHome </> ".gitmodules") ""
+      (emptyExit, emptyStdout, emptyStderr) <- runEndToEndCommandIn temporaryHome ["summary", "--json"]
+      assertEqual "An empty home JSON summary succeeds." ExitSuccess emptyExit
+      assertEqual "An empty home JSON summary contains no repositories." (renderRepositorySummariesJson []) emptyStdout
+      assertEqual "An empty home JSON summary leaves stderr empty." "" emptyStderr
+      TIO.writeFile
+        (temporaryHome </> ".gitmodules")
+        ( T.unlines
+            [ "[submodule \"second\"]",
+              "  path = zeta.test/owner/second",
+              "[submodule \"first\"]",
+              "  path = alpha.test/owner/first"
+            ]
+        )
+      (textExit, textStdout, textStderr) <- runEndToEndCommandIn temporaryHome ["summary"]
+      assertEqual "The home text summary succeeds." ExitSuccess textExit
+      assertEqual "The home text summary is grouped in path order." (renderRepositorySummariesText expectedSummaries) textStdout
+      assertEqual "The home text summary leaves stderr empty." "" textStderr
+      let homeChild = temporaryHome </> "not-a-repository" </> "child"
+      createDirectoryIfMissing True homeChild
+      (jsonExit, jsonStdout, jsonStderr) <- runEndToEndCommandAt homeChild ["summary", "--json"]
+      assertEqual "The home JSON summary succeeds." ExitSuccess jsonExit
+      assertEqual "Git -C beneath home routes to the grouped JSON summary." (renderRepositorySummariesJson expectedSummaries) jsonStdout
+      assertEqual "The home JSON summary leaves stderr empty." "" jsonStderr
+      TIO.appendFile
+        (temporaryHome </> ".gitmodules")
+        (T.unlines ["[submodule \"missing\"]", "  path = aardvark.test/owner/missing"])
+      (failedExit, failedStdout, failedStderr) <- runEndToEndCommandIn temporaryHome ["summary"]
+      assertEqual "A missing registered repository fails the home summary." (ExitFailure 1) failedExit
+      assertEqual "A failed home summary does not emit partial stdout." "" failedStdout
+      assertBool "A failed home summary identifies the registered path." ("aardvark.test/owner/missing" `isInfixOf` failedStderr)
 haskellSummaryEndToEndTest :: IO ()
 haskellSummaryEndToEndTest =
   withGeneratedHaskellPackageRepository "haskell-summary-end-to-end" $ \temporaryRepository -> do
+    canonicalHomeDirectory <- getHomeDirectory >>= canonicalizePath
+    repositoryPath <- repositoryIdentifier canonicalHomeDirectory temporaryRepository
     (summaryExit, summaryStdout, summaryStderr) <- runEndToEndCommandIn temporaryRepository ["summary"]
     assertEqual "A generated Haskell package summary succeeds." ExitSuccess summaryExit
     assertEqual
       "The summary reports its conventional HUnit label."
-      (renderRepositoryPackageSummariesText [expectedGeneratedHaskellPackageSummary])
+      ( renderRepositorySummariesText
+          [RepositorySummary repositoryPath [expectedGeneratedHaskellPackageSummary]]
+      )
       summaryStdout
     assertEqual "A successful Haskell summary leaves stderr empty." "" summaryStderr
 generatedPackageCheckEndToEndTest :: IO ()
@@ -3249,6 +3418,9 @@ expectedGeneratedHaskellPackageSummary =
 runEndToEndCommandIn :: FilePath -> [String] -> IO (ExitCode, String, String)
 runEndToEndCommandIn workingDirectory arguments =
   withCurrentDirectory workingDirectory (readProcessWithExitCode "git" ("canonicalization" : arguments) "")
+runEndToEndCommandAt :: FilePath -> [String] -> IO (ExitCode, String, String)
+runEndToEndCommandAt workingDirectory arguments =
+  readProcessWithExitCode "git" (["-C", workingDirectory, "canonicalization"] ++ arguments) ""
 initializeGitRepositoryFixture :: FilePath -> IO ()
 initializeGitRepositoryFixture repositoryPath =
   findExecutable "git" >>= \case
