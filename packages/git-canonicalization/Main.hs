@@ -464,8 +464,6 @@ usageTextForCommand = \case
       [ "usage: git canonicalization summary [--json]",
         "",
         "Summarize the nearest Git repository. Use 'git -C <location>' to select it.",
-        "When the selected repository is $HOME, summarize every repository",
-        "registered in $HOME/.gitmodules.",
         "",
         "    --json                output the repository summary as JSON",
         ""
@@ -475,8 +473,8 @@ usageTextForCommand = \case
       [ "usage: git canonicalization check [<location>]",
         "",
         "Check the nearest Git repository, defaulting to the current directory.",
-        "When the selected repository is $HOME, validate its .gitmodules path policy",
-        "and check every registered repository; otherwise check the selected repository.",
+        "The repository rooted at $HOME only uses the home .gitmodules path policy;",
+        "other repositories use canonical repository checks.",
         ""
       ]
   Just "init" ->
@@ -590,24 +588,14 @@ checkCanonicalizationLocation canonicalizationSettings location = do
   homeDirectory <- getHomeDirectory
   canonicalHomeDirectory <- canonicalizePath homeDirectory
   if repositoryRoot == canonicalHomeDirectory
-    then do
-      registeredRepositories <- resolveHomeRegisteredRepositories canonicalHomeDirectory
-      repositoryChecksSucceeded <-
-        forM registeredRepositories $ \(repositoryPath, registeredRepositoryRoot) ->
-          checkRepositoryAt canonicalizationSettings (Just repositoryPath) registeredRepositoryRoot
-      unless (and repositoryChecksSucceeded) exitFailure
-    else do
-      repositoryCheckSucceeded <- checkRepositoryAt canonicalizationSettings Nothing repositoryRoot
-      unless repositoryCheckSucceeded exitFailure
-checkRepositoryAt :: CanonicalizationSettings -> Maybe FilePath -> FilePath -> IO Bool
-checkRepositoryAt canonicalizationSettings maybeRepositoryPath repositoryRoot =
-  withCurrentDirectory repositoryRoot $
-    collectRepositoryComplianceWith canonicalizationSettings >>= \case
-      Left (checkPhaseName, checkPhaseIssues) -> do
-        forM_ maybeRepositoryPath (hPutStrLn stderr . ("error: repository: " ++))
-        reportCheckRepositoryFailures checkPhaseName checkPhaseIssues
-        pure False
-      Right _ -> pure True
+    then checkHomeGitmoduleCompliance canonicalHomeDirectory >>= either failCanonicalizationCheck pure
+    else
+      withCurrentDirectory repositoryRoot $
+        collectRepositoryComplianceWith canonicalizationSettings >>= \case
+          Left (checkPhaseName, checkPhaseIssues) -> do
+            reportCheckRepositoryFailures checkPhaseName checkPhaseIssues
+            exitFailure
+          Right _ -> pure ()
 failCanonicalizationCheck :: String -> IO a
 failCanonicalizationCheck diagnostic = do
   forM_ (lines diagnostic) (hPutStrLn stderr . ("error: " ++))
@@ -616,8 +604,8 @@ dieWithFatal :: String -> IO a
 dieWithFatal diagnostic = do
   hPutStrLn stderr ("fatal: " ++ diagnostic)
   exitWith (ExitFailure 128)
-readHomeGitmodulePaths :: FilePath -> IO (Either String [FilePath])
-readHomeGitmodulePaths homeDirectory = do
+checkHomeGitmoduleCompliance :: FilePath -> IO (Either String ())
+checkHomeGitmoduleCompliance homeDirectory = do
   let gitmodulesPath = homeDirectory </> ".gitmodules"
   gitmodulesExists <- doesFileExist gitmodulesPath
   if not gitmodulesExists
@@ -636,7 +624,7 @@ readHomeGitmodulePaths homeDirectory = do
             exitWith gitConfigExit
       pure $
         case filter (not . isCompatibleHomeGitmodulePath) pathEntries of
-          [] -> Right (sort (map T.unpack pathEntries))
+          [] -> Right ()
           invalidPathEntries ->
             Left
               ( intercalate
@@ -838,40 +826,9 @@ summarizeCanonicalizationLocation canonicalizationSettings render location = do
   repositoryRoot <- discoverGitRepositoryRoot location
   homeDirectory <- getHomeDirectory
   canonicalHomeDirectory <- canonicalizePath homeDirectory
-  repositorySummaries <-
-    if repositoryRoot == canonicalHomeDirectory
-      then do
-        registeredRepositories <- resolveHomeRegisteredRepositories canonicalHomeDirectory
-        forM registeredRepositories (uncurry (summarizeRepositoryAt canonicalizationSettings))
-      else do
-        repositoryPath <- repositoryIdentifier canonicalHomeDirectory repositoryRoot
-        (: []) <$> summarizeRepositoryAt canonicalizationSettings repositoryPath repositoryRoot
-  putStr (render repositorySummaries)
-resolveHomeRegisteredRepositories :: FilePath -> IO [(FilePath, FilePath)]
-resolveHomeRegisteredRepositories canonicalHomeDirectory = do
-  repositoryPaths <- readHomeGitmodulePaths canonicalHomeDirectory >>= either failCanonicalizationCheck pure
-  forM repositoryPaths $ \repositoryPath -> do
-    let absoluteRepositoryPath = canonicalHomeDirectory </> repositoryPath
-    repositoryExists <- doesDirectoryExist absoluteRepositoryPath
-    unless repositoryExists $ failCanonicalizationCheck (repositoryPath ++ ": missing repository directory: " ++ absoluteRepositoryPath)
-    canonicalRepositoryPath <- canonicalizePath absoluteRepositoryPath
-    discoveredRepositoryRoot <- discoverRegisteredRepositoryRoot repositoryPath canonicalRepositoryPath
-    unless (discoveredRepositoryRoot == canonicalRepositoryPath) $
-      failCanonicalizationCheck (repositoryPath ++ ": not a Git repository root: " ++ canonicalRepositoryPath)
-    pure (repositoryPath, canonicalRepositoryPath)
-discoverRegisteredRepositoryRoot :: FilePath -> FilePath -> IO FilePath
-discoverRegisteredRepositoryRoot repositoryPath canonicalRepositoryPath = do
-  (gitExit, gitStdout, gitStderr) <- captureGit (gitIn canonicalRepositoryPath ["rev-parse", "--path-format=absolute", "--show-toplevel"])
-  case gitExit of
-    ExitSuccess -> pure (T.unpack (T.strip (T.pack gitStdout)))
-    _ ->
-      let gitDiagnostic = unwords (lines gitStderr)
-       in failCanonicalizationCheck
-            ( repositoryPath
-                ++ ": not a Git repository root: "
-                ++ canonicalRepositoryPath
-                ++ if null gitDiagnostic then "" else ": " ++ gitDiagnostic
-            )
+  repositoryPath <- repositoryIdentifier canonicalHomeDirectory repositoryRoot
+  repositorySummary <- summarizeRepositoryAt canonicalizationSettings repositoryPath repositoryRoot
+  putStr (render [repositorySummary])
 repositoryIdentifier :: FilePath -> FilePath -> IO FilePath
 repositoryIdentifier canonicalHomeDirectory repositoryRoot = do
   canonicalRepositoryRoot <- canonicalizePath repositoryRoot
@@ -2804,14 +2761,13 @@ hUnitPackageTests =
       TestLabel "Initializes and safely reinitializes a compatible home repository." (TestCase initCompatibleHomeEndToEndTest),
       TestLabel "Rejects initialization when the home ignore policy conflicts." (TestCase initConflictingHomeEndToEndTest),
       TestLabel "Checks the current directory by default and routes home descendants to the home repository." (TestCase checkHomeRoutingEndToEndTest),
-      TestLabel "Checks every registered home repository." (TestCase checkHomeRepositoriesEndToEndTest),
+      TestLabel "Does not apply canonical repository checks to home submodules." (TestCase checkHomeSubmodulesEndToEndTest),
       TestLabel "Rejects malformed home submodule paths." (TestCase checkMalformedHomePathEndToEndTest),
       TestLabel "Checks nested Git repositories independently from the home repository." (TestCase checkNestedRepositoryEndToEndTest),
       TestLabel "Propagates Git refusal without changing a staged submodule." (TestCase stagedSubmoduleRemovalRefusalEndToEndTest),
       TestLabel "Scaffolds a package and its requested checks from a nested directory." (TestCase addPackageEndToEndTest),
       TestLabel "Reports generated package behavior in the text summary." (TestCase textSummaryEndToEndTest),
       TestLabel "Reports generated package behavior in the JSON summary." (TestCase jsonSummaryEndToEndTest),
-      TestLabel "Summarizes every registered home repository." (TestCase homeSummaryEndToEndTest),
       TestLabel "Reports conventional tests for generated Haskell packages." (TestCase haskellSummaryEndToEndTest),
       TestLabel "Accepts a generated package during repository checks." (TestCase generatedPackageCheckEndToEndTest),
       TestLabel "Rejects unlabeled HUnit cases in generated Haskell packages." (TestCase unlabeledHaskellPackageCheckEndToEndTest),
@@ -3039,14 +2995,14 @@ commandLineHelpEndToEndTest =
     (checkHelpExit, checkHelpStdout, checkHelpStderr) <- runEndToEndCommandIn temporaryDirectory ["check", "--help"]
     assertEqual "Check help succeeds." ExitSuccess checkHelpExit
     assertBool
-      "Check help requires a location and explains home routing."
+      "Check help accepts a location and explains home compliance."
       ("<location>" `isInfixOf` checkHelpStdout && ".gitmodules" `isInfixOf` checkHelpStdout)
     assertEqual "Check help leaves stderr empty." "" checkHelpStderr
     (summaryHelpExit, summaryHelpStdout, summaryHelpStderr) <- runEndToEndCommandIn temporaryDirectory ["summary", "--help"]
     assertEqual "Summary help succeeds." ExitSuccess summaryHelpExit
     assertBool
-      "Summary help explains Git location selection and home aggregation."
-      ("git -C <location>" `isInfixOf` summaryHelpStdout && ".gitmodules" `isInfixOf` summaryHelpStdout)
+      "Summary help explains Git location selection without home aggregation."
+      ("git -C <location>" `isInfixOf` summaryHelpStdout && not (".gitmodules" `isInfixOf` summaryHelpStdout))
     assertEqual "Summary help leaves stderr empty." "" summaryHelpStderr
     (initHelpExit, initHelpStdout, initHelpStderr) <- runEndToEndCommandIn temporaryDirectory ["init", "--help"]
     assertEqual "Init help succeeds." ExitSuccess initHelpExit
@@ -3121,9 +3077,9 @@ checkHomeRoutingEndToEndTest =
       assertEqual "A home descendant without its own repository uses the home check." ExitSuccess homeCheckExit
       assertEqual "A successful home check leaves stdout empty." "" homeCheckStdout
       assertEqual "A successful home check leaves stderr empty." "" homeCheckStderr
-checkHomeRepositoriesEndToEndTest :: IO ()
-checkHomeRepositoriesEndToEndTest =
-  withTemporaryPackageRepository "check-home-repositories" $ \temporaryHome -> do
+checkHomeSubmodulesEndToEndTest :: IO ()
+checkHomeSubmodulesEndToEndTest =
+  withTemporaryPackageRepository "check-home-submodules" $ \temporaryHome -> do
     initializeGitRepositoryFixture temporaryHome
     let firstRepositoryPath = "alpha.test" </> "owner" </> "first"
         secondRepositoryPath = "zeta.test" </> "owner" </> "second"
@@ -3143,21 +3099,12 @@ checkHomeRepositoriesEndToEndTest =
           ]
       )
     withEnvironmentVariable "HOME" temporaryHome $ do
-      (successfulCheckExit, successfulCheckStdout, successfulCheckStderr) <- runEndToEndCommandIn temporaryHome ["check"]
-      assertEqual "Checking valid registered home repositories succeeds." ExitSuccess successfulCheckExit
-      assertEqual "A successful registered-repository check leaves stdout empty." "" successfulCheckStdout
-      assertEqual "A successful registered-repository check leaves stderr empty." "" successfulCheckStderr
       removeFile (firstRepository </> "flake.lock")
       removeFile (secondRepository </> "flake.lock")
-      (failedCheckExit, failedCheckStdout, failedCheckStderr) <- runEndToEndCommandIn temporaryHome ["check"]
-      assertEqual "Noncompliant registered home repositories fail the home check." (ExitFailure 1) failedCheckExit
-      assertEqual "A failed registered-repository check leaves stdout empty." "" failedCheckStdout
-      assertBool
-        "A failed home check reports every noncompliant registered repository."
-        ( ("repository: " ++ firstRepositoryPath) `isInfixOf` failedCheckStderr
-            && ("repository: " ++ secondRepositoryPath) `isInfixOf` failedCheckStderr
-            && "canonicalization check failed at phase: required-root-files" `isInfixOf` failedCheckStderr
-        )
+      (homeCheckExit, homeCheckStdout, homeCheckStderr) <- runEndToEndCommandIn temporaryHome ["check"]
+      assertEqual "Home checks only validate .gitmodules path compliance." ExitSuccess homeCheckExit
+      assertEqual "A successful home compliance check leaves stdout empty." "" homeCheckStdout
+      assertEqual "A successful home compliance check leaves stderr empty." "" homeCheckStderr
 checkMalformedHomePathEndToEndTest :: IO ()
 checkMalformedHomePathEndToEndTest =
   withTemporaryPackageRepository "check-malformed-home" $ \temporaryHome -> do
@@ -3286,59 +3233,6 @@ jsonSummaryEndToEndTest =
       )
       jsonStdout
     assertEqual "A successful JSON summary leaves stderr empty." "" jsonStderr
-homeSummaryEndToEndTest :: IO ()
-homeSummaryEndToEndTest =
-  withTemporaryPackageRepository "home-summary-end-to-end" $ \temporaryHome -> do
-    initializeGitRepositoryFixture temporaryHome
-    let firstRepositoryPath = "alpha.test" </> "owner" </> "first"
-        secondRepositoryPath = "zeta.test" </> "owner" </> "second"
-        firstRepository = temporaryHome </> firstRepositoryPath
-        secondRepository = temporaryHome </> secondRepositoryPath
-    initializeGitRepositoryFixture firstRepository
-    initializeGitRepositoryFixture secondRepository
-    forM_ [firstRepository, secondRepository] $ \repositoryPath -> do
-      TIO.writeFile (repositoryPath </> "flake.nix") "{}"
-      TIO.writeFile (repositoryPath </> "flake.lock") "{}"
-    let expectedSummaries =
-          [ RepositorySummary firstRepositoryPath [],
-            RepositorySummary secondRepositoryPath []
-          ]
-    withEnvironmentVariable "HOME" temporaryHome $ do
-      (missingGitmodulesExit, missingGitmodulesStdout, missingGitmodulesStderr) <- runEndToEndCommandIn temporaryHome ["summary"]
-      assertEqual "A home summary requires .gitmodules." (ExitFailure 1) missingGitmodulesExit
-      assertEqual "A missing .gitmodules summary leaves stdout empty." "" missingGitmodulesStdout
-      assertBool "A missing .gitmodules summary identifies the missing file." ("missing file:" `isInfixOf` missingGitmodulesStderr)
-      TIO.writeFile (temporaryHome </> ".gitmodules") ""
-      (emptyExit, emptyStdout, emptyStderr) <- runEndToEndCommandIn temporaryHome ["summary", "--json"]
-      assertEqual "An empty home JSON summary succeeds." ExitSuccess emptyExit
-      assertEqual "An empty home JSON summary contains no repositories." (renderRepositorySummariesJson []) emptyStdout
-      assertEqual "An empty home JSON summary leaves stderr empty." "" emptyStderr
-      TIO.writeFile
-        (temporaryHome </> ".gitmodules")
-        ( T.unlines
-            [ "[submodule \"second\"]",
-              "  path = zeta.test/owner/second",
-              "[submodule \"first\"]",
-              "  path = alpha.test/owner/first"
-            ]
-        )
-      (textExit, textStdout, textStderr) <- runEndToEndCommandIn temporaryHome ["summary"]
-      assertEqual "The home text summary succeeds." ExitSuccess textExit
-      assertEqual "The home text summary is grouped in path order." (renderRepositorySummariesText expectedSummaries) textStdout
-      assertEqual "The home text summary leaves stderr empty." "" textStderr
-      let homeChild = temporaryHome </> "not-a-repository" </> "child"
-      createDirectoryIfMissing True homeChild
-      (jsonExit, jsonStdout, jsonStderr) <- runEndToEndCommandAt homeChild ["summary", "--json"]
-      assertEqual "The home JSON summary succeeds." ExitSuccess jsonExit
-      assertEqual "Git -C beneath home routes to the grouped JSON summary." (renderRepositorySummariesJson expectedSummaries) jsonStdout
-      assertEqual "The home JSON summary leaves stderr empty." "" jsonStderr
-      TIO.appendFile
-        (temporaryHome </> ".gitmodules")
-        (T.unlines ["[submodule \"missing\"]", "  path = aardvark.test/owner/missing"])
-      (failedExit, failedStdout, failedStderr) <- runEndToEndCommandIn temporaryHome ["summary"]
-      assertEqual "A missing registered repository fails the home summary." (ExitFailure 1) failedExit
-      assertEqual "A failed home summary does not emit partial stdout." "" failedStdout
-      assertBool "A failed home summary identifies the registered path." ("aardvark.test/owner/missing" `isInfixOf` failedStderr)
 haskellSummaryEndToEndTest :: IO ()
 haskellSummaryEndToEndTest =
   withGeneratedHaskellPackageRepository "haskell-summary-end-to-end" $ \temporaryRepository -> do
@@ -3522,9 +3416,6 @@ expectedGeneratedHaskellPackageSummary =
 runEndToEndCommandIn :: FilePath -> [String] -> IO (ExitCode, String, String)
 runEndToEndCommandIn workingDirectory arguments =
   withCurrentDirectory workingDirectory (readProcessWithExitCode "git" ("canonicalization" : arguments) "")
-runEndToEndCommandAt :: FilePath -> [String] -> IO (ExitCode, String, String)
-runEndToEndCommandAt workingDirectory arguments =
-  readProcessWithExitCode "git" (["-C", workingDirectory, "canonicalization"] ++ arguments) ""
 initializeGitRepositoryFixture :: FilePath -> IO ()
 initializeGitRepositoryFixture repositoryPath =
   findExecutable "git" >>= \case
