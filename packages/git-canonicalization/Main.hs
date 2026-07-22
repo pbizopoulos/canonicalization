@@ -370,8 +370,7 @@ defaultCanonicalizationSettings =
 type RepositoryLocation :: Type
 data RepositoryLocation = RepositoryLocation
   { repositoryLocationHostname :: String,
-    repositoryLocationUsername :: String,
-    repositoryLocationName :: FilePath,
+    repositoryLocationPathComponents :: NonEmpty FilePath,
     repositoryLocationUrl :: String
   }
   deriving stock (Eq, Show)
@@ -446,7 +445,7 @@ usageTextForCommand = \case
       [ "usage: git canonicalization add <https-or-ssh-repository-url>",
         "   or: git canonicalization add [<options>] <package-type> <package-name> [<description>...]",
         "",
-        "Repository URLs are added below $HOME as <hostname>/<username>/<repository-name>.",
+        "Repository URLs are added below $HOME as <hostname>/<repository-path>.",
         "Generated package and check files are staged with git add.",
         "",
         "    --default-check       add the package's default check",
@@ -518,14 +517,21 @@ repositoryLocationFromUrlPath repositoryUrl hostnameAndPath = do
   repositoryLocationFromUrlParts repositoryUrl hostname repositoryPath
 repositoryLocationFromUrlParts :: String -> String -> String -> Maybe RepositoryLocation
 repositoryLocationFromUrlParts repositoryUrl hostname repositoryPath =
-  case T.splitOn "/" (T.pack repositoryPath) of
-    [username, repositoryNameWithSuffix] -> do
+  case reverse (T.splitOn "/" (T.dropWhileEnd (== '/') (T.pack repositoryPath))) of
+    repositoryNameWithSuffix : reversedParentPathComponents -> do
       let repositoryName = fromMaybe repositoryNameWithSuffix (T.stripSuffix ".git" repositoryNameWithSuffix)
-          location = RepositoryLocation hostname (T.unpack username) (T.unpack repositoryName) repositoryUrl
-      if any T.null [T.pack hostname, username, repositoryName]
+          pathComponents = reverse reversedParentPathComponents ++ [repositoryName]
+      nonEmptyPathComponents <- NE.nonEmpty pathComponents
+      if T.null (T.pack hostname) || any T.null pathComponents
         then Nothing
-        else Just location
-    _ -> Nothing
+        else
+          Just
+            RepositoryLocation
+              { repositoryLocationHostname = hostname,
+                repositoryLocationPathComponents = T.unpack <$> nonEmptyPathComponents,
+                repositoryLocationUrl = repositoryUrl
+              }
+    [] -> Nothing
 parseRepositoryCheckFlags :: [String] -> Maybe (Set.Set RepositoryCheckKind)
 parseRepositoryCheckFlags flagArguments =
   Set.fromList
@@ -616,7 +622,7 @@ checkHomeGitmoduleCompliance homeDirectory = do
             Left
               ( intercalate
                   "\n"
-                  [ T.unpack pathEntry ++ ": must be exactly <host>/<owner>/<repo>"
+                  [ T.unpack pathEntry ++ ": must be <host>/<repository-path> with valid path components"
                   | pathEntry <- invalidPathEntries
                   ]
               )
@@ -624,11 +630,12 @@ parseNullSeparatedValues :: String -> [T.Text]
 parseNullSeparatedValues = nub . filter (not . T.null) . T.splitOn "\0" . T.pack
 isCompatibleHomeGitmodulePath :: T.Text -> Bool
 isCompatibleHomeGitmodulePath pathEntry =
-  not (T.isPrefixOf "/" pathEntry)
-    && case T.splitOn "/" pathEntry of
-      [hostname, username, repositoryName] ->
-        all (\component -> not (T.null component) && component `notElem` [".", ".."]) [hostname, username, repositoryName]
-      _ -> False
+  case T.splitOn "/" pathEntry of
+    hostname : repositoryPathComponents ->
+      not (T.null hostname)
+        && not (null repositoryPathComponents)
+        && all (isNothing . validateNewName "path component" . T.unpack) (hostname : repositoryPathComponents)
+    [] -> False
 initializeHomeGitRepository :: IO ()
 initializeHomeGitRepository = do
   homeDirectory <- getHomeDirectory
@@ -653,16 +660,15 @@ addGitRepositoryFromLocation repositoryLocation = do
     Right gitArguments -> delegateToGit gitArguments
 gitSubmoduleAddArguments :: FilePath -> RepositoryLocation -> Either String [String]
 gitSubmoduleAddArguments homeDirectory repositoryLocation =
-  case catMaybes [validateNewName "hostname" hostname, validateNewName "username" username, validateNewName "repository" repositoryName] of
+  case catMaybes (validateNewName "hostname" hostname : map (validateNewName "repository path component") pathComponents) of
     validationError : _ -> Left validationError
     [] ->
-      let repositoryPathEntry = hostname </> username </> repositoryName
+      let repositoryPathEntry = foldl (</>) hostname pathComponents
           repositoryUrl = repositoryLocationUrl repositoryLocation
        in Right (gitIn homeDirectory ["submodule", "add", "--force", repositoryUrl, repositoryPathEntry])
   where
     hostname = repositoryLocationHostname repositoryLocation
-    username = repositoryLocationUsername repositoryLocation
-    repositoryName = repositoryLocationName repositoryLocation
+    pathComponents = NE.toList (repositoryLocationPathComponents repositoryLocation)
 requiredRepositoryRootFiles :: [FilePath]
 requiredRepositoryRootFiles = ["flake.nix", "flake.lock"]
 checkRequiredRepositoryRootFiles :: IO [String]
@@ -2691,6 +2697,7 @@ hUnitPackageTests =
       TestLabel "Reports concise Nix template parameter differences." (TestCase nixTemplateParameterDifferenceTest),
       TestLabel "Accepts python_template without inputs or shellHook." (TestCase pythonTemplateOptionalInputsAndShellHookTest),
       TestLabel "Documents top-level and command-specific usage." (TestCase commandLineHelpEndToEndTest),
+      TestLabel "Preserves nested repository URL paths." (TestCase repositoryUrlParsingTest),
       TestLabel "Rejects missing and unknown commands with usage on stderr." (TestCase invalidCommandEndToEndTest),
       TestLabel "Initializes and safely reinitializes a compatible home repository." (TestCase initCompatibleHomeEndToEndTest),
       TestLabel "Rejects initialization when the home ignore policy conflicts." (TestCase initConflictingHomeEndToEndTest),
@@ -2913,6 +2920,47 @@ repositorySummaryRenderingTest = do
     "JSON string rendering escapes embedded newlines."
     "\"line one\\nline two\""
     (renderJsonString "line one\nline two")
+repositoryUrlParsingTest :: IO ()
+repositoryUrlParsingTest = do
+  let kernelRepositoryUrl :: String
+      kernelRepositoryUrl = "https://git.kernel.org/pub/scm/editors/uemacs/uemacs.git/"
+      kernelRepositoryLocation =
+        RepositoryLocation
+          { repositoryLocationHostname = "git.kernel.org",
+            repositoryLocationPathComponents = "pub" :| ["scm", "editors", "uemacs", "uemacs"],
+            repositoryLocationUrl = kernelRepositoryUrl
+          }
+  assertEqual
+    "Nested namespaces, a .git suffix, and a trailing slash are normalized for the local path."
+    (Just kernelRepositoryLocation)
+    (parseRepositoryUrl kernelRepositoryUrl)
+  assertEqual
+    "The complete remote hierarchy becomes the submodule path while Git receives the original URL."
+    ( Right
+        [ "-C",
+          "/home/example",
+          "submodule",
+          "add",
+          "--force",
+          kernelRepositoryUrl,
+          "git.kernel.org/pub/scm/editors/uemacs/uemacs"
+        ]
+    )
+    (gitSubmoduleAddArguments "/home/example" kernelRepositoryLocation)
+  assertEqual
+    "A repository directly below its host is accepted."
+    (Just (RepositoryLocation "example.test" ("demo" :| []) "https://example.test/demo.git"))
+    (parseRepositoryUrl "https://example.test/demo.git")
+  assertEqual
+    "An empty repository path is rejected."
+    Nothing
+    (parseRepositoryUrl "https://example.test/")
+  assertBool
+    "Home submodule paths accept nested repository namespaces."
+    (isCompatibleHomeGitmodulePath "git.kernel.org/pub/scm/editors/uemacs/uemacs")
+  assertBool
+    "Home submodule paths reject traversal components."
+    (not (isCompatibleHomeGitmodulePath "example.test/owner/../demo"))
 commandLineHelpEndToEndTest :: IO ()
 commandLineHelpEndToEndTest =
   withTemporaryPackageRepository "command-line-help" $ \temporaryDirectory -> do
@@ -3039,11 +3087,11 @@ checkMalformedHomePathEndToEndTest =
     let homeChild = temporaryHome </> "not-a-repository" </> "child"
     createDirectoryIfMissing True homeChild
     withEnvironmentVariable "HOME" temporaryHome $ do
-      TIO.writeFile (temporaryHome </> ".gitmodules") "path = owner/repository\n"
+      TIO.writeFile (temporaryHome </> ".gitmodules") "path = repository\n"
       (failedHomeExit, failedHomeStdout, failedHomeStderr) <- runEndToEndCommandIn temporaryHome ["check", homeChild]
       assertEqual "A malformed home submodule path fails." (ExitFailure 1) failedHomeExit
       assertEqual "A malformed home check leaves stdout empty." "" failedHomeStdout
-      assertBool "A malformed home path is reported on stderr." ("must be exactly <host>/<owner>/<repo>" `isInfixOf` failedHomeStderr)
+      assertBool "A malformed home path is reported on stderr." ("must be <host>/<repository-path>" `isInfixOf` failedHomeStderr)
 checkNestedRepositoryEndToEndTest :: IO ()
 checkNestedRepositoryEndToEndTest =
   withTemporaryPackageRepository "check-nested-home" $ \temporaryHome -> do

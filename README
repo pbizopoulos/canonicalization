@@ -1,10 +1,10 @@
-# git+ssh://git@<domain>/<namespace>/<repository-name>			# <URL-private> remote private repository
-# <domain>:<namespace>/<repository-name>				# <URL-public> remote public repository
-# ~/<domain>/<namespace>/<repository-name>				# <URL-local> local repository
+# git+ssh://git@<domain>/<repository-path>.git				# <URL-private> remote private repository
+# https://<domain>/<repository-path>.git				# <URL-public> remote public repository
+# ~/<domain>/<repository-path>						# <URL-local> local repository; repository-path may contain nested namespaces
 # Using a subset of https://numtide.github.io/blueprint/main/
-# ~/<domain>/<namespace>/<repository-name>/packages/<package>		# <URL-local-package> https://numtide.github.io/blueprint/main/getting-started/folder_structure/#packages-for-packages
-# ~/<domain>/<namespace>/<repository-name>/hosts/<host>			# <URL-local-host> https://numtide.github.io/blueprint/main/getting-started/folder_structure/#hostshostnamedefaultnixconfigurationnixdarwin-configurationnixsystem-configurationnixrpi-configurationnix
-# ~/<domain>/<namespace>/<repository-name>/checks/<check>		# <URL-local-check> https://numtide.github.io/blueprint/main/getting-started/folder_structure/#checks-for-flake-checks
+# ~/<domain>/<repository-path>/packages/<package>			# <URL-local-package> https://numtide.github.io/blueprint/main/getting-started/folder_structure/#packages-for-packages
+# ~/<domain>/<repository-path>/hosts/<host>				# <URL-local-host> https://numtide.github.io/blueprint/main/getting-started/folder_structure/#hostshostnamedefaultnixconfigurationnixdarwin-configurationnixsystem-configurationnixrpi-configurationnix
+# ~/<domain>/<repository-path>/checks/<check>				# <URL-local-check> https://numtide.github.io/blueprint/main/getting-started/folder_structure/#checks-for-flake-checks
 git clone <URL-*> <URL-local>						# clone repository
 nix flake update <URL-*> 						# update flake lock file
 nix flake check <URL-*>			 				# check whether the flake evaluates and run its tests
