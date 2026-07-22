@@ -5,9 +5,14 @@ let
   executableHaskellDepends = [
     pkgs.haskellPackages.HUnit
     pkgs.haskellPackages.base
+    pkgs.haskellPackages.containers
+    pkgs.haskellPackages.data-fix
     pkgs.haskellPackages.directory
     pkgs.haskellPackages.filepath
+    pkgs.haskellPackages.hnix
+    pkgs.haskellPackages.prettyprinter
     pkgs.haskellPackages.process
+    pkgs.haskellPackages.regex-tdfa
     pkgs.haskellPackages.text
     pkgs.haskellPackages.unix
   ];
@@ -18,6 +23,8 @@ pkgs.haskellPackages.mkDerivation rec {
   executableToolDepends = [
     pkgs.git
     pkgs.makeWrapper
+    pkgs.nix
+    pkgs.python3
   ];
   mainProgram = pname;
   passthru.haskellExecutableDepends = executableHaskellDepends;
@@ -26,6 +33,8 @@ pkgs.haskellPackages.mkDerivation rec {
     wrapProgram $out/bin/${pname} --prefix PATH : ${
       pkgs.lib.makeBinPath [
         pkgs.git
+        pkgs.nix
+        pkgs.python3
       ]
     } --run "rm -f tmp/${pname}.tix" --set-default HPCTIXFILE tmp/${pname}.tix
     PATH="$out/bin:$PATH" ${ghcForTests}/bin/ghc -i. -e 'Main.runPackageTests' Main.hs

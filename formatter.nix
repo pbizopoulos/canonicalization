@@ -5,6 +5,9 @@
   ...
 }:
 let
+  canonicalization-script = pkgs.writeShellScriptBin "canonicalization-check" ''
+    ${inputs.self.packages.${pkgs.stdenv.system}.canonicalization}/bin/canonicalization check .
+  '';
   clippy-script = pkgs.writeShellScriptBin "clippy" ''
     [ -n "$NIX_BUILD_TOP" ] && exit 0
     export PATH="${
@@ -18,11 +21,6 @@ let
     find packages -name Cargo.toml -execdir cargo clippy --fix --allow-dirty --allow-staged --all-targets --all-features -- -D warnings -D clippy::all -D clippy::pedantic -D clippy::nursery -D clippy::cargo -D clippy::restriction -A clippy::needless_return \;
   '';
   formatter = treefmtEval.config.build.wrapper;
-  git-canonicalization-script = pkgs.writeShellScriptBin "git-canonicalization-check" ''
-    ${
-      inputs.self.packages.${pkgs.stdenv.system}."git-canonicalization"
-    }/bin/git-canonicalization check .
-  '';
   treefmtEval = inputs.treefmt-nix.lib.evalModule pkgs {
     programs = {
       actionlint.enable = true;
@@ -82,7 +80,7 @@ let
           "--max-diagnostics=none"
         ];
         canonicalization = {
-          command = "${git-canonicalization-script}/bin/git-canonicalization-check";
+          command = "${canonicalization-script}/bin/canonicalization-check";
           includes = [
             "*.nix"
           ];
