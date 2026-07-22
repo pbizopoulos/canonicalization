@@ -2,7 +2,7 @@
   pkgs ? import <nixpkgs> { },
 }:
 pkgs.rustPlatform.buildRustPackage rec {
-  cargoHash = "sha256-XkJ4c8CcbwmvWEltX+n4J7r7E2ruHKVPd6jebU81oh4=";
+  cargoHash = "sha256-ECtdW4/yF8gcbn+616yU5LWwItY7WJd0cM6BOwTSVRo=";
   doInstallCheck = pkgs.stdenv.isLinux;
   env = {
     RUSTDOCFLAGS = "-D warnings";
@@ -14,7 +14,7 @@ pkgs.rustPlatform.buildRustPackage rec {
     runHook postInstallCheck
   '';
   meta = {
-    description = "Manage Git submodules in a canonical hierarchy below the home directory.";
+    description = "Manage repositories as canonical submodules of a private, allowlisted home-directory Git superproject.";
     mainProgram = pname;
   };
   nativeBuildInputs = [

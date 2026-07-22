@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "git-home-submodules"
+name = "git-home-submodule"
 version = "0.1.0"

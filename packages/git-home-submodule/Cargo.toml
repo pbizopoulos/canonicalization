@@ -1,5 +1,5 @@
 [[bin]]
-name = "git-home-submodules"
+name = "git-home-submodule"
 path = "src/main.rs"
 
 [dependencies]
@@ -14,10 +14,10 @@ cargo = {level = "deny", priority = -1}
 unsafe_code = "forbid"
 
 [package]
-name = "git-home-submodules"
+name = "git-home-submodule"
 version = "0.1.0"
 edition = "2021"
-description = "Manage Git submodules in a canonical hierarchy below the home directory."
+description = "Manage repositories as canonical submodules of a private, allowlisted home-directory Git superproject."
 license = "MIT"
 repository = "https://github.com/pbizopoulos/canonicalization"
 readme = "../../README"

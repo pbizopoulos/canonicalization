@@ -5,11 +5,11 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command, ExitStatus, Stdio};
-const MAIN_HELP: &str = "usage: git home-submodules [-h | --help] <command> [<args>]\n\n   add                 Add a repository below $HOME\n   check               Check $HOME/.gitmodules submodule entries\n   init                Initialize $HOME as a Git repository\n\nSee 'git home-submodules <command> -h' for help on a specific command.\n";
-const MAIN_USAGE: &str = "usage: git home-submodules [-h | --help] <command> [<args>]\n";
-const ADD_HELP: &str = "usage: git home-submodules add <https-or-ssh-repository-url>\n\nAdd the repository below $HOME as <hostname>/<repository-path>.\n";
-const CHECK_HELP: &str = "usage: git home-submodules check [--fix]\n\nCheck that every $HOME/.gitmodules path matches its repository URL.\nWith --fix, rename mismatched local directories and update their paths.\n";
-const INIT_HELP: &str = "usage: git home-submodules init\n\nInitialize $HOME as a Git repository and ensure its .gitignore starts with *.\nThe rules !.gitignore and !.gitmodules are required; additional rules must start with !.\n";
+const MAIN_HELP: &str = "usage: git home-submodule [-h | --help] <command> [<args>]\n\nManage repositories as submodules of a private, allowlisted $HOME Git superproject.\nSubmodules use deterministic <hostname>/<repository-path> locations.\n\n   add      Add a repository as a submodule\n   check    Check canonical submodule paths\n   init     Initialize the $HOME superproject\n\nSee 'git home-submodule <command> -h' for help on a specific command.\n";
+const MAIN_USAGE: &str = "usage: git home-submodule [-h | --help] <command> [<args>]\n";
+const ADD_HELP: &str = "usage: git home-submodule add <https-or-ssh-repository-url>\n\nAdd the repository as a $HOME submodule at <hostname>/<repository-path>.\n";
+const CHECK_HELP: &str = "usage: git home-submodule check [--fix]\n\nCheck that every $HOME/.gitmodules path matches the canonical path for its repository URL.\nWith --fix, rename mismatched submodules and update their paths.\n";
+const INIT_HELP: &str = "usage: git home-submodule init\n\nInitialize $HOME as a private Git superproject with an allowlist .gitignore.\nThe rules !.gitignore and !.gitmodules are required; additional rules must start with !.\n";
 const DEFAULT_GITIGNORE: &str = "*\n!.gitignore\n!.gitmodules\n";
 const USAGE_EXIT_CODE: i32 = 129;
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -463,7 +463,7 @@ mod tests {
                 .as_nanos();
             let counter = TEMPORARY_DIRECTORY_COUNTER.fetch_add(1, Ordering::Relaxed);
             let path = env::temp_dir().join(format!(
-                "git-home-submodules-{label}-{}-{timestamp}-{counter}",
+                "git-home-submodule-{label}-{}-{timestamp}-{counter}",
                 process::id()
             ));
             fs::create_dir(&path)?;
