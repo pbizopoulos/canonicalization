@@ -2454,12 +2454,13 @@ stripCabalQuotedValue quotedValue =
 comparePackageDefaultNixWithTemplate :: FilePath -> FilePath -> FilePath -> Set.Set T.Text -> T.Text -> IO [String]
 comparePackageDefaultNixWithTemplate packageName subjectNixPath templateBaselineNixPath allowedNixDifferenceKeys templateBaselineSourceText = do
   packageKind <- detectPackageKindForPackage packageName
-  let ignoredTopLevelFunctionParams :: Set.Set T.Text
-      ignoredTopLevelFunctionParams =
-        case packageKind of
-          CPackage -> Set.singleton "inputs"
-          _ -> Set.empty
+  let ignoredTopLevelFunctionParams = optionalTemplateFunctionParams packageKind templateBaselineNixPath
   compareNixFileWithTemplate ignoredTopLevelFunctionParams subjectNixPath templateBaselineNixPath allowedNixDifferenceKeys templateBaselineSourceText
+optionalTemplateFunctionParams :: PackageKind -> FilePath -> Set.Set T.Text
+optionalTemplateFunctionParams packageKind templateBaselineNixPath =
+  if packageKind == CPackage || takeBaseName (takeDirectory templateBaselineNixPath) == "python_template"
+    then Set.singleton "inputs"
+    else Set.empty
 compareCheckTemplateWithBaseline :: FilePath -> T.Text -> IO [String]
 compareCheckTemplateWithBaseline checkTemplatePath templateBaselineText = do
   checkTemplateSource <- TIO.readFile checkTemplatePath
@@ -2797,6 +2798,7 @@ hUnitPackageTests =
       TestLabel "Parses versioned coverage summaries strictly." (TestCase repositoryCoverageParsingTest),
       TestLabel "Renders stable text and JSON repository summaries." (TestCase repositorySummaryRenderingTest),
       TestLabel "Reports concise Nix template parameter differences." (TestCase nixTemplateParameterDifferenceTest),
+      TestLabel "Accepts python_template without inputs or shellHook." (TestCase pythonTemplateOptionalInputsAndShellHookTest),
       TestLabel "Documents top-level and command-specific usage." (TestCase commandLineHelpEndToEndTest),
       TestLabel "Rejects missing and unknown commands with usage on stderr." (TestCase invalidCommandEndToEndTest),
       TestLabel "Initializes and safely reinitializes a compatible home repository." (TestCase initCompatibleHomeEndToEndTest),
@@ -2932,9 +2934,27 @@ nixTemplateParameterDifferenceTest = do
     (Right actualExpression, Right expectedExpression) ->
       assertEqual
         "Only the missing function parameter is reported."
-        ["packages/demo/default.nix: differs from template packages/python_template/default.nix (excluding dependency keys)\n  - missing parameter: inputs"]
-        (formatNixTemplateDifferences "packages/demo/default.nix" "packages/python_template/default.nix" actualExpression expectedExpression)
+        ["packages/demo/default.nix: differs from template packages/example_template/default.nix (excluding dependency keys)\n  - missing parameter: inputs"]
+        (formatNixTemplateDifferences "packages/demo/default.nix" "packages/example_template/default.nix" actualExpression expectedExpression)
     _ -> assertFailure "The Nix parameter-difference fixtures must parse."
+pythonTemplateOptionalInputsAndShellHookTest :: IO ()
+pythonTemplateOptionalInputsAndShellHookTest = do
+  actualParseResult <- parseNixExprFromText "{ pkgs ? import <nixpkgs> {} }: pkgs.python3.pkgs.buildPythonPackage { pname = baseNameOf ./.; }"
+  expectedParseResult <- parseNixExprFromText "{ inputs, pkgs ? import <nixpkgs> {} }: pkgs.python3.pkgs.buildPythonPackage { pname = baseNameOf ./.; shellHook = inputs.example; }"
+  case (actualParseResult, expectedParseResult) of
+    (Right actualExpression, Right expectedExpression) ->
+      assertEqual
+        "The python template's inputs parameter and shellHook binding may both be omitted."
+        []
+        ( formatNixTemplateDifferences
+            "packages/demo/default.nix"
+            "packages/python_template/default.nix"
+            (normalizeNixExpr optionalFunctionParams (Set.singleton "shellHook") actualExpression)
+            (normalizeNixExpr optionalFunctionParams (Set.singleton "shellHook") expectedExpression)
+        )
+    _ -> assertFailure "The optional python-template fixtures must parse."
+  where
+    optionalFunctionParams = optionalTemplateFunctionParams PythonPackage "packages/python_template/default.nix"
 repositorySummaryRenderingTest :: IO ()
 repositorySummaryRenderingTest = do
   let packageSummary =
