@@ -113,7 +113,7 @@ templateSpecs =
     TemplateSpec
       { templateName = "python_latex_template",
         templateMatches = matchesPythonLatexTemplate,
-        templateAllowedDifferenceKeys = Set.fromList ["meta", "propagatedBuildInputs", "version"],
+        templateAllowedDifferenceKeys = Set.fromList ["meta", "propagatedBuildInputs", "pythonDeps", "version"],
         templateBaselineSource = pythonLatexTemplateBaselineNixSource
       },
     TemplateSpec
