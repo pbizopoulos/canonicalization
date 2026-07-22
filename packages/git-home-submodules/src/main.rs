@@ -1,0 +1,622 @@
+use std::collections::BTreeMap;
+use std::env;
+use std::ffi::OsString;
+use std::fmt;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{self, Command, ExitStatus};
+const MAIN_HELP: &str = "usage: git home-submodules [-h | --help] <command> [<args>]\n\n   add        Add a repository below $HOME\n   check      Check $HOME/.gitmodules submodule entries\n   init       Initialize $HOME as a Git repository\n\nSee 'git home-submodules <command> -h' for help on a specific command.\n";
+const MAIN_USAGE: &str = "usage: git home-submodules [-h | --help] <command> [<args>]\n";
+const ADD_HELP: &str = "usage: git home-submodules add <https-or-ssh-repository-url>\n\nAdd the repository below $HOME as <hostname>/<repository-path>.\n";
+const CHECK_HELP: &str = "usage: git home-submodules check\n\nCheck that every $HOME/.gitmodules path matches its repository URL.\n";
+const INIT_HELP: &str = "usage: git home-submodules init\n\nInitialize $HOME as a Git repository and ensure its .gitignore starts with *.\nAdditional whitelist rules must start with !.\n";
+const USAGE_EXIT_CODE: i32 = 129;
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RepositoryLocation {
+    hostname: String,
+    path_components: Vec<String>,
+    url: String,
+}
+impl RepositoryLocation {
+    fn canonical_path(&self) -> String {
+        let mut components = Vec::with_capacity(self.path_components.len() + 1);
+        components.push(self.hostname.as_str());
+        components.extend(self.path_components.iter().map(String::as_str));
+        return components.join("/");
+    }
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RepositoryUrlErrorKind {
+    Syntax,
+    Validation,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RepositoryUrlError {
+    kind: RepositoryUrlErrorKind,
+    message: String,
+}
+impl fmt::Display for RepositoryUrlError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        return formatter.write_str(&self.message);
+    }
+}
+impl std::error::Error for RepositoryUrlError {}
+#[derive(Debug)]
+struct CliFailure {
+    exit_code: i32,
+    diagnostics: Vec<String>,
+}
+impl CliFailure {
+    fn fatal(diagnostic: impl Into<String>) -> Self {
+        return Self {
+            exit_code: 128,
+            diagnostics: vec![format!("fatal: {}", diagnostic.into())],
+        };
+    }
+    fn check(diagnostics: Vec<String>) -> Self {
+        return Self {
+            exit_code: 1,
+            diagnostics: diagnostics
+                .into_iter()
+                .map(|diagnostic| format!("error: {diagnostic}"))
+                .collect(),
+        };
+    }
+    fn git(exit_status: ExitStatus) -> Self {
+        return Self {
+            exit_code: exit_status.code().unwrap_or(1),
+            diagnostics: Vec::new(),
+        };
+    }
+}
+#[derive(Debug, Default)]
+struct SubmoduleFields {
+    paths: Vec<String>,
+    urls: Vec<String>,
+}
+fn main() {
+    let arguments: Vec<OsString> = env::args_os().skip(1).collect();
+    let home_directory = env::var_os("HOME").map_or_else(
+        || {
+            eprintln!("fatal: HOME is not set");
+            process::exit(128);
+        },
+        PathBuf::from,
+    );
+    process::exit(run_cli(&arguments, &home_directory));
+}
+fn run_cli(arguments: &[OsString], home_directory: &Path) -> i32 {
+    if arguments
+        .iter()
+        .any(|argument| argument == "-h" || argument == "--help")
+    {
+        if arguments.len() == 1 {
+            print!("{MAIN_HELP}");
+        } else {
+            print!(
+                "{}",
+                command_usage(arguments.first().and_then(|value| value.to_str()))
+            );
+        }
+        return 0;
+    }
+    let result = match arguments {
+        [] => {
+            eprint!("{MAIN_HELP}");
+            return 1;
+        }
+        [command] if command == "help" => {
+            print!("{MAIN_HELP}");
+            return 0;
+        }
+        [command] if command == "init" => initialize_home_repository(home_directory),
+        [command, repository_url] if command == "add" => repository_url.to_str().map_or_else(
+            || Err(CliFailure::fatal("repository URL must be valid UTF-8")),
+            |url| add_repository(home_directory, url),
+        ),
+        [command] if command == "check" => check_home_gitmodules(home_directory),
+        _ => {
+            eprint!(
+                "{}",
+                command_usage(arguments.first().and_then(|value| value.to_str()))
+            );
+            return USAGE_EXIT_CODE;
+        }
+    };
+    match result {
+        Ok(()) => 0,
+        Err(failure) => {
+            for diagnostic in failure.diagnostics {
+                eprintln!("{diagnostic}");
+            }
+            failure.exit_code
+        }
+    }
+}
+fn command_usage(command: Option<&str>) -> &'static str {
+    return match command {
+        Some("add") => ADD_HELP,
+        Some("check") => CHECK_HELP,
+        Some("init") => INIT_HELP,
+        _ => MAIN_USAGE,
+    };
+}
+fn parse_repository_url(repository_url: &str) -> Result<RepositoryLocation, RepositoryUrlError> {
+    let (hostname, repository_path) =
+        if let Some(location) = repository_url.strip_prefix("https://") {
+            split_url_path(repository_url, location)?
+        } else if let Some(location) = repository_url.strip_prefix("ssh://git@") {
+            split_url_path(repository_url, location)?
+        } else if let Some(location) = repository_url.strip_prefix("git+ssh://git@") {
+            split_url_path(repository_url, location)?
+        } else if let Some(location) = repository_url.strip_prefix("git@") {
+            location.split_once(':').ok_or_else(|| {
+                syntax_url_error(repository_url, "unsupported or incomplete repository URL")
+            })?
+        } else {
+            return Err(syntax_url_error(
+                repository_url,
+                "unsupported repository URL",
+            ));
+        };
+    let repository_path = repository_path.trim_end_matches('/');
+    if hostname.is_empty() || repository_path.is_empty() {
+        return Err(syntax_url_error(
+            repository_url,
+            "unsupported or incomplete repository URL",
+        ));
+    }
+    validate_component("hostname", hostname)?;
+    let mut path_components: Vec<String> = repository_path.split('/').map(str::to_owned).collect();
+    if let Some(repository_name) = path_components.last_mut() {
+        if let Some(name_without_suffix) = repository_name.strip_suffix(".git") {
+            *repository_name = name_without_suffix.to_owned();
+        }
+    }
+    for component in &path_components {
+        validate_component("repository path component", component)?;
+    }
+    return Ok(RepositoryLocation {
+        hostname: hostname.to_owned(),
+        path_components,
+        url: repository_url.to_owned(),
+    });
+}
+fn split_url_path<'a>(
+    repository_url: &str,
+    location: &'a str,
+) -> Result<(&'a str, &'a str), RepositoryUrlError> {
+    return location.split_once('/').ok_or_else(|| {
+        syntax_url_error(repository_url, "unsupported or incomplete repository URL")
+    });
+}
+fn syntax_url_error(repository_url: &str, diagnostic: &str) -> RepositoryUrlError {
+    return RepositoryUrlError {
+        kind: RepositoryUrlErrorKind::Syntax,
+        message: format!("{diagnostic}: {repository_url}"),
+    };
+}
+fn validate_component(component_kind: &str, component: &str) -> Result<(), RepositoryUrlError> {
+    let diagnostic = if component.is_empty() {
+        Some(format!("{component_kind} name must not be empty"))
+    } else if component == "." || component == ".." {
+        Some(format!("{component_kind} name must not be '.' or '..'"))
+    } else if !component
+        .chars()
+        .all(|character| character.is_alphanumeric() || matches!(character, '.' | '-' | '_'))
+    {
+        Some(format!(
+            "{component_kind} name must contain only letters, digits, '.', '-', or '_'"
+        ))
+    } else {
+        None
+    };
+    return diagnostic.map_or(Ok(()), |message| {
+        Err(RepositoryUrlError {
+            kind: RepositoryUrlErrorKind::Validation,
+            message,
+        })
+    });
+}
+fn add_repository(home_directory: &Path, repository_url: &str) -> Result<(), CliFailure> {
+    return add_repository_with_environment(home_directory, repository_url, &[]);
+}
+fn add_repository_with_environment(
+    home_directory: &Path,
+    repository_url: &str,
+    environment: &[(OsString, OsString)],
+) -> Result<(), CliFailure> {
+    let repository_location = match parse_repository_url(repository_url) {
+        Ok(location) => location,
+        Err(error) if error.kind == RepositoryUrlErrorKind::Syntax => {
+            eprint!("{ADD_HELP}");
+            return Err(CliFailure {
+                exit_code: USAGE_EXIT_CODE,
+                diagnostics: Vec::new(),
+            });
+        }
+        Err(error) => return Err(CliFailure::fatal(error.message)),
+    };
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(home_directory)
+        .args(["submodule", "add", "--force"])
+        .arg(&repository_location.url)
+        .arg(repository_location.canonical_path())
+        .envs(environment.iter().cloned());
+    let status = command
+        .status()
+        .map_err(|error| CliFailure::fatal(format!("failed to execute git: {error}")))?;
+    if status.success() {
+        return Ok(());
+    }
+    return Err(CliFailure::git(status));
+}
+fn initialize_home_repository(home_directory: &Path) -> Result<(), CliFailure> {
+    let gitignore_path = home_directory.join(".gitignore");
+    if gitignore_path.is_file() {
+        let contents = fs::read_to_string(&gitignore_path)
+            .map_err(|error| CliFailure::fatal(format!("{}: {error}", gitignore_path.display())))?;
+        let mut lines = contents.lines();
+        let compatible = lines.next() == Some("*") && lines.all(|line| line.starts_with('!'));
+        if !compatible {
+            return Err(CliFailure::fatal(format!(
+                "{}: existing file must start with * and subsequent lines must start with !",
+                gitignore_path.display()
+            )));
+        }
+    }
+    let status = Command::new("git")
+        .arg("init")
+        .arg(home_directory)
+        .status()
+        .map_err(|error| CliFailure::fatal(format!("failed to execute git: {error}")))?;
+    if !status.success() {
+        return Err(CliFailure::git(status));
+    }
+    if !gitignore_path.is_file() {
+        fs::write(&gitignore_path, "*\n")
+            .map_err(|error| CliFailure::fatal(format!("{}: {error}", gitignore_path.display())))?;
+    }
+    return Ok(());
+}
+fn check_home_gitmodules(home_directory: &Path) -> Result<(), CliFailure> {
+    let gitmodules_path = home_directory.join(".gitmodules");
+    if !gitmodules_path.is_file() {
+        return Err(CliFailure::check(vec![format!(
+            "missing file: {}",
+            gitmodules_path.display()
+        )]));
+    }
+    let output = Command::new("git")
+        .args(["config", "get", "--file"])
+        .arg(&gitmodules_path)
+        .args([
+            "--null",
+            "--show-names",
+            "--all",
+            "--regexp",
+            "^submodule\\..*",
+        ])
+        .output()
+        .map_err(|error| {
+            CliFailure::check(vec![format!("failed to execute git config: {error}")])
+        })?;
+    let exit_code = output.status.code().unwrap_or(1);
+    if !(output.status.success()
+        || exit_code == 1 && output.stdout.is_empty() && output.stderr.is_empty())
+    {
+        let diagnostic = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(CliFailure {
+            exit_code,
+            diagnostics: if diagnostic.is_empty() {
+                Vec::new()
+            } else {
+                vec![diagnostic]
+            },
+        });
+    }
+    let submodules = parse_submodule_records(&output.stdout)
+        .map_err(|diagnostic| CliFailure::check(vec![diagnostic]))?;
+    let mut diagnostics = Vec::new();
+    for (section, fields) in submodules {
+        if fields.paths.len() != 1 {
+            diagnostics.push(format!(
+                "submodule \"{section}\": must have exactly one path (found {})",
+                fields.paths.len()
+            ));
+        }
+        if fields.urls.len() != 1 {
+            diagnostics.push(format!(
+                "submodule \"{section}\": must have exactly one URL (found {})",
+                fields.urls.len()
+            ));
+        }
+        if fields.paths.len() != 1 || fields.urls.len() != 1 {
+            continue;
+        }
+        let configured_path = &fields.paths[0];
+        let configured_url = &fields.urls[0];
+        if !path_entry_is_valid(configured_path) {
+            diagnostics.push(format!(                "submodule \"{section}\": invalid path '{configured_path}'; expected <host>/<repository-path> with valid components"            ));
+            continue;
+        }
+        match parse_repository_url(configured_url) {
+            Ok(repository_location) => {
+                let expected_path = repository_location.canonical_path();
+                if configured_path != &expected_path {
+                    diagnostics.push(format!(                        "submodule \"{section}\": path '{configured_path}' does not match URL '{configured_url}'; expected '{expected_path}'"                    ));
+                }
+            }
+            Err(error) => diagnostics.push(format!("submodule \"{section}\": {}", error.message)),
+        }
+    }
+    if diagnostics.is_empty() {
+        return Ok(());
+    }
+    return Err(CliFailure::check(diagnostics));
+}
+fn parse_submodule_records(bytes: &[u8]) -> Result<BTreeMap<String, SubmoduleFields>, String> {
+    let mut submodules = BTreeMap::new();
+    for record in bytes
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        let separator = record
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .ok_or_else(|| "malformed git config output: missing key/value separator".to_owned())?;
+        let key = std::str::from_utf8(&record[..separator])
+            .map_err(|error| format!("git config key is not valid UTF-8: {error}"))?;
+        let value = std::str::from_utf8(&record[separator + 1..])
+            .map_err(|error| format!("git config value for '{key}' is not valid UTF-8: {error}"))?;
+        let Some(remainder) = key.strip_prefix("submodule.") else {
+            continue;
+        };
+        let (section, field) = match remainder.rsplit_once('.') {
+            Some(parts) if !parts.0.is_empty() => parts,
+            _ => continue,
+        };
+        let fields = submodules
+            .entry(section.to_owned())
+            .or_insert_with(SubmoduleFields::default);
+        match field {
+            "path" => fields.paths.push(value.to_owned()),
+            "url" => fields.urls.push(value.to_owned()),
+            _ => {}
+        }
+    }
+    return Ok(submodules);
+}
+fn path_entry_is_valid(path_entry: &str) -> bool {
+    let components: Vec<&str> = path_entry.split('/').collect();
+    return components.len() >= 2
+        && components
+            .iter()
+            .all(|component| validate_component("path component", component).is_ok());
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::error::Error;
+    use std::ffi::OsStr;
+    use std::io;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    type TestResult = Result<(), Box<dyn Error>>;
+    static TEMPORARY_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(0);
+    struct TemporaryDirectory(PathBuf);
+    impl TemporaryDirectory {
+        fn new(label: &str) -> io::Result<Self> {
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(io::Error::other)?
+                .as_nanos();
+            let counter = TEMPORARY_DIRECTORY_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = env::temp_dir().join(format!(
+                "git-home-submodules-{label}-{}-{timestamp}-{counter}",
+                process::id()
+            ));
+            fs::create_dir(&path)?;
+            return Ok(Self(path));
+        }
+        fn path(&self) -> &Path {
+            return &self.0;
+        }
+    }
+    impl Drop for TemporaryDirectory {
+        fn drop(&mut self) {
+            let _result = fs::remove_dir_all(&self.0);
+        }
+    }
+    fn run_git<I, S>(arguments: I) -> io::Result<()>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let status = Command::new("git").args(arguments).status()?;
+        if status.success() {
+            return Ok(());
+        }
+        return Err(io::Error::other(format!(
+            "git fixture command exited with {status}"
+        )));
+    }
+    #[test]
+    fn parses_supported_urls_into_the_same_canonical_path() -> TestResult {
+        for repository_url in [
+            "https://github.com/owner/demo.git",
+            "ssh://git@github.com/owner/demo.git",
+            "git+ssh://git@github.com/owner/demo.git//",
+            "git@github.com:owner/demo.git",
+        ] {
+            assert_eq!(
+                parse_repository_url(repository_url)?.canonical_path(),
+                "github.com/owner/demo"
+            );
+        }
+        assert_eq!(
+            parse_repository_url("https://git.example.test/group/nested/demo.git/")?
+                .canonical_path(),
+            "git.example.test/group/nested/demo"
+        );
+        return Ok(());
+    }
+    #[test]
+    fn rejects_unsupported_and_unsafe_urls() {
+        for repository_url in [
+            "../demo.git",
+            "http://github.com/owner/demo.git",
+            "https://github.com/",
+            "https://github.com/owner/../demo.git",
+            "git@github.com:owner//demo.git",
+        ] {
+            assert!(parse_repository_url(repository_url).is_err());
+        }
+    }
+    #[test]
+    fn initializes_and_reinitializes_a_compatible_home_repository() -> TestResult {
+        let home = TemporaryDirectory::new("init")?;
+        initialize_home_repository(home.path())
+            .map_err(|failure| format!("init failed: {failure:?}"))?;
+        assert!(home.path().join(".git").is_dir());
+        assert_eq!(fs::read_to_string(home.path().join(".gitignore"))?, "*\n");
+        fs::write(
+            home.path().join(".gitignore"),
+            "*\n!.gitmodules\n!github.com/\n",
+        )?;
+        initialize_home_repository(home.path())
+            .map_err(|failure| format!("reinit failed: {failure:?}"))?;
+        return Ok(());
+    }
+    #[test]
+    fn rejects_conflicting_initialization_without_side_effects() -> TestResult {
+        let home = TemporaryDirectory::new("init-conflict")?;
+        fs::write(home.path().join(".gitignore"), "*.tmp\n")?;
+        let failure = initialize_home_repository(home.path())
+            .expect_err("conflicting initialization must fail");
+        assert_eq!(failure.exit_code, 128);
+        assert!(!home.path().join(".git").exists());
+        return Ok(());
+    }
+    #[test]
+    fn checks_matching_submodule_urls_and_paths() -> TestResult {
+        let home = TemporaryDirectory::new("check")?;
+        fs::write(
+            home.path().join(".gitmodules"),
+            "[submodule \"https\"]\n path = github.com/owner/https-demo\n url = https://github.com/owner/https-demo.git\n[submodule \"ssh\"]\n path = git.example.test/group/ssh-demo\n url = git+ssh://git@git.example.test/group/ssh-demo.git//\n",
+        )?;
+        check_home_gitmodules(home.path())
+            .map_err(|failure| format!("check failed: {failure:?}"))?;
+        return Ok(());
+    }
+    #[test]
+    fn reports_incomplete_unsupported_unsafe_and_mismatched_entries() -> TestResult {
+        let home = TemporaryDirectory::new("check-invalid")?;
+        fs::write(
+            home.path().join(".gitmodules"),
+            "[submodule \"missing-url\"]\n path = github.com/owner/demo\n[submodule \"missing-path\"]\n url = https://github.com/owner/missing.git\n[submodule \"relative\"]\n path = github.com/owner/relative\n url = ../relative.git\n[submodule \"unsafe\"]\n path = github.com/owner/../unsafe\n url = https://github.com/owner/unsafe.git\n[submodule \"mismatch\"]\n path = github.com/other/demo\n url = git@github.com:owner/demo.git\n[submodule \"duplicate\"]\n path = github.com/owner/duplicate\n path = github.com/owner/other\n url = https://github.com/owner/duplicate.git\n url = git@github.com:owner/duplicate.git\n",
+        )?;
+        let failure = check_home_gitmodules(home.path()).expect_err("invalid entries must fail");
+        let diagnostics = failure.diagnostics.join("\n");
+        for expected in [
+            "must have exactly one URL",
+            "must have exactly one path",
+            "unsupported repository URL",
+            "invalid path",
+            "expected 'github.com/owner/demo'",
+        ] {
+            assert!(
+                diagnostics.contains(expected),
+                "missing diagnostic: {expected}"
+            );
+        }
+        return Ok(());
+    }
+    #[test]
+    fn treats_an_empty_file_as_valid_but_requires_gitmodules_to_exist() -> TestResult {
+        let home = TemporaryDirectory::new("check-empty")?;
+        assert!(check_home_gitmodules(home.path()).is_err());
+        fs::write(home.path().join(".gitmodules"), "")?;
+        check_home_gitmodules(home.path())
+            .map_err(|failure| format!("empty check failed: {failure:?}"))?;
+        return Ok(());
+    }
+    #[test]
+    fn adds_a_local_fixture_at_the_canonical_destination() -> TestResult {
+        let workspace = TemporaryDirectory::new("add")?;
+        let seed = workspace.path().join("seed");
+        let remote_root = workspace.path().join("remotes");
+        let remote = remote_root.join("owner/demo.git");
+        let home = workspace.path().join("home");
+        fs::create_dir_all(&seed)?;
+        fs::create_dir_all(
+            remote
+                .parent()
+                .ok_or_else(|| io::Error::other("remote has no parent"))?,
+        )?;
+        fs::create_dir(&home)?;
+        run_git([OsStr::new("init"), OsStr::new("--quiet"), seed.as_os_str()])?;
+        run_git([
+            OsStr::new("-C"),
+            seed.as_os_str(),
+            OsStr::new("config"),
+            OsStr::new("user.email"),
+            OsStr::new("test@example.test"),
+        ])?;
+        run_git([
+            OsStr::new("-C"),
+            seed.as_os_str(),
+            OsStr::new("config"),
+            OsStr::new("user.name"),
+            OsStr::new("Test"),
+        ])?;
+        fs::write(seed.join("README"), "fixture\n")?;
+        run_git([
+            OsStr::new("-C"),
+            seed.as_os_str(),
+            OsStr::new("add"),
+            OsStr::new("README"),
+        ])?;
+        run_git([
+            OsStr::new("-C"),
+            seed.as_os_str(),
+            OsStr::new("commit"),
+            OsStr::new("--quiet"),
+            OsStr::new("-m"),
+            OsStr::new("fixture"),
+        ])?;
+        run_git([
+            OsStr::new("clone"),
+            OsStr::new("--quiet"),
+            OsStr::new("--bare"),
+            seed.as_os_str(),
+            remote.as_os_str(),
+        ])?;
+        initialize_home_repository(&home)
+            .map_err(|failure| format!("fixture init failed: {failure:?}"))?;
+        let global_config = workspace.path().join("gitconfig");
+        fs::write(
+            &global_config,
+            format!(
+                "[protocol \"file\"]\n allow = always\n[url \"file://{}/\"]\n insteadOf = https://example.test/\n",
+                remote_root.display()
+            ),
+        )?;
+        let environment = [
+            (
+                OsString::from("GIT_CONFIG_GLOBAL"),
+                global_config.into_os_string(),
+            ),
+            (OsString::from("GIT_CONFIG_NOSYSTEM"), OsString::from("1")),
+        ];
+        add_repository_with_environment(&home, "https://example.test/owner/demo.git", &environment)
+            .map_err(|failure| format!("add failed: {failure:?}"))?;
+        assert!(home.join("example.test/owner/demo").is_dir());
+        let gitmodules = fs::read_to_string(home.join(".gitmodules"))?;
+        assert!(gitmodules.contains("path = example.test/owner/demo"));
+        assert!(gitmodules.contains("url = https://example.test/owner/demo.git"));
+        return Ok(());
+    }
+}
