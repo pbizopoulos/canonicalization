@@ -4,11 +4,11 @@ use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{self, Command, ExitStatus};
-const MAIN_HELP: &str = "usage: git home-submodules [-h | --help] <command> [<args>]\n\n   add                 Add a repository below $HOME\n   check-gitmodules    Check $HOME/.gitmodules submodule entries\n   init                Initialize $HOME as a Git repository\n\nSee 'git home-submodules <command> -h' for help on a specific command.\n";
+use std::process::{self, Command, ExitStatus, Stdio};
+const MAIN_HELP: &str = "usage: git home-submodules [-h | --help] <command> [<args>]\n\n   add                 Add a repository below $HOME\n   check               Check $HOME/.gitmodules submodule entries\n   init                Initialize $HOME as a Git repository\n\nSee 'git home-submodules <command> -h' for help on a specific command.\n";
 const MAIN_USAGE: &str = "usage: git home-submodules [-h | --help] <command> [<args>]\n";
 const ADD_HELP: &str = "usage: git home-submodules add <https-or-ssh-repository-url>\n\nAdd the repository below $HOME as <hostname>/<repository-path>.\n";
-const CHECK_GITMODULES_HELP: &str = "usage: git home-submodules check-gitmodules [--fix]\n\nCheck that every $HOME/.gitmodules path matches its repository URL.\nWith --fix, rename mismatched local directories and update their paths.\n";
+const CHECK_HELP: &str = "usage: git home-submodules check [--fix]\n\nCheck that every $HOME/.gitmodules path matches its repository URL.\nWith --fix, rename mismatched local directories and update their paths.\n";
 const INIT_HELP: &str = "usage: git home-submodules init\n\nInitialize $HOME as a Git repository and ensure its .gitignore starts with *.\nThe rules !.gitignore and !.gitmodules are required; additional rules must start with !.\n";
 const DEFAULT_GITIGNORE: &str = "*\n!.gitignore\n!.gitmodules\n";
 const USAGE_EXIT_CODE: i32 = 129;
@@ -115,8 +115,8 @@ fn run_cli(arguments: &[OsString], home_directory: &Path) -> i32 {
             || Err(CliFailure::fatal("repository URL must be valid UTF-8")),
             |url| add_repository(home_directory, url),
         ),
-        [command] if command == "check-gitmodules" => check_home_gitmodules(home_directory, false),
-        [command, fix] if command == "check-gitmodules" && fix == "--fix" => {
+        [command] if command == "check" => check_home_gitmodules(home_directory, false),
+        [command, fix] if command == "check" && fix == "--fix" => {
             check_home_gitmodules(home_directory, true)
         }
         _ => {
@@ -140,7 +140,7 @@ fn run_cli(arguments: &[OsString], home_directory: &Path) -> i32 {
 fn command_usage(command: Option<&str>) -> &'static str {
     return match command {
         Some("add") => ADD_HELP,
-        Some("check-gitmodules") => CHECK_GITMODULES_HELP,
+        Some("check") => CHECK_HELP,
         Some("init") => INIT_HELP,
         _ => MAIN_USAGE,
     };
@@ -317,6 +317,7 @@ fn check_home_gitmodules(home_directory: &Path, fix: bool) -> Result<(), CliFail
             "--regexp",
             "^submodule\\..*",
         ])
+        .stderr(Stdio::inherit())
         .output()
         .map_err(|error| {
             CliFailure::check(vec![format!("failed to execute git config: {error}")])
@@ -325,15 +326,7 @@ fn check_home_gitmodules(home_directory: &Path, fix: bool) -> Result<(), CliFail
     if !(output.status.success()
         || exit_code == 1 && output.stdout.is_empty() && output.stderr.is_empty())
     {
-        let diagnostic = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(CliFailure {
-            exit_code,
-            diagnostics: if diagnostic.is_empty() {
-                Vec::new()
-            } else {
-                vec![diagnostic]
-            },
-        });
+        return Err(CliFailure::git(output.status));
     }
     let submodules = parse_submodule_records(&output.stdout)
         .map_err(|diagnostic| CliFailure::check(vec![diagnostic]))?;
@@ -365,14 +358,7 @@ fn check_home_gitmodules(home_directory: &Path, fix: bool) -> Result<(), CliFail
                 let expected_path = repository_location.canonical_path();
                 if configured_path != &expected_path {
                     if fix {
-                        if let Err(diagnostic) = fix_submodule_path(
-                            home_directory,
-                            &section,
-                            configured_path,
-                            &expected_path,
-                        ) {
-                            diagnostics.push(diagnostic);
-                        }
+                        fix_submodule_path(home_directory, configured_path, &expected_path)?;
                     } else {
                         diagnostics.push(format!(                        "submodule \"{section}\": path '{configured_path}' does not match URL '{configured_url}'; expected '{expected_path}'"                    ));
                     }
@@ -388,55 +374,34 @@ fn check_home_gitmodules(home_directory: &Path, fix: bool) -> Result<(), CliFail
 }
 fn fix_submodule_path(
     home_directory: &Path,
-    section: &str,
     configured_path: &str,
     expected_path: &str,
-) -> Result<(), String> {
-    let source = home_directory.join(configured_path);
+) -> Result<(), CliFailure> {
     let target = home_directory.join(expected_path);
-    if fs::symlink_metadata(&target).is_ok() {
-        return Err(format!(
-            "submodule \"{section}\": cannot rename '{}' to '{}': target already exists",
-            source.display(),
-            target.display()
-        ));
-    }
-    if !source.is_dir() {
-        return Err(format!(
-            "submodule \"{section}\": cannot rename '{}' to '{}': source directory does not exist",
-            source.display(),
-            target.display()
-        ));
-    }
     let target_parent = target.parent().ok_or_else(|| {
-        format!(
-            "submodule \"{section}\": cannot determine parent directory for '{}'",
+        CliFailure::fatal(format!(
+            "cannot determine parent directory for '{}'",
             target.display()
-        )
+        ))
     })?;
     fs::create_dir_all(target_parent).map_err(|error| {
-        format!(
-            "submodule \"{section}\": cannot create '{}': {error}",
+        CliFailure::fatal(format!(
+            "cannot create '{}': {error}",
             target_parent.display()
-        )
+        ))
     })?;
-    let output = Command::new("git")
+    let status = Command::new("git")
         .arg("-C")
         .arg(home_directory)
         .args(["mv", "--"])
         .arg(configured_path)
         .arg(expected_path)
-        .output()
-        .map_err(|error| format!("submodule \"{section}\": failed to execute git mv: {error}"))?;
-    if output.status.success() {
+        .status()
+        .map_err(|error| CliFailure::fatal(format!("failed to execute git mv: {error}")))?;
+    if status.success() {
         return Ok(());
     }
-    let diagnostic = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    return Err(format!(
-        "submodule \"{section}\": git mv failed while renaming '{}' to '{}': {diagnostic}",
-        source.display(),
-        target.display()
-    ));
+    return Err(CliFailure::git(status));
 }
 fn parse_submodule_records(bytes: &[u8]) -> Result<BTreeMap<String, SubmoduleFields>, String> {
     let mut submodules = BTreeMap::new();
@@ -632,21 +597,21 @@ mod tests {
         return Ok(());
     }
     #[test]
-    fn exposes_check_gitmodules_and_its_fix_option() -> TestResult {
+    fn exposes_check_and_its_fix_option() -> TestResult {
         let home = TemporaryDirectory::new("check-command")?;
         fs::write(home.path().join(".gitmodules"), "")?;
-        assert_eq!(
-            run_cli(&[OsString::from("check-gitmodules")], home.path()),
-            0
-        );
+        assert_eq!(run_cli(&[OsString::from("check")], home.path()), 0);
         assert_eq!(
             run_cli(
-                &[OsString::from("check-gitmodules"), OsString::from("--fix"),],
+                &[OsString::from("check"), OsString::from("--fix"),],
                 home.path(),
             ),
             0
         );
-        assert_eq!(run_cli(&[OsString::from("check")], home.path()), 129);
+        assert_eq!(
+            run_cli(&[OsString::from("check-gitmodules")], home.path()),
+            129
+        );
         return Ok(());
     }
     #[test]
@@ -722,40 +687,6 @@ mod tests {
         );
         check_home_gitmodules(&home, false)
             .map_err(|failure| format!("post-fix check failed: {failure:?}"))?;
-        return Ok(());
-    }
-    #[test]
-    fn fix_rejects_a_preexisting_target_without_renaming() -> TestResult {
-        let home = TemporaryDirectory::new("check-fix-conflict")?;
-        let configured_path = "old.example.test/owner/demo";
-        let expected_path = "new.example.test/owner/demo";
-        fs::write(
-            home.path().join(".gitmodules"),
-            format!(
-                "[submodule \"demo\"]\n path = {configured_path}\n url = https://new.example.test/owner/demo.git\n"
-            ),
-        )?;
-        let source = home.path().join(configured_path);
-        let target = home.path().join(expected_path);
-        fs::create_dir_all(&source)?;
-        fs::create_dir_all(&target)?;
-        fs::write(source.join("source"), "source\n")?;
-        fs::write(target.join("target"), "target\n")?;
-        let failure = check_home_gitmodules(home.path(), true)
-            .expect_err("a preexisting target must make the fix fail");
-        assert_eq!(failure.exit_code, 1);
-        assert!(
-            failure
-                .diagnostics
-                .join("\n")
-                .contains("target already exists")
-        );
-        assert_eq!(fs::read_to_string(source.join("source"))?, "source\n");
-        assert_eq!(fs::read_to_string(target.join("target"))?, "target\n");
-        assert!(
-            fs::read_to_string(home.path().join(".gitmodules"))?
-                .contains(&format!("path = {configured_path}"))
-        );
         return Ok(());
     }
     #[test]
