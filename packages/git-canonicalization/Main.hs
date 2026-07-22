@@ -592,18 +592,22 @@ checkCanonicalizationLocation canonicalizationSettings location = do
   if repositoryRoot == canonicalHomeDirectory
     then do
       registeredRepositories <- resolveHomeRegisteredRepositories canonicalHomeDirectory
-      forM_ registeredRepositories $ \(repositoryPath, registeredRepositoryRoot) ->
-        checkRepositoryAt canonicalizationSettings (Just repositoryPath) registeredRepositoryRoot
-    else checkRepositoryAt canonicalizationSettings Nothing repositoryRoot
-checkRepositoryAt :: CanonicalizationSettings -> Maybe FilePath -> FilePath -> IO ()
+      repositoryChecksSucceeded <-
+        forM registeredRepositories $ \(repositoryPath, registeredRepositoryRoot) ->
+          checkRepositoryAt canonicalizationSettings (Just repositoryPath) registeredRepositoryRoot
+      unless (and repositoryChecksSucceeded) exitFailure
+    else do
+      repositoryCheckSucceeded <- checkRepositoryAt canonicalizationSettings Nothing repositoryRoot
+      unless repositoryCheckSucceeded exitFailure
+checkRepositoryAt :: CanonicalizationSettings -> Maybe FilePath -> FilePath -> IO Bool
 checkRepositoryAt canonicalizationSettings maybeRepositoryPath repositoryRoot =
   withCurrentDirectory repositoryRoot $
     collectRepositoryComplianceWith canonicalizationSettings >>= \case
       Left (checkPhaseName, checkPhaseIssues) -> do
         forM_ maybeRepositoryPath (hPutStrLn stderr . ("error: repository: " ++))
         reportCheckRepositoryFailures checkPhaseName checkPhaseIssues
-        exitFailure
-      Right _ -> pure ()
+        pure False
+      Right _ -> pure True
 failCanonicalizationCheck :: String -> IO a
 failCanonicalizationCheck diagnostic = do
   forM_ (lines diagnostic) (hPutStrLn stderr . ("error: " ++))
@@ -3052,6 +3056,10 @@ checkHomeRoutingEndToEndTest =
   withTemporaryPackageRepository "check-routing-home" $ \temporaryHome -> do
     initializeGitRepositoryFixture temporaryHome
     TIO.writeFile (temporaryHome </> ".gitmodules") ""
+    doesFileExist (temporaryHome </> "flake.nix")
+      >>= assertBool "The home check fixture does not rely on flake.nix." . not
+    doesFileExist (temporaryHome </> "flake.lock")
+      >>= assertBool "The home check fixture does not rely on flake.lock." . not
     let homeChild = temporaryHome </> "not-a-repository" </> "child"
     createDirectoryIfMissing True homeChild
     withEnvironmentVariable "HOME" temporaryHome $ do
@@ -3089,13 +3097,15 @@ checkHomeRepositoriesEndToEndTest =
       assertEqual "Checking valid registered home repositories succeeds." ExitSuccess successfulCheckExit
       assertEqual "A successful registered-repository check leaves stdout empty." "" successfulCheckStdout
       assertEqual "A successful registered-repository check leaves stderr empty." "" successfulCheckStderr
+      removeFile (firstRepository </> "flake.lock")
       removeFile (secondRepository </> "flake.lock")
       (failedCheckExit, failedCheckStdout, failedCheckStderr) <- runEndToEndCommandIn temporaryHome ["check"]
-      assertEqual "A noncompliant registered home repository fails the home check." (ExitFailure 1) failedCheckExit
+      assertEqual "Noncompliant registered home repositories fail the home check." (ExitFailure 1) failedCheckExit
       assertEqual "A failed registered-repository check leaves stdout empty." "" failedCheckStdout
       assertBool
-        "A failed registered-repository check identifies the repository and phase."
-        ( ("repository: " ++ secondRepositoryPath) `isInfixOf` failedCheckStderr
+        "A failed home check reports every noncompliant registered repository."
+        ( ("repository: " ++ firstRepositoryPath) `isInfixOf` failedCheckStderr
+            && ("repository: " ++ secondRepositoryPath) `isInfixOf` failedCheckStderr
             && "canonicalization check failed at phase: required-root-files" `isInfixOf` failedCheckStderr
         )
 checkMalformedHomePathEndToEndTest :: IO ()
