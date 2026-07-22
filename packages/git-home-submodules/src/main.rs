@@ -9,7 +9,8 @@ const MAIN_HELP: &str = "usage: git home-submodules [-h | --help] <command> [<ar
 const MAIN_USAGE: &str = "usage: git home-submodules [-h | --help] <command> [<args>]\n";
 const ADD_HELP: &str = "usage: git home-submodules add <https-or-ssh-repository-url>\n\nAdd the repository below $HOME as <hostname>/<repository-path>.\n";
 const CHECK_GITMODULES_HELP: &str = "usage: git home-submodules check-gitmodules [--fix]\n\nCheck that every $HOME/.gitmodules path matches its repository URL.\nWith --fix, rename mismatched local directories and update their paths.\n";
-const INIT_HELP: &str = "usage: git home-submodules init\n\nInitialize $HOME as a Git repository and ensure its .gitignore starts with *.\nAdditional whitelist rules must start with !.\n";
+const INIT_HELP: &str = "usage: git home-submodules init\n\nInitialize $HOME as a Git repository and ensure its .gitignore starts with *.\nThe rules !.gitignore and !.gitmodules are required; additional rules must start with !.\n";
+const DEFAULT_GITIGNORE: &str = "*\n!.gitignore\n!.gitmodules\n";
 const USAGE_EXIT_CODE: i32 = 129;
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RepositoryLocation {
@@ -258,18 +259,32 @@ fn add_repository_with_environment(
 }
 fn initialize_home_repository(home_directory: &Path) -> Result<(), CliFailure> {
     let gitignore_path = home_directory.join(".gitignore");
-    if gitignore_path.is_file() {
+    let updated_gitignore = if gitignore_path.is_file() {
         let contents = fs::read_to_string(&gitignore_path)
             .map_err(|error| CliFailure::fatal(format!("{}: {error}", gitignore_path.display())))?;
-        let mut lines = contents.lines();
-        let compatible = lines.next() == Some("*") && lines.all(|line| line.starts_with('!'));
+        let lines: Vec<&str> = contents.lines().collect();
+        let compatible =
+            lines.first() == Some(&"*") && lines.iter().skip(1).all(|line| line.starts_with('!'));
         if !compatible {
             return Err(CliFailure::fatal(format!(
                 "{}: existing file must start with * and subsequent lines must start with !",
                 gitignore_path.display()
             )));
         }
-    }
+        let mut updated = contents.clone();
+        for required_rule in ["!.gitignore", "!.gitmodules"] {
+            if !lines.contains(&required_rule) {
+                if !updated.ends_with('\n') {
+                    updated.push('\n');
+                }
+                updated.push_str(required_rule);
+                updated.push('\n');
+            }
+        }
+        (updated != contents).then_some(updated)
+    } else {
+        Some(DEFAULT_GITIGNORE.to_owned())
+    };
     let status = Command::new("git")
         .arg("init")
         .arg(home_directory)
@@ -278,8 +293,8 @@ fn initialize_home_repository(home_directory: &Path) -> Result<(), CliFailure> {
     if !status.success() {
         return Err(CliFailure::git(status));
     }
-    if !gitignore_path.is_file() {
-        fs::write(&gitignore_path, "*\n")
+    if let Some(contents) = updated_gitignore {
+        fs::write(&gitignore_path, contents)
             .map_err(|error| CliFailure::fatal(format!("{}: {error}", gitignore_path.display())))?;
     }
     return Ok(());
@@ -352,7 +367,6 @@ fn check_home_gitmodules(home_directory: &Path, fix: bool) -> Result<(), CliFail
                     if fix {
                         if let Err(diagnostic) = fix_submodule_path(
                             home_directory,
-                            &gitmodules_path,
                             &section,
                             configured_path,
                             &expected_path,
@@ -374,7 +388,6 @@ fn check_home_gitmodules(home_directory: &Path, fix: bool) -> Result<(), CliFail
 }
 fn fix_submodule_path(
     home_directory: &Path,
-    gitmodules_path: &Path,
     section: &str,
     configured_path: &str,
     expected_path: &str,
@@ -407,40 +420,23 @@ fn fix_submodule_path(
             target_parent.display()
         )
     })?;
-    fs::rename(&source, &target).map_err(|error| {
-        format!(
-            "submodule \"{section}\": cannot rename '{}' to '{}': {error}",
-            source.display(),
-            target.display()
-        )
-    })?;
-    let status = Command::new("git")
-        .args(["config", "--file"])
-        .arg(gitmodules_path)
-        .arg(format!("submodule.{section}.path"))
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(home_directory)
+        .args(["mv", "--"])
+        .arg(configured_path)
         .arg(expected_path)
-        .status();
-    match status {
-        Ok(exit_status) if exit_status.success() => Ok(()),
-        result => {
-            let rollback = fs::rename(&target, &source);
-            let reason = match result {
-                Ok(exit_status) => format!("git config exited with {exit_status}"),
-                Err(error) => format!("failed to execute git config: {error}"),
-            };
-            let rollback_diagnostic = rollback.err().map_or_else(String::new, |error| {
-                format!(
-                    "; additionally failed to restore '{}': {error}",
-                    source.display()
-                )
-            });
-            Err(format!(
-                "submodule \"{section}\": failed to update path after renaming '{}' to '{}': {reason}{rollback_diagnostic}",
-                source.display(),
-                target.display()
-            ))
-        }
+        .output()
+        .map_err(|error| format!("submodule \"{section}\": failed to execute git mv: {error}"))?;
+    if output.status.success() {
+        return Ok(());
     }
+    let diagnostic = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    return Err(format!(
+        "submodule \"{section}\": git mv failed while renaming '{}' to '{}': {diagnostic}",
+        source.display(),
+        target.display()
+    ));
 }
 fn parse_submodule_records(bytes: &[u8]) -> Result<BTreeMap<String, SubmoduleFields>, String> {
     let mut submodules = BTreeMap::new();
@@ -566,13 +562,17 @@ mod tests {
         initialize_home_repository(home.path())
             .map_err(|failure| format!("init failed: {failure:?}"))?;
         assert!(home.path().join(".git").is_dir());
-        assert_eq!(fs::read_to_string(home.path().join(".gitignore"))?, "*\n");
-        fs::write(
-            home.path().join(".gitignore"),
-            "*\n!.gitmodules\n!github.com/\n",
-        )?;
+        assert_eq!(
+            fs::read_to_string(home.path().join(".gitignore"))?,
+            DEFAULT_GITIGNORE
+        );
+        fs::write(home.path().join(".gitignore"), "*\n!github.com/")?;
         initialize_home_repository(home.path())
             .map_err(|failure| format!("reinit failed: {failure:?}"))?;
+        assert_eq!(
+            fs::read_to_string(home.path().join(".gitignore"))?,
+            "*\n!github.com/\n!.gitignore\n!.gitmodules\n"
+        );
         return Ok(());
     }
     #[test]
@@ -649,24 +649,76 @@ mod tests {
     }
     #[test]
     fn fixes_a_mismatched_submodule_path() -> TestResult {
-        let home = TemporaryDirectory::new("check-fix")?;
-        fs::write(
-            home.path().join(".gitmodules"),
-            "[submodule \"demo\"]\n path = old.example.test/owner/demo\n url = https://new.example.test/owner/demo.git\n",
-        )?;
-        let source = home.path().join("old.example.test/owner/demo");
-        fs::create_dir_all(&source)?;
-        fs::write(source.join("README"), "fixture\n")?;
-        check_home_gitmodules(home.path(), true)
-            .map_err(|failure| format!("fix failed: {failure:?}"))?;
-        let target = home.path().join("new.example.test/owner/demo");
+        let workspace = TemporaryDirectory::new("check-fix")?;
+        let seed = workspace.path().join("seed");
+        let home = workspace.path().join("home");
+        fs::create_dir(&seed)?;
+        fs::create_dir(&home)?;
+        run_git([OsStr::new("init"), OsStr::new("--quiet"), seed.as_os_str()])?;
+        run_git([
+            OsStr::new("-C"),
+            seed.as_os_str(),
+            OsStr::new("config"),
+            OsStr::new("user.email"),
+            OsStr::new("test@example.test"),
+        ])?;
+        run_git([
+            OsStr::new("-C"),
+            seed.as_os_str(),
+            OsStr::new("config"),
+            OsStr::new("user.name"),
+            OsStr::new("Test"),
+        ])?;
+        fs::write(seed.join("README"), "fixture\n")?;
+        run_git([
+            OsStr::new("-C"),
+            seed.as_os_str(),
+            OsStr::new("add"),
+            OsStr::new("README"),
+        ])?;
+        run_git([
+            OsStr::new("-C"),
+            seed.as_os_str(),
+            OsStr::new("commit"),
+            OsStr::new("--quiet"),
+            OsStr::new("-m"),
+            OsStr::new("fixture"),
+        ])?;
+        run_git([OsStr::new("init"), OsStr::new("--quiet"), home.as_os_str()])?;
+        run_git([
+            OsStr::new("-c"),
+            OsStr::new("protocol.file.allow=always"),
+            OsStr::new("-C"),
+            home.as_os_str(),
+            OsStr::new("submodule"),
+            OsStr::new("add"),
+            OsStr::new("--quiet"),
+            seed.as_os_str(),
+            OsStr::new("old.example.test/owner/demo"),
+        ])?;
+        run_git([
+            OsStr::new("config"),
+            OsStr::new("--file"),
+            home.join(".gitmodules").as_os_str(),
+            OsStr::new("submodule.old.example.test/owner/demo.url"),
+            OsStr::new("https://new.example.test/owner/demo.git"),
+        ])?;
+        run_git([
+            OsStr::new("-C"),
+            home.as_os_str(),
+            OsStr::new("add"),
+            OsStr::new(".gitmodules"),
+        ])?;
+        let source = home.join("old.example.test/owner/demo");
+        check_home_gitmodules(&home, true).map_err(|failure| format!("fix failed: {failure:?}"))?;
+        let target = home.join("new.example.test/owner/demo");
         assert!(!source.exists());
         assert_eq!(fs::read_to_string(target.join("README"))?, "fixture\n");
         assert!(
-            fs::read_to_string(home.path().join(".gitmodules"))?
+            fs::read_to_string(home.join(".gitmodules"))?
                 .contains("path = new.example.test/owner/demo")
         );
-        check_home_gitmodules(home.path(), false)
+        check_home_gitmodules(&home, false)
             .map_err(|failure| format!("post-fix check failed: {failure:?}"))?;
         return Ok(());
     }
