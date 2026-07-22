@@ -41,11 +41,11 @@ import Nix.Utils (Path (Path))
 import Numeric (showFFloat)
 import Prettyprinter (defaultLayoutOptions, layoutPretty)
 import Prettyprinter.Render.Text (renderStrict)
-import System.Directory (canonicalizePath, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, doesPathExist, findExecutable, getCurrentDirectory, getHomeDirectory, getTemporaryDirectory, listDirectory, removeFile, removePathForcibly, withCurrentDirectory)
+import System.Directory (canonicalizePath, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, doesPathExist, findExecutable, getCurrentDirectory, getTemporaryDirectory, listDirectory, removeFile, removePathForcibly, withCurrentDirectory)
 import System.Environment (getArgs)
 import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitFailure, exitWith)
 import System.FilePath ((<.>), (</>))
-import System.FilePath.Posix (isRelative, makeRelative, splitDirectories, takeBaseName, takeDirectory, takeFileName)
+import System.FilePath.Posix (makeRelative, splitDirectories, takeBaseName, takeDirectory, takeFileName)
 import System.FilePath.Windows qualified as Windows
 import System.IO (hClose, hPutStr, hPutStrLn, openTempFile, stderr, stdout)
 import System.Posix.Process (executeFile)
@@ -378,8 +378,8 @@ runCli canonicalizationSettings commandLineArgs =
     ["check"] -> checkRepositoryLocation canonicalizationSettings "."
     ["check", location] -> checkRepositoryLocation canonicalizationSettings location
     "check" : _ -> printCommandUsageAndExit usageExitCode commandLineArgs
-    ["summary"] -> summarizeCanonicalizationLocation canonicalizationSettings renderRepositorySummariesText "."
-    ["summary", "--json"] -> summarizeCanonicalizationLocation canonicalizationSettings renderRepositorySummariesJson "."
+    ["summary"] -> summarizeRepositoryLocation canonicalizationSettings renderRepositorySummariesText "."
+    ["summary", "--json"] -> summarizeRepositoryLocation canonicalizationSettings renderRepositorySummariesJson "."
     _ ->
       case parseAddPackageArgs commandLineArgs of
         Just (packageKindName, packageName, packageDescription, requestedCheckKinds) ->
@@ -414,20 +414,20 @@ usageExitCode = ExitFailure 129
 mainHelpText :: String
 mainHelpText =
   unlines
-    [ "usage: canonicalization [-h | --help] <command> [<args>]",
+    [ "usage: repository-canonicalization [-h | --help] <command> [<args>]",
       "",
       "   add        Add a package and its requested checks",
       "   check      Check a canonical repository",
       "   summary    Show a summary of packages and checks",
       "",
-      "See 'canonicalization <command> -h' for help on a specific command.",
+      "See 'repository-canonicalization <command> -h' for help on a specific command.",
       ""
     ]
 usageTextForCommand :: Maybe String -> String
 usageTextForCommand = \case
   Just "add" ->
     unlines
-      [ "usage: canonicalization add [<options>] <package-type> <package-name> [<description>...]",
+      [ "usage: repository-canonicalization add [<options>] <package-type> <package-name> [<description>...]",
         "",
         "Generated package and check files are staged with git add.",
         "",
@@ -440,7 +440,7 @@ usageTextForCommand = \case
       ]
   Just "summary" ->
     unlines
-      [ "usage: canonicalization summary [--json]",
+      [ "usage: repository-canonicalization summary [--json]",
         "",
         "Summarize the nearest Git repository. Use 'git -C <location>' to select it.",
         "",
@@ -449,12 +449,12 @@ usageTextForCommand = \case
       ]
   Just "check" ->
     unlines
-      [ "usage: canonicalization check [<location>]",
+      [ "usage: repository-canonicalization check [<location>]",
         "",
         "Check the nearest Git repository, defaulting to the current directory.",
         ""
       ]
-  _ -> unlines ["usage: canonicalization [-h | --help] <command> [<args>]", ""]
+  _ -> unlines ["usage: repository-canonicalization [-h | --help] <command> [<args>]", ""]
 parseAddPackageArgs :: [String] -> Maybe (String, FilePath, Maybe String, Set.Set RepositoryCheckKind)
 parseAddPackageArgs ("add" : packageKindName : packageName : remainingArguments) = do
   let (flagArguments, packageDescriptionArguments) =
@@ -541,7 +541,7 @@ collectRepositoryContentComplianceWith canonicalizationSettings = do
     _ -> pure (Left ("directory-structure", repositoryStructureIssues))
 reportCheckRepositoryFailures :: String -> [String] -> IO ()
 reportCheckRepositoryFailures checkPhaseName checkPhaseIssues = do
-  hPutStrLn stderr ("error: canonicalization check failed at phase: " ++ checkPhaseName)
+  hPutStrLn stderr ("error: repository-canonicalization check failed at phase: " ++ checkPhaseName)
   forM_ checkPhaseIssues $ \issue ->
     hPutStrLn stderr ("- [" ++ checkPhaseName ++ "] " ++ issue)
   case checkPhaseName of
@@ -599,21 +599,12 @@ data RepositorySummary = RepositorySummary
     repositorySummaryPackages :: [RepositoryPackageSummary]
   }
   deriving stock (Eq, Show)
-summarizeCanonicalizationLocation :: CanonicalizationSettings -> ([RepositorySummary] -> String) -> FilePath -> IO ()
-summarizeCanonicalizationLocation canonicalizationSettings render location = do
+summarizeRepositoryLocation :: CanonicalizationSettings -> ([RepositorySummary] -> String) -> FilePath -> IO ()
+summarizeRepositoryLocation canonicalizationSettings render location = do
   repositoryRoot <- discoverGitRepositoryRoot location
-  homeDirectory <- getHomeDirectory
-  canonicalHomeDirectory <- canonicalizePath homeDirectory
-  repositoryPath <- repositoryIdentifier canonicalHomeDirectory repositoryRoot
+  repositoryPath <- canonicalizePath repositoryRoot
   repositorySummary <- summarizeRepositoryAt canonicalizationSettings repositoryPath repositoryRoot
   putStr (render [repositorySummary])
-repositoryIdentifier :: FilePath -> FilePath -> IO FilePath
-repositoryIdentifier canonicalHomeDirectory repositoryRoot = do
-  canonicalRepositoryRoot <- canonicalizePath repositoryRoot
-  let relativeRepositoryPath = makeRelative canonicalHomeDirectory canonicalRepositoryRoot
-      repositoryPathParts = splitDirectories relativeRepositoryPath
-      repositoryIsBelowHome = isRelative relativeRepositoryPath && relativeRepositoryPath /= "." && ".." `notElem` repositoryPathParts
-  pure (if repositoryIsBelowHome then relativeRepositoryPath else canonicalRepositoryRoot)
 summarizeRepositoryAt :: CanonicalizationSettings -> FilePath -> FilePath -> IO RepositorySummary
 summarizeRepositoryAt canonicalizationSettings repositoryPath repositoryRoot =
   withCurrentDirectory repositoryRoot $
@@ -2756,11 +2747,11 @@ commandLineHelpEndToEndTest =
   withTemporaryPackageRepository "command-line-help" $ \temporaryDirectory -> do
     (helpExit, helpStdout, helpStderr) <- runEndToEndCommandIn temporaryDirectory ["-h"]
     assertEqual "The top-level help command succeeds." ExitSuccess helpExit
-    assertBool "The top-level help command prints usage to stdout." ("usage: canonicalization" `isPrefixOf` helpStdout)
+    assertBool "The top-level help command prints usage to stdout." ("usage: repository-canonicalization" `isPrefixOf` helpStdout)
     assertEqual "The top-level help command leaves stderr empty." "" helpStderr
     (addHelpExit, addHelpStdout, addHelpStderr) <- runEndToEndCommandIn temporaryDirectory ["add", "--help"]
     assertEqual "Command-specific help succeeds." ExitSuccess addHelpExit
-    assertBool "Command-specific help prints the add usage to stdout." ("usage: canonicalization add" `isPrefixOf` addHelpStdout)
+    assertBool "Command-specific help prints the add usage to stdout." ("usage: repository-canonicalization add" `isPrefixOf` addHelpStdout)
     assertEqual "Command-specific help leaves stderr empty." "" addHelpStderr
     (checkHelpExit, checkHelpStdout, checkHelpStderr) <- runEndToEndCommandIn temporaryDirectory ["check", "--help"]
     assertEqual "Check help succeeds." ExitSuccess checkHelpExit
@@ -2780,11 +2771,11 @@ invalidCommandEndToEndTest =
     (missingCommandExit, missingCommandStdout, missingCommandStderr) <- runEndToEndCommandIn temporaryDirectory []
     assertEqual "An omitted command exits unsuccessfully." (ExitFailure 1) missingCommandExit
     assertEqual "An omitted command leaves stdout empty." "" missingCommandStdout
-    assertBool "An omitted command prints usage to stderr." ("usage: canonicalization" `isPrefixOf` missingCommandStderr)
+    assertBool "An omitted command prints usage to stderr." ("usage: repository-canonicalization" `isPrefixOf` missingCommandStderr)
     (invalidCommandExit, invalidCommandStdout, invalidCommandStderr) <- runEndToEndCommandIn temporaryDirectory ["unknown-command"]
     assertEqual "An invalid command uses Git's usage exit status." usageExitCode invalidCommandExit
     assertEqual "An invalid command leaves stdout empty." "" invalidCommandStdout
-    assertBool "An invalid command prints usage to stderr." ("usage: canonicalization" `isPrefixOf` invalidCommandStderr)
+    assertBool "An invalid command prints usage to stderr." ("usage: repository-canonicalization" `isPrefixOf` invalidCommandStderr)
 addPackageEndToEndTest :: IO ()
 addPackageEndToEndTest =
   withTemporaryPackageRepository "add-package-end-to-end" $ \temporaryRepository -> do
@@ -2814,8 +2805,7 @@ addPackageEndToEndTest =
 textSummaryEndToEndTest :: IO ()
 textSummaryEndToEndTest =
   withGeneratedPythonPackageRepository "text-summary-end-to-end" $ \temporaryRepository -> do
-    canonicalHomeDirectory <- getHomeDirectory >>= canonicalizePath
-    repositoryPath <- repositoryIdentifier canonicalHomeDirectory temporaryRepository
+    repositoryPath <- canonicalizePath temporaryRepository
     (summaryExit, summaryStdout, summaryStderr) <- runEndToEndCommandIn temporaryRepository ["summary"]
     assertEqual "Text summary succeeds for the generated repository." ExitSuccess summaryExit
     assertEqual
@@ -2828,8 +2818,7 @@ textSummaryEndToEndTest =
 jsonSummaryEndToEndTest :: IO ()
 jsonSummaryEndToEndTest =
   withGeneratedPythonPackageRepository "json-summary-end-to-end" $ \temporaryRepository -> do
-    canonicalHomeDirectory <- getHomeDirectory >>= canonicalizePath
-    repositoryPath <- repositoryIdentifier canonicalHomeDirectory temporaryRepository
+    repositoryPath <- canonicalizePath temporaryRepository
     (jsonExit, jsonStdout, jsonStderr) <- runEndToEndCommandIn temporaryRepository ["summary", "--json"]
     assertEqual "JSON summary succeeds for the generated repository." ExitSuccess jsonExit
     assertEqual
@@ -2842,8 +2831,7 @@ jsonSummaryEndToEndTest =
 haskellSummaryEndToEndTest :: IO ()
 haskellSummaryEndToEndTest =
   withGeneratedHaskellPackageRepository "haskell-summary-end-to-end" $ \temporaryRepository -> do
-    canonicalHomeDirectory <- getHomeDirectory >>= canonicalizePath
-    repositoryPath <- repositoryIdentifier canonicalHomeDirectory temporaryRepository
+    repositoryPath <- canonicalizePath temporaryRepository
     (summaryExit, summaryStdout, summaryStderr) <- runEndToEndCommandIn temporaryRepository ["summary"]
     assertEqual "A generated Haskell package summary succeeds." ExitSuccess summaryExit
     assertEqual
@@ -2881,7 +2869,7 @@ corruptedPackageCheckEndToEndTest =
     assertEqual "A failed check leaves stdout empty." "" failedCheckStdout
     assertBool
       "A failed check reports its phase and affected file."
-      ( "canonicalization check failed at phase: file-compliance" `isInfixOf` failedCheckStderr
+      ( "repository-canonicalization check failed at phase: file-compliance" `isInfixOf` failedCheckStderr
           && "packages/demo/default.nix:" `isInfixOf` failedCheckStderr
       )
 unknownAddOptionEndToEndTest :: IO ()
@@ -2891,7 +2879,7 @@ unknownAddOptionEndToEndTest =
       runEndToEndCommandIn temporaryRepository ["add", "python", "demo", "--unknown"]
     assertEqual "An unknown add option uses Git's usage exit status." usageExitCode unknownOptionExit
     assertEqual "An unknown add option leaves stdout empty." "" unknownOptionStdout
-    assertBool "An unknown add option prints add usage to stderr." ("usage: canonicalization add" `isPrefixOf` unknownOptionStderr)
+    assertBool "An unknown add option prints add usage to stderr." ("usage: repository-canonicalization add" `isPrefixOf` unknownOptionStderr)
     packageDirectoryExists <- doesDirectoryExist (temporaryRepository </> "packages/demo")
     assertBool "An unknown option does not leave a partial package directory." (not packageDirectoryExists)
 invalidPackageNameEndToEndTest :: IO ()
@@ -3000,7 +2988,7 @@ expectedGeneratedHaskellPackageSummary =
     }
 runEndToEndCommandIn :: FilePath -> [String] -> IO (ExitCode, String, String)
 runEndToEndCommandIn workingDirectory arguments =
-  withCurrentDirectory workingDirectory (readProcessWithExitCode "canonicalization" arguments "")
+  withCurrentDirectory workingDirectory (readProcessWithExitCode "repository-canonicalization" arguments "")
 initializeGitRepositoryFixture :: FilePath -> IO ()
 initializeGitRepositoryFixture repositoryPath =
   findExecutable "git" >>= \case

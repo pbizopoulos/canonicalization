@@ -5,9 +5,6 @@
   ...
 }:
 let
-  canonicalization-script = pkgs.writeShellScriptBin "canonicalization-check" ''
-    ${inputs.self.packages.${pkgs.stdenv.system}.canonicalization}/bin/canonicalization check .
-  '';
   clippy-script = pkgs.writeShellScriptBin "clippy" ''
     [ -n "$NIX_BUILD_TOP" ] && exit 0
     export PATH="${
@@ -21,6 +18,11 @@ let
     find packages -name Cargo.toml -execdir cargo clippy --fix --allow-dirty --allow-staged --all-targets --all-features -- -D warnings -D clippy::all -D clippy::pedantic -D clippy::nursery -D clippy::cargo -D clippy::restriction -A clippy::needless_return \;
   '';
   formatter = treefmtEval.config.build.wrapper;
+  repository-canonicalization-script = pkgs.writeShellScriptBin "repository-canonicalization-check" ''
+    ${
+      inputs.self.packages.${pkgs.stdenv.system}."repository-canonicalization"
+    }/bin/repository-canonicalization check .
+  '';
   treefmtEval = inputs.treefmt-nix.lib.evalModule pkgs {
     programs = {
       actionlint.enable = true;
@@ -79,12 +81,6 @@ let
         biome.options = [
           "--max-diagnostics=none"
         ];
-        canonicalization = {
-          command = "${canonicalization-script}/bin/canonicalization-check";
-          includes = [
-            "*.nix"
-          ];
-        };
         clippy = {
           command = "${clippy-script}/bin/clippy";
           includes = [
@@ -150,6 +146,13 @@ let
             "*.js"
             "*.rs"
           ];
+        };
+        repository-canonicalization = {
+          command = "${repository-canonicalization-script}/bin/repository-canonicalization-check";
+          includes = [
+            "*.nix"
+          ];
+          priority = 1;
         };
         ruff-check.options = [
           "--cache-dir=/tmp/.ruff_cache"
