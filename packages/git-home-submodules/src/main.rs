@@ -356,7 +356,7 @@ fn check_home_gitmodules(home_directory: &Path, fix: bool) -> Result<(), CliFail
         }
         let configured_path = &fields.paths[0];
         let configured_url = &fields.urls[0];
-        if !path_entry_is_valid(configured_path) {
+        if !path_entry_is_valid(configured_path) && (!fix || !path_entry_is_safe(configured_path)) {
             diagnostics.push(format!(                "submodule \"{section}\": invalid path '{configured_path}'; expected <host>/<repository-path> with valid components"            ));
             continue;
         }
@@ -472,10 +472,12 @@ fn parse_submodule_records(bytes: &[u8]) -> Result<BTreeMap<String, SubmoduleFie
 }
 fn path_entry_is_valid(path_entry: &str) -> bool {
     let components: Vec<&str> = path_entry.split('/').collect();
-    return components.len() >= 2
-        && components
-            .iter()
-            .all(|component| validate_component("path component", component).is_ok());
+    return components.len() >= 2 && path_entry_is_safe(path_entry);
+}
+fn path_entry_is_safe(path_entry: &str) -> bool {
+    return path_entry
+        .split('/')
+        .all(|component| validate_component("path component", component).is_ok());
 }
 #[cfg(test)]
 mod tests {
@@ -694,13 +696,13 @@ mod tests {
             OsStr::new("add"),
             OsStr::new("--quiet"),
             seed.as_os_str(),
-            OsStr::new("old.example.test/owner/demo"),
+            OsStr::new("demo"),
         ])?;
         run_git([
             OsStr::new("config"),
             OsStr::new("--file"),
             home.join(".gitmodules").as_os_str(),
-            OsStr::new("submodule.old.example.test/owner/demo.url"),
+            OsStr::new("submodule.demo.url"),
             OsStr::new("https://new.example.test/owner/demo.git"),
         ])?;
         run_git([
@@ -709,7 +711,7 @@ mod tests {
             OsStr::new("add"),
             OsStr::new(".gitmodules"),
         ])?;
-        let source = home.join("old.example.test/owner/demo");
+        let source = home.join("demo");
         check_home_gitmodules(&home, true).map_err(|failure| format!("fix failed: {failure:?}"))?;
         let target = home.join("new.example.test/owner/demo");
         assert!(!source.exists());
