@@ -2629,8 +2629,14 @@ formatNixTemplateDifferences subjectNixPath templateBaselineNixPath subjectNixEx
         else
           let packageLetBindingMap = fromMaybe Map.empty (extractOutermostLetBindings subjectNixExpr)
               templateLetBindingMap = fromMaybe Map.empty (extractOutermostLetBindings templateBaselineExpr)
+              packageFunctionParameterMap = fromMaybe Map.empty (extractTopLevelFunctionParameters subjectNixExpr)
+              templateFunctionParameterMap = fromMaybe Map.empty (extractTopLevelFunctionParameters templateBaselineExpr)
               packagePrimaryBindingMap = fromMaybe Map.empty (extractPrimaryNixBindings subjectNixExpr)
               templatePrimaryBindingMap = fromMaybe Map.empty (extractPrimaryNixBindings templateBaselineExpr)
+              functionParameterDifferenceLines =
+                if Map.null packageFunctionParameterMap && Map.null templateFunctionParameterMap
+                  then []
+                  else formatBindingMapDifferences "parameter" packageFunctionParameterMap templateFunctionParameterMap
               letBindingDifferenceLines =
                 if Map.null packageLetBindingMap && Map.null templateLetBindingMap
                   then []
@@ -2639,7 +2645,7 @@ formatNixTemplateDifferences subjectNixPath templateBaselineNixPath subjectNixEx
                 if Map.null packagePrimaryBindingMap && Map.null templatePrimaryBindingMap
                   then []
                   else formatBindingMapDifferences "key" packagePrimaryBindingMap templatePrimaryBindingMap
-              differenceDetailLines = letBindingDifferenceLines ++ primaryBindingDifferenceLines
+              differenceDetailLines = functionParameterDifferenceLines ++ letBindingDifferenceLines ++ primaryBindingDifferenceLines
               renderedDifferenceDetailLines =
                 if null differenceDetailLines
                   then
@@ -2695,6 +2701,18 @@ firstMismatchedLine actualLines expectedLines =
     | (lineNumber, actualLine, expectedLine) <- zip3 [1 ..] actualLines expectedLines,
       actualLine /= expectedLine
     ]
+extractTopLevelFunctionParameters :: NExprLoc -> Maybe (Map.Map T.Text T.Text)
+extractTopLevelFunctionParameters (Fix (Compose (AnnUnit _ expressionFunctor))) =
+  case expressionFunctor of
+    NAbs (ParamSet _ _ params) _ ->
+      Just
+        ( Map.fromList
+            [ (paramName, maybe "required" (T.pack . compactTextToSingleLine . renderNixExpr) maybeDefaultValue)
+            | (VarName paramName, maybeDefaultValue) <- params
+            ]
+        )
+    NAbs (Param (VarName paramName)) _ -> Just (Map.singleton paramName "required")
+    _ -> Nothing
 extractPrimaryNixBindings :: NExprLoc -> Maybe (Map.Map T.Text T.Text)
 extractPrimaryNixBindings nixExpression =
   Map.fromList . maximumBy (comparing length) . NE.toList
@@ -2778,6 +2796,7 @@ hUnitPackageTests =
       TestLabel "Humanizes conventional test identifiers across frameworks." (TestCase testIdentifierSpecificationTest),
       TestLabel "Parses versioned coverage summaries strictly." (TestCase repositoryCoverageParsingTest),
       TestLabel "Renders stable text and JSON repository summaries." (TestCase repositorySummaryRenderingTest),
+      TestLabel "Reports concise Nix template parameter differences." (TestCase nixTemplateParameterDifferenceTest),
       TestLabel "Documents top-level and command-specific usage." (TestCase commandLineHelpEndToEndTest),
       TestLabel "Rejects missing and unknown commands with usage on stderr." (TestCase invalidCommandEndToEndTest),
       TestLabel "Initializes and safely reinitializes a compatible home repository." (TestCase initCompatibleHomeEndToEndTest),
@@ -2905,6 +2924,17 @@ repositoryCoverageParsingTest = do
     "A coverage timing artifact preserves per-test durations without a profile check."
     (Just (Map.fromList [("Reports behavior.", 0.125)]))
     (parseRepositoryTestTimings "test\t0.125\tReports behavior.\n")
+nixTemplateParameterDifferenceTest :: IO ()
+nixTemplateParameterDifferenceTest = do
+  actualParseResult <- parseNixExprFromText "{ pkgs ? import <nixpkgs> {} }: let python = pkgs.python3; in { pname = baseNameOf ./.; }"
+  expectedParseResult <- parseNixExprFromText "{ inputs, pkgs ? import <nixpkgs> {} }: let python = pkgs.python3; in { pname = baseNameOf ./.; }"
+  case (actualParseResult, expectedParseResult) of
+    (Right actualExpression, Right expectedExpression) ->
+      assertEqual
+        "Only the missing function parameter is reported."
+        ["packages/demo/default.nix: differs from template packages/python_template/default.nix (excluding dependency keys)\n  - missing parameter: inputs"]
+        (formatNixTemplateDifferences "packages/demo/default.nix" "packages/python_template/default.nix" actualExpression expectedExpression)
+    _ -> assertFailure "The Nix parameter-difference fixtures must parse."
 repositorySummaryRenderingTest :: IO ()
 repositorySummaryRenderingTest = do
   let packageSummary =
