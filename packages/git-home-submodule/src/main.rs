@@ -5,11 +5,11 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command, ExitStatus, Stdio};
-const MAIN_HELP: &str = "usage: git home-submodule [-h | --help] <command> [<args>]\n\nManage repositories as submodules of a private, allowlisted $HOME Git superproject.\nSubmodules use deterministic <hostname>/<repository-path> locations.\n\n   add      Add a repository as a submodule\n   check    Check canonical submodule paths\n   init     Initialize the $HOME superproject\n\nSee 'git home-submodule <command> -h' for help on a specific command.\n";
+const MAIN_HELP: &str = "usage: git home-submodule [-h | --help] <command> [<args>]\n\nPolicy-enforcing Git porcelain for an allowlisted $HOME superproject.\nRepositories are submodules at canonical <hostname>/<repository-path> locations.\n\n   add      Add a repository as a submodule\n   check    Check canonical submodule paths\n   init     Initialize the $HOME superproject\n\nSee 'git home-submodule <command> -h' for help on a specific command.\n";
 const MAIN_USAGE: &str = "usage: git home-submodule [-h | --help] <command> [<args>]\n";
 const ADD_HELP: &str = "usage: git home-submodule add <https-or-ssh-repository-url>\n\nAdd the repository as a $HOME submodule at <hostname>/<repository-path>.\n";
 const CHECK_HELP: &str = "usage: git home-submodule check [--fix]\n\nCheck that every $HOME/.gitmodules path matches the canonical path for its repository URL.\nWith --fix, rename mismatched submodules and update their paths.\n";
-const INIT_HELP: &str = "usage: git home-submodule init\n\nInitialize $HOME as a private Git superproject with an allowlist .gitignore.\nThe rules !.gitignore and !.gitmodules are required; additional rules must start with !.\n";
+const INIT_HELP: &str = "usage: git home-submodule init\n\nInitialize $HOME as a Git superproject with an allowlist .gitignore.\nThe rules !.gitignore and !.gitmodules are required; additional rules must start with !.\n";
 const DEFAULT_GITIGNORE: &str = "*\n!.gitignore\n!.gitmodules\n";
 const USAGE_EXIT_CODE: i32 = 129;
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -259,35 +259,55 @@ fn add_repository_with_environment(
 }
 fn initialize_home_repository(home_directory: &Path) -> Result<(), CliFailure> {
     let gitignore_path = home_directory.join(".gitignore");
-    let updated_gitignore = if gitignore_path.is_file() {
-        let contents = fs::read_to_string(&gitignore_path)
-            .map_err(|error| CliFailure::fatal(format!("{}: {error}", gitignore_path.display())))?;
-        let lines: Vec<&str> = contents.lines().collect();
-        let compatible =
-            lines.first() == Some(&"*") && lines.iter().skip(1).all(|line| line.starts_with('!'));
-        if !compatible {
+    let updated_gitignore = match fs::symlink_metadata(&gitignore_path) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            let contents = fs::read_to_string(&gitignore_path).map_err(|error| {
+                CliFailure::fatal(format!("{}: {error}", gitignore_path.display()))
+            })?;
+            let lines: Vec<&str> = contents.lines().collect();
+            let compatible = lines.first() == Some(&"*")
+                && lines.iter().skip(1).all(|line| line.starts_with('!'));
+            if !compatible {
+                return Err(CliFailure::fatal(format!(
+                    "{}: existing file must start with * and subsequent lines must start with !",
+                    gitignore_path.display()
+                )));
+            }
+            let mut updated = contents.clone();
+            for required_rule in ["!.gitignore", "!.gitmodules"] {
+                if !lines.contains(&required_rule) {
+                    if !updated.ends_with('\n') {
+                        updated.push('\n');
+                    }
+                    updated.push_str(required_rule);
+                    updated.push('\n');
+                }
+            }
+            (updated != contents).then_some(updated)
+        }
+        Ok(_) => {
             return Err(CliFailure::fatal(format!(
-                "{}: existing file must start with * and subsequent lines must start with !",
+                "{}: existing path must be a regular file",
                 gitignore_path.display()
             )));
         }
-        let mut updated = contents.clone();
-        for required_rule in ["!.gitignore", "!.gitmodules"] {
-            if !lines.contains(&required_rule) {
-                if !updated.ends_with('\n') {
-                    updated.push('\n');
-                }
-                updated.push_str(required_rule);
-                updated.push('\n');
-            }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Some(DEFAULT_GITIGNORE.to_owned())
         }
-        (updated != contents).then_some(updated)
-    } else {
-        Some(DEFAULT_GITIGNORE.to_owned())
+        Err(error) => {
+            return Err(CliFailure::fatal(format!(
+                "{}: {error}",
+                gitignore_path.display()
+            )));
+        }
     };
     let status = Command::new("git")
         .arg("init")
         .arg(home_directory)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_OBJECT_DIRECTORY")
         .status()
         .map_err(|error| CliFailure::fatal(format!("failed to execute git: {error}")))?;
     if !status.success() {
@@ -548,6 +568,16 @@ mod tests {
         fs::write(home.path().join(".gitignore"), "*.tmp\n")?;
         let failure = initialize_home_repository(home.path())
             .expect_err("conflicting initialization must fail");
+        assert_eq!(failure.exit_code, 128);
+        assert!(!home.path().join(".git").exists());
+        return Ok(());
+    }
+    #[test]
+    fn rejects_a_non_regular_gitignore_without_side_effects() -> TestResult {
+        let home = TemporaryDirectory::new("init-non-regular-gitignore")?;
+        fs::create_dir(home.path().join(".gitignore"))?;
+        let failure = initialize_home_repository(home.path())
+            .expect_err("a non-regular .gitignore must fail");
         assert_eq!(failure.exit_code, 128);
         assert!(!home.path().join(".git").exists());
         return Ok(());

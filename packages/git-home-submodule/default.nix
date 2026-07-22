@@ -14,7 +14,7 @@ pkgs.rustPlatform.buildRustPackage rec {
     runHook postInstallCheck
   '';
   meta = {
-    description = "Manage repositories as canonical submodules of a private, allowlisted home-directory Git superproject.";
+    description = "Policy-enforcing Git porcelain for canonical submodules in an allowlisted home-directory superproject.";
     mainProgram = pname;
   };
   nativeBuildInputs = [
