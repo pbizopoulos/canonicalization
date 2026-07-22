@@ -10,7 +10,7 @@
 module Main (main, runPackageTests, runPackageTestsWithTimings) where
 import Control.Applicative ((<|>))
 import Control.Exception (IOException, finally, try)
-import Control.Monad (filterM, forM, forM_, unless, void, when)
+import Control.Monad (filterM, forM, forM_, unless, when)
 import Data.Char (isAlphaNum, isAsciiLower, isDigit, isLower, isSpace, isUpper, toLower, toUpper)
 import Data.Fix (Fix (Fix))
 import Data.Functor.Compose (Compose (Compose))
@@ -475,8 +475,8 @@ usageTextForCommand = \case
       [ "usage: git canonicalization check [<location>]",
         "",
         "Check the nearest Git repository, defaulting to the current directory.",
-        "The repository rooted at $HOME uses",
-        "the home .gitmodules path policy; other repositories use canonical checks.",
+        "When the selected repository is $HOME, validate its .gitmodules path policy",
+        "and check every registered repository; otherwise check the selected repository.",
         ""
       ]
   Just "init" ->
@@ -590,14 +590,20 @@ checkCanonicalizationLocation canonicalizationSettings location = do
   homeDirectory <- getHomeDirectory
   canonicalHomeDirectory <- canonicalizePath homeDirectory
   if repositoryRoot == canonicalHomeDirectory
-    then checkHomeGitmodules canonicalHomeDirectory >>= either failCanonicalizationCheck pure
-    else
-      withCurrentDirectory repositoryRoot $
-        collectRepositoryComplianceWith canonicalizationSettings >>= \case
-          Left (checkPhaseName, checkPhaseIssues) -> do
-            reportCheckRepositoryFailures checkPhaseName checkPhaseIssues
-            exitFailure
-          Right _ -> pure ()
+    then do
+      registeredRepositories <- resolveHomeRegisteredRepositories canonicalHomeDirectory
+      forM_ registeredRepositories $ \(repositoryPath, registeredRepositoryRoot) ->
+        checkRepositoryAt canonicalizationSettings (Just repositoryPath) registeredRepositoryRoot
+    else checkRepositoryAt canonicalizationSettings Nothing repositoryRoot
+checkRepositoryAt :: CanonicalizationSettings -> Maybe FilePath -> FilePath -> IO ()
+checkRepositoryAt canonicalizationSettings maybeRepositoryPath repositoryRoot =
+  withCurrentDirectory repositoryRoot $
+    collectRepositoryComplianceWith canonicalizationSettings >>= \case
+      Left (checkPhaseName, checkPhaseIssues) -> do
+        forM_ maybeRepositoryPath (hPutStrLn stderr . ("error: repository: " ++))
+        reportCheckRepositoryFailures checkPhaseName checkPhaseIssues
+        exitFailure
+      Right _ -> pure ()
 failCanonicalizationCheck :: String -> IO a
 failCanonicalizationCheck diagnostic = do
   forM_ (lines diagnostic) (hPutStrLn stderr . ("error: " ++))
@@ -606,8 +612,6 @@ dieWithFatal :: String -> IO a
 dieWithFatal diagnostic = do
   hPutStrLn stderr ("fatal: " ++ diagnostic)
   exitWith (ExitFailure 128)
-checkHomeGitmodules :: FilePath -> IO (Either String ())
-checkHomeGitmodules homeDirectory = fmap void (readHomeGitmodulePaths homeDirectory)
 readHomeGitmodulePaths :: FilePath -> IO (Either String [FilePath])
 readHomeGitmodulePaths homeDirectory = do
   let gitmodulesPath = homeDirectory </> ".gitmodules"
@@ -833,20 +837,24 @@ summarizeCanonicalizationLocation canonicalizationSettings render location = do
   repositorySummaries <-
     if repositoryRoot == canonicalHomeDirectory
       then do
-        repositoryPaths <- readHomeGitmodulePaths canonicalHomeDirectory >>= either failCanonicalizationCheck pure
-        forM repositoryPaths $ \repositoryPath -> do
-          let absoluteRepositoryPath = canonicalHomeDirectory </> repositoryPath
-          repositoryExists <- doesDirectoryExist absoluteRepositoryPath
-          unless repositoryExists $ failCanonicalizationCheck (repositoryPath ++ ": missing repository directory: " ++ absoluteRepositoryPath)
-          canonicalRepositoryPath <- canonicalizePath absoluteRepositoryPath
-          discoveredRepositoryRoot <- discoverRegisteredRepositoryRoot repositoryPath canonicalRepositoryPath
-          unless (discoveredRepositoryRoot == canonicalRepositoryPath) $
-            failCanonicalizationCheck (repositoryPath ++ ": not a Git repository root: " ++ canonicalRepositoryPath)
-          summarizeRepositoryAt canonicalizationSettings repositoryPath canonicalRepositoryPath
+        registeredRepositories <- resolveHomeRegisteredRepositories canonicalHomeDirectory
+        forM registeredRepositories (uncurry (summarizeRepositoryAt canonicalizationSettings))
       else do
         repositoryPath <- repositoryIdentifier canonicalHomeDirectory repositoryRoot
         (: []) <$> summarizeRepositoryAt canonicalizationSettings repositoryPath repositoryRoot
   putStr (render repositorySummaries)
+resolveHomeRegisteredRepositories :: FilePath -> IO [(FilePath, FilePath)]
+resolveHomeRegisteredRepositories canonicalHomeDirectory = do
+  repositoryPaths <- readHomeGitmodulePaths canonicalHomeDirectory >>= either failCanonicalizationCheck pure
+  forM repositoryPaths $ \repositoryPath -> do
+    let absoluteRepositoryPath = canonicalHomeDirectory </> repositoryPath
+    repositoryExists <- doesDirectoryExist absoluteRepositoryPath
+    unless repositoryExists $ failCanonicalizationCheck (repositoryPath ++ ": missing repository directory: " ++ absoluteRepositoryPath)
+    canonicalRepositoryPath <- canonicalizePath absoluteRepositoryPath
+    discoveredRepositoryRoot <- discoverRegisteredRepositoryRoot repositoryPath canonicalRepositoryPath
+    unless (discoveredRepositoryRoot == canonicalRepositoryPath) $
+      failCanonicalizationCheck (repositoryPath ++ ": not a Git repository root: " ++ canonicalRepositoryPath)
+    pure (repositoryPath, canonicalRepositoryPath)
 discoverRegisteredRepositoryRoot :: FilePath -> FilePath -> IO FilePath
 discoverRegisteredRepositoryRoot repositoryPath canonicalRepositoryPath = do
   (gitExit, gitStdout, gitStderr) <- captureGit (gitIn canonicalRepositoryPath ["rev-parse", "--path-format=absolute", "--show-toplevel"])
@@ -2771,6 +2779,7 @@ hUnitPackageTests =
       TestLabel "Initializes and safely reinitializes a compatible home repository." (TestCase initCompatibleHomeEndToEndTest),
       TestLabel "Rejects initialization when the home ignore policy conflicts." (TestCase initConflictingHomeEndToEndTest),
       TestLabel "Checks the current directory by default and routes home descendants to the home repository." (TestCase checkHomeRoutingEndToEndTest),
+      TestLabel "Checks every registered home repository." (TestCase checkHomeRepositoriesEndToEndTest),
       TestLabel "Rejects malformed home submodule paths." (TestCase checkMalformedHomePathEndToEndTest),
       TestLabel "Checks nested Git repositories independently from the home repository." (TestCase checkNestedRepositoryEndToEndTest),
       TestLabel "Propagates Git refusal without changing a staged submodule." (TestCase stagedSubmoduleRemovalRefusalEndToEndTest),
@@ -3054,6 +3063,41 @@ checkHomeRoutingEndToEndTest =
       assertEqual "A home descendant without its own repository uses the home check." ExitSuccess homeCheckExit
       assertEqual "A successful home check leaves stdout empty." "" homeCheckStdout
       assertEqual "A successful home check leaves stderr empty." "" homeCheckStderr
+checkHomeRepositoriesEndToEndTest :: IO ()
+checkHomeRepositoriesEndToEndTest =
+  withTemporaryPackageRepository "check-home-repositories" $ \temporaryHome -> do
+    initializeGitRepositoryFixture temporaryHome
+    let firstRepositoryPath = "alpha.test" </> "owner" </> "first"
+        secondRepositoryPath = "zeta.test" </> "owner" </> "second"
+        firstRepository = temporaryHome </> firstRepositoryPath
+        secondRepository = temporaryHome </> secondRepositoryPath
+    forM_ [firstRepository, secondRepository] $ \repositoryPath -> do
+      initializeGitRepositoryFixture repositoryPath
+      TIO.writeFile (repositoryPath </> "flake.nix") "{}"
+      TIO.writeFile (repositoryPath </> "flake.lock") "{}"
+    TIO.writeFile
+      (temporaryHome </> ".gitmodules")
+      ( T.unlines
+          [ "[submodule \"second\"]",
+            "  path = zeta.test/owner/second",
+            "[submodule \"first\"]",
+            "  path = alpha.test/owner/first"
+          ]
+      )
+    withEnvironmentVariable "HOME" temporaryHome $ do
+      (successfulCheckExit, successfulCheckStdout, successfulCheckStderr) <- runEndToEndCommandIn temporaryHome ["check"]
+      assertEqual "Checking valid registered home repositories succeeds." ExitSuccess successfulCheckExit
+      assertEqual "A successful registered-repository check leaves stdout empty." "" successfulCheckStdout
+      assertEqual "A successful registered-repository check leaves stderr empty." "" successfulCheckStderr
+      removeFile (secondRepository </> "flake.lock")
+      (failedCheckExit, failedCheckStdout, failedCheckStderr) <- runEndToEndCommandIn temporaryHome ["check"]
+      assertEqual "A noncompliant registered home repository fails the home check." (ExitFailure 1) failedCheckExit
+      assertEqual "A failed registered-repository check leaves stdout empty." "" failedCheckStdout
+      assertBool
+        "A failed registered-repository check identifies the repository and phase."
+        ( ("repository: " ++ secondRepositoryPath) `isInfixOf` failedCheckStderr
+            && "canonicalization check failed at phase: required-root-files" `isInfixOf` failedCheckStderr
+        )
 checkMalformedHomePathEndToEndTest :: IO ()
 checkMalformedHomePathEndToEndTest =
   withTemporaryPackageRepository "check-malformed-home" $ \temporaryHome -> do
