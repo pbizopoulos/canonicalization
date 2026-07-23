@@ -7,8 +7,9 @@ import Control.Monad (unless)
 import Data.Fix (Fix (Fix))
 import Data.Function (on)
 import Data.Functor.Compose (Compose (Compose))
-import Data.List (groupBy, sort, sortBy)
+import Data.List (groupBy, isPrefixOf, sort, sortBy)
 import Data.List.NonEmpty (NonEmpty ((:|)))
+import Data.List.NonEmpty qualified as NE
 import Data.Ord (comparing)
 import Data.Text
   ( Text,
@@ -78,7 +79,9 @@ import Prelude
     map,
     mapM,
     maybe,
+    not,
     notElem,
+    null,
     otherwise,
     pure,
     putStrLn,
@@ -146,6 +149,13 @@ getBindingName :: Binding r -> Maybe Text
 getBindingName (NamedVar (StaticKey (VarName keyText) :| _) _ _) = Just keyText
 getBindingName (NamedVar (DynamicKey (Plain (DoubleQuoted [Plain keyText])) :| _) _ _) = Just keyText
 getBindingName _ = Nothing
+getBindingPath :: Binding r -> Maybe [Text]
+getBindingPath (NamedVar bindingKeys _ _) = mapM getBindingKeyName (NE.toList bindingKeys)
+getBindingPath _ = Nothing
+getBindingKeyName :: NKeyName r -> Maybe Text
+getBindingKeyName (StaticKey (VarName keyText)) = Just keyText
+getBindingKeyName (DynamicKey (Plain (DoubleQuoted [Plain keyText]))) = Just keyText
+getBindingKeyName _ = Nothing
 sortAndCollapseBindings :: [Binding NExprLoc] -> [Binding NExprLoc]
 sortAndCollapseBindings =
   concatMap collapseNestedBindings
@@ -155,21 +165,41 @@ collapseNestedBindings :: [Binding NExprLoc] -> [Binding NExprLoc]
 collapseNestedBindings [] = []
 collapseNestedBindings bindings@(firstBinding : _) =
   case (getBindingName firstBinding, firstBinding) of
-    (Just _, NamedVar (bindingKey :| _) _ bindingPos) ->
-      let nestedBindings = concatMap nextLevelBindings bindings
-          sortedNested = sortAndCollapseBindings nestedBindings
-          sortedBindings = map (fmap sortExpression) bindings
-       in case sortedNested of
-            [] -> sortedBindings
-            [NamedVar (subKey :| restKeys) valExpr _] ->
-              [NamedVar (bindingKey :| subKey : restKeys) valExpr bindingPos]
-            newNested ->
-              [ NamedVar
-                  (bindingKey :| [])
-                  (Fix (Compose (AnnUnit (SrcSpan bindingPos bindingPos) (NSet NonRecursive newNested))))
-                  bindingPos
-              ]
+    (Just _, NamedVar (bindingKey :| _) _ bindingPos)
+      | bindingsAreStructurallyCompatible bindings ->
+          let nestedBindings = concatMap nextLevelBindings bindings
+              sortedNested = sortAndCollapseBindings nestedBindings
+              sortedBindings = map (fmap sortExpression) bindings
+           in case sortedNested of
+                [] -> sortedBindings
+                [NamedVar (subKey :| restKeys) valExpr _] ->
+                  [NamedVar (bindingKey :| subKey : restKeys) valExpr bindingPos]
+                newNested ->
+                  [ NamedVar
+                      (bindingKey :| [])
+                      (Fix (Compose (AnnUnit (SrcSpan bindingPos bindingPos) (NSet NonRecursive newNested))))
+                      bindingPos
+                  ]
     _ -> map (fmap sortExpression) bindings
+bindingsAreStructurallyCompatible :: [Binding NExprLoc] -> Bool
+bindingsAreStructurallyCompatible [] = False
+bindingsAreStructurallyCompatible [binding] = not (null (nextLevelBindings binding))
+bindingsAreStructurallyCompatible bindings =
+  all isDottedBinding bindings
+    && maybe False pathsAreUnambiguous (mapM getBindingPath bindings)
+isDottedBinding :: Binding r -> Bool
+isDottedBinding (NamedVar (_ :| _ : _) _ _) = True
+isDottedBinding _ = False
+pathsAreUnambiguous :: [[Text]] -> Bool
+pathsAreUnambiguous [] = True
+pathsAreUnambiguous (bindingPath : remainingPaths) =
+  all
+    ( \otherPath ->
+        not (bindingPath `isPrefixOf` otherPath)
+          && not (otherPath `isPrefixOf` bindingPath)
+    )
+    remainingPaths
+    && pathsAreUnambiguous remainingPaths
 nextLevelBindings :: Binding NExprLoc -> [Binding NExprLoc]
 nextLevelBindings (NamedVar (_ :| bindingKey : restKeys) valExpr bindingPos) =
   [NamedVar (bindingKey :| restKeys) valExpr bindingPos]
@@ -420,6 +450,18 @@ hUnitPackageTests =
         makeFormattingTest
           (pack "{ inherit a; ${name}.x = 1; ${other}.y = 2; }")
           (pack "{\n  inherit a;\n  ${name}.x = 1;\n  ${other}.y = 2;\n}"),
+      TestLabel "Preserves conflicting scalar and dotted bindings." $
+        makeFormattingTest
+          (pack "{ a = 1; a.b = 2; }")
+          (pack "{\n  a = 1;\n  a.b = 2;\n}"),
+      TestLabel "Preserves duplicate dotted bindings." $
+        makeFormattingTest
+          (pack "{ a.b = 1; a.b = 2; }")
+          (pack "{\n  a.b = 1;\n  a.b = 2;\n}"),
+      TestLabel "Preserves prefix-conflicting dotted bindings." $
+        makeFormattingTest
+          (pack "{ a.b = 1; a.b.c = 2; }")
+          (pack "{\n  a.b = 1;\n  a.b.c = 2;\n}"),
       TestLabel "Reports parse failure without rewriting the file." $
         TestCase $
           withSystemTempFile "malformed.nix" $ \tmpFile tmpHandle -> do

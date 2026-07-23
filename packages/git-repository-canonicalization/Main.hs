@@ -1039,9 +1039,6 @@ durationFromSeconds seconds =
   if seconds >= 0 && not (isNaN seconds) && not (isInfinite seconds)
     then Just (Duration seconds)
     else Nothing
-testDuration :: Double -> Duration
-testDuration seconds =
-  fromMaybe (error "test duration must be finite and non-negative") (durationFromSeconds seconds)
 extractHaskellPackageDescription :: T.Text -> Maybe String
 extractHaskellPackageDescription cabalContents =
   (T.unpack <$> lookupCabalField "description" cabalContents)
@@ -2737,11 +2734,11 @@ repositoryCoverageParsingTest = do
     (parseRepositoryCheckOutputPaths ["demo-coverage", "sample_coverage"] "demo-coverage\t/nix/store/demo")
   assertEqual
     "A valid profile artifact preserves total and per-test durations."
-    (Just (RepositoryProfileMeasured (testDuration 1.25) (Map.fromList [("Reports behavior.", testDuration 0.125)])))
+    (Just (RepositoryProfileMeasured (Duration 1.25) (Map.fromList [("Reports behavior.", Duration 0.125)])))
     (parseRepositoryProfileSummary "profile-v1\ttotal-seconds\t1.25\ntest\t0.125\tReports behavior.\n")
   assertEqual
     "A coverage timing artifact preserves per-test durations without a profile check."
-    (Just (Map.fromList [("Reports behavior.", testDuration 0.125)]))
+    (Just (Map.fromList [("Reports behavior.", Duration 0.125)]))
     (parseRepositoryTestTimings "test\t0.125\tReports behavior.\n")
   forM_
     [ "profile-v1\ttotal-seconds\tNaN\ntest\t0.125\tReports behavior.\n",
@@ -2794,9 +2791,9 @@ repositorySummaryRenderingTest = do
                     Just
                       ( RepositoryCoverageMeasured
                           (CoverageMeasurement StatementCoverage 19 20)
-                          (Map.fromList [("Reports \"quoted\" behavior.", testDuration 9.999)])
+                          (Map.fromList [("Reports \"quoted\" behavior.", Duration 9.999)])
                       ),
-                  repositoryPackageProfile = Just (RepositoryProfileMeasured (testDuration 1.234) (Map.fromList [("Reports \"quoted\" behavior.", testDuration 0.125)])),
+                  repositoryPackageProfile = Just (RepositoryProfileMeasured (Duration 1.234) (Map.fromList [("Reports \"quoted\" behavior.", Duration 0.125)])),
                   repositoryPackageHasPropertyTestingCheck = False,
                   repositoryPackageHasMutationTestingCheck = False
                 }
@@ -2808,7 +2805,7 @@ repositorySummaryRenderingTest = do
           }
   assertEqual
     "Profile timings take precedence over coverage timings."
-    (Map.fromList [("Reports \"quoted\" behavior.", testDuration 0.125)])
+    (Map.fromList [("Reports \"quoted\" behavior.", Duration 0.125)])
     (repositoryPackageTestDurations packageSummary)
   assertEqual
     "Text rendering has stable fields, indentation, and fallbacks."

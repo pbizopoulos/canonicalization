@@ -18,7 +18,6 @@ import Data.Aeson
   )
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
-import Data.ByteString.Char8 qualified as BS
 import Data.ByteString.Lazy qualified as LBS
 import Data.Fix (Fix (Fix))
 import Data.Foldable (toList)
@@ -88,11 +87,12 @@ import Prelude
     appendFile,
     concat,
     concatMap,
-    error,
     fail,
     fmap,
     fromIntegral,
     fst,
+    isInfinite,
+    isNaN,
     map,
     mapM,
     maybe,
@@ -101,6 +101,7 @@ import Prelude
     otherwise,
     pure,
     putStrLn,
+    replicate,
     show,
     snd,
     writeFile,
@@ -133,17 +134,14 @@ optionPathFromComponents :: [Text] -> Maybe OptionPath
 optionPathFromComponents = fmap OptionPath . NE.nonEmpty
 optionPathComponents :: OptionPath -> [Text]
 optionPathComponents (OptionPath components) = NE.toList components
-testOptionPath :: [Text] -> OptionPath
-testOptionPath components =
-  case optionPathFromComponents components of
-    Just optionPath -> optionPath
-    Nothing -> error "test option paths must not be empty"
 type NixosCandidate :: Type
 type NixosCandidate = (OptionPath, Literal)
 type NixosDefinitionRecord :: Type
 data NixosDefinitionRecord = NixosDefinitionRecord OptionPath Literal [FilePath]
+  deriving stock (Eq, Show)
 type TreefmtDefaultRecord :: Type
 data TreefmtDefaultRecord = TreefmtDefaultRecord OptionPath Literal
+  deriving stock (Eq, Show)
 instance FromJSON OptionPath where
   parseJSON =
     withArray "non-empty option path" $ \values -> do
@@ -156,10 +154,11 @@ instance FromJSON Literal where
   parseJSON (Bool value) = pure (LiteralBool value)
   parseJSON (String value) = pure (LiteralString value)
   parseJSON (Number value) =
-    pure $
-      case floatingOrInteger value of
-        Left floatValue -> LiteralFloat floatValue
-        Right integerValue -> LiteralInteger integerValue
+    case floatingOrInteger value of
+      Left floatValue
+        | isNaN floatValue || isInfinite floatValue -> fail "floating literal must be finite"
+        | otherwise -> pure (LiteralFloat floatValue)
+      Right integerValue -> pure (LiteralInteger integerValue)
   parseJSON (Array values) = LiteralList <$> mapM parseJSON (toList values)
   parseJSON (Object values) =
     LiteralSet . sortLiteralBindings
@@ -646,7 +645,7 @@ readJsonFromNixWith runNix arguments = do
     Right (exitCode, standardOutput, standardError) ->
       case exitCode of
         ExitSuccess ->
-          case eitherDecodeStrict' (BS.pack standardOutput) of
+          case eitherDecodeStrict' (Text.encodeUtf8 (pack standardOutput)) of
             Right jsonValue -> pure (Right jsonValue)
             Left diagnostic -> pure (Left ("cannot decode Nix JSON output: " ++ diagnostic))
         _ -> pure (Left ("nix evaluation failed: " ++ standardError))
@@ -715,60 +714,60 @@ hUnitPackageTests =
   TestList
     [ TestLabel "Removes a literal assignment equal to its default." $
         makeRemovalTest
-          (Map.singleton (testOptionPath ["boot", "enabled"]) (LiteralBool False))
+          (Map.singleton (OptionPath ("boot" :| ["enabled"])) (LiteralBool False))
           (pack "{ boot.enabled = false; keep = true; }")
           (pack "{ keep = true; }"),
       TestLabel "Preserves a literal assignment different from its default." $
         makeRemovalTest
-          (Map.singleton (testOptionPath ["boot", "enabled"]) (LiteralBool True))
+          (Map.singleton (OptionPath ("boot" :| ["enabled"])) (LiteralBool True))
           (pack "{ boot.enabled = false; }")
           (pack "{ boot.enabled = false; }"),
       TestLabel "Removes now-empty structural parent sets." $
         makeRemovalTest
-          (Map.singleton (testOptionPath ["services", "example", "enable"]) (LiteralBool False))
+          (Map.singleton (OptionPath ("services" :| ["example", "enable"])) (LiteralBool False))
           (pack "{ services = { example = { enable = false; }; }; keep = 1; }")
           (pack "{ keep = 1; }"),
       TestLabel "Removes literal list defaults." $
         makeRemovalTest
-          (Map.singleton (testOptionPath ["environment", "systemPackages"]) (LiteralList []))
+          (Map.singleton (OptionPath ("environment" :| ["systemPackages"])) (LiteralList []))
           (pack "{ environment.systemPackages = [ ]; }")
           (pack "{}"),
       TestLabel "Removes string, integer, null, and attribute-set defaults." $
         makeRemovalTest
           ( Map.fromList
-              [ (testOptionPath ["example", "count"], LiteralInteger 3),
-                (testOptionPath ["example", "label"], LiteralString "default"),
-                (testOptionPath ["example", "optional"], LiteralNull),
-                (testOptionPath ["example", "settings"], LiteralSet [("enabled", LiteralBool True)])
+              [ (OptionPath ("example" :| ["count"]), LiteralInteger 3),
+                (OptionPath ("example" :| ["label"]), LiteralString "default"),
+                (OptionPath ("example" :| ["optional"]), LiteralNull),
+                (OptionPath ("example" :| ["settings"]), LiteralSet [("enabled", LiteralBool True)])
               ]
           )
           (pack "{ example.count = 3; example.label = \"default\"; example.optional = null; example.settings = { enabled = true; }; }")
           (pack "{}"),
       TestLabel "Preserves context-dependent expressions." $
         makeRemovalTest
-          (Map.singleton (testOptionPath ["example", "value"]) (LiteralInteger 1))
+          (Map.singleton (OptionPath ("example" :| ["value"])) (LiteralInteger 1))
           (pack "{ example.value = let x = 1; in x; }")
           (pack "{ example.value = let   x = 1; in x; }"),
       TestLabel "Treats a top-level config attribute as the option root." $
         makeRemovalTest
-          (Map.singleton (testOptionPath ["networking", "useDHCP"]) (LiteralBool True))
+          (Map.singleton (OptionPath ("networking" :| ["useDHCP"])) (LiteralBool True))
           (pack "{ config.networking.useDHCP = true; options.example = { }; }")
           (pack "{ options.example = {}; }"),
       TestLabel "Traverses the returned set of a let-wrapped module." $
         makeRemovalTest
-          (Map.singleton (testOptionPath ["boot", "initrd", "systemd", "enable"]) (LiteralBool True))
+          (Map.singleton (OptionPath ("boot" :| ["initrd", "systemd", "enable"])) (LiteralBool True))
           (pack "{ pkgs, ... }: let hostName = \"default\"; in { boot.initrd.systemd.enable = true; networking.hostName = hostName; }")
           (pack "{ pkgs, ... }:\n  let   hostName = \"default\"; in { networking.hostName = hostName; }"),
       TestLabel "Transformation is idempotent." $ TestCase $ do
         let defaults :: Map OptionPath Literal
-            defaults = Map.singleton (testOptionPath ["example", "enable"]) (LiteralBool False)
+            defaults = Map.singleton (OptionPath ("example" :| ["enable"])) (LiteralBool False)
             input = pack "{ example.enable = false; keep = true; }"
         once <- formatWithDefaults defaults input
         twice <- formatWithDefaults defaults once
         assertEqual "second transformation" once twice,
       TestLabel "Removes defaults inside a treefmt evalModule argument." $
         makeTreefmtRemovalTest
-          (Map.singleton (testOptionPath ["programs", "shfmt", "simplify"]) (LiteralBool True))
+          (Map.singleton (OptionPath ("programs" :| ["shfmt", "simplify"])) (LiteralBool True))
           (pack "{ inputs, pkgs, ... }: let treefmtEval = inputs.treefmt-nix.lib.evalModule pkgs { programs.shfmt.simplify = true; keep = false; }; in treefmtEval.config.build.wrapper")
           (pack "{ inputs, pkgs, ... }:\n  let\n    treefmtEval = inputs.treefmt-nix.lib.evalModule pkgs { keep = false; };\n  in treefmtEval.config.build.wrapper"),
       TestLabel "Builds candidate records into the NixOS default-definition lookup expression." $ TestCase $ do
@@ -776,7 +775,7 @@ hUnitPackageTests =
               nixosDefaultDefinitionFilesExpression
                 "/repository"
                 ["default"]
-                [(testOptionPath ["boot", "initrd", "systemd", "enable"], LiteralBool True)]
+                [(OptionPath ("boot" :| ["initrd", "systemd", "enable"]), LiteralBool True)]
         assertBool
           "candidate records"
           ("candidates = [ { path = [ \"boot\" \"initrd\" \"systemd\" \"enable\" ]; value = true; } ]" `isInfixOf` expression),
@@ -785,7 +784,7 @@ hUnitPackageTests =
               nixosDefaultDefinitionFilesExpression
                 "/repository"
                 ["default"]
-                [(testOptionPath ["boot", "initrd", "systemd", "enable"], LiteralBool True)]
+                [(OptionPath ("boot" :| ["initrd", "systemd", "enable"]), LiteralBool True)]
         assertBool
           "literal comparison"
           ("literalEquals = expected: actual:" `isInfixOf` expression),
@@ -794,20 +793,35 @@ hUnitPackageTests =
               nixosDefaultDefinitionFilesExpression
                 "/repository"
                 ["default"]
-                [(testOptionPath ["boot", "initrd", "systemd", "enable"], LiteralBool True)]
+                [(OptionPath ("boot" :| ["initrd", "systemd", "enable"]), LiteralBool True)]
         assertBool
           "candidate result"
           ("candidateFiles = candidate: { inherit (candidate) path value; files =" `isInfixOf` expression),
       TestLabel "Rejects empty option paths from Nix JSON." $
         TestCase $
-          case (eitherDecodeStrict' (BS.pack "[]") :: Either String OptionPath) of
+          case (eitherDecodeStrict' (Text.encodeUtf8 "[]") :: Either String OptionPath) of
             Left diagnostic -> assertBool "non-empty path diagnostic" ("must not be empty" `isInfixOf` diagnostic)
             Right _ -> assertFailure "empty option path decoded successfully",
       TestLabel "Preserves JSON decoding diagnostics." $
         TestCase $
-          case (eitherDecodeStrict' (BS.pack "null") :: Either String String) of
+          case (eitherDecodeStrict' (Text.encodeUtf8 "null") :: Either String String) of
             Left diagnostic -> assertBool "typed decode failure" ("expected String" `isInfixOf` diagnostic)
             Right _ -> assertFailure "null decoded as a string",
+      TestLabel "Decodes Unicode Nix JSON without byte truncation." $
+        TestCase $
+          assertEqual
+            "Unicode record"
+            (Right (TreefmtDefaultRecord (OptionPath ("naïve" :| [])) (LiteralString "λ")))
+            ( eitherDecodeStrict'
+                (Text.encodeUtf8 "{\"path\":[\"naïve\"],\"default\":\"λ\"}") ::
+                Either String TreefmtDefaultRecord
+            ),
+      TestLabel "Rejects non-finite floating literals." $
+        TestCase $ do
+          let oversizedFraction = pack (replicate 400 '9' ++ ".1")
+          case (eitherDecodeStrict' (Text.encodeUtf8 oversizedFraction) :: Either String Literal) of
+            Left diagnostic -> assertBool "finite floating literal diagnostic" ("must be finite" `isInfixOf` diagnostic)
+            Right _ -> assertFailure "non-finite floating literal decoded successfully",
       TestLabel "Propagates the underlying Nix evaluation diagnostic." $
         TestCase $ do
           result <-
