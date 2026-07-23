@@ -90,11 +90,7 @@ fn run_cli(arguments: &[OsString], home_directory: &Path) -> i32 {
             eprint!("{MAIN_USAGE}");
             return 1;
         }
-        [argument] if argument == "-h" => {
-            print!("{MAIN_USAGE}");
-            return USAGE_EXIT_CODE;
-        }
-        [argument] if argument == "--help" => {
+        [argument] if argument == "-h" || argument == "--help" => {
             print!("{MAIN_HELP}");
             return 0;
         }
