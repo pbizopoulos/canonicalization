@@ -5,7 +5,6 @@ let
   python = pkgs.python3;
   pythonDeps = [
     python.pkgs.matplotlib
-    python.pkgs.pandas
   ];
   pythonEnv = python.withPackages (_: pythonDeps);
 in
