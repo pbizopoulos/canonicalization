@@ -12,6 +12,7 @@ import Control.Applicative ((<|>))
 import Control.Exception (IOException, finally, try)
 import Control.Monad (filterM, forM, forM_, when)
 import Data.Char (isAlphaNum, isAsciiLower, isDigit, isLower, isSpace, isUpper, toLower, toUpper)
+import Data.Either (partitionEithers)
 import Data.Fix (Fix (Fix))
 import Data.Functor.Compose (Compose (Compose))
 import Data.Kind (Type)
@@ -19,7 +20,7 @@ import Data.List (find, intercalate, isInfixOf, isPrefixOf, isSuffixOf, mapAccum
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, fromMaybe, isNothing, listToMaybe, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isJust, listToMaybe, mapMaybe, maybeToList)
 import Data.Ord (comparing)
 import Data.Set qualified as Set
 import Data.Text qualified as T
@@ -389,8 +390,8 @@ runCli canonicalizationSettings commandLineArgs =
                 hPutStrLn stderr ("error: unsupported package type: " ++ packageKindName)
                 hPutStrLn stderr ("hint: supported package types: " ++ intercalate ", " (map fst supportedAddPackageKinds))
                 exitFailure
-              Just packageKind -> do
-                addResult <- addPackageToCurrentRepositoryWith canonicalizationSettings packageKind packageName packageDescription requestedCheckKinds
+              Just scaffoldPackageKind -> do
+                addResult <- addPackageToCurrentRepositoryWith canonicalizationSettings scaffoldPackageKind packageName packageDescription requestedCheckKinds
                 case addResult of
                   Left addError -> do
                     hPutStrLn stderr ("error: " ++ addError)
@@ -555,23 +556,21 @@ reportCheckRepositoryFailures checkPhaseName checkPhaseIssues = do
 type RepositoryPackageChecksSummary :: Type
 data RepositoryPackageChecksSummary = RepositoryPackageChecksSummary
   { repositoryPackageHasCheck :: Bool,
-    repositoryPackageHasCoverageCheck :: Bool,
-    repositoryPackageHasProfileCheck :: Bool,
+    repositoryPackageCoverage :: Maybe RepositoryPackageCoverageSummary,
+    repositoryPackageProfile :: Maybe RepositoryPackageProfileSummary,
     repositoryPackageHasPropertyTestingCheck :: Bool,
     repositoryPackageHasMutationTestingCheck :: Bool
   }
   deriving stock (Eq, Show)
 type RepositoryPackageCoverageSummary :: Type
 data RepositoryPackageCoverageSummary
-  = RepositoryCoverageNotConfigured
-  | RepositoryCoverageNotRun
+  = RepositoryCoverageNotRun
   | RepositoryCoverageUnavailable
   | RepositoryCoverageMeasured String Integer Integer
   deriving stock (Eq, Show)
 type RepositoryPackageProfileSummary :: Type
 data RepositoryPackageProfileSummary
-  = RepositoryProfileNotConfigured
-  | RepositoryProfileNotRun
+  = RepositoryProfileNotRun
   | RepositoryProfileUnavailable
   | RepositoryProfileMeasured Double (Map.Map String Double)
   deriving stock (Eq, Show)
@@ -588,9 +587,7 @@ data RepositoryPackageSummary = RepositoryPackageSummary
     repositoryPackageDescription :: Maybe String,
     repositoryPackageTestNames :: [String],
     repositoryPackageTestDurations :: Map.Map String Double,
-    repositoryPackageChecks :: RepositoryPackageChecksSummary,
-    repositoryPackageCoverage :: RepositoryPackageCoverageSummary,
-    repositoryPackageProfile :: RepositoryPackageProfileSummary
+    repositoryPackageChecks :: RepositoryPackageChecksSummary
   }
   deriving stock (Eq, Show)
 type RepositorySummary :: Type
@@ -690,8 +687,8 @@ renderRepositoryPackageSummaryJson packageSummary =
       "      \"packageType\": " ++ renderJsonString (repositoryPackageType packageSummary) ++ ",",
       "      \"description\": " ++ maybe "null" renderJsonString (repositoryPackageDescription packageSummary) ++ ",",
       "      \"checks\": " ++ renderRepositoryPackageChecksJson (repositoryPackageChecks packageSummary) ++ ",",
-      "      \"coverage\": " ++ renderRepositoryPackageCoverageJson (repositoryPackageCoverage packageSummary) ++ ",",
-      "      \"profile\": " ++ renderRepositoryPackageProfileJson (repositoryPackageProfile packageSummary) ++ ",",
+      "      \"coverage\": " ++ renderRepositoryPackageCoverageJson (repositoryPackageCoverage (repositoryPackageChecks packageSummary)) ++ ",",
+      "      \"profile\": " ++ renderRepositoryPackageProfileJson (repositoryPackageProfile (repositoryPackageChecks packageSummary)) ++ ",",
       "      \"testDurationsSeconds\": " ++ renderRepositoryPackageTestDurationsJson (repositoryPackageTestDurations packageSummary) ++ ",",
       "      \"tests\": " ++ "[" ++ intercalate ", " (map renderJsonString (repositoryPackageTestNames packageSummary)) ++ "]",
       "    }"
@@ -708,34 +705,32 @@ renderRepositoryPackageChecksJson packageChecks =
 repositoryPackageCheckEntries :: RepositoryPackageChecksSummary -> [(String, Bool)]
 repositoryPackageCheckEntries packageChecks =
   [ ("default-check", repositoryPackageHasCheck packageChecks),
-    ("coverage", repositoryPackageHasCoverageCheck packageChecks),
-    ("profile", repositoryPackageHasProfileCheck packageChecks),
+    ("coverage", isJust (repositoryPackageCoverage packageChecks)),
+    ("profile", isJust (repositoryPackageProfile packageChecks)),
     ("property-testing", repositoryPackageHasPropertyTestingCheck packageChecks),
     ("mutation-testing", repositoryPackageHasMutationTestingCheck packageChecks)
   ]
 enabledRepositoryPackageCheckNames :: RepositoryPackageSummary -> [String]
 enabledRepositoryPackageCheckNames packageSummary =
-  [ renderCheckName checkName
-  | (checkName, isEnabled) <- repositoryPackageCheckEntries (repositoryPackageChecks packageSummary),
-    isEnabled
-  ]
+  ["default-check" | repositoryPackageHasCheck packageChecks]
+    ++ ["coverage " ++ renderRepositoryPackageCoverageAnnotation coverage | coverage <- maybeToList (repositoryPackageCoverage packageChecks)]
+    ++ ["profile " ++ renderRepositoryPackageProfileAnnotation profile | profile <- maybeToList (repositoryPackageProfile packageChecks)]
+    ++ ["property-testing" | repositoryPackageHasPropertyTestingCheck packageChecks]
+    ++ ["mutation-testing" | repositoryPackageHasMutationTestingCheck packageChecks]
   where
-    renderCheckName "coverage" = "coverage " ++ renderRepositoryPackageCoverageAnnotation (repositoryPackageCoverage packageSummary)
-    renderCheckName "profile" = "profile " ++ renderRepositoryPackageProfileAnnotation (repositoryPackageProfile packageSummary)
-    renderCheckName checkName = checkName
+    packageChecks = repositoryPackageChecks packageSummary
 renderRepositoryPackageCoverageAnnotation :: RepositoryPackageCoverageSummary -> String
 renderRepositoryPackageCoverageAnnotation = \case
-  RepositoryCoverageNotConfigured -> "(not configured)"
   RepositoryCoverageNotRun -> "(not run)"
   RepositoryCoverageUnavailable -> "(unavailable)"
   RepositoryCoverageMeasured metric covered total ->
     "(" ++ metric ++ " " ++ show covered ++ "/" ++ show total ++ ", " ++ renderCoveragePercent covered total ++ "%)"
-renderRepositoryPackageCoverageJson :: RepositoryPackageCoverageSummary -> String
+renderRepositoryPackageCoverageJson :: Maybe RepositoryPackageCoverageSummary -> String
 renderRepositoryPackageCoverageJson = \case
-  RepositoryCoverageNotConfigured -> "{ \"status\": \"not-configured\" }"
-  RepositoryCoverageNotRun -> "{ \"status\": \"not-run\" }"
-  RepositoryCoverageUnavailable -> "{ \"status\": \"unavailable\" }"
-  RepositoryCoverageMeasured metric covered total ->
+  Nothing -> "{ \"status\": \"not-configured\" }"
+  Just RepositoryCoverageNotRun -> "{ \"status\": \"not-run\" }"
+  Just RepositoryCoverageUnavailable -> "{ \"status\": \"unavailable\" }"
+  Just (RepositoryCoverageMeasured metric covered total) ->
     "{ \"status\": \"measured\", \"metric\": "
       ++ renderJsonString metric
       ++ ", \"covered\": "
@@ -750,16 +745,15 @@ renderCoveragePercent covered total =
   showFFloat (Just 1) (100 * fromIntegral covered / fromIntegral total :: Double) ""
 renderRepositoryPackageProfileAnnotation :: RepositoryPackageProfileSummary -> String
 renderRepositoryPackageProfileAnnotation = \case
-  RepositoryProfileNotConfigured -> "(not configured)"
   RepositoryProfileNotRun -> "(not run)"
   RepositoryProfileUnavailable -> "(unavailable)"
   RepositoryProfileMeasured totalSeconds _ -> "(all tests: " ++ renderProfileSeconds totalSeconds ++ "s)"
-renderRepositoryPackageProfileJson :: RepositoryPackageProfileSummary -> String
+renderRepositoryPackageProfileJson :: Maybe RepositoryPackageProfileSummary -> String
 renderRepositoryPackageProfileJson = \case
-  RepositoryProfileNotConfigured -> "{ \"status\": \"not-configured\" }"
-  RepositoryProfileNotRun -> "{ \"status\": \"not-run\" }"
-  RepositoryProfileUnavailable -> "{ \"status\": \"unavailable\" }"
-  RepositoryProfileMeasured totalSeconds _ -> "{ \"status\": \"measured\", \"totalSeconds\": " ++ renderProfileSeconds totalSeconds ++ " }"
+  Nothing -> "{ \"status\": \"not-configured\" }"
+  Just RepositoryProfileNotRun -> "{ \"status\": \"not-run\" }"
+  Just RepositoryProfileUnavailable -> "{ \"status\": \"unavailable\" }"
+  Just (RepositoryProfileMeasured totalSeconds _) -> "{ \"status\": \"measured\", \"totalSeconds\": " ++ renderProfileSeconds totalSeconds ++ " }"
 renderRepositoryPackageTestText :: RepositoryPackageSummary -> String -> String
 renderRepositoryPackageTestText packageSummary testName =
   case Map.lookup testName testDurations of
@@ -814,25 +808,30 @@ summarizeRepositoryPackage checkOutputPaths repositoryCheckNames packageName = d
             maybeMainPythonSourceText <- readTextFileIfExists (packageRoot </> "main.py")
             pure (maybe [] (discoverPythonUnitTestNamesFromSource . T.unpack) maybeMainPythonSourceText)
       _ -> pure []
+  let configuredRepositoryCheckName checkKind =
+        repositoryCheckNameForKind packageKind packageName checkKind
+          >>= \checkName ->
+            if checkName `Set.member` repositoryCheckNames
+              then Just checkName
+              else Nothing
+      coverageCheckName = configuredRepositoryCheckName RepositoryCoverageCheck
+  repositoryPackageCoverageValue <-
+    traverse (summarizeRepositoryPackageCoverage checkOutputPaths) coverageCheckName
+  repositoryPackageProfileValue <-
+    traverse (summarizeRepositoryPackageProfile checkOutputPaths) (configuredRepositoryCheckName RepositoryProfileCheck)
   let repositoryPackageChecksValue =
         RepositoryPackageChecksSummary
-          { repositoryPackageHasCheck = maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName RepositoryDefaultCheck),
-            repositoryPackageHasCoverageCheck = maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName RepositoryCoverageCheck),
-            repositoryPackageHasProfileCheck = maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName RepositoryProfileCheck),
-            repositoryPackageHasPropertyTestingCheck = maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName RepositoryPropertyTestingCheck),
-            repositoryPackageHasMutationTestingCheck = maybe False (`Set.member` repositoryCheckNames) (repositoryCheckNameForKind packageKind packageName RepositoryMutationTestingCheck)
+          { repositoryPackageHasCheck = isJust (configuredRepositoryCheckName RepositoryDefaultCheck),
+            repositoryPackageCoverage = repositoryPackageCoverageValue,
+            repositoryPackageProfile = repositoryPackageProfileValue,
+            repositoryPackageHasPropertyTestingCheck = isJust (configuredRepositoryCheckName RepositoryPropertyTestingCheck),
+            repositoryPackageHasMutationTestingCheck = isJust (configuredRepositoryCheckName RepositoryMutationTestingCheck)
           }
-  repositoryPackageCoverageValue <-
-    summarizeRepositoryPackageCoverage checkOutputPaths packageKind packageName (repositoryPackageHasCoverageCheck repositoryPackageChecksValue)
-  repositoryPackageProfileValue <-
-    summarizeRepositoryPackageProfile checkOutputPaths packageKind packageName (repositoryPackageHasProfileCheck repositoryPackageChecksValue)
   repositoryPackageTestDurationsValue <-
     summarizeRepositoryPackageTestDurations
       checkOutputPaths
-      packageKind
-      packageName
+      coverageCheckName
       repositoryPackageChecksValue
-      repositoryPackageProfileValue
   pure
     RepositoryPackageSummary
       { repositoryPackageName = packageName,
@@ -840,9 +839,7 @@ summarizeRepositoryPackage checkOutputPaths repositoryCheckNames packageName = d
         repositoryPackageDescription = repositoryPackageDescriptionValue,
         repositoryPackageTestNames = repositoryPackageTestNamesValue,
         repositoryPackageTestDurations = repositoryPackageTestDurationsValue,
-        repositoryPackageChecks = repositoryPackageChecksValue,
-        repositoryPackageCoverage = repositoryPackageCoverageValue,
-        repositoryPackageProfile = repositoryPackageProfileValue
+        repositoryPackageChecks = repositoryPackageChecksValue
       }
 resolveRepositoryCheckOutputPaths :: [FilePath] -> IO (Maybe (Map.Map FilePath FilePath))
 resolveRepositoryCheckOutputPaths [] = pure (Just Map.empty)
@@ -877,22 +874,18 @@ parseRepositoryCheckOutputPaths expectedCheckNames outputPathsText = do
       case T.splitOn "\t" outputPathLine of
         [checkName, outputPath] | not (T.null checkName) && not (T.null outputPath) -> Just (T.unpack checkName, T.unpack outputPath)
         _ -> Nothing
-summarizeRepositoryPackageCoverage :: Maybe (Map.Map FilePath FilePath) -> PackageKind -> FilePath -> Bool -> IO RepositoryPackageCoverageSummary
-summarizeRepositoryPackageCoverage _ _ _ False = pure RepositoryCoverageNotConfigured
-summarizeRepositoryPackageCoverage Nothing _ _ True = pure RepositoryCoverageUnavailable
-summarizeRepositoryPackageCoverage (Just coverageOutputPaths) packageKind packageName True =
-  case repositoryCheckNameForKind packageKind packageName RepositoryCoverageCheck of
+summarizeRepositoryPackageCoverage :: Maybe (Map.Map FilePath FilePath) -> FilePath -> IO RepositoryPackageCoverageSummary
+summarizeRepositoryPackageCoverage Nothing _ = pure RepositoryCoverageUnavailable
+summarizeRepositoryPackageCoverage (Just coverageOutputPaths) coverageCheckName =
+  case Map.lookup coverageCheckName coverageOutputPaths of
     Nothing -> pure RepositoryCoverageUnavailable
-    Just coverageCheckName ->
-      case Map.lookup coverageCheckName coverageOutputPaths of
-        Nothing -> pure RepositoryCoverageUnavailable
-        Just outputPath -> do
-          outputExists <- doesDirectoryExist outputPath
-          if not outputExists
-            then pure RepositoryCoverageNotRun
-            else do
-              maybeCoverageText <- readTextFileIfExists (outputPath </> "coverage-summary.tsv")
-              pure (maybe RepositoryCoverageUnavailable (fromMaybe RepositoryCoverageUnavailable . parseRepositoryCoverageSummary) maybeCoverageText)
+    Just outputPath -> do
+      outputExists <- doesDirectoryExist outputPath
+      if not outputExists
+        then pure RepositoryCoverageNotRun
+        else do
+          maybeCoverageText <- readTextFileIfExists (outputPath </> "coverage-summary.tsv")
+          pure (maybe RepositoryCoverageUnavailable (fromMaybe RepositoryCoverageUnavailable . parseRepositoryCoverageSummary) maybeCoverageText)
 parseRepositoryCoverageSummary :: T.Text -> Maybe RepositoryPackageCoverageSummary
 parseRepositoryCoverageSummary coverageText =
   case T.splitOn "\t" (T.strip coverageText) of
@@ -904,11 +897,10 @@ parseRepositoryCoverageSummary coverageText =
         then Just (RepositoryCoverageMeasured metric covered total)
         else Nothing
     _ -> Nothing
-summarizeRepositoryPackageProfile :: Maybe (Map.Map FilePath FilePath) -> PackageKind -> FilePath -> Bool -> IO RepositoryPackageProfileSummary
-summarizeRepositoryPackageProfile _ _ _ False = pure RepositoryProfileNotConfigured
-summarizeRepositoryPackageProfile Nothing _ _ True = pure RepositoryProfileUnavailable
-summarizeRepositoryPackageProfile (Just checkOutputPaths) packageKind packageName True =
-  case repositoryCheckNameForKind packageKind packageName RepositoryProfileCheck >>= (`Map.lookup` checkOutputPaths) of
+summarizeRepositoryPackageProfile :: Maybe (Map.Map FilePath FilePath) -> FilePath -> IO RepositoryPackageProfileSummary
+summarizeRepositoryPackageProfile Nothing _ = pure RepositoryProfileUnavailable
+summarizeRepositoryPackageProfile (Just checkOutputPaths) profileCheckName =
+  case Map.lookup profileCheckName checkOutputPaths of
     Nothing -> pure RepositoryProfileUnavailable
     Just outputPath -> do
       outputExists <- doesDirectoryExist outputPath
@@ -929,18 +921,16 @@ parseRepositoryProfileSummary profileText =
         then Just (RepositoryProfileMeasured totalSeconds testDurations)
         else Nothing
     [] -> Nothing
-summarizeRepositoryPackageTestDurations :: Maybe (Map.Map FilePath FilePath) -> PackageKind -> FilePath -> RepositoryPackageChecksSummary -> RepositoryPackageProfileSummary -> IO (Map.Map String Double)
-summarizeRepositoryPackageTestDurations checkOutputPaths packageKind packageName packageChecks packageProfile =
-  case packageProfile of
-    RepositoryProfileMeasured _ testDurations -> pure testDurations
-    _
-      | repositoryPackageHasCoverageCheck packageChecks ->
-          case checkOutputPaths >>= \outputPaths -> repositoryCheckNameForKind packageKind packageName RepositoryCoverageCheck >>= (`Map.lookup` outputPaths) of
-            Nothing -> pure Map.empty
-            Just outputPath -> do
-              maybeTimingsText <- readTextFileIfExists (outputPath </> "test-timings.tsv")
-              pure (fromMaybe Map.empty (maybeTimingsText >>= parseRepositoryTestTimings))
-      | otherwise -> pure Map.empty
+summarizeRepositoryPackageTestDurations :: Maybe (Map.Map FilePath FilePath) -> Maybe FilePath -> RepositoryPackageChecksSummary -> IO (Map.Map String Double)
+summarizeRepositoryPackageTestDurations checkOutputPaths coverageCheckName packageChecks =
+  case repositoryPackageProfile packageChecks of
+    Just (RepositoryProfileMeasured _ testDurations) -> pure testDurations
+    _ ->
+      case checkOutputPaths >>= \outputPaths -> coverageCheckName >>= (`Map.lookup` outputPaths) of
+        Nothing -> pure Map.empty
+        Just outputPath -> do
+          maybeTimingsText <- readTextFileIfExists (outputPath </> "test-timings.tsv")
+          pure (fromMaybe Map.empty (maybeTimingsText >>= parseRepositoryTestTimings))
 parseRepositoryTestTimings :: T.Text -> Maybe (Map.Map String Double)
 parseRepositoryTestTimings = parseRepositoryTestTimingLines . T.lines
 parseRepositoryTestTimingLines :: [T.Text] -> Maybe (Map.Map String Double)
@@ -1013,18 +1003,36 @@ renderPackageKind packageKind =
     LatexPackage -> "latex"
     BinaryReleasePackage -> "binary-release"
     UnknownPackage -> "unknown"
-supportedAddPackageKinds :: [(String, PackageKind)]
+type ScaffoldPackageKind :: Type
+data ScaffoldPackageKind
+  = HaskellScaffold
+  | RustScaffold
+  | HtmlScaffold
+  | PythonLatexScaffold
+  | PythonScaffold
+  | CScaffold
+  | LatexScaffold
+supportedAddPackageKinds :: [(String, ScaffoldPackageKind)]
 supportedAddPackageKinds =
-  [ ("haskell", HaskellPackage),
-    ("rust", RustPackage),
-    ("html", HtmlPackage),
-    ("python", PythonPackage),
-    ("python-latex", PythonLatexPackage),
-    ("c", CPackage),
-    ("latex", LatexPackage)
+  [ ("haskell", HaskellScaffold),
+    ("rust", RustScaffold),
+    ("html", HtmlScaffold),
+    ("python", PythonScaffold),
+    ("python-latex", PythonLatexScaffold),
+    ("c", CScaffold),
+    ("latex", LatexScaffold)
   ]
-parseSupportedAddPackageKind :: String -> Maybe PackageKind
+parseSupportedAddPackageKind :: String -> Maybe ScaffoldPackageKind
 parseSupportedAddPackageKind packageKindName = lookup packageKindName supportedAddPackageKinds
+packageKindForScaffold :: ScaffoldPackageKind -> PackageKind
+packageKindForScaffold = \case
+  HaskellScaffold -> HaskellPackage
+  RustScaffold -> RustPackage
+  HtmlScaffold -> HtmlPackage
+  PythonLatexScaffold -> PythonLatexPackage
+  PythonScaffold -> PythonPackage
+  CScaffold -> CPackage
+  LatexScaffold -> LatexPackage
 validatePackageNameForKind :: PackageKind -> FilePath -> Maybe String
 validatePackageNameForKind packageKind packageName =
   case packageNameConventionForKind packageKind of
@@ -1081,44 +1089,50 @@ data RepositoryScaffoldFile = RepositoryScaffoldFile
   { repositoryScaffoldFilePath :: FilePath,
     repositoryScaffoldFileContents :: T.Text
   }
-addPackageToCurrentRepositoryWith :: CanonicalizationSettings -> PackageKind -> FilePath -> Maybe String -> Set.Set RepositoryCheckKind -> IO (Either String [FilePath])
-addPackageToCurrentRepositoryWith canonicalizationSettings packageKind packageName packageDescription requestedCheckKinds =
-  case validatePackageNameForKind packageKind packageName <|> validateRepositoryCheckSelection packageKind requestedCheckKinds of
-    Just validationError -> pure (Left validationError)
-    Nothing -> do
-      let packageRootDirectory = "packages" </> packageName
-          packageScaffoldFiles =
-            [ RepositoryScaffoldFile
-                (packageRootDirectory </> scaffoldFileRelativePath scaffoldFile)
-                (scaffoldFileContents scaffoldFile)
-            | scaffoldFile <- renderScaffoldFilesWith canonicalizationSettings packageKind packageName packageDescription
-            ]
-          checkScaffoldFiles = renderRepositoryCheckScaffoldFiles packageKind packageName requestedCheckKinds
-          scaffoldFiles = packageScaffoldFiles ++ checkScaffoldFiles
-          scaffoldPaths = map repositoryScaffoldFilePath scaffoldFiles
-      if null packageScaffoldFiles
-        then pure (Left ("unsupported package type: " ++ renderPackageKind packageKind))
-        else do
-          existingPaths <- filterM doesPathExist (packageRootDirectory : scaffoldPaths)
-          case existingPaths of
-            existingPath : _ -> pure (Left ("path already exists: " ++ existingPath))
-            [] -> do
-              forM_ scaffoldFiles $ \repositoryScaffoldFile -> do
-                let absolutePath = repositoryScaffoldFilePath repositoryScaffoldFile
-                createDirectoryIfMissing True (takeDirectory absolutePath)
-                TIO.writeFile absolutePath (repositoryScaffoldFileContents repositoryScaffoldFile)
-              pure (Right scaffoldPaths)
-validateRepositoryCheckSelection :: PackageKind -> Set.Set RepositoryCheckKind -> Maybe String
+type RepositoryCheckSpec :: Type
+data RepositoryCheckSpec = RepositoryCheckSpec
+  { repositoryCheckNameSuffix :: String,
+    repositoryCheckSource :: T.Text
+  }
+addPackageToCurrentRepositoryWith :: CanonicalizationSettings -> ScaffoldPackageKind -> FilePath -> Maybe String -> Set.Set RepositoryCheckKind -> IO (Either String [FilePath])
+addPackageToCurrentRepositoryWith canonicalizationSettings scaffoldPackageKind packageName packageDescription requestedCheckKinds =
+  let packageKind = packageKindForScaffold scaffoldPackageKind
+   in case validatePackageNameForKind packageKind packageName of
+        Just validationError -> pure (Left validationError)
+        Nothing ->
+          case validateRepositoryCheckSelection packageKind requestedCheckKinds of
+            Left validationError -> pure (Left validationError)
+            Right requestedCheckSpecs -> do
+              let packageRootDirectory = "packages" </> packageName
+                  packageScaffoldFiles =
+                    [ RepositoryScaffoldFile
+                        (packageRootDirectory </> scaffoldFileRelativePath scaffoldFile)
+                        (scaffoldFileContents scaffoldFile)
+                    | scaffoldFile <- renderScaffoldFilesWith canonicalizationSettings scaffoldPackageKind packageName packageDescription
+                    ]
+                  checkScaffoldFiles = renderRepositoryCheckScaffoldFiles packageName requestedCheckSpecs
+                  scaffoldFiles = packageScaffoldFiles ++ checkScaffoldFiles
+                  scaffoldPaths = map repositoryScaffoldFilePath scaffoldFiles
+              existingPaths <- filterM doesPathExist (packageRootDirectory : scaffoldPaths)
+              case existingPaths of
+                existingPath : _ -> pure (Left ("path already exists: " ++ existingPath))
+                [] -> do
+                  forM_ scaffoldFiles $ \repositoryScaffoldFile -> do
+                    let absolutePath = repositoryScaffoldFilePath repositoryScaffoldFile
+                    createDirectoryIfMissing True (takeDirectory absolutePath)
+                    TIO.writeFile absolutePath (repositoryScaffoldFileContents repositoryScaffoldFile)
+                  pure (Right scaffoldPaths)
+validateRepositoryCheckSelection :: PackageKind -> Set.Set RepositoryCheckKind -> Either String [RepositoryCheckSpec]
 validateRepositoryCheckSelection packageKind requestedCheckKinds =
-  let unsupportedCheckKinds =
-        [ requestedCheckKind
-        | requestedCheckKind <- Set.toList requestedCheckKinds,
-          isNothing (repositoryCheckNameForKind packageKind "example" requestedCheckKind)
-        ]
-   in case unsupportedCheckKinds of
-        [] -> Nothing
-        _ ->
-          Just
+  let (unsupportedCheckKinds, requestedCheckSpecs) =
+        partitionEithers
+          [ maybe (Left requestedCheckKind) Right (repositoryCheckSpecForKind packageKind requestedCheckKind)
+          | requestedCheckKind <- Set.toList requestedCheckKinds
+          ]
+   in case NE.nonEmpty unsupportedCheckKinds of
+        Nothing -> Right requestedCheckSpecs
+        Just unsupportedCheckKindsNonEmpty ->
+          Left
             ( "unsupported checks for package type "
                 ++ renderPackageKind packageKind
                 ++ ": "
@@ -1130,106 +1144,84 @@ validateRepositoryCheckSelection packageKind requestedCheckKinds =
                       RepositoryProfileCheck -> "--profile"
                       RepositoryPropertyTestingCheck -> "--property-testing"
                       RepositoryMutationTestingCheck -> "--mutation-testing"
-                  | repositoryCheckKind <- unsupportedCheckKinds
+                  | repositoryCheckKind <- NE.toList unsupportedCheckKindsNonEmpty
                   ]
             )
-renderRepositoryCheckScaffoldFiles :: PackageKind -> FilePath -> Set.Set RepositoryCheckKind -> [RepositoryScaffoldFile]
-renderRepositoryCheckScaffoldFiles packageKind packageName requestedCheckKinds =
-  catMaybes
-    [ do
-        checkName <- repositoryCheckNameForKind packageKind packageName requestedCheckKind
-        checkTemplateSource <- repositoryCheckBaselineSource packageKind requestedCheckKind
-        pure
-          ( RepositoryScaffoldFile
-              ("checks" </> checkName </> "default.nix")
-              checkTemplateSource
-          )
-    | requestedCheckKind <- Set.toList requestedCheckKinds
-    ]
+renderRepositoryCheckScaffoldFiles :: FilePath -> [RepositoryCheckSpec] -> [RepositoryScaffoldFile]
+renderRepositoryCheckScaffoldFiles packageName requestedCheckSpecs =
+  [ RepositoryScaffoldFile
+      ("checks" </> (packageName ++ repositoryCheckNameSuffix checkSpec) </> "default.nix")
+      (repositoryCheckSource checkSpec)
+  | checkSpec <- requestedCheckSpecs
+  ]
 repositoryCheckNameForKind :: PackageKind -> FilePath -> RepositoryCheckKind -> Maybe FilePath
 repositoryCheckNameForKind packageKind packageName repositoryCheckKind =
+  (\checkSpec -> packageName ++ repositoryCheckNameSuffix checkSpec)
+    <$> repositoryCheckSpecForKind packageKind repositoryCheckKind
+repositoryCheckSpecForKind :: PackageKind -> RepositoryCheckKind -> Maybe RepositoryCheckSpec
+repositoryCheckSpecForKind packageKind repositoryCheckKind =
   case (packageKind, repositoryCheckKind) of
-    (HaskellPackage, RepositoryCoverageCheck) -> Just (packageName ++ "-coverage")
-    (HaskellPackage, RepositoryProfileCheck) -> Just (packageName ++ "-profile")
-    (HaskellPackage, RepositoryPropertyTestingCheck) -> Just (packageName ++ "-property-testing")
-    (RustPackage, RepositoryCoverageCheck) -> Just (packageName ++ "-coverage")
-    (RustPackage, RepositoryProfileCheck) -> Just (packageName ++ "-profile")
-    (RustPackage, RepositoryPropertyTestingCheck) -> Just (packageName ++ "-property-testing")
-    (RustPackage, RepositoryMutationTestingCheck) -> Just (packageName ++ "-mutation-testing")
-    (PythonPackage, RepositoryCoverageCheck) -> Just (packageName ++ "_coverage")
-    (PythonPackage, RepositoryProfileCheck) -> Just (packageName ++ "_profile")
-    (PythonPackage, RepositoryPropertyTestingCheck) -> Just (packageName ++ "_property_testing")
-    (PythonLatexPackage, RepositoryCoverageCheck) -> Just (packageName ++ "_coverage")
-    (PythonLatexPackage, RepositoryProfileCheck) -> Just (packageName ++ "_profile")
-    (PythonLatexPackage, RepositoryPropertyTestingCheck) -> Just (packageName ++ "_property_testing")
-    (HtmlPackage, RepositoryDefaultCheck) -> Just packageName
-    (CPackage, RepositoryDefaultCheck) -> Just packageName
+    (HaskellPackage, RepositoryCoverageCheck) -> spec "-coverage" haskellCoverageCheckBaselineNixSource
+    (HaskellPackage, RepositoryProfileCheck) -> spec "-profile" haskellProfileCheckBaselineNixSource
+    (HaskellPackage, RepositoryPropertyTestingCheck) -> spec "-property-testing" haskellPropertyTestingCheckBaselineNixSource
+    (RustPackage, RepositoryCoverageCheck) -> spec "-coverage" rustCoverageCheckBaselineNixSource
+    (RustPackage, RepositoryProfileCheck) -> spec "-profile" rustProfileCheckBaselineNixSource
+    (RustPackage, RepositoryPropertyTestingCheck) -> spec "-property-testing" rustPropertyTestingCheckBaselineNixSource
+    (RustPackage, RepositoryMutationTestingCheck) -> spec "-mutation-testing" rustMutationTestingCheckBaselineNixSource
+    (_, RepositoryCoverageCheck) | isPythonPackage -> spec "_coverage" pythonCoverageCheckBaselineNixSource
+    (_, RepositoryProfileCheck) | isPythonPackage -> spec "_profile" pythonProfileCheckBaselineNixSource
+    (_, RepositoryPropertyTestingCheck) | isPythonPackage -> spec "_property_testing" pythonPropertyTestingCheckBaselineNixSource
+    (HtmlPackage, RepositoryDefaultCheck) -> spec "" htmlTemplateCheckBaselineNixSource
+    (CPackage, RepositoryDefaultCheck) -> spec "" cTemplateCheckBaselineNixSource
     _ -> Nothing
-repositoryCheckBaselineSource :: PackageKind -> RepositoryCheckKind -> Maybe T.Text
-repositoryCheckBaselineSource packageKind repositoryCheckKind =
-  case (packageKind, repositoryCheckKind) of
-    (HaskellPackage, RepositoryCoverageCheck) -> Just haskellCoverageCheckBaselineNixSource
-    (HaskellPackage, RepositoryProfileCheck) -> Just haskellProfileCheckBaselineNixSource
-    (HaskellPackage, RepositoryPropertyTestingCheck) -> Just haskellPropertyTestingCheckBaselineNixSource
-    (RustPackage, RepositoryCoverageCheck) -> Just rustCoverageCheckBaselineNixSource
-    (RustPackage, RepositoryProfileCheck) -> Just rustProfileCheckBaselineNixSource
-    (RustPackage, RepositoryPropertyTestingCheck) -> Just rustPropertyTestingCheckBaselineNixSource
-    (RustPackage, RepositoryMutationTestingCheck) -> Just rustMutationTestingCheckBaselineNixSource
-    (PythonPackage, RepositoryCoverageCheck) -> Just pythonCoverageCheckBaselineNixSource
-    (PythonPackage, RepositoryProfileCheck) -> Just pythonProfileCheckBaselineNixSource
-    (PythonPackage, RepositoryPropertyTestingCheck) -> Just pythonPropertyTestingCheckBaselineNixSource
-    (PythonLatexPackage, RepositoryCoverageCheck) -> Just pythonCoverageCheckBaselineNixSource
-    (PythonLatexPackage, RepositoryProfileCheck) -> Just pythonProfileCheckBaselineNixSource
-    (PythonLatexPackage, RepositoryPropertyTestingCheck) -> Just pythonPropertyTestingCheckBaselineNixSource
-    (HtmlPackage, RepositoryDefaultCheck) -> Just htmlTemplateCheckBaselineNixSource
-    (CPackage, RepositoryDefaultCheck) -> Just cTemplateCheckBaselineNixSource
-    _ -> Nothing
-renderScaffoldFilesWith :: CanonicalizationSettings -> PackageKind -> FilePath -> Maybe String -> [ScaffoldFile]
-renderScaffoldFilesWith canonicalizationSettings packageKind packageName packageDescription =
-  case packageKind of
-    HaskellPackage ->
+  where
+    isPythonPackage = packageKind `elem` [PythonPackage, PythonLatexPackage]
+    spec suffix source = Just (RepositoryCheckSpec suffix source)
+renderScaffoldFilesWith :: CanonicalizationSettings -> ScaffoldPackageKind -> FilePath -> Maybe String -> [ScaffoldFile]
+renderScaffoldFilesWith canonicalizationSettings scaffoldPackageKind packageName packageDescription =
+  case scaffoldPackageKind of
+    HaskellScaffold ->
       [ ScaffoldFile ".gitignore" haskellGitignoreSource,
         ScaffoldFile "default.nix" haskellTemplateBaselineNixSource,
         ScaffoldFile "Main.hs" haskellMainSource,
         ScaffoldFile (packageName <.> "cabal") (renderScaffoldHaskellCabal packageName packageDescription)
       ]
-    RustPackage ->
+    RustScaffold ->
       [ ScaffoldFile ".gitignore" rustGitignoreSource,
         ScaffoldFile "default.nix" rustTemplateBaselineNixSource,
         ScaffoldFile "Cargo.toml" (renderScaffoldCargoToml packageName packageDescription),
         ScaffoldFile "src/main.rs" rustMainSource
       ]
-    HtmlPackage ->
+    HtmlScaffold ->
       [ ScaffoldFile ".gitignore" htmlGitignoreSource,
         ScaffoldFile "default.nix" (renderNixTemplateDescription defaultHtmlTemplateDescription packageDescription htmlTemplateBaselineNixSource),
         ScaffoldFile "index.html" htmlIndexSource,
         ScaffoldFile "script.js" htmlScriptSource,
         ScaffoldFile "style.css" htmlStyleSource
       ]
-    PythonLatexPackage ->
+    PythonLatexScaffold ->
       [ ScaffoldFile ".gitignore" pythonLatexGitignoreSource,
         ScaffoldFile "default.nix" (renderNixTemplateDescription defaultPythonLatexTemplateDescription packageDescription pythonLatexTemplateBaselineNixSource),
         ScaffoldFile "main.py" pythonLatexMainSource,
         ScaffoldFile "ms.tex" latexMsTexSource,
         ScaffoldFile "ms.bib" latexMsBibSource
       ]
-    PythonPackage ->
+    PythonScaffold ->
       [ ScaffoldFile ".gitignore" pythonGitignoreSource,
         ScaffoldFile "default.nix" (renderPythonTemplateBaselineNixSourceWith (scaffoldDescription defaultPythonTemplateDescription packageDescription) (canonicalizationPythonPackageAttribute canonicalizationSettings)),
         ScaffoldFile "main.py" pythonMainSource
       ]
-    CPackage ->
+    CScaffold ->
       [ ScaffoldFile ".gitignore" cGitignoreSource,
         ScaffoldFile "default.nix" (renderNixTemplateDescription defaultCTemplateDescription packageDescription cTemplateBaselineNixSource),
         ScaffoldFile "main.c" cMainSource
       ]
-    LatexPackage ->
+    LatexScaffold ->
       [ ScaffoldFile ".gitignore" latexGitignoreSource,
         ScaffoldFile "default.nix" (renderNixTemplateDescription defaultLatexTemplateDescription packageDescription latexTemplateBaselineNixSource),
         ScaffoldFile "ms.tex" latexMsTexSource,
         ScaffoldFile "ms.bib" latexMsBibSource
       ]
-    _ -> []
 defaultPythonTemplateDescription :: String
 defaultPythonTemplateDescription = "A Python template package."
 defaultHaskellScaffoldDescription :: String
@@ -2684,13 +2676,11 @@ repositorySummaryRenderingTest = do
             repositoryPackageChecks =
               RepositoryPackageChecksSummary
                 { repositoryPackageHasCheck = False,
-                  repositoryPackageHasCoverageCheck = True,
-                  repositoryPackageHasProfileCheck = True,
+                  repositoryPackageCoverage = Just (RepositoryCoverageMeasured "statements" 19 20),
+                  repositoryPackageProfile = Just (RepositoryProfileMeasured 1.234 (Map.fromList [("Reports \"quoted\" behavior.", 0.125)])),
                   repositoryPackageHasPropertyTestingCheck = False,
                   repositoryPackageHasMutationTestingCheck = False
-                },
-            repositoryPackageCoverage = RepositoryCoverageMeasured "statements" 19 20,
-            repositoryPackageProfile = RepositoryProfileMeasured 1.234 (Map.fromList [("Reports \"quoted\" behavior.", 0.125)])
+                }
           }
       repositorySummary =
         RepositorySummary
@@ -2959,13 +2949,11 @@ expectedGeneratedPythonPackageSummary =
       repositoryPackageChecks =
         RepositoryPackageChecksSummary
           { repositoryPackageHasCheck = False,
-            repositoryPackageHasCoverageCheck = True,
-            repositoryPackageHasProfileCheck = False,
+            repositoryPackageCoverage = Just RepositoryCoverageUnavailable,
+            repositoryPackageProfile = Nothing,
             repositoryPackageHasPropertyTestingCheck = True,
             repositoryPackageHasMutationTestingCheck = False
-          },
-      repositoryPackageCoverage = RepositoryCoverageUnavailable,
-      repositoryPackageProfile = RepositoryProfileNotConfigured
+          }
     }
 expectedGeneratedHaskellPackageSummary :: RepositoryPackageSummary
 expectedGeneratedHaskellPackageSummary =
@@ -2978,13 +2966,11 @@ expectedGeneratedHaskellPackageSummary =
       repositoryPackageChecks =
         RepositoryPackageChecksSummary
           { repositoryPackageHasCheck = False,
-            repositoryPackageHasCoverageCheck = False,
-            repositoryPackageHasProfileCheck = False,
+            repositoryPackageCoverage = Nothing,
+            repositoryPackageProfile = Nothing,
             repositoryPackageHasPropertyTestingCheck = False,
             repositoryPackageHasMutationTestingCheck = False
-          },
-      repositoryPackageCoverage = RepositoryCoverageNotConfigured,
-      repositoryPackageProfile = RepositoryProfileNotConfigured
+          }
     }
 runEndToEndCommandIn :: FilePath -> [String] -> IO (ExitCode, String, String)
 runEndToEndCommandIn workingDirectory arguments =
