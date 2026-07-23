@@ -578,8 +578,11 @@ data RepositoryPackageChecksSummary = RepositoryPackageChecksSummary
 type RepositoryPackageCoverageSummary :: Type
 data RepositoryPackageCoverageSummary
   = RepositoryCoverageNotRun
-  | RepositoryCoverageUnavailable
-  | RepositoryCoverageMeasured CoverageMetric Integer Integer
+  | RepositoryCoverageUnavailable (Map.Map String Double)
+  | RepositoryCoverageMeasured CoverageMeasurement (Map.Map String Double)
+  deriving stock (Eq, Show)
+type CoverageMeasurement :: Type
+data CoverageMeasurement = CoverageMeasurement CoverageMetric Integer Integer
   deriving stock (Eq, Show)
 type CoverageMetric :: Type
 data CoverageMetric
@@ -602,10 +605,9 @@ data RepositoryComplianceSuccess = RepositoryComplianceSuccess
 type RepositoryPackageSummary :: Type
 data RepositoryPackageSummary = RepositoryPackageSummary
   { repositoryPackageName :: FilePath,
-    repositoryPackageType :: String,
+    repositoryPackageKind :: PackageKind,
     repositoryPackageDescription :: Maybe String,
     repositoryPackageTestNames :: [String],
-    repositoryPackageTestDurations :: Map.Map String Double,
     repositoryPackageChecks :: RepositoryPackageChecksSummary
   }
   deriving stock (Eq, Show)
@@ -677,7 +679,7 @@ renderRepositoryPackageSummariesText packageSummaries =
     "\n"
     [ unlines
         ( [ renderRepositoryPackageFieldName "packageName" ++ " " ++ repositoryPackageName packageSummary,
-            renderRepositoryPackageFieldName "packageType" ++ " " ++ repositoryPackageType packageSummary,
+            renderRepositoryPackageFieldName "packageType" ++ " " ++ renderPackageKind (repositoryPackageKind packageSummary),
             renderRepositoryPackageFieldName "description" ++ " " ++ fromMaybe "(none)" (repositoryPackageDescription packageSummary),
             renderRepositoryPackageFieldName "checks"
           ]
@@ -703,7 +705,7 @@ renderRepositoryPackageSummaryJson packageSummary =
     "\n"
     [ "    {",
       "      \"name\": " ++ renderJsonString (repositoryPackageName packageSummary) ++ ",",
-      "      \"packageType\": " ++ renderJsonString (repositoryPackageType packageSummary) ++ ",",
+      "      \"packageType\": " ++ renderJsonString (renderPackageKind (repositoryPackageKind packageSummary)) ++ ",",
       "      \"description\": " ++ maybe "null" renderJsonString (repositoryPackageDescription packageSummary) ++ ",",
       "      \"checks\": " ++ renderRepositoryPackageChecksJson (repositoryPackageChecks packageSummary) ++ ",",
       "      \"coverage\": " ++ renderRepositoryPackageCoverageJson (repositoryPackageCoverage (repositoryPackageChecks packageSummary)) ++ ",",
@@ -741,15 +743,15 @@ enabledRepositoryPackageCheckNames packageSummary =
 renderRepositoryPackageCoverageAnnotation :: RepositoryPackageCoverageSummary -> String
 renderRepositoryPackageCoverageAnnotation = \case
   RepositoryCoverageNotRun -> "(not run)"
-  RepositoryCoverageUnavailable -> "(unavailable)"
-  RepositoryCoverageMeasured metric covered total ->
+  RepositoryCoverageUnavailable _ -> "(unavailable)"
+  RepositoryCoverageMeasured (CoverageMeasurement metric covered total) _ ->
     "(" ++ renderCoverageMetric metric ++ " " ++ show covered ++ "/" ++ show total ++ ", " ++ renderCoveragePercent covered total ++ "%)"
 renderRepositoryPackageCoverageJson :: Maybe RepositoryPackageCoverageSummary -> String
 renderRepositoryPackageCoverageJson = \case
   Nothing -> "{ \"status\": \"not-configured\" }"
   Just RepositoryCoverageNotRun -> "{ \"status\": \"not-run\" }"
-  Just RepositoryCoverageUnavailable -> "{ \"status\": \"unavailable\" }"
-  Just (RepositoryCoverageMeasured metric covered total) ->
+  Just (RepositoryCoverageUnavailable _) -> "{ \"status\": \"unavailable\" }"
+  Just (RepositoryCoverageMeasured (CoverageMeasurement metric covered total) _) ->
     "{ \"status\": \"measured\", \"metric\": "
       ++ renderJsonString (renderCoverageMetric metric)
       ++ ", \"covered\": "
@@ -788,6 +790,18 @@ renderRepositoryPackageTestText packageSummary testName =
     Nothing -> testName
   where
     testDurations = repositoryPackageTestDurations packageSummary
+repositoryPackageTestDurations :: RepositoryPackageSummary -> Map.Map String Double
+repositoryPackageTestDurations packageSummary =
+  case repositoryPackageProfile packageChecks of
+    Just (RepositoryProfileMeasured _ profileTestDurations) -> profileTestDurations
+    _ ->
+      case repositoryPackageCoverage packageChecks of
+        Just (RepositoryCoverageUnavailable coverageTestDurations) -> coverageTestDurations
+        Just (RepositoryCoverageMeasured _ coverageTestDurations) -> coverageTestDurations
+        Just RepositoryCoverageNotRun -> Map.empty
+        Nothing -> Map.empty
+  where
+    packageChecks = repositoryPackageChecks packageSummary
 renderRepositoryPackageTestDurationsJson :: Map.Map String Double -> String
 renderRepositoryPackageTestDurationsJson testDurations
   | not (Map.null testDurations) =
@@ -851,18 +865,12 @@ summarizeRepositoryPackage checkOutputPaths repositoryCheckNames packageName = d
             repositoryPackageHasPropertyTestingCheck = isJust (configuredRepositoryCheckName RepositoryPropertyTestingCheck),
             repositoryPackageHasMutationTestingCheck = isJust (configuredRepositoryCheckName RepositoryMutationTestingCheck)
           }
-  repositoryPackageTestDurationsValue <-
-    summarizeRepositoryPackageTestDurations
-      checkOutputPaths
-      coverageCheckName
-      repositoryPackageChecksValue
   pure
     RepositoryPackageSummary
       { repositoryPackageName = packageName,
-        repositoryPackageType = renderPackageKind packageKind,
+        repositoryPackageKind = packageKind,
         repositoryPackageDescription = repositoryPackageDescriptionValue,
         repositoryPackageTestNames = repositoryPackageTestNamesValue,
-        repositoryPackageTestDurations = repositoryPackageTestDurationsValue,
         repositoryPackageChecks = repositoryPackageChecksValue
       }
 resolveRepositoryCheckOutputPaths :: [FilePath] -> IO (Maybe (Map.Map FilePath FilePath))
@@ -899,18 +907,24 @@ parseRepositoryCheckOutputPaths expectedCheckNames outputPathsText = do
         [checkName, outputPath] | not (T.null checkName) && not (T.null outputPath) -> Just (T.unpack checkName, T.unpack outputPath)
         _ -> Nothing
 summarizeRepositoryPackageCoverage :: Maybe (Map.Map FilePath FilePath) -> FilePath -> IO RepositoryPackageCoverageSummary
-summarizeRepositoryPackageCoverage Nothing _ = pure RepositoryCoverageUnavailable
+summarizeRepositoryPackageCoverage Nothing _ =
+  pure (RepositoryCoverageUnavailable Map.empty)
 summarizeRepositoryPackageCoverage (Just coverageOutputPaths) coverageCheckName =
   case Map.lookup coverageCheckName coverageOutputPaths of
-    Nothing -> pure RepositoryCoverageUnavailable
+    Nothing -> pure (RepositoryCoverageUnavailable Map.empty)
     Just outputPath -> do
       outputExists <- doesDirectoryExist outputPath
       if not outputExists
         then pure RepositoryCoverageNotRun
         else do
           maybeCoverageText <- readTextFileIfExists (outputPath </> "coverage-summary.tsv")
-          pure (maybe RepositoryCoverageUnavailable (fromMaybe RepositoryCoverageUnavailable . parseRepositoryCoverageSummary) maybeCoverageText)
-parseRepositoryCoverageSummary :: T.Text -> Maybe RepositoryPackageCoverageSummary
+          maybeTimingsText <- readTextFileIfExists (outputPath </> "test-timings.tsv")
+          let testDurations = fromMaybe Map.empty (maybeTimingsText >>= parseRepositoryTestTimings)
+          pure $
+            case maybeCoverageText >>= parseRepositoryCoverageSummary of
+              Nothing -> RepositoryCoverageUnavailable testDurations
+              Just coverageMeasurement -> RepositoryCoverageMeasured coverageMeasurement testDurations
+parseRepositoryCoverageSummary :: T.Text -> Maybe CoverageMeasurement
 parseRepositoryCoverageSummary coverageText =
   case T.splitOn "\t" (T.strip coverageText) of
     ["coverage-v1", metricText, coveredText, totalText] -> do
@@ -924,7 +938,7 @@ parseRepositoryCoverageSummary coverageText =
       covered <- readMaybe (T.unpack coveredText)
       total <- readMaybe (T.unpack totalText)
       if covered >= 0 && total > 0 && covered <= total
-        then Just (RepositoryCoverageMeasured metric covered total)
+        then Just (CoverageMeasurement metric covered total)
         else Nothing
     _ -> Nothing
 summarizeRepositoryPackageProfile :: Maybe (Map.Map FilePath FilePath) -> FilePath -> IO RepositoryPackageProfileSummary
@@ -951,16 +965,6 @@ parseRepositoryProfileSummary profileText =
         then Just (RepositoryProfileMeasured totalSeconds testDurations)
         else Nothing
     [] -> Nothing
-summarizeRepositoryPackageTestDurations :: Maybe (Map.Map FilePath FilePath) -> Maybe FilePath -> RepositoryPackageChecksSummary -> IO (Map.Map String Double)
-summarizeRepositoryPackageTestDurations checkOutputPaths coverageCheckName packageChecks =
-  case repositoryPackageProfile packageChecks of
-    Just (RepositoryProfileMeasured _ testDurations) -> pure testDurations
-    _ ->
-      case checkOutputPaths >>= \outputPaths -> coverageCheckName >>= (`Map.lookup` outputPaths) of
-        Nothing -> pure Map.empty
-        Just outputPath -> do
-          maybeTimingsText <- readTextFileIfExists (outputPath </> "test-timings.tsv")
-          pure (fromMaybe Map.empty (maybeTimingsText >>= parseRepositoryTestTimings))
 parseRepositoryTestTimings :: T.Text -> Maybe (Map.Map String Double)
 parseRepositoryTestTimings = parseRepositoryTestTimingLines . T.lines
 parseRepositoryTestTimingLines :: [T.Text] -> Maybe (Map.Map String Double)
@@ -2635,7 +2639,7 @@ repositoryCoverageParsingTest = do
     (localGitFlakeReference "/tmp/example-repository")
   assertEqual
     "A valid coverage artifact preserves its labeled numerator and denominator."
-    (Just (RepositoryCoverageMeasured LineCoverage 91 100))
+    (Just (CoverageMeasurement LineCoverage 91 100))
     (parseRepositoryCoverageSummary "coverage-v1\tlines\t91\t100\n")
   forM_
     [ "coverage-v2\tlines\t91\t100",
@@ -2698,14 +2702,18 @@ repositorySummaryRenderingTest = do
   let packageSummary =
         RepositoryPackageSummary
           { repositoryPackageName = "demo",
-            repositoryPackageType = "python",
+            repositoryPackageKind = PythonPackage,
             repositoryPackageDescription = Nothing,
             repositoryPackageTestNames = ["Reports \"quoted\" behavior."],
-            repositoryPackageTestDurations = Map.fromList [("Reports \"quoted\" behavior.", 0.125)],
             repositoryPackageChecks =
               RepositoryPackageChecksSummary
                 { repositoryPackageHasCheck = False,
-                  repositoryPackageCoverage = Just (RepositoryCoverageMeasured StatementCoverage 19 20),
+                  repositoryPackageCoverage =
+                    Just
+                      ( RepositoryCoverageMeasured
+                          (CoverageMeasurement StatementCoverage 19 20)
+                          (Map.fromList [("Reports \"quoted\" behavior.", 9.999)])
+                      ),
                   repositoryPackageProfile = Just (RepositoryProfileMeasured 1.234 (Map.fromList [("Reports \"quoted\" behavior.", 0.125)])),
                   repositoryPackageHasPropertyTestingCheck = False,
                   repositoryPackageHasMutationTestingCheck = False
@@ -2716,6 +2724,10 @@ repositorySummaryRenderingTest = do
           { repositorySummaryPath = "example.test/owner/demo",
             repositorySummaryPackages = [packageSummary]
           }
+  assertEqual
+    "Profile timings take precedence over coverage timings."
+    (Map.fromList [("Reports \"quoted\" behavior.", 0.125)])
+    (repositoryPackageTestDurations packageSummary)
   assertEqual
     "Text rendering has stable fields, indentation, and fallbacks."
     ( unlines
@@ -2962,7 +2974,7 @@ expectedGeneratedPythonPackageSummary :: RepositoryPackageSummary
 expectedGeneratedPythonPackageSummary =
   RepositoryPackageSummary
     { repositoryPackageName = "demo",
-      repositoryPackageType = "python",
+      repositoryPackageKind = PythonPackage,
       repositoryPackageDescription = Just "Demo package",
       repositoryPackageTestNames =
         [ "Canonical labels should only contain lowercase ASCII, digits, and hyphens.",
@@ -2974,11 +2986,10 @@ expectedGeneratedPythonPackageSummary =
           "The default message should summarize unique canonical labels.",
           "main() should emit the canonical label summary."
         ],
-      repositoryPackageTestDurations = Map.empty,
       repositoryPackageChecks =
         RepositoryPackageChecksSummary
           { repositoryPackageHasCheck = False,
-            repositoryPackageCoverage = Just RepositoryCoverageUnavailable,
+            repositoryPackageCoverage = Just (RepositoryCoverageUnavailable Map.empty),
             repositoryPackageProfile = Nothing,
             repositoryPackageHasPropertyTestingCheck = True,
             repositoryPackageHasMutationTestingCheck = False
@@ -2988,10 +2999,9 @@ expectedGeneratedHaskellPackageSummary :: RepositoryPackageSummary
 expectedGeneratedHaskellPackageSummary =
   RepositoryPackageSummary
     { repositoryPackageName = "demo",
-      repositoryPackageType = "haskell",
+      repositoryPackageKind = HaskellPackage,
       repositoryPackageDescription = Just "Demo package",
       repositoryPackageTestNames = ["Renders the sample message."],
-      repositoryPackageTestDurations = Map.empty,
       repositoryPackageChecks =
         RepositoryPackageChecksSummary
           { repositoryPackageHasCheck = False,
