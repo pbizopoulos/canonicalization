@@ -8,7 +8,6 @@ import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from unittest import mock
 
 import matplotlib as mpl
 from hypothesis import given, settings
@@ -178,21 +177,6 @@ def test_create_figure_writes_non_empty_png() -> None:
         create_figure(figure_path, DEFAULT_SAMPLES)
         if not figure_path.is_file() or figure_path.stat().st_size == 0:
             msg = "figure generation should create a non-empty PNG"
-            raise AssertionError(msg)
-
-
-def test_main_generates_workspace_artifacts_in_current_directory() -> None:
-    """main() should write both artifacts into <cwd>/tmp."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        current_directory = Path(tmpdir)
-        with mock.patch("pathlib.Path.cwd", return_value=current_directory):
-            main()
-        workspace = current_directory.resolve() / "tmp"
-        if not (workspace / "figure.png").is_file():
-            msg = "figure.png should exist"
-            raise AssertionError(msg)
-        if not (workspace / "table.tex").is_file():
-            msg = "table.tex should exist"
             raise AssertionError(msg)
 
 

@@ -626,8 +626,8 @@ data RepositoryPackageChecksSummary = RepositoryPackageChecksSummary
 type RepositoryPackageCoverageSummary :: Type
 data RepositoryPackageCoverageSummary
   = RepositoryCoverageNotRun
-  | RepositoryCoverageUnavailable (Map.Map String Double)
-  | RepositoryCoverageMeasured CoverageMeasurement (Map.Map String Double)
+  | RepositoryCoverageUnavailable (Map.Map String Duration)
+  | RepositoryCoverageMeasured CoverageMeasurement (Map.Map String Duration)
   deriving stock (Eq, Show)
 type CoverageMeasurement :: Type
 data CoverageMeasurement = CoverageMeasurement CoverageMetric Integer Integer
@@ -638,11 +638,14 @@ data CoverageMetric
   | StatementCoverage
   | LineCoverage
   deriving stock (Eq, Show)
+type Duration :: Type
+newtype Duration = Duration Double
+  deriving stock (Eq, Ord, Show)
 type RepositoryPackageProfileSummary :: Type
 data RepositoryPackageProfileSummary
   = RepositoryProfileNotRun
   | RepositoryProfileUnavailable
-  | RepositoryProfileMeasured Double (Map.Map String Double)
+  | RepositoryProfileMeasured Duration (Map.Map String Duration)
   deriving stock (Eq, Show)
 type RepositoryComplianceSuccess :: Type
 data RepositoryComplianceSuccess = RepositoryComplianceSuccess
@@ -838,7 +841,7 @@ renderRepositoryPackageTestText packageSummary testName =
     Nothing -> testName
   where
     testDurations = repositoryPackageTestDurations packageSummary
-repositoryPackageTestDurations :: RepositoryPackageSummary -> Map.Map String Double
+repositoryPackageTestDurations :: RepositoryPackageSummary -> Map.Map String Duration
 repositoryPackageTestDurations packageSummary =
   case repositoryPackageProfile packageChecks of
     Just (RepositoryProfileMeasured _ profileTestDurations) -> profileTestDurations
@@ -850,15 +853,15 @@ repositoryPackageTestDurations packageSummary =
         Nothing -> Map.empty
   where
     packageChecks = repositoryPackageChecks packageSummary
-renderRepositoryPackageTestDurationsJson :: Map.Map String Double -> String
+renderRepositoryPackageTestDurationsJson :: Map.Map String Duration -> String
 renderRepositoryPackageTestDurationsJson testDurations
   | not (Map.null testDurations) =
       "{ "
         ++ intercalate ", " [renderJsonString testName ++ ": " ++ renderProfileSeconds seconds | (testName, seconds) <- Map.toAscList testDurations]
         ++ " }"
   | otherwise = "{}"
-renderProfileSeconds :: Double -> String
-renderProfileSeconds seconds = showFFloat (Just 3) seconds ""
+renderProfileSeconds :: Duration -> String
+renderProfileSeconds (Duration seconds) = showFFloat (Just 3) seconds ""
 summarizeRepositoryPackage :: Maybe (Map.Map FilePath FilePath) -> Set.Set FilePath -> FilePath -> IO RepositoryPackageSummary
 summarizeRepositoryPackage checkOutputPaths repositoryCheckNames packageName = do
   packageKind <- detectPackageKindForPackage packageName
@@ -1006,31 +1009,39 @@ parseRepositoryProfileSummary profileText =
   case T.lines profileText of
     headerLine : testLines -> do
       totalSeconds <- case T.splitOn "\t" headerLine of
-        ["profile-v1", "total-seconds", secondsText] -> readMaybe (T.unpack secondsText)
+        ["profile-v1", "total-seconds", secondsText] -> readDuration secondsText
         _ -> Nothing
       testDurations <- parseRepositoryTestTimingLines testLines
-      if validDuration totalSeconds
-        then Just (RepositoryProfileMeasured totalSeconds testDurations)
-        else Nothing
+      Just (RepositoryProfileMeasured totalSeconds testDurations)
     [] -> Nothing
-parseRepositoryTestTimings :: T.Text -> Maybe (Map.Map String Double)
+parseRepositoryTestTimings :: T.Text -> Maybe (Map.Map String Duration)
 parseRepositoryTestTimings = parseRepositoryTestTimingLines . T.lines
-parseRepositoryTestTimingLines :: [T.Text] -> Maybe (Map.Map String Double)
+parseRepositoryTestTimingLines :: [T.Text] -> Maybe (Map.Map String Duration)
 parseRepositoryTestTimingLines testLines = do
   testDurations <- Map.fromList <$> mapM parseTestLine testLines
-  if all validDuration (Map.elems testDurations) && Map.size testDurations == length testLines
+  if Map.size testDurations == length testLines
     then Just testDurations
     else Nothing
   where
-    parseTestLine :: T.Text -> Maybe (String, Double)
+    parseTestLine :: T.Text -> Maybe (String, Duration)
     parseTestLine testLine =
       case T.splitOn "\t" testLine of
         ["test", secondsText, testName] | not (T.null testName) -> do
-          seconds <- readMaybe (T.unpack secondsText)
+          seconds <- readDuration secondsText
           pure (T.unpack testName, seconds)
         _ -> Nothing
-validDuration :: Double -> Bool
-validDuration seconds = seconds >= 0 && not (isNaN seconds) && not (isInfinite seconds)
+readDuration :: T.Text -> Maybe Duration
+readDuration secondsText = do
+  seconds <- readMaybe (T.unpack secondsText)
+  durationFromSeconds seconds
+durationFromSeconds :: Double -> Maybe Duration
+durationFromSeconds seconds =
+  if seconds >= 0 && not (isNaN seconds) && not (isInfinite seconds)
+    then Just (Duration seconds)
+    else Nothing
+testDuration :: Double -> Duration
+testDuration seconds =
+  fromMaybe (error "test duration must be finite and non-negative") (durationFromSeconds seconds)
 extractHaskellPackageDescription :: T.Text -> Maybe String
 extractHaskellPackageDescription cabalContents =
   (T.unpack <$> lookupCabalField "description" cabalContents)
@@ -1119,13 +1130,10 @@ supportedAddPackageKinds =
   ]
 parseSupportedAddPackageKind :: String -> Maybe ScaffoldPackageKind
 parseSupportedAddPackageKind packageKindName = lookup packageKindName supportedAddPackageKinds
-packageKindForScaffold :: ScaffoldPackageKind -> PackageKind
+packageKindForScaffold :: ScaffoldPackageKind -> Maybe PackageKind
 packageKindForScaffold scaffoldPackageKind =
   packageSpecPackageKind
-    ( fromMaybe
-        (error "internal error: missing scaffold package specification")
-        (find ((== scaffoldPackageKind) . packageSpecScaffoldKind) packageSpecs)
-    )
+    <$> find ((== scaffoldPackageKind) . packageSpecScaffoldKind) packageSpecs
 validatePackageNameForKind :: PackageKind -> FilePath -> Maybe String
 validatePackageNameForKind packageKind packageName =
   let (conventionName, separator) = packageNameConventionForKind packageKind
@@ -1177,32 +1185,33 @@ data RepositoryCheckSpec = RepositoryCheckSpec
   }
 addPackageToCurrentRepositoryWith :: CanonicalizationSettings -> ScaffoldPackageKind -> FilePath -> Maybe String -> Set.Set RepositoryCheckKind -> IO (Either String [FilePath])
 addPackageToCurrentRepositoryWith canonicalizationSettings scaffoldPackageKind packageName packageDescription requestedCheckKinds =
-  let packageKind = packageKindForScaffold scaffoldPackageKind
-   in case validatePackageNameForKind packageKind packageName of
-        Just validationError -> pure (Left validationError)
-        Nothing ->
-          case validateRepositoryCheckSelection packageKind requestedCheckKinds of
-            Left validationError -> pure (Left validationError)
-            Right requestedCheckSpecs -> do
-              let packageRootDirectory = "packages" </> packageName
-                  packageScaffoldFiles =
-                    [ RepositoryScaffoldFile
-                        (packageRootDirectory </> scaffoldFileRelativePath scaffoldFile)
-                        (scaffoldFileContents scaffoldFile)
-                    | scaffoldFile <- renderScaffoldFilesWith canonicalizationSettings scaffoldPackageKind packageName packageDescription
-                    ]
-                  checkScaffoldFiles = renderRepositoryCheckScaffoldFiles packageName requestedCheckSpecs
-                  scaffoldFiles = packageScaffoldFiles ++ checkScaffoldFiles
-                  scaffoldPaths = map repositoryScaffoldFilePath scaffoldFiles
-              existingPaths <- filterM doesPathExist (packageRootDirectory : scaffoldPaths)
-              case existingPaths of
-                existingPath : _ -> pure (Left ("path already exists: " ++ existingPath))
-                [] -> do
-                  forM_ scaffoldFiles $ \repositoryScaffoldFile -> do
-                    let absolutePath = repositoryScaffoldFilePath repositoryScaffoldFile
-                    createDirectoryIfMissing True (takeDirectory absolutePath)
-                    TIO.writeFile absolutePath (repositoryScaffoldFileContents repositoryScaffoldFile)
-                  pure (Right scaffoldPaths)
+  case packageKindForScaffold scaffoldPackageKind of
+    Nothing -> pure (Left "internal error: missing scaffold package specification")
+    Just packageKind -> case validatePackageNameForKind packageKind packageName of
+      Just validationError -> pure (Left validationError)
+      Nothing ->
+        case validateRepositoryCheckSelection packageKind requestedCheckKinds of
+          Left validationError -> pure (Left validationError)
+          Right requestedCheckSpecs -> do
+            let packageRootDirectory = "packages" </> packageName
+                packageScaffoldFiles =
+                  [ RepositoryScaffoldFile
+                      (packageRootDirectory </> scaffoldFileRelativePath scaffoldFile)
+                      (scaffoldFileContents scaffoldFile)
+                  | scaffoldFile <- renderScaffoldFilesWith canonicalizationSettings scaffoldPackageKind packageName packageDescription
+                  ]
+                checkScaffoldFiles = renderRepositoryCheckScaffoldFiles packageName requestedCheckSpecs
+                scaffoldFiles = packageScaffoldFiles ++ checkScaffoldFiles
+                scaffoldPaths = map repositoryScaffoldFilePath scaffoldFiles
+            existingPaths <- filterM doesPathExist (packageRootDirectory : scaffoldPaths)
+            case existingPaths of
+              existingPath : _ -> pure (Left ("path already exists: " ++ existingPath))
+              [] -> do
+                forM_ scaffoldFiles $ \repositoryScaffoldFile -> do
+                  let absolutePath = repositoryScaffoldFilePath repositoryScaffoldFile
+                  createDirectoryIfMissing True (takeDirectory absolutePath)
+                  TIO.writeFile absolutePath (repositoryScaffoldFileContents repositoryScaffoldFile)
+                pure (Right scaffoldPaths)
 validateRepositoryCheckSelection :: PackageKind -> Set.Set RepositoryCheckKind -> Either String [RepositoryCheckSpec]
 validateRepositoryCheckSelection packageKind requestedCheckKinds =
   let (unsupportedCheckKinds, requestedCheckSpecs) =
@@ -2728,11 +2737,11 @@ repositoryCoverageParsingTest = do
     (parseRepositoryCheckOutputPaths ["demo-coverage", "sample_coverage"] "demo-coverage\t/nix/store/demo")
   assertEqual
     "A valid profile artifact preserves total and per-test durations."
-    (Just (RepositoryProfileMeasured 1.25 (Map.fromList [("Reports behavior.", 0.125)])))
+    (Just (RepositoryProfileMeasured (testDuration 1.25) (Map.fromList [("Reports behavior.", testDuration 0.125)])))
     (parseRepositoryProfileSummary "profile-v1\ttotal-seconds\t1.25\ntest\t0.125\tReports behavior.\n")
   assertEqual
     "A coverage timing artifact preserves per-test durations without a profile check."
-    (Just (Map.fromList [("Reports behavior.", 0.125)]))
+    (Just (Map.fromList [("Reports behavior.", testDuration 0.125)]))
     (parseRepositoryTestTimings "test\t0.125\tReports behavior.\n")
   forM_
     [ "profile-v1\ttotal-seconds\tNaN\ntest\t0.125\tReports behavior.\n",
@@ -2785,9 +2794,9 @@ repositorySummaryRenderingTest = do
                     Just
                       ( RepositoryCoverageMeasured
                           (CoverageMeasurement StatementCoverage 19 20)
-                          (Map.fromList [("Reports \"quoted\" behavior.", 9.999)])
+                          (Map.fromList [("Reports \"quoted\" behavior.", testDuration 9.999)])
                       ),
-                  repositoryPackageProfile = Just (RepositoryProfileMeasured 1.234 (Map.fromList [("Reports \"quoted\" behavior.", 0.125)])),
+                  repositoryPackageProfile = Just (RepositoryProfileMeasured (testDuration 1.234) (Map.fromList [("Reports \"quoted\" behavior.", testDuration 0.125)])),
                   repositoryPackageHasPropertyTestingCheck = False,
                   repositoryPackageHasMutationTestingCheck = False
                 }
@@ -2799,7 +2808,7 @@ repositorySummaryRenderingTest = do
           }
   assertEqual
     "Profile timings take precedence over coverage timings."
-    (Map.fromList [("Reports \"quoted\" behavior.", 0.125)])
+    (Map.fromList [("Reports \"quoted\" behavior.", testDuration 0.125)])
     (repositoryPackageTestDurations packageSummary)
   assertEqual
     "Text rendering has stable fields, indentation, and fallbacks."

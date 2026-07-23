@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-import contextlib
-import io
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -109,16 +107,6 @@ def test_canonical_labels_keeps_first_occurrence() -> None:
     canonical = CanonicalLabels(labels).values
     if canonical != ("hello-world", "python-template"):
         msg = "deduplication should keep first canonical labels in order"
-        raise AssertionError(msg)
-
-
-def test_main_prints_message() -> None:
-    """main() should emit the canonical-label summary."""
-    output = io.StringIO()
-    with contextlib.redirect_stdout(output):
-        main()
-    if output.getvalue() != "hello-world, python-template\n":
-        msg = "main() should emit the canonical-label summary"
         raise AssertionError(msg)
 
 

@@ -5,9 +5,17 @@
 {-# LANGUAGE Trustworthy #-}
 {-# OPTIONS_GHC -Wno-all-missed-specialisations -Wno-missed-specialisations -Wno-unsafe #-}
 module Main (main, runPackageTests, runPackageTestsWithTimings) where
-import Control.Exception (finally)
+import Control.Exception (IOException, finally, try)
 import Control.Monad (mapM_, unless, when)
-import Data.Aeson (Value (Array, Bool, Null, Number, Object, String), eitherDecodeStrict', encode)
+import Data.Aeson
+  ( FromJSON (parseJSON),
+    Value (Array, Bool, Null, Number, Object, String),
+    eitherDecodeStrict',
+    encode,
+    withArray,
+    withObject,
+    (.:),
+  )
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString.Char8 qualified as BS
@@ -18,6 +26,7 @@ import Data.Functor.Compose (Compose (Compose))
 import Data.Kind (Type)
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf, nub, sortBy)
 import Data.List.NonEmpty (NonEmpty ((:|)))
+import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe)
@@ -48,7 +57,7 @@ import Prettyprinter (defaultLayoutOptions, layoutPretty)
 import Prettyprinter.Render.Text (renderStrict)
 import System.Directory (doesDirectoryExist, doesFileExist, listDirectory, makeAbsolute)
 import System.Environment (getArgs)
-import System.Exit (ExitCode (ExitSuccess), exitFailure)
+import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitFailure)
 import System.FilePath (normalise, pathSeparator, takeDirectory, takeExtension, (</>))
 import System.IO (hClose)
 import System.IO.Temp (withSystemTempFile)
@@ -79,11 +88,14 @@ import Prelude
     appendFile,
     concat,
     concatMap,
+    error,
+    fail,
     fmap,
     fromIntegral,
     fst,
     map,
     mapM,
+    maybe,
     not,
     null,
     otherwise,
@@ -100,7 +112,6 @@ import Prelude
     (/),
     (<$>),
     (==),
-    (>>=),
     (||),
   )
 type Literal :: Type
@@ -114,9 +125,63 @@ data Literal
   | LiteralSet [(Text, Literal)]
   deriving stock (Eq, Ord, Show)
 type OptionPath :: Type
-type OptionPath = [Text]
+newtype OptionPath = OptionPath (NonEmpty Text)
+  deriving stock (Eq, Ord, Show)
+type PathPrefix :: Type
+type PathPrefix = [Text]
+optionPathFromComponents :: [Text] -> Maybe OptionPath
+optionPathFromComponents = fmap OptionPath . NE.nonEmpty
+optionPathComponents :: OptionPath -> [Text]
+optionPathComponents (OptionPath components) = NE.toList components
+testOptionPath :: [Text] -> OptionPath
+testOptionPath components =
+  case optionPathFromComponents components of
+    Just optionPath -> optionPath
+    Nothing -> error "test option paths must not be empty"
 type NixosCandidate :: Type
 type NixosCandidate = (OptionPath, Literal)
+type NixosDefinitionRecord :: Type
+data NixosDefinitionRecord = NixosDefinitionRecord OptionPath Literal [FilePath]
+type TreefmtDefaultRecord :: Type
+data TreefmtDefaultRecord = TreefmtDefaultRecord OptionPath Literal
+instance FromJSON OptionPath where
+  parseJSON =
+    withArray "non-empty option path" $ \values -> do
+      components <- mapM parseJSON (toList values)
+      case optionPathFromComponents components of
+        Just optionPath -> pure optionPath
+        Nothing -> fail "option path must not be empty"
+instance FromJSON Literal where
+  parseJSON Null = pure LiteralNull
+  parseJSON (Bool value) = pure (LiteralBool value)
+  parseJSON (String value) = pure (LiteralString value)
+  parseJSON (Number value) =
+    pure $
+      case floatingOrInteger value of
+        Left floatValue -> LiteralFloat floatValue
+        Right integerValue -> LiteralInteger integerValue
+  parseJSON (Array values) = LiteralList <$> mapM parseJSON (toList values)
+  parseJSON (Object values) =
+    LiteralSet . sortLiteralBindings
+      <$> mapM
+        ( \(key, value) -> do
+            literalValue <- parseJSON value
+            pure (Key.toText key, literalValue)
+        )
+        (KeyMap.toList values)
+instance FromJSON NixosDefinitionRecord where
+  parseJSON =
+    withObject "NixOS definition record" $ \values -> do
+      optionPath <- values .: "path"
+      literalValue <- values .: "value"
+      sourceFiles <- values .: "files"
+      pure (NixosDefinitionRecord optionPath literalValue sourceFiles)
+instance FromJSON TreefmtDefaultRecord where
+  parseJSON =
+    withObject "treefmt default record" $ \values -> do
+      optionPath <- values .: "path"
+      defaultValue <- values .: "default"
+      pure (TreefmtDefaultRecord optionPath defaultValue)
 type DefaultResolver :: Type
 type DefaultResolver = OptionPath -> IO (Maybe Literal)
 type ParsedNixFile :: Type
@@ -295,59 +360,60 @@ collectTreefmtCandidates (Fix (Compose (AnnUnit _ exprF))) =
           | isTreefmtEvalModuleFunction function ->
               collectCandidates argument ++ nestedCandidates
         _ -> nestedCandidates
-collectModuleExpression :: OptionPath -> NExprLoc -> [(OptionPath, Literal)]
+collectModuleExpression :: PathPrefix -> NExprLoc -> [(OptionPath, Literal)]
 collectModuleExpression prefix expr@(Fix (Compose (AnnUnit _ exprF))) =
   case exprF of
     NAbs _ body -> collectModuleExpression prefix body
     NLet _ body -> collectModuleExpression prefix body
     NSet _ bindings -> collectBindings prefix bindings
-    _ -> case expressionLiteral expr of
-      Just literalValue -> [(prefix, literalValue)]
-      Nothing -> []
-collectBindings :: OptionPath -> [Binding NExprLoc] -> [(OptionPath, Literal)]
+    _ -> case (optionPathFromComponents prefix, expressionLiteral expr) of
+      (Just optionPath, Just literalValue) -> [(optionPath, literalValue)]
+      _ -> []
+collectBindings :: PathPrefix -> [Binding NExprLoc] -> [(OptionPath, Literal)]
 collectBindings prefix = concatMap (collectBinding prefix)
-collectBinding :: OptionPath -> Binding NExprLoc -> [(OptionPath, Literal)]
+collectBinding :: PathPrefix -> Binding NExprLoc -> [(OptionPath, Literal)]
 collectBinding prefix (NamedVar keyPath valueExpr _) =
   case keyPathTexts keyPath of
     Nothing -> []
     Just pathSuffix ->
-      let optionPath = effectivePath prefix pathSuffix
-          ownCandidate = case expressionLiteral valueExpr of
-            Just literalValue -> [(optionPath, literalValue)]
-            Nothing -> []
-       in ownCandidate ++ collectNestedCandidates optionPath valueExpr
+      let pathComponents = effectivePath prefix pathSuffix
+          ownCandidate = case (optionPathFromComponents pathComponents, expressionLiteral valueExpr) of
+            (Just optionPath, Just literalValue) -> [(optionPath, literalValue)]
+            _ -> []
+       in ownCandidate ++ collectNestedCandidates pathComponents valueExpr
 collectBinding _ _ = []
-collectNestedCandidates :: OptionPath -> NExprLoc -> [(OptionPath, Literal)]
+collectNestedCandidates :: PathPrefix -> NExprLoc -> [(OptionPath, Literal)]
 collectNestedCandidates prefix (Fix (Compose (AnnUnit _ (NSet _ bindings)))) =
   collectBindings prefix bindings
 collectNestedCandidates _ _ = []
 rewriteModuleExpression :: Set OptionPath -> NExprLoc -> NExprLoc
 rewriteModuleExpression removals = goModule []
   where
-    goModule :: OptionPath -> NExprLoc -> NExprLoc
+    goModule :: PathPrefix -> NExprLoc -> NExprLoc
     goModule prefix (Fix (Compose (AnnUnit exprSpan exprF))) =
       Fix . Compose . AnnUnit exprSpan $ case exprF of
         NAbs params body -> NAbs params (goModule prefix body)
         NLet bindings body -> NLet bindings (goModule prefix body)
         NSet rec bindings -> NSet rec (rewriteBindings prefix bindings)
         otherExpr -> otherExpr
-    rewriteBindings :: OptionPath -> [Binding NExprLoc] -> [Binding NExprLoc]
+    rewriteBindings :: PathPrefix -> [Binding NExprLoc] -> [Binding NExprLoc]
     rewriteBindings prefix = mapMaybe (rewriteBinding prefix)
-    rewriteBinding :: OptionPath -> Binding NExprLoc -> Maybe (Binding NExprLoc)
+    rewriteBinding :: PathPrefix -> Binding NExprLoc -> Maybe (Binding NExprLoc)
     rewriteBinding prefix binding@(NamedVar keyPath valueExpr bindingPos) =
       case keyPathTexts keyPath of
         Nothing -> Just binding
         Just pathSuffix ->
-          let optionPath = effectivePath prefix pathSuffix
-           in if optionPath `Set.member` removals
+          let pathComponents = effectivePath prefix pathSuffix
+              shouldRemove = maybe False (`Set.member` removals) (optionPathFromComponents pathComponents)
+           in if shouldRemove
                 then Nothing
                 else
-                  let rewrittenValue = rewriteNested optionPath valueExpr
+                  let rewrittenValue = rewriteNested pathComponents valueExpr
                    in if isEmptySet rewrittenValue && wasNonEmptySet valueExpr
                         then Nothing
                         else Just (NamedVar keyPath rewrittenValue bindingPos)
     rewriteBinding _ binding = Just binding
-    rewriteNested :: OptionPath -> NExprLoc -> NExprLoc
+    rewriteNested :: PathPrefix -> NExprLoc -> NExprLoc
     rewriteNested prefix (Fix (Compose (AnnUnit exprSpan (NSet rec bindings)))) =
       Fix (Compose (AnnUnit exprSpan (NSet rec (rewriteBindings prefix bindings))))
     rewriteNested _ valueExpr = valueExpr
@@ -378,7 +444,7 @@ selectorPath (Fix (Compose (AnnUnit _ exprF))) =
       suffix <- keyPathTexts keyPath
       pure (basePath ++ suffix)
     _ -> Nothing
-effectivePath :: OptionPath -> OptionPath -> OptionPath
+effectivePath :: PathPrefix -> [Text] -> PathPrefix
 effectivePath [] ("config" : rest) = rest
 effectivePath prefix suffix = prefix ++ suffix
 keyPathTexts :: NonEmpty (NKeyName NExprLoc) -> Maybe [Text]
@@ -499,7 +565,7 @@ renderNixosCandidate (optionPath, literalValue) =
   "{ path = " ++ renderOptionPathAsList optionPath ++ "; value = " ++ renderLiteral literalValue ++ "; }"
 renderOptionPathAsList :: OptionPath -> String
 renderOptionPathAsList optionPath =
-  "[ " ++ intercalateStrings " " (map (nixString . unpack) optionPath) ++ " ]"
+  "[ " ++ intercalateStrings " " (map (nixString . unpack) (optionPathComponents optionPath)) ++ " ]"
 renderLiteral :: Literal -> String
 renderLiteral LiteralNull = "null"
 renderLiteral (LiteralBool True) = "true"
@@ -551,88 +617,44 @@ dropPrefix _ [] = []
 nixString :: String -> String
 nixString = unpack . renderOptionKey . pack
 readStringFromNix :: [String] -> IO (Either String String)
-readStringFromNix arguments = do
-  jsonResult <- readJsonFromNix arguments
-  pure (jsonResult >>= requireDecoded "expected a JSON string" jsonString)
+readStringFromNix = readJsonFromNix
 readStringListFromNix :: [String] -> IO (Either String [String])
-readStringListFromNix arguments = do
-  jsonResult <- readJsonFromNix arguments
-  pure (jsonResult >>= requireDecoded "expected a JSON array of NixOS definition records" jsonStringList)
+readStringListFromNix = readJsonFromNix
 readNixosDefinitionFilesFromNix :: [String] -> IO (Either String [(NixosCandidate, [FilePath])])
 readNixosDefinitionFilesFromNix arguments = do
-  jsonResult <- readJsonFromNix arguments
-  pure (jsonResult >>= requireDecoded "expected a JSON array of NixOS definition records" jsonNixosDefinitionFiles)
+  recordsResult <- readJsonFromNix arguments
+  pure (map nixosDefinitionEntry <$> recordsResult)
+  where
+    nixosDefinitionEntry :: NixosDefinitionRecord -> (NixosCandidate, [FilePath])
+    nixosDefinitionEntry (NixosDefinitionRecord optionPath literalValue sourceFiles) =
+      ((optionPath, literalValue), sourceFiles)
 readTreefmtDefaultsFromNix :: [String] -> IO (Either String [(OptionPath, Literal)])
 readTreefmtDefaultsFromNix arguments = do
-  jsonResult <- readJsonFromNix arguments
-  pure (jsonResult >>= requireDecoded "expected a JSON array of treefmt defaults" jsonTreefmtDefaults)
-readJsonFromNix :: [String] -> IO (Either String Value)
-readJsonFromNix arguments = do
-  (exitCode, standardOutput, standardError) <-
-    readProcessWithExitCode "nix" arguments ""
-  case exitCode of
-    ExitSuccess ->
-      case eitherDecodeStrict' (BS.pack standardOutput) of
-        Right jsonValue -> pure (Right jsonValue)
-        Left diagnostic -> pure (Left ("cannot decode Nix JSON output: " ++ diagnostic))
-    _ -> pure (Left ("nix evaluation failed: " ++ standardError))
-requireDecoded :: String -> (Value -> Maybe a) -> Value -> Either String a
-requireDecoded diagnostic decodeValue jsonValue =
-  case decodeValue jsonValue of
-    Just value -> Right value
-    Nothing -> Left ("cannot decode Nix JSON output: " ++ diagnostic)
+  recordsResult <- readJsonFromNix arguments
+  pure (map treefmtDefaultEntry <$> recordsResult)
+  where
+    treefmtDefaultEntry :: TreefmtDefaultRecord -> (OptionPath, Literal)
+    treefmtDefaultEntry (TreefmtDefaultRecord optionPath defaultValue) =
+      (optionPath, defaultValue)
+readJsonFromNix :: (FromJSON value) => [String] -> IO (Either String value)
+readJsonFromNix = readJsonFromNixWith tryReadNixProcess
+readJsonFromNixWith :: (FromJSON value) => ([String] -> IO (Either IOException (ExitCode, String, String))) -> [String] -> IO (Either String value)
+readJsonFromNixWith runNix arguments = do
+  processResult <- runNix arguments
+  case processResult of
+    Left processError -> pure (Left ("cannot execute nix: " ++ show processError))
+    Right (exitCode, standardOutput, standardError) ->
+      case exitCode of
+        ExitSuccess ->
+          case eitherDecodeStrict' (BS.pack standardOutput) of
+            Right jsonValue -> pure (Right jsonValue)
+            Left diagnostic -> pure (Left ("cannot decode Nix JSON output: " ++ diagnostic))
+        _ -> pure (Left ("nix evaluation failed: " ++ standardError))
+tryReadNixProcess :: [String] -> IO (Either IOException (ExitCode, String, String))
+tryReadNixProcess arguments =
+  try (readProcessWithExitCode "nix" arguments "")
 renderOptionKey :: Text -> Text
 renderOptionKey = Text.decodeUtf8 . LBS.toStrict . encode
-jsonString :: Value -> Maybe String
-jsonString (String value) = Just (unpack value)
-jsonString _ = Nothing
-jsonStringList :: Value -> Maybe [String]
-jsonStringList (Array values) = mapM jsonString (toList values)
-jsonStringList _ = Nothing
-jsonText :: Value -> Maybe Text
-jsonText (String value) = Just value
-jsonText _ = Nothing
-jsonOptionPath :: Value -> Maybe OptionPath
-jsonOptionPath (Array values) = do
-  optionPath <- mapM jsonText (toList values)
-  if null optionPath then Nothing else Just optionPath
-jsonOptionPath _ = Nothing
-jsonNixosDefinitionFiles :: Value -> Maybe [(NixosCandidate, [FilePath])]
-jsonNixosDefinitionFiles (Array values) = mapM jsonNixosDefinitionFile (toList values)
-jsonNixosDefinitionFiles _ = Nothing
-jsonNixosDefinitionFile :: Value -> Maybe (NixosCandidate, [FilePath])
-jsonNixosDefinitionFile (Object values) = do
-  optionPath <- KeyMap.lookup (Key.fromText "path") values >>= jsonOptionPath
-  literalValue <- KeyMap.lookup (Key.fromText "value") values >>= jsonLiteral
-  sourceFiles <- KeyMap.lookup (Key.fromText "files") values >>= jsonStringList
-  pure ((optionPath, literalValue), sourceFiles)
-jsonNixosDefinitionFile _ = Nothing
-jsonTreefmtDefaults :: Value -> Maybe [(OptionPath, Literal)]
-jsonTreefmtDefaults (Array values) = mapM jsonTreefmtDefault (toList values)
-jsonTreefmtDefaults _ = Nothing
-jsonTreefmtDefault :: Value -> Maybe (OptionPath, Literal)
-jsonTreefmtDefault (Object values) = do
-  optionPath <- KeyMap.lookup (Key.fromText "path") values >>= jsonOptionPath
-  defaultValue <- KeyMap.lookup (Key.fromText "default") values >>= jsonLiteral
-  pure (optionPath, defaultValue)
-jsonTreefmtDefault _ = Nothing
-jsonLiteral :: Value -> Maybe Literal
-jsonLiteral Null = Just LiteralNull
-jsonLiteral (Bool value) = Just (LiteralBool value)
-jsonLiteral (String value) = Just (LiteralString value)
-jsonLiteral (Number value) =
-  case floatingOrInteger value of
-    Left floatValue -> Just (LiteralFloat floatValue)
-    Right integerValue -> Just (LiteralInteger integerValue)
-jsonLiteral (Array values) = LiteralList <$> mapM jsonLiteral (toList values)
-jsonLiteral (Object values) =
-  LiteralSet . sortLiteralBindings
-    <$> mapM
-      ( \(key, value) -> do
-          literalValue <- jsonLiteral value
-          pure (Key.toText key, literalValue)
-      )
-      (KeyMap.toList values)
 formatWithDefaults :: Map OptionPath Literal -> Text -> IO Text
 formatWithDefaults defaults input =
   withSystemTempFile "nix-remove-defaults-test.nix" $ \tmpFile tmpHandle -> do
@@ -693,60 +715,60 @@ hUnitPackageTests =
   TestList
     [ TestLabel "Removes a literal assignment equal to its default." $
         makeRemovalTest
-          (Map.singleton ["boot", "enabled"] (LiteralBool False))
+          (Map.singleton (testOptionPath ["boot", "enabled"]) (LiteralBool False))
           (pack "{ boot.enabled = false; keep = true; }")
           (pack "{ keep = true; }"),
       TestLabel "Preserves a literal assignment different from its default." $
         makeRemovalTest
-          (Map.singleton ["boot", "enabled"] (LiteralBool True))
+          (Map.singleton (testOptionPath ["boot", "enabled"]) (LiteralBool True))
           (pack "{ boot.enabled = false; }")
           (pack "{ boot.enabled = false; }"),
       TestLabel "Removes now-empty structural parent sets." $
         makeRemovalTest
-          (Map.singleton ["services", "example", "enable"] (LiteralBool False))
+          (Map.singleton (testOptionPath ["services", "example", "enable"]) (LiteralBool False))
           (pack "{ services = { example = { enable = false; }; }; keep = 1; }")
           (pack "{ keep = 1; }"),
       TestLabel "Removes literal list defaults." $
         makeRemovalTest
-          (Map.singleton ["environment", "systemPackages"] (LiteralList []))
+          (Map.singleton (testOptionPath ["environment", "systemPackages"]) (LiteralList []))
           (pack "{ environment.systemPackages = [ ]; }")
           (pack "{}"),
       TestLabel "Removes string, integer, null, and attribute-set defaults." $
         makeRemovalTest
           ( Map.fromList
-              [ (["example", "count"], LiteralInteger 3),
-                (["example", "label"], LiteralString "default"),
-                (["example", "optional"], LiteralNull),
-                (["example", "settings"], LiteralSet [("enabled", LiteralBool True)])
+              [ (testOptionPath ["example", "count"], LiteralInteger 3),
+                (testOptionPath ["example", "label"], LiteralString "default"),
+                (testOptionPath ["example", "optional"], LiteralNull),
+                (testOptionPath ["example", "settings"], LiteralSet [("enabled", LiteralBool True)])
               ]
           )
           (pack "{ example.count = 3; example.label = \"default\"; example.optional = null; example.settings = { enabled = true; }; }")
           (pack "{}"),
       TestLabel "Preserves context-dependent expressions." $
         makeRemovalTest
-          (Map.singleton ["example", "value"] (LiteralInteger 1))
+          (Map.singleton (testOptionPath ["example", "value"]) (LiteralInteger 1))
           (pack "{ example.value = let x = 1; in x; }")
           (pack "{ example.value = let   x = 1; in x; }"),
       TestLabel "Treats a top-level config attribute as the option root." $
         makeRemovalTest
-          (Map.singleton ["networking", "useDHCP"] (LiteralBool True))
+          (Map.singleton (testOptionPath ["networking", "useDHCP"]) (LiteralBool True))
           (pack "{ config.networking.useDHCP = true; options.example = { }; }")
           (pack "{ options.example = {}; }"),
       TestLabel "Traverses the returned set of a let-wrapped module." $
         makeRemovalTest
-          (Map.singleton ["boot", "initrd", "systemd", "enable"] (LiteralBool True))
+          (Map.singleton (testOptionPath ["boot", "initrd", "systemd", "enable"]) (LiteralBool True))
           (pack "{ pkgs, ... }: let hostName = \"default\"; in { boot.initrd.systemd.enable = true; networking.hostName = hostName; }")
           (pack "{ pkgs, ... }:\n  let   hostName = \"default\"; in { networking.hostName = hostName; }"),
       TestLabel "Transformation is idempotent." $ TestCase $ do
         let defaults :: Map OptionPath Literal
-            defaults = Map.singleton ["example", "enable"] (LiteralBool False)
+            defaults = Map.singleton (testOptionPath ["example", "enable"]) (LiteralBool False)
             input = pack "{ example.enable = false; keep = true; }"
         once <- formatWithDefaults defaults input
         twice <- formatWithDefaults defaults once
         assertEqual "second transformation" once twice,
       TestLabel "Removes defaults inside a treefmt evalModule argument." $
         makeTreefmtRemovalTest
-          (Map.singleton ["programs", "shfmt", "simplify"] (LiteralBool True))
+          (Map.singleton (testOptionPath ["programs", "shfmt", "simplify"]) (LiteralBool True))
           (pack "{ inputs, pkgs, ... }: let treefmtEval = inputs.treefmt-nix.lib.evalModule pkgs { programs.shfmt.simplify = true; keep = false; }; in treefmtEval.config.build.wrapper")
           (pack "{ inputs, pkgs, ... }:\n  let\n    treefmtEval = inputs.treefmt-nix.lib.evalModule pkgs { keep = false; };\n  in treefmtEval.config.build.wrapper"),
       TestLabel "Builds candidate records into the NixOS default-definition lookup expression." $ TestCase $ do
@@ -754,7 +776,7 @@ hUnitPackageTests =
               nixosDefaultDefinitionFilesExpression
                 "/repository"
                 ["default"]
-                [(["boot", "initrd", "systemd", "enable"], LiteralBool True)]
+                [(testOptionPath ["boot", "initrd", "systemd", "enable"], LiteralBool True)]
         assertBool
           "candidate records"
           ("candidates = [ { path = [ \"boot\" \"initrd\" \"systemd\" \"enable\" ]; value = true; } ]" `isInfixOf` expression),
@@ -763,7 +785,7 @@ hUnitPackageTests =
               nixosDefaultDefinitionFilesExpression
                 "/repository"
                 ["default"]
-                [(["boot", "initrd", "systemd", "enable"], LiteralBool True)]
+                [(testOptionPath ["boot", "initrd", "systemd", "enable"], LiteralBool True)]
         assertBool
           "literal comparison"
           ("literalEquals = expected: actual:" `isInfixOf` expression),
@@ -772,19 +794,28 @@ hUnitPackageTests =
               nixosDefaultDefinitionFilesExpression
                 "/repository"
                 ["default"]
-                [(["boot", "initrd", "systemd", "enable"], LiteralBool True)]
+                [(testOptionPath ["boot", "initrd", "systemd", "enable"], LiteralBool True)]
         assertBool
           "candidate result"
           ("candidateFiles = candidate: { inherit (candidate) path value; files =" `isInfixOf` expression),
       TestLabel "Rejects empty option paths from Nix JSON." $
         TestCase $
-          case eitherDecodeStrict' (BS.pack "[]") of
-            Right jsonValue -> assertEqual "empty option path" Nothing (jsonOptionPath jsonValue)
-            Left diagnostic -> assertFailure diagnostic,
+          case (eitherDecodeStrict' (BS.pack "[]") :: Either String OptionPath) of
+            Left diagnostic -> assertBool "non-empty path diagnostic" ("must not be empty" `isInfixOf` diagnostic)
+            Right _ -> assertFailure "empty option path decoded successfully",
       TestLabel "Preserves JSON decoding diagnostics." $
         TestCase $
+          case (eitherDecodeStrict' (BS.pack "null") :: Either String String) of
+            Left diagnostic -> assertBool "typed decode failure" ("expected String" `isInfixOf` diagnostic)
+            Right _ -> assertFailure "null decoded as a string",
+      TestLabel "Propagates the underlying Nix evaluation diagnostic." $
+        TestCase $ do
+          result <-
+            readJsonFromNixWith
+              (\_ -> pure (Right (ExitFailure 1, "", "underlying evaluation failure\n")))
+              []
           assertEqual
-            "typed decode failure"
-            (Left "cannot decode Nix JSON output: expected a JSON string")
-            (requireDecoded "expected a JSON string" jsonString Null)
+            "Nix failure"
+            (Left "nix evaluation failed: underlying evaluation failure\n")
+            (result :: Either String String)
     ]

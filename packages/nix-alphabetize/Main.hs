@@ -98,19 +98,18 @@ main :: IO ()
 main = do
   args <- getArgs
   successes <-
-    mapM
-      ( \filePath -> do
-          parseResult <- parseNixFileLoc (Path filePath)
-          case parseResult of
-            Left parseError -> do
-              putStrLn ("Error parsing " ++ filePath ++ ": " ++ show parseError)
-              pure False
-            Right expr -> do
-              writeFormattedFile filePath expr
-              pure True
-      )
-      args
+    mapM formatNixFile args
   unless (and successes) exitFailure
+formatNixFile :: FilePath -> IO Bool
+formatNixFile filePath = do
+  parseResult <- parseNixFileLoc (Path filePath)
+  case parseResult of
+    Left parseError -> do
+      putStrLn ("Error parsing " ++ filePath ++ ": " ++ show parseError)
+      pure False
+    Right expr -> do
+      writeFormattedFile filePath expr
+      pure True
 writeFormattedFile :: FilePath -> NExprLoc -> IO ()
 writeFormattedFile filePath expr = do
   let finalText =
@@ -421,6 +420,16 @@ hUnitPackageTests =
         makeFormattingTest
           (pack "{ inherit a; ${name}.x = 1; ${other}.y = 2; }")
           (pack "{\n  inherit a;\n  ${name}.x = 1;\n  ${other}.y = 2;\n}"),
+      TestLabel "Reports parse failure without rewriting the file." $
+        TestCase $
+          withSystemTempFile "malformed.nix" $ \tmpFile tmpHandle -> do
+            hClose tmpHandle
+            let malformed = pack "{ invalid = ; }"
+            TIO.writeFile tmpFile malformed
+            succeeded <- formatNixFile tmpFile
+            contents <- TIO.readFile tmpFile
+            assertEqual "parse status" False succeeded
+            assertEqual "unchanged contents" malformed contents,
       TestLabel "Preserves multiline string formatting." $
         makeFormattingTest
           (pack "{ a = ''\n  line1\n  line2\n''; }")
