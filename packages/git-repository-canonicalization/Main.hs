@@ -373,10 +373,9 @@ runCli :: CanonicalizationSettings -> [String] -> IO ()
 runCli canonicalizationSettings commandLineArgs =
   case commandLineArgs of
     [] -> printMainHelpAndExit (ExitFailure 1)
-    ["help"] -> printMainHelpAndExit ExitSuccess
+    [argument] | argument `elem` ["help", "-h", "--help"] -> printMainHelpAndExit ExitSuccess
     _ | isHelpRequest commandLineArgs -> printCommandUsageAndExit ExitSuccess commandLineArgs
     ["check"] -> checkRepositoryLocation canonicalizationSettings "."
-    ["check", location] -> checkRepositoryLocation canonicalizationSettings location
     "check" : _ -> printCommandUsageAndExit usageExitCode commandLineArgs
     ["summary"] -> summarizeRepositoryLocation canonicalizationSettings renderRepositorySummariesText "."
     ["summary", "--json"] -> summarizeRepositoryLocation canonicalizationSettings renderRepositorySummariesJson "."
@@ -414,20 +413,20 @@ usageExitCode = ExitFailure 129
 mainHelpText :: String
 mainHelpText =
   unlines
-    [ "usage: repository-canonicalization [-h | --help] <command> [<args>]",
+    [ "usage: git repository-canonicalization [-h | --help] <command> [<args>]",
       "",
       "   add        Add a package and its requested checks",
       "   check      Check a canonical repository",
       "   summary    Show a summary of packages and checks",
       "",
-      "See 'repository-canonicalization <command> -h' for help on a specific command.",
+      "See 'git repository-canonicalization <command> -h' for help on a specific command.",
       ""
     ]
 usageTextForCommand :: Maybe String -> String
 usageTextForCommand = \case
   Just "add" ->
     unlines
-      [ "usage: repository-canonicalization add [<options>] <package-type> <package-name> [<description>...]",
+      [ "usage: git repository-canonicalization add [<options>] <package-type> <package-name> [<description>...]",
         "",
         "Generated package and check files are staged with git add.",
         "",
@@ -440,7 +439,7 @@ usageTextForCommand = \case
       ]
   Just "summary" ->
     unlines
-      [ "usage: repository-canonicalization summary [--json]",
+      [ "usage: git repository-canonicalization summary [--json]",
         "",
         "Summarize the nearest Git repository. Use 'git -C <location>' to select it.",
         "",
@@ -449,12 +448,12 @@ usageTextForCommand = \case
       ]
   Just "check" ->
     unlines
-      [ "usage: repository-canonicalization check [<location>]",
+      [ "usage: git repository-canonicalization check",
         "",
-        "Check the nearest Git repository, defaulting to the current directory.",
+        "Check the nearest Git repository. Use 'git -C <location>' to select it.",
         ""
       ]
-  _ -> unlines ["usage: repository-canonicalization [-h | --help] <command> [<args>]", ""]
+  _ -> unlines ["usage: git repository-canonicalization [-h | --help] <command> [<args>]", ""]
 parseAddPackageArgs :: [String] -> Maybe (String, FilePath, Maybe String, Set.Set RepositoryCheckKind)
 parseAddPackageArgs ("add" : packageKindName : packageName : remainingArguments) = do
   let (flagArguments, packageDescriptionArguments) =
@@ -552,7 +551,7 @@ collectRepositoryContentComplianceWith canonicalizationSettings = do
 reportCheckRepositoryFailure :: RepositoryComplianceFailure -> IO ()
 reportCheckRepositoryFailure (RepositoryComplianceFailure checkPhase checkPhaseIssues) = do
   let checkPhaseName = renderRepositoryCheckPhase checkPhase
-  hPutStrLn stderr ("error: repository-canonicalization check failed at phase: " ++ checkPhaseName)
+  hPutStrLn stderr ("error: git repository-canonicalization check failed at phase: " ++ checkPhaseName)
   forM_ (NE.toList checkPhaseIssues) $ \issue ->
     hPutStrLn stderr ("- [" ++ checkPhaseName ++ "] " ++ issue)
   hPutStrLn stderr ("hint: " ++ repositoryCheckPhaseHint checkPhase)
@@ -2778,17 +2777,19 @@ commandLineHelpEndToEndTest =
   withTemporaryPackageRepository "command-line-help" $ \temporaryDirectory -> do
     (helpExit, helpStdout, helpStderr) <- runEndToEndCommandIn temporaryDirectory ["-h"]
     assertEqual "The top-level help command succeeds." ExitSuccess helpExit
-    assertBool "The top-level help command prints usage to stdout." ("usage: repository-canonicalization" `isPrefixOf` helpStdout)
+    assertBool
+      "The top-level help command prints usage and commands to stdout."
+      ("usage: git repository-canonicalization" `isPrefixOf` helpStdout && "add        Add a package" `isInfixOf` helpStdout)
     assertEqual "The top-level help command leaves stderr empty." "" helpStderr
     (addHelpExit, addHelpStdout, addHelpStderr) <- runEndToEndCommandIn temporaryDirectory ["add", "--help"]
     assertEqual "Command-specific help succeeds." ExitSuccess addHelpExit
-    assertBool "Command-specific help prints the add usage to stdout." ("usage: repository-canonicalization add" `isPrefixOf` addHelpStdout)
+    assertBool "Command-specific help prints the add usage to stdout." ("usage: git repository-canonicalization add" `isPrefixOf` addHelpStdout)
     assertEqual "Command-specific help leaves stderr empty." "" addHelpStderr
     (checkHelpExit, checkHelpStdout, checkHelpStderr) <- runEndToEndCommandIn temporaryDirectory ["check", "--help"]
     assertEqual "Check help succeeds." ExitSuccess checkHelpExit
     assertBool
-      "Check help accepts a repository location."
-      ("<location>" `isInfixOf` checkHelpStdout)
+      "Check help explains Git location selection."
+      ("usage: git repository-canonicalization check" `isPrefixOf` checkHelpStdout && "git -C <location>" `isInfixOf` checkHelpStdout)
     assertEqual "Check help leaves stderr empty." "" checkHelpStderr
     (summaryHelpExit, summaryHelpStdout, summaryHelpStderr) <- runEndToEndCommandIn temporaryDirectory ["summary", "--help"]
     assertEqual "Summary help succeeds." ExitSuccess summaryHelpExit
@@ -2802,11 +2803,11 @@ invalidCommandEndToEndTest =
     (missingCommandExit, missingCommandStdout, missingCommandStderr) <- runEndToEndCommandIn temporaryDirectory []
     assertEqual "An omitted command exits unsuccessfully." (ExitFailure 1) missingCommandExit
     assertEqual "An omitted command leaves stdout empty." "" missingCommandStdout
-    assertBool "An omitted command prints usage to stderr." ("usage: repository-canonicalization" `isPrefixOf` missingCommandStderr)
+    assertBool "An omitted command prints usage to stderr." ("usage: git repository-canonicalization" `isPrefixOf` missingCommandStderr)
     (invalidCommandExit, invalidCommandStdout, invalidCommandStderr) <- runEndToEndCommandIn temporaryDirectory ["unknown-command"]
     assertEqual "An invalid command uses Git's usage exit status." usageExitCode invalidCommandExit
     assertEqual "An invalid command leaves stdout empty." "" invalidCommandStdout
-    assertBool "An invalid command prints usage to stderr." ("usage: repository-canonicalization" `isPrefixOf` invalidCommandStderr)
+    assertBool "An invalid command prints usage to stderr." ("usage: git repository-canonicalization" `isPrefixOf` invalidCommandStderr)
 addPackageEndToEndTest :: IO ()
 addPackageEndToEndTest =
   withTemporaryPackageRepository "add-package-end-to-end" $ \temporaryRepository -> do
@@ -2875,7 +2876,7 @@ haskellSummaryEndToEndTest =
 generatedPackageCheckEndToEndTest :: IO ()
 generatedPackageCheckEndToEndTest =
   withGeneratedPythonPackageRepository "generated-check-end-to-end" $ \temporaryRepository -> do
-    (checkExit, checkStdout, checkStderr) <- runEndToEndCommandIn temporaryRepository ["check", "."]
+    (checkExit, checkStdout, checkStderr) <- runEndToEndCommandIn temporaryRepository ["check"]
     assertEqual "Checking the generated repository succeeds." ExitSuccess checkExit
     assertEqual "A successful check produces no stdout." "" checkStdout
     assertEqual "A successful check produces no stderr." "" checkStderr
@@ -2885,7 +2886,7 @@ unlabeledHaskellPackageCheckEndToEndTest =
     let mainPath = temporaryRepository </> "packages/demo/Main.hs"
     mainSource <- TIO.readFile mainPath
     TIO.writeFile mainPath (T.replace "TestLabel \"Renders the sample message.\" $ " "" mainSource)
-    (checkExit, checkStdout, checkStderr) <- runEndToEndCommandIn temporaryRepository ["check", "."]
+    (checkExit, checkStdout, checkStderr) <- runEndToEndCommandIn temporaryRepository ["check"]
     assertEqual "An unlabeled HUnit package fails its repository check." (ExitFailure 1) checkExit
     assertEqual "An unlabeled HUnit package produces no stdout." "" checkStdout
     assertBool
@@ -2895,12 +2896,12 @@ corruptedPackageCheckEndToEndTest :: IO ()
 corruptedPackageCheckEndToEndTest =
   withGeneratedPythonPackageRepository "corrupted-check-end-to-end" $ \temporaryRepository -> do
     TIO.writeFile (temporaryRepository </> "packages/demo/default.nix") "not valid nix template"
-    (failedCheckExit, failedCheckStdout, failedCheckStderr) <- runEndToEndCommandIn temporaryRepository ["check", "."]
+    (failedCheckExit, failedCheckStdout, failedCheckStderr) <- runEndToEndCommandIn temporaryRepository ["check"]
     assertEqual "Checking a corrupted package fails." (ExitFailure 1) failedCheckExit
     assertEqual "A failed check leaves stdout empty." "" failedCheckStdout
     assertBool
       "A failed check reports its phase and affected file."
-      ( "repository-canonicalization check failed at phase: file-compliance" `isInfixOf` failedCheckStderr
+      ( "git repository-canonicalization check failed at phase: file-compliance" `isInfixOf` failedCheckStderr
           && "packages/demo/default.nix:" `isInfixOf` failedCheckStderr
       )
 unknownAddOptionEndToEndTest :: IO ()
@@ -2910,7 +2911,7 @@ unknownAddOptionEndToEndTest =
       runEndToEndCommandIn temporaryRepository ["add", "python", "demo", "--unknown"]
     assertEqual "An unknown add option uses Git's usage exit status." usageExitCode unknownOptionExit
     assertEqual "An unknown add option leaves stdout empty." "" unknownOptionStdout
-    assertBool "An unknown add option prints add usage to stderr." ("usage: repository-canonicalization add" `isPrefixOf` unknownOptionStderr)
+    assertBool "An unknown add option prints add usage to stderr." ("usage: git repository-canonicalization add" `isPrefixOf` unknownOptionStderr)
     packageDirectoryExists <- doesDirectoryExist (temporaryRepository </> "packages/demo")
     assertBool "An unknown option does not leave a partial package directory." (not packageDirectoryExists)
 invalidPackageNameEndToEndTest :: IO ()
@@ -3013,7 +3014,7 @@ expectedGeneratedHaskellPackageSummary =
     }
 runEndToEndCommandIn :: FilePath -> [String] -> IO (ExitCode, String, String)
 runEndToEndCommandIn workingDirectory arguments =
-  withCurrentDirectory workingDirectory (readProcessWithExitCode "repository-canonicalization" arguments "")
+  readProcessWithExitCode "git" (["-C", workingDirectory, "repository-canonicalization"] ++ arguments) ""
 initializeGitRepositoryFixture :: FilePath -> IO ()
 initializeGitRepositoryFixture repositoryPath =
   findExecutable "git" >>= \case
