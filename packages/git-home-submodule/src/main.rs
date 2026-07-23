@@ -5,11 +5,9 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command, ExitStatus, Stdio};
-const MAIN_HELP: &str = "usage: git home-submodule [-h | --help] <command> [<args>]\n\nPolicy-enforcing Git porcelain for an allowlisted $HOME superproject.\nRepositories are submodules at canonical <hostname>/<repository-path> locations.\n\n   add      Add a repository as a submodule\n   check    Check canonical submodule paths\n   init     Initialize the $HOME superproject\n\nSee 'git home-submodule <command> -h' for help on a specific command.\n";
-const MAIN_USAGE: &str = "usage: git home-submodule [-h | --help] <command> [<args>]\n";
-const ADD_HELP: &str = "usage: git home-submodule add <https-or-ssh-repository-url>\n\nAdd the repository as a $HOME submodule at <hostname>/<repository-path>.\n";
-const CHECK_HELP: &str = "usage: git home-submodule check [--fix]\n\nCheck that every $HOME/.gitmodules path matches the canonical path for its repository URL.\nWith --fix, rename mismatched submodules and update their paths.\n";
-const INIT_HELP: &str = "usage: git home-submodule init\n\nInitialize $HOME as a Git superproject with an allowlist .gitignore.\nThe rules !.gitignore and !.gitmodules are required; additional rules must start with !.\n";
+const MAIN_USAGE: &str = "usage: git home-submodule add <repository>\n   or: git home-submodule check [--fix]\n   or: git home-submodule init\n";
+const MAIN_HELP: &str = "GIT-HOME-SUBMODULE(1)\n\nNAME\n    git-home-submodule - Manage canonical submodules in an allowlisted home directory\n\nSYNOPSIS\n    git home-submodule add <repository>\n    git home-submodule check [--fix]\n    git home-submodule init\n\nDESCRIPTION\n    Manages repositories as submodules of a Git superproject in $HOME.\n\n    Every repository is placed at its canonical\n    <hostname>/<repository-path> location. Repository URLs must use HTTPS or\n    SSH, and the home directory's .gitignore acts as an explicit allowlist.\n\nCOMMANDS\n    add <repository>\n        Add <repository> as a submodule at its canonical path. HTTPS and SSH\n        repository URLs are supported.\n\n    check [--fix]\n        Check that every path in $HOME/.gitmodules matches the canonical path\n        derived from its repository URL.\n\n        With --fix, move mismatched submodules and update their paths in\n        .gitmodules.\n\n    init\n        Initialize $HOME as a Git superproject with an allowlist .gitignore.\n        The rules !.gitignore and !.gitmodules are required; additional rules\n        must start with !.\n";
+const ADD_USAGE: &str = "usage: git home-submodule add <repository>\n";
 const DEFAULT_GITIGNORE: &str = "*\n!.gitignore\n!.gitmodules\n";
 const USAGE_EXIT_CODE: i32 = 129;
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -87,28 +85,22 @@ fn main() {
     process::exit(run_cli(&arguments, &home_directory));
 }
 fn run_cli(arguments: &[OsString], home_directory: &Path) -> i32 {
-    if arguments
-        .iter()
-        .any(|argument| argument == "-h" || argument == "--help")
-    {
-        if arguments.len() == 1 {
-            print!("{MAIN_HELP}");
-        } else {
-            print!(
-                "{}",
-                command_usage(arguments.first().and_then(|value| value.to_str()))
-            );
-        }
-        return 0;
-    }
     let result = match arguments {
         [] => {
-            eprint!("{MAIN_HELP}");
+            eprint!("{MAIN_USAGE}");
             return 1;
         }
-        [command] if command == "help" => {
+        [argument] if argument == "-h" => {
+            print!("{MAIN_USAGE}");
+            return USAGE_EXIT_CODE;
+        }
+        [argument] if argument == "--help" => {
             print!("{MAIN_HELP}");
             return 0;
+        }
+        [_, argument] if argument == "-h" || argument == "--help" => {
+            eprint!("{MAIN_USAGE}");
+            return 1;
         }
         [command] if command == "init" => initialize_home_repository(home_directory),
         [command, repository_url] if command == "add" => repository_url.to_str().map_or_else(
@@ -120,10 +112,7 @@ fn run_cli(arguments: &[OsString], home_directory: &Path) -> i32 {
             check_home_gitmodules(home_directory, true)
         }
         _ => {
-            eprint!(
-                "{}",
-                command_usage(arguments.first().and_then(|value| value.to_str()))
-            );
+            eprint!("{MAIN_USAGE}");
             return USAGE_EXIT_CODE;
         }
     };
@@ -136,14 +125,6 @@ fn run_cli(arguments: &[OsString], home_directory: &Path) -> i32 {
             failure.exit_code
         }
     }
-}
-fn command_usage(command: Option<&str>) -> &'static str {
-    return match command {
-        Some("add") => ADD_HELP,
-        Some("check") => CHECK_HELP,
-        Some("init") => INIT_HELP,
-        _ => MAIN_USAGE,
-    };
 }
 fn parse_repository_url(repository_url: &str) -> Result<RepositoryLocation, RepositoryUrlError> {
     let (hostname, repository_path) =
@@ -233,7 +214,7 @@ fn add_repository_with_environment(
     let repository_location = match parse_repository_url(repository_url) {
         Ok(location) => location,
         Err(error) if error.kind == RepositoryUrlErrorKind::Syntax => {
-            eprint!("{ADD_HELP}");
+            eprint!("{ADD_USAGE}");
             return Err(CliFailure {
                 exit_code: USAGE_EXIT_CODE,
                 diagnostics: Vec::new(),
