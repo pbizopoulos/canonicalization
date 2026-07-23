@@ -69,9 +69,15 @@ impl CliFailure {
     }
 }
 #[derive(Debug, Default)]
-struct SubmoduleFields {
+struct RawSubmoduleFields {
     paths: Vec<String>,
     urls: Vec<String>,
+}
+#[derive(Debug, Eq, PartialEq)]
+struct SubmoduleRecord {
+    section: String,
+    path: String,
+    url: String,
 }
 fn main() {
     let arguments: Vec<OsString> = env::args_os().skip(1).collect();
@@ -325,8 +331,42 @@ fn check_home_gitmodules(home_directory: &Path, fix: bool) -> Result<(), CliFail
     {
         return Err(CliFailure::git(output.status));
     }
-    let submodules = parse_submodule_records(&output.stdout)
+    let raw_submodules = parse_raw_submodule_fields(&output.stdout)
         .map_err(|diagnostic| CliFailure::check(vec![diagnostic]))?;
+    let (submodules, mut diagnostics) = validate_submodule_records(raw_submodules);
+    for submodule in submodules {
+        let section = submodule.section;
+        let configured_path = submodule.path;
+        let configured_url = submodule.url;
+        if validate_repository_path(&configured_path, true).is_err()
+            && (!fix || validate_repository_path(&configured_path, false).is_err())
+        {
+            diagnostics.push(format!(                "submodule \"{section}\": invalid path '{configured_path}'; expected <host>/<repository-path> with valid components"            ));
+            continue;
+        }
+        match parse_repository_url(&configured_url) {
+            Ok(repository_location) => {
+                let expected_path = repository_location.canonical_path();
+                if configured_path != expected_path {
+                    if fix {
+                        fix_submodule_path(home_directory, &configured_path, &expected_path)?;
+                    } else {
+                        diagnostics.push(format!(                            "submodule \"{section}\": path '{configured_path}' does not match URL '{configured_url}'; expected '{expected_path}'"                        ));
+                    }
+                }
+            }
+            Err(error) => diagnostics.push(format!("submodule \"{section}\": {}", error.message)),
+        }
+    }
+    if diagnostics.is_empty() {
+        return Ok(());
+    }
+    return Err(CliFailure::check(diagnostics));
+}
+fn validate_submodule_records(
+    submodules: BTreeMap<String, RawSubmoduleFields>,
+) -> (Vec<SubmoduleRecord>, Vec<String>) {
+    let mut records = Vec::new();
     let mut diagnostics = Vec::new();
     for (section, fields) in submodules {
         if fields.paths.len() != 1 {
@@ -344,30 +384,17 @@ fn check_home_gitmodules(home_directory: &Path, fix: bool) -> Result<(), CliFail
         if fields.paths.len() != 1 || fields.urls.len() != 1 {
             continue;
         }
-        let configured_path = &fields.paths[0];
-        let configured_url = &fields.urls[0];
-        if !path_entry_is_valid(configured_path) && (!fix || !path_entry_is_safe(configured_path)) {
-            diagnostics.push(format!(                "submodule \"{section}\": invalid path '{configured_path}'; expected <host>/<repository-path> with valid components"            ));
-            continue;
-        }
-        match parse_repository_url(configured_url) {
-            Ok(repository_location) => {
-                let expected_path = repository_location.canonical_path();
-                if configured_path != &expected_path {
-                    if fix {
-                        fix_submodule_path(home_directory, configured_path, &expected_path)?;
-                    } else {
-                        diagnostics.push(format!(                        "submodule \"{section}\": path '{configured_path}' does not match URL '{configured_url}'; expected '{expected_path}'"                    ));
-                    }
-                }
-            }
-            Err(error) => diagnostics.push(format!("submodule \"{section}\": {}", error.message)),
-        }
+        records.push(SubmoduleRecord {
+            section,
+            path: fields
+                .paths
+                .into_iter()
+                .next()
+                .expect("validated path count"),
+            url: fields.urls.into_iter().next().expect("validated URL count"),
+        });
     }
-    if diagnostics.is_empty() {
-        return Ok(());
-    }
-    return Err(CliFailure::check(diagnostics));
+    return (records, diagnostics);
 }
 fn fix_submodule_path(
     home_directory: &Path,
@@ -400,7 +427,9 @@ fn fix_submodule_path(
     }
     return Err(CliFailure::git(status));
 }
-fn parse_submodule_records(bytes: &[u8]) -> Result<BTreeMap<String, SubmoduleFields>, String> {
+fn parse_raw_submodule_fields(
+    bytes: &[u8],
+) -> Result<BTreeMap<String, RawSubmoduleFields>, String> {
     let mut submodules = BTreeMap::new();
     for record in bytes
         .split(|byte| *byte == 0)
@@ -423,7 +452,7 @@ fn parse_submodule_records(bytes: &[u8]) -> Result<BTreeMap<String, SubmoduleFie
         };
         let fields = submodules
             .entry(section.to_owned())
-            .or_insert_with(SubmoduleFields::default);
+            .or_insert_with(RawSubmoduleFields::default);
         match field {
             "path" => fields.paths.push(value.to_owned()),
             "url" => fields.urls.push(value.to_owned()),
@@ -432,14 +461,18 @@ fn parse_submodule_records(bytes: &[u8]) -> Result<BTreeMap<String, SubmoduleFie
     }
     return Ok(submodules);
 }
-fn path_entry_is_valid(path_entry: &str) -> bool {
-    let components: Vec<&str> = path_entry.split('/').collect();
-    return components.len() >= 2 && path_entry_is_safe(path_entry);
-}
-fn path_entry_is_safe(path_entry: &str) -> bool {
-    return path_entry
-        .split('/')
-        .all(|component| validate_component("path component", component).is_ok());
+fn validate_repository_path(path: &str, require_host: bool) -> Result<(), RepositoryUrlError> {
+    let components: Vec<&str> = path.split('/').collect();
+    if require_host && components.len() < 2 {
+        return Err(RepositoryUrlError {
+            kind: RepositoryUrlErrorKind::Validation,
+            message: "repository path must include a host and repository path".to_owned(),
+        });
+    }
+    for component in components {
+        validate_component("path component", component)?;
+    }
+    return Ok(());
 }
 #[cfg(test)]
 mod tests {
@@ -519,6 +552,28 @@ mod tests {
         ] {
             assert!(parse_repository_url(repository_url).is_err());
         }
+    }
+    #[test]
+    fn separates_raw_submodule_parsing_from_cardinality_validation() -> TestResult {
+        let raw = parse_raw_submodule_fields(            b"submodule.demo.path\nhost/owner/demo\0submodule.demo.path\nhost/owner/other\0submodule.demo.url\nhttps://host/owner/demo.git\0",        )?;
+        let (records, diagnostics) = validate_submodule_records(raw);
+        assert!(records.is_empty());
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].contains("exactly one path (found 2)"));
+        assert!(parse_raw_submodule_fields(b"submodule.demo.path\0").is_err());
+        return Ok(());
+    }
+    #[test]
+    fn rejects_unsafe_canonical_paths_centrally() {
+        for path in [
+            "host",
+            "host/../demo",
+            "/owner/demo",
+            "host/owner/demo name",
+        ] {
+            assert!(validate_repository_path(path, true).is_err(), "{path}");
+        }
+        assert!(validate_repository_path("host/owner/demo", true).is_ok());
     }
     #[test]
     fn initializes_and_reinitializes_a_compatible_home_repository() -> TestResult {

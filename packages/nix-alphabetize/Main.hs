@@ -3,6 +3,7 @@
 {-# OPTIONS_GHC -Wno-unsafe #-}
 module Main (main, runPackageTests, runPackageTestsWithTimings) where
 import Control.Exception (finally)
+import Control.Monad (unless)
 import Data.Fix (Fix (Fix))
 import Data.Function (on)
 import Data.Functor.Compose (Compose (Compose))
@@ -11,10 +12,7 @@ import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.Ord (comparing)
 import Data.Text
   ( Text,
-    empty,
-    isPrefixOf,
     pack,
-    stripStart,
     unpack,
   )
 import Data.Text.IO qualified as TIO
@@ -22,7 +20,7 @@ import GHC.Clock (getMonotonicTimeNSec)
 import Nix.Expr.Types
   ( Antiquoted (Plain),
     Binding (NamedVar),
-    NExprF (NAbs, NLet, NList, NSet),
+    NExprF (NAbs, NLet, NList, NSet, NStr),
     NKeyName (DynamicKey, StaticKey),
     NString (DoubleQuoted),
     Params (ParamSet),
@@ -69,6 +67,7 @@ import Prelude
     Show (show),
     String,
     all,
+    and,
     any,
     appendFile,
     concatMap,
@@ -77,7 +76,7 @@ import Prelude
     fromIntegral,
     fst,
     map,
-    mapM_,
+    mapM,
     maybe,
     notElem,
     otherwise,
@@ -94,19 +93,24 @@ import Prelude
     (-),
     (.),
     (/),
-    (||),
   )
 main :: IO ()
 main = do
   args <- getArgs
-  mapM_
-    ( \filePath -> do
-        parseResult <- parseNixFileLoc (Path filePath)
-        case parseResult of
-          Left parseError -> putStrLn ("Error parsing " ++ filePath ++ ": " ++ show parseError)
-          Right expr -> writeFormattedFile filePath expr
-    )
-    args
+  successes <-
+    mapM
+      ( \filePath -> do
+          parseResult <- parseNixFileLoc (Path filePath)
+          case parseResult of
+            Left parseError -> do
+              putStrLn ("Error parsing " ++ filePath ++ ": " ++ show parseError)
+              pure False
+            Right expr -> do
+              writeFormattedFile filePath expr
+              pure True
+      )
+      args
+  unless (and successes) exitFailure
 writeFormattedFile :: FilePath -> NExprLoc -> IO ()
 writeFormattedFile filePath expr = do
   let finalText =
@@ -119,9 +123,8 @@ renderExpressionText :: NExprLoc -> Text
 renderExpressionText =
   renderStrict . layoutPretty (LayoutOptions (AvailablePerLine 1 1.0)) . prettyNix . stripAnnotation
 isStringExpr :: NExprLoc -> Bool
-isStringExpr expr =
-  let rendered = stripStart (renderExpressionText expr)
-   in pack "\"" `isPrefixOf` rendered || pack "''" `isPrefixOf` rendered
+isStringExpr (Fix (Compose (AnnUnit _ (NStr _)))) = True
+isStringExpr _ = False
 sortExpression :: NExprLoc -> NExprLoc
 sortExpression (Fix (Compose (AnnUnit exprSpan exprF))) =
   Fix . Compose . AnnUnit exprSpan $ case exprF of
@@ -140,10 +143,10 @@ sortExpression (Fix (Compose (AnnUnit exprSpan exprF))) =
     NLet bindings body ->
       NLet (sortAndCollapseBindings bindings) (sortExpression body)
     otherExpr -> fmap sortExpression otherExpr
-getBindingName :: Binding r -> Text
-getBindingName (NamedVar (StaticKey (VarName keyText) :| _) _ _) = keyText
-getBindingName (NamedVar (DynamicKey (Plain (DoubleQuoted [Plain keyText])) :| _) _ _) = keyText
-getBindingName _ = empty
+getBindingName :: Binding r -> Maybe Text
+getBindingName (NamedVar (StaticKey (VarName keyText) :| _) _ _) = Just keyText
+getBindingName (NamedVar (DynamicKey (Plain (DoubleQuoted [Plain keyText])) :| _) _ _) = Just keyText
+getBindingName _ = Nothing
 sortAndCollapseBindings :: [Binding NExprLoc] -> [Binding NExprLoc]
 sortAndCollapseBindings =
   concatMap collapseNestedBindings
@@ -152,8 +155,8 @@ sortAndCollapseBindings =
 collapseNestedBindings :: [Binding NExprLoc] -> [Binding NExprLoc]
 collapseNestedBindings [] = []
 collapseNestedBindings bindings@(firstBinding : _) =
-  case firstBinding of
-    NamedVar (bindingKey :| _) _ bindingPos ->
+  case (getBindingName firstBinding, firstBinding) of
+    (Just _, NamedVar (bindingKey :| _) _ bindingPos) ->
       let nestedBindings = concatMap nextLevelBindings bindings
           sortedNested = sortAndCollapseBindings nestedBindings
           sortedBindings = map (fmap sortExpression) bindings
@@ -181,9 +184,7 @@ makeFormattingTest input expectedOutput = TestCase $ do
     parseResult <- parseNixFileLoc (Path tmpFile)
     case parseResult of
       Right expr -> do
-        writeFormattedFile tmpFile expr
-        formatted <- TIO.readFile tmpFile
-        assertEqual "formatted output" expectedOutput formatted
+        assertEqual "formatted output" expectedOutput (formattedExpression expr)
       Left parseError ->
         assertFailure $ "Parse error in formatting test: " ++ show parseError
 formatText :: Text -> IO Text
@@ -194,10 +195,16 @@ formatText input =
     parseResult <- parseNixFileLoc (Path tmpFile)
     case parseResult of
       Right expr -> do
-        writeFormattedFile tmpFile expr
-        TIO.readFile tmpFile
+        pure (formattedExpression expr)
       Left parseError ->
         assertFailure ("Property fixture failed to parse: " ++ show parseError)
+formattedExpression :: NExprLoc -> Text
+formattedExpression =
+  renderStrict
+    . layoutPretty (LayoutOptions (AvailablePerLine 1 1.0))
+    . prettyNix
+    . stripAnnotation
+    . sortExpression
 runPackageTests :: IO ()
 runPackageTests = runPackageTestsWith Nothing
 runPackageTestsWithTimings :: FilePath -> IO ()
@@ -410,6 +417,10 @@ hUnitPackageTests =
         makeFormattingTest
           (pack "{ \"b\".val1 = 1; \"a\".val2 = 2; }")
           (pack "{\n  \"a\".val2 = 2;\n  \"b\".val1 = 1;\n}"),
+      TestLabel "Preserves inherited and ambiguous dynamic bindings." $
+        makeFormattingTest
+          (pack "{ inherit a; ${name}.x = 1; ${other}.y = 2; }")
+          (pack "{\n  inherit a;\n  ${name}.x = 1;\n  ${other}.y = 2;\n}"),
       TestLabel "Preserves multiline string formatting." $
         makeFormattingTest
           (pack "{ a = ''\n  line1\n  line2\n''; }")

@@ -367,47 +367,63 @@ defaultCanonicalizationSettings =
   CanonicalizationSettings
     { canonicalizationPythonPackageAttribute = defaultPythonPackageAttribute
     }
+type Command :: Type
+data Command
+  = CheckCommand
+  | SummaryCommand Bool
+  | AddCommand String FilePath (Maybe String) (Set.Set RepositoryCheckKind)
+type CommandParseResult :: Type
+data CommandParseResult
+  = ParsedCommand Command
+  | MainHelp
+  | InvalidCommand ExitCode (Maybe String)
 main :: IO ()
 main = getArgs >>= runCli defaultCanonicalizationSettings
 runCli :: CanonicalizationSettings -> [String] -> IO ()
 runCli canonicalizationSettings commandLineArgs =
+  case parseCommand commandLineArgs of
+    MainHelp -> printMainHelpAndExit
+    InvalidCommand exitCode maybeCommand ->
+      hPutStr stderr (usageTextForCommand maybeCommand) >> exitWith exitCode
+    ParsedCommand CheckCommand -> checkRepositoryLocation canonicalizationSettings "."
+    ParsedCommand (SummaryCommand jsonOutput) ->
+      summarizeRepositoryLocation
+        canonicalizationSettings
+        (if jsonOutput then renderRepositorySummariesJson else renderRepositorySummariesText)
+        "."
+    ParsedCommand (AddCommand packageKindName packageName packageDescription requestedCheckKinds) ->
+      runInGitRepositoryRoot "." $
+        case parseSupportedAddPackageKind packageKindName of
+          Nothing -> do
+            hPutStrLn stderr ("error: unsupported package type: " ++ packageKindName)
+            hPutStrLn stderr ("hint: supported package types: " ++ intercalate ", " (map fst supportedAddPackageKinds))
+            exitFailure
+          Just scaffoldPackageKind -> do
+            addResult <- addPackageToCurrentRepositoryWith canonicalizationSettings scaffoldPackageKind packageName packageDescription requestedCheckKinds
+            case addResult of
+              Left addError -> do
+                hPutStrLn stderr ("error: " ++ addError)
+                exitFailure
+              Right generatedPaths -> delegateToGit (["add", "--"] ++ generatedPaths)
+parseCommand :: [String] -> CommandParseResult
+parseCommand commandLineArgs =
   case commandLineArgs of
-    [] -> printMainUsageAndExit (ExitFailure 1)
-    [argument] | argument `elem` ["-h", "--help"] -> printMainHelpAndExit
-    [_, argument] | argument `elem` ["-h", "--help"] -> printMainUsageAndExit (ExitFailure 1)
-    ["check"] -> checkRepositoryLocation canonicalizationSettings "."
-    "check" : _ -> printCommandUsageAndExit usageExitCode commandLineArgs
-    ["summary"] -> summarizeRepositoryLocation canonicalizationSettings renderRepositorySummariesText "."
-    ["summary", "--json"] -> summarizeRepositoryLocation canonicalizationSettings renderRepositorySummariesJson "."
+    [] -> InvalidCommand (ExitFailure 1) Nothing
+    [argument] | argument `elem` ["-h", "--help"] -> MainHelp
+    [_, argument] | argument `elem` ["-h", "--help"] -> InvalidCommand (ExitFailure 1) Nothing
+    ["check"] -> ParsedCommand CheckCommand
+    "check" : _ -> InvalidCommand usageExitCode (Just "check")
+    ["summary"] -> ParsedCommand (SummaryCommand False)
+    ["summary", "--json"] -> ParsedCommand (SummaryCommand True)
     _ ->
       case parseAddPackageArgs commandLineArgs of
         Just (packageKindName, packageName, packageDescription, requestedCheckKinds) ->
-          runInGitRepositoryRoot "." $
-            case parseSupportedAddPackageKind packageKindName of
-              Nothing -> do
-                hPutStrLn stderr ("error: unsupported package type: " ++ packageKindName)
-                hPutStrLn stderr ("hint: supported package types: " ++ intercalate ", " (map fst supportedAddPackageKinds))
-                exitFailure
-              Just scaffoldPackageKind -> do
-                addResult <- addPackageToCurrentRepositoryWith canonicalizationSettings scaffoldPackageKind packageName packageDescription requestedCheckKinds
-                case addResult of
-                  Left addError -> do
-                    hPutStrLn stderr ("error: " ++ addError)
-                    exitFailure
-                  Right generatedPaths -> delegateToGit (["add", "--"] ++ generatedPaths)
-        Nothing -> printCommandUsageAndExit usageExitCode commandLineArgs
+          ParsedCommand (AddCommand packageKindName packageName packageDescription requestedCheckKinds)
+        Nothing -> InvalidCommand usageExitCode (listToMaybe commandLineArgs)
 printMainHelpAndExit :: IO a
 printMainHelpAndExit = do
   putStr mainHelpText
   exitSuccess
-printMainUsageAndExit :: ExitCode -> IO a
-printMainUsageAndExit exitCode = do
-  hPutStr stderr mainUsageText
-  exitWith exitCode
-printCommandUsageAndExit :: ExitCode -> [String] -> IO a
-printCommandUsageAndExit exitCode commandLineArgs = do
-  hPutStr stderr (usageTextForCommand (listToMaybe commandLineArgs))
-  exitWith exitCode
 usageExitCode :: ExitCode
 usageExitCode = ExitFailure 129
 mainUsageText :: String
@@ -993,7 +1009,7 @@ parseRepositoryProfileSummary profileText =
         ["profile-v1", "total-seconds", secondsText] -> readMaybe (T.unpack secondsText)
         _ -> Nothing
       testDurations <- parseRepositoryTestTimingLines testLines
-      if totalSeconds >= 0
+      if validDuration totalSeconds
         then Just (RepositoryProfileMeasured totalSeconds testDurations)
         else Nothing
     [] -> Nothing
@@ -1002,7 +1018,7 @@ parseRepositoryTestTimings = parseRepositoryTestTimingLines . T.lines
 parseRepositoryTestTimingLines :: [T.Text] -> Maybe (Map.Map String Double)
 parseRepositoryTestTimingLines testLines = do
   testDurations <- Map.fromList <$> mapM parseTestLine testLines
-  if all (>= 0) (Map.elems testDurations) && Map.size testDurations == length testLines
+  if all validDuration (Map.elems testDurations) && Map.size testDurations == length testLines
     then Just testDurations
     else Nothing
   where
@@ -1013,6 +1029,8 @@ parseRepositoryTestTimingLines testLines = do
           seconds <- readMaybe (T.unpack secondsText)
           pure (T.unpack testName, seconds)
         _ -> Nothing
+validDuration :: Double -> Bool
+validDuration seconds = seconds >= 0 && not (isNaN seconds) && not (isInfinite seconds)
 extractHaskellPackageDescription :: T.Text -> Maybe String
 extractHaskellPackageDescription cabalContents =
   (T.unpack <$> lookupCabalField "description" cabalContents)
@@ -1077,27 +1095,37 @@ data ScaffoldPackageKind
   | PythonScaffold
   | CScaffold
   | LatexScaffold
+  deriving stock (Eq)
+type PackageSpec :: Type
+data PackageSpec = PackageSpec
+  { packageSpecCliName :: String,
+    packageSpecScaffoldKind :: ScaffoldPackageKind,
+    packageSpecPackageKind :: PackageKind
+  }
+packageSpecs :: [PackageSpec]
+packageSpecs =
+  [ PackageSpec "haskell" HaskellScaffold HaskellPackage,
+    PackageSpec "rust" RustScaffold RustPackage,
+    PackageSpec "html" HtmlScaffold HtmlPackage,
+    PackageSpec "python" PythonScaffold PythonPackage,
+    PackageSpec "python-latex" PythonLatexScaffold PythonLatexPackage,
+    PackageSpec "c" CScaffold CPackage,
+    PackageSpec "latex" LatexScaffold LatexPackage
+  ]
 supportedAddPackageKinds :: [(String, ScaffoldPackageKind)]
 supportedAddPackageKinds =
-  [ ("haskell", HaskellScaffold),
-    ("rust", RustScaffold),
-    ("html", HtmlScaffold),
-    ("python", PythonScaffold),
-    ("python-latex", PythonLatexScaffold),
-    ("c", CScaffold),
-    ("latex", LatexScaffold)
+  [ (packageSpecCliName packageSpec, packageSpecScaffoldKind packageSpec)
+  | packageSpec <- packageSpecs
   ]
 parseSupportedAddPackageKind :: String -> Maybe ScaffoldPackageKind
 parseSupportedAddPackageKind packageKindName = lookup packageKindName supportedAddPackageKinds
 packageKindForScaffold :: ScaffoldPackageKind -> PackageKind
-packageKindForScaffold = \case
-  HaskellScaffold -> HaskellPackage
-  RustScaffold -> RustPackage
-  HtmlScaffold -> HtmlPackage
-  PythonLatexScaffold -> PythonLatexPackage
-  PythonScaffold -> PythonPackage
-  CScaffold -> CPackage
-  LatexScaffold -> LatexPackage
+packageKindForScaffold scaffoldPackageKind =
+  packageSpecPackageKind
+    ( fromMaybe
+        (error "internal error: missing scaffold package specification")
+        (find ((== scaffoldPackageKind) . packageSpecScaffoldKind) packageSpecs)
+    )
 validatePackageNameForKind :: PackageKind -> FilePath -> Maybe String
 validatePackageNameForKind packageKind packageName =
   let (conventionName, separator) = packageNameConventionForKind packageKind
@@ -1213,23 +1241,29 @@ repositoryCheckNameForKind packageKind packageName repositoryCheckKind =
     <$> repositoryCheckSpecForKind packageKind repositoryCheckKind
 repositoryCheckSpecForKind :: PackageKind -> RepositoryCheckKind -> Maybe RepositoryCheckSpec
 repositoryCheckSpecForKind packageKind repositoryCheckKind =
-  case (packageKind, repositoryCheckKind) of
-    (HaskellPackage, RepositoryCoverageCheck) -> spec "-coverage" haskellCoverageCheckBaselineNixSource
-    (HaskellPackage, RepositoryProfileCheck) -> spec "-profile" haskellProfileCheckBaselineNixSource
-    (HaskellPackage, RepositoryPropertyTestingCheck) -> spec "-property-testing" haskellPropertyTestingCheckBaselineNixSource
-    (RustPackage, RepositoryCoverageCheck) -> spec "-coverage" rustCoverageCheckBaselineNixSource
-    (RustPackage, RepositoryProfileCheck) -> spec "-profile" rustProfileCheckBaselineNixSource
-    (RustPackage, RepositoryPropertyTestingCheck) -> spec "-property-testing" rustPropertyTestingCheckBaselineNixSource
-    (RustPackage, RepositoryMutationTestingCheck) -> spec "-mutation-testing" rustMutationTestingCheckBaselineNixSource
-    (_, RepositoryCoverageCheck) | isPythonPackage -> spec "_coverage" pythonCoverageCheckBaselineNixSource
-    (_, RepositoryProfileCheck) | isPythonPackage -> spec "_profile" pythonProfileCheckBaselineNixSource
-    (_, RepositoryPropertyTestingCheck) | isPythonPackage -> spec "_property_testing" pythonPropertyTestingCheckBaselineNixSource
-    (HtmlPackage, RepositoryDefaultCheck) -> spec "" htmlTemplateCheckBaselineNixSource
-    (CPackage, RepositoryDefaultCheck) -> spec "" cTemplateCheckBaselineNixSource
-    _ -> Nothing
+  lookup (packageKind, repositoryCheckKind) repositoryCheckSpecs
+repositoryCheckSpecs :: [((PackageKind, RepositoryCheckKind), RepositoryCheckSpec)]
+repositoryCheckSpecs =
+  [ spec HaskellPackage RepositoryCoverageCheck "-coverage" haskellCoverageCheckBaselineNixSource,
+    spec HaskellPackage RepositoryProfileCheck "-profile" haskellProfileCheckBaselineNixSource,
+    spec HaskellPackage RepositoryPropertyTestingCheck "-property-testing" haskellPropertyTestingCheckBaselineNixSource,
+    spec RustPackage RepositoryCoverageCheck "-coverage" rustCoverageCheckBaselineNixSource,
+    spec RustPackage RepositoryProfileCheck "-profile" rustProfileCheckBaselineNixSource,
+    spec RustPackage RepositoryPropertyTestingCheck "-property-testing" rustPropertyTestingCheckBaselineNixSource,
+    spec RustPackage RepositoryMutationTestingCheck "-mutation-testing" rustMutationTestingCheckBaselineNixSource,
+    spec PythonPackage RepositoryCoverageCheck "_coverage" pythonCoverageCheckBaselineNixSource,
+    spec PythonPackage RepositoryProfileCheck "_profile" pythonProfileCheckBaselineNixSource,
+    spec PythonPackage RepositoryPropertyTestingCheck "_property_testing" pythonPropertyTestingCheckBaselineNixSource,
+    spec PythonLatexPackage RepositoryCoverageCheck "_coverage" pythonCoverageCheckBaselineNixSource,
+    spec PythonLatexPackage RepositoryProfileCheck "_profile" pythonProfileCheckBaselineNixSource,
+    spec PythonLatexPackage RepositoryPropertyTestingCheck "_property_testing" pythonPropertyTestingCheckBaselineNixSource,
+    spec HtmlPackage RepositoryDefaultCheck "" htmlTemplateCheckBaselineNixSource,
+    spec CPackage RepositoryDefaultCheck "" cTemplateCheckBaselineNixSource
+  ]
   where
-    isPythonPackage = packageKind `elem` [PythonPackage, PythonLatexPackage]
-    spec suffix source = Just (RepositoryCheckSpec suffix source)
+    spec :: PackageKind -> RepositoryCheckKind -> String -> T.Text -> ((PackageKind, RepositoryCheckKind), RepositoryCheckSpec)
+    spec packageKind checkKind suffix source =
+      ((packageKind, checkKind), RepositoryCheckSpec suffix source)
 renderScaffoldFilesWith :: CanonicalizationSettings -> ScaffoldPackageKind -> FilePath -> Maybe String -> [ScaffoldFile]
 renderScaffoldFilesWith canonicalizationSettings scaffoldPackageKind packageName packageDescription =
   case scaffoldPackageKind of
@@ -2700,6 +2734,13 @@ repositoryCoverageParsingTest = do
     "A coverage timing artifact preserves per-test durations without a profile check."
     (Just (Map.fromList [("Reports behavior.", 0.125)]))
     (parseRepositoryTestTimings "test\t0.125\tReports behavior.\n")
+  forM_
+    [ "profile-v1\ttotal-seconds\tNaN\ntest\t0.125\tReports behavior.\n",
+      "profile-v1\ttotal-seconds\tInfinity\ntest\t0.125\tReports behavior.\n",
+      "profile-v1\ttotal-seconds\t1.0\ntest\tNaN\tReports behavior.\n",
+      "profile-v1\ttotal-seconds\t1.0\ntest\tInfinity\tReports behavior.\n"
+    ]
+    (assertEqual "Non-finite summary timings are rejected." Nothing . parseRepositoryProfileSummary)
 nixTemplateParameterDifferenceTest :: IO ()
 nixTemplateParameterDifferenceTest = do
   actualParseResult <- parseNixExprFromText "{ pkgs ? import <nixpkgs> {} }: let python = pkgs.python3; in { pname = baseNameOf ./.; }"

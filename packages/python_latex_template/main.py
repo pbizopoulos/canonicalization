@@ -40,7 +40,6 @@ class Samples:
     """An immutable, non-empty sequence with finite summary statistics."""
 
     values: tuple[float, ...]
-    total: float
 
     def __init__(self, values: Iterable[float]) -> None:
         """Freeze values after validating every summary operation."""
@@ -56,14 +55,14 @@ class Samples:
             msg = "sample total must be finite"
             raise ValueError(msg)
         object.__setattr__(self, "values", normalized)
-        object.__setattr__(self, "total", total)
 
     def summary(self) -> tuple[tuple[str, float], ...]:
         """Return summary rows in display order."""
+        total = math.fsum(self.values)
         return (
             ("count", float(len(self.values))),
-            ("total", self.total),
-            ("mean", self.total / len(self.values)),
+            ("total", total),
+            ("mean", total / len(self.values)),
             ("min", min(self.values)),
             ("max", max(self.values)),
         )

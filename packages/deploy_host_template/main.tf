@@ -9,18 +9,22 @@ terraform {
   backend "local" {}
 }
 variable "hcloud_token" {
+  type      = string
   sensitive = true
 }
 variable "nixos_config_name" {
+  type    = string
   default = "template"
 }
 variable "server_name" {
+  type    = string
   default = "template"
 }
 variable "output_dir" {
   type = string
 }
 variable "hcloud_ssh_key_name" {
+  type    = string
   default = "default"
 }
 provider "hcloud" {
@@ -40,7 +44,6 @@ resource "hcloud_server" "default" {
   ]
 }
 module "deploy" {
-  count                  = 1
   source                 = "github.com/nix-community/nixos-anywhere//terraform/all-in-one"
   nixos_system_attr      = ".#nixosConfigurations.${var.nixos_config_name}.config.system.build.toplevel"
   nixos_partitioner_attr = ".#nixosConfigurations.${var.nixos_config_name}.config.system.build.diskoScript"

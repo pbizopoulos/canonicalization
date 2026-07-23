@@ -9,30 +9,24 @@ fn main() -> Result<()> {
 }
 fn run(input_paths: Vec<String>) -> Result<()> {
     if input_paths.is_empty() {
-        process_root_path(Path::new("."));
+        process_root_path(Path::new("."))?;
     } else {
         for input_path in input_paths {
-            process_root_path(Path::new(&input_path));
+            process_root_path(Path::new(&input_path))?;
         }
     }
     return Ok(());
 }
-fn process_root_path(root: &Path) {
+fn process_root_path(root: &Path) -> Result<()> {
     let walker = WalkBuilder::new(root).require_git(false).build();
     for result in walker {
-        match result {
-            Ok(entry) => {
-                let path = entry.path();
-                if path.is_file() {
-                    if let Err(e) = remove_new_lines(path) {
-                        let path_display = path.display();
-                        eprintln!("Error processing {path_display}: {e}");
-                    }
-                }
-            }
-            Err(err) => eprintln!("Error walking path: {err}"),
+        let entry = result.with_context(|| format!("Failed to walk path: {}", root.display()))?;
+        let path = entry.path();
+        if path.is_file() {
+            remove_new_lines(path)?;
         }
     }
+    return Ok(());
 }
 fn remove_new_lines(path: &Path) -> Result<()> {
     let path_display = path.display();
@@ -93,7 +87,7 @@ mod tests {
         let root = dir.path();
         let file1_path = root.join("test.txt");
         fs::write(&file1_path, "line1\n\nline2\n   \nline3\n")?;
-        process_root_path(root);
+        process_root_path(root)?;
         let content1 = fs::read_to_string(&file1_path)?;
         assert_eq!(content1, "line1line2   line3");
         return Ok(());
@@ -109,7 +103,7 @@ mod tests {
         fs::write(&ignored_path, "should be ignored\n\n")?;
         let binary_path = root.join("binary.bin");
         fs::write(&binary_path, [0, 15, 255, 0, 1, 2, 3])?;
-        process_root_path(root);
+        process_root_path(root)?;
         let content_ignored = fs::read_to_string(&ignored_path)?;
         assert_eq!(content_ignored, "should be ignored\n\n");
         let content_binary = fs::read(&binary_path)?;
@@ -131,6 +125,18 @@ mod tests {
         let content = fs::read_to_string(&file_path)?;
         assert_eq!(content, "line1line2");
         return Ok(());
+    }
+    #[test]
+    fn test_run_propagates_missing_root_failures() {
+        let missing = env::temp_dir().join("remove-new-lines-definitely-missing-root");
+        assert!(process_root_path(&missing).is_err());
+    }
+    #[test]
+    fn test_byte_transform_handles_non_utf8_data() {
+        assert_eq!(
+            strip_new_lines_from_bytes(&[0xff, b'\r', b'\n', 0xfe]),
+            vec![0xff, 0xfe]
+        );
     }
     #[test]
     fn quickcheck_strip_new_lines_matches_filtered_sequence() {

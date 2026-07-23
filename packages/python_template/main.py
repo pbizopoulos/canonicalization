@@ -45,15 +45,7 @@ class CanonicalLabels:
         return ", ".join(self.values)
 
 
-DEFAULT_LABELS = CanonicalLabels(
-    (
-        "Hello, World!",
-        "hello_world",
-        "HELLO   WORLD",
-        "Python-Template",
-        "python template",
-    ),
-)
+DEFAULT_LABELS = CanonicalLabels(("hello-world", "python-template"))
 
 
 def render_message(labels: CanonicalLabels = DEFAULT_LABELS) -> str:
