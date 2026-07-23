@@ -47,7 +47,6 @@ import System.Environment (getArgs)
 import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitFailure, exitWith)
 import System.FilePath ((<.>), (</>))
 import System.FilePath.Posix (makeRelative, splitDirectories, takeBaseName, takeDirectory, takeFileName)
-import System.FilePath.Windows qualified as Windows
 import System.IO (hClose, hPutStr, hPutStrLn, openTempFile, stderr, stdout)
 import System.Posix.Process (executeFile)
 import System.Process (readProcessWithExitCode)
@@ -504,8 +503,8 @@ checkRepositoryLocation canonicalizationSettings location = do
   repositoryRoot <- discoverGitRepositoryRoot location
   withCurrentDirectory repositoryRoot $
     collectRepositoryComplianceWith canonicalizationSettings >>= \case
-      Left (checkPhaseName, checkPhaseIssues) -> do
-        reportCheckRepositoryFailures checkPhaseName checkPhaseIssues
+      Left repositoryComplianceFailure -> do
+        reportCheckRepositoryFailure repositoryComplianceFailure
         exitFailure
       Right _ -> pure ()
 requiredRepositoryRootFiles :: [FilePath]
@@ -514,13 +513,21 @@ checkRequiredRepositoryRootFiles :: IO [String]
 checkRequiredRepositoryRootFiles = do
   missingFiles <- filterM (fmap not . doesFileExist) requiredRepositoryRootFiles
   pure ["missing required file: " ++ missingFile | missingFile <- missingFiles]
-collectRepositoryComplianceWith :: CanonicalizationSettings -> IO (Either (String, [String]) RepositoryComplianceSuccess)
+type RepositoryCheckPhase :: Type
+data RepositoryCheckPhase
+  = RequiredRootFilesPhase
+  | DirectoryStructurePhase
+  | FileCompliancePhase
+type RepositoryComplianceFailure :: Type
+data RepositoryComplianceFailure = RepositoryComplianceFailure RepositoryCheckPhase (NonEmpty String)
+collectRepositoryComplianceWith :: CanonicalizationSettings -> IO (Either RepositoryComplianceFailure RepositoryComplianceSuccess)
 collectRepositoryComplianceWith canonicalizationSettings = do
   requiredRootFileIssues <- checkRequiredRepositoryRootFiles
   case requiredRootFileIssues of
     [] -> collectRepositoryContentComplianceWith canonicalizationSettings
-    _ -> pure (Left ("required-root-files", requiredRootFileIssues))
-collectRepositoryContentComplianceWith :: CanonicalizationSettings -> IO (Either (String, [String]) RepositoryComplianceSuccess)
+    firstIssue : remainingIssues ->
+      pure (Left (RepositoryComplianceFailure RequiredRootFilesPhase (firstIssue :| remainingIssues)))
+collectRepositoryContentComplianceWith :: CanonicalizationSettings -> IO (Either RepositoryComplianceFailure RepositoryComplianceSuccess)
 collectRepositoryContentComplianceWith canonicalizationSettings = do
   repositoryStructureIssues <- checkRepositoryStructure
   case repositoryStructureIssues of
@@ -538,21 +545,27 @@ collectRepositoryContentComplianceWith canonicalizationSettings = do
                     repositoryComplianceCheckNames = checkNames
                   }
             )
-        fileComplianceIssues -> pure (Left ("file-compliance", fileComplianceIssues))
-    _ -> pure (Left ("directory-structure", repositoryStructureIssues))
-reportCheckRepositoryFailures :: String -> [String] -> IO ()
-reportCheckRepositoryFailures checkPhaseName checkPhaseIssues = do
+        firstIssue : remainingIssues ->
+          pure (Left (RepositoryComplianceFailure FileCompliancePhase (firstIssue :| remainingIssues)))
+    firstIssue : remainingIssues ->
+      pure (Left (RepositoryComplianceFailure DirectoryStructurePhase (firstIssue :| remainingIssues)))
+reportCheckRepositoryFailure :: RepositoryComplianceFailure -> IO ()
+reportCheckRepositoryFailure (RepositoryComplianceFailure checkPhase checkPhaseIssues) = do
+  let checkPhaseName = renderRepositoryCheckPhase checkPhase
   hPutStrLn stderr ("error: repository-canonicalization check failed at phase: " ++ checkPhaseName)
-  forM_ checkPhaseIssues $ \issue ->
+  forM_ (NE.toList checkPhaseIssues) $ \issue ->
     hPutStrLn stderr ("- [" ++ checkPhaseName ++ "] " ++ issue)
-  case checkPhaseName of
-    "required-root-files" ->
-      hPutStrLn stderr "hint: add flake.nix and run 'nix flake update' to create or update flake.lock."
-    "directory-structure" ->
-      hPutStrLn stderr "hint: fix directory and required-file layout under packages/, hosts/, checks/, and repository root."
-    "file-compliance" ->
-      hPutStrLn stderr "hint: align package files with the expected internal templates and language-specific policy checks."
-    _ -> pure ()
+  hPutStrLn stderr ("hint: " ++ repositoryCheckPhaseHint checkPhase)
+renderRepositoryCheckPhase :: RepositoryCheckPhase -> String
+renderRepositoryCheckPhase = \case
+  RequiredRootFilesPhase -> "required-root-files"
+  DirectoryStructurePhase -> "directory-structure"
+  FileCompliancePhase -> "file-compliance"
+repositoryCheckPhaseHint :: RepositoryCheckPhase -> String
+repositoryCheckPhaseHint = \case
+  RequiredRootFilesPhase -> "add flake.nix and run 'nix flake update' to create or update flake.lock."
+  DirectoryStructurePhase -> "fix directory and required-file layout under packages/, hosts/, checks/, and repository root."
+  FileCompliancePhase -> "align package files with the expected internal templates and language-specific policy checks."
 type RepositoryPackageChecksSummary :: Type
 data RepositoryPackageChecksSummary = RepositoryPackageChecksSummary
   { repositoryPackageHasCheck :: Bool,
@@ -566,7 +579,13 @@ type RepositoryPackageCoverageSummary :: Type
 data RepositoryPackageCoverageSummary
   = RepositoryCoverageNotRun
   | RepositoryCoverageUnavailable
-  | RepositoryCoverageMeasured String Integer Integer
+  | RepositoryCoverageMeasured CoverageMetric Integer Integer
+  deriving stock (Eq, Show)
+type CoverageMetric :: Type
+data CoverageMetric
+  = ExpressionCoverage
+  | StatementCoverage
+  | LineCoverage
   deriving stock (Eq, Show)
 type RepositoryPackageProfileSummary :: Type
 data RepositoryPackageProfileSummary
@@ -606,9 +625,9 @@ summarizeRepositoryAt :: CanonicalizationSettings -> FilePath -> FilePath -> IO 
 summarizeRepositoryAt canonicalizationSettings repositoryPath repositoryRoot =
   withCurrentDirectory repositoryRoot $
     collectRepositoryComplianceWith canonicalizationSettings >>= \case
-      Left (checkPhaseName, checkPhaseIssues) -> do
+      Left repositoryComplianceFailure -> do
         hPutStrLn stderr ("error: repository: " ++ repositoryPath)
-        reportCheckRepositoryFailures checkPhaseName checkPhaseIssues
+        reportCheckRepositoryFailure repositoryComplianceFailure
         exitFailure
       Right (RepositoryComplianceSuccess packageNames checkNames) -> do
         let repositoryCheckNames = Set.fromList checkNames
@@ -724,7 +743,7 @@ renderRepositoryPackageCoverageAnnotation = \case
   RepositoryCoverageNotRun -> "(not run)"
   RepositoryCoverageUnavailable -> "(unavailable)"
   RepositoryCoverageMeasured metric covered total ->
-    "(" ++ metric ++ " " ++ show covered ++ "/" ++ show total ++ ", " ++ renderCoveragePercent covered total ++ "%)"
+    "(" ++ renderCoverageMetric metric ++ " " ++ show covered ++ "/" ++ show total ++ ", " ++ renderCoveragePercent covered total ++ "%)"
 renderRepositoryPackageCoverageJson :: Maybe RepositoryPackageCoverageSummary -> String
 renderRepositoryPackageCoverageJson = \case
   Nothing -> "{ \"status\": \"not-configured\" }"
@@ -732,7 +751,7 @@ renderRepositoryPackageCoverageJson = \case
   Just RepositoryCoverageUnavailable -> "{ \"status\": \"unavailable\" }"
   Just (RepositoryCoverageMeasured metric covered total) ->
     "{ \"status\": \"measured\", \"metric\": "
-      ++ renderJsonString metric
+      ++ renderJsonString (renderCoverageMetric metric)
       ++ ", \"covered\": "
       ++ show covered
       ++ ", \"total\": "
@@ -740,6 +759,11 @@ renderRepositoryPackageCoverageJson = \case
       ++ ", \"percent\": "
       ++ renderCoveragePercent covered total
       ++ " }"
+renderCoverageMetric :: CoverageMetric -> String
+renderCoverageMetric = \case
+  ExpressionCoverage -> "expressions"
+  StatementCoverage -> "statements"
+  LineCoverage -> "lines"
 renderCoveragePercent :: Integer -> Integer -> String
 renderCoveragePercent covered total =
   showFFloat (Just 1) (100 * fromIntegral covered / fromIntegral total :: Double) ""
@@ -890,10 +914,16 @@ parseRepositoryCoverageSummary :: T.Text -> Maybe RepositoryPackageCoverageSumma
 parseRepositoryCoverageSummary coverageText =
   case T.splitOn "\t" (T.strip coverageText) of
     ["coverage-v1", metricText, coveredText, totalText] -> do
-      let metric = T.unpack metricText
+      metric <-
+        lookup
+          metricText
+          [ ("expressions", ExpressionCoverage),
+            ("statements", StatementCoverage),
+            ("lines", LineCoverage)
+          ]
       covered <- readMaybe (T.unpack coveredText)
       total <- readMaybe (T.unpack totalText)
-      if metric `elem` ["expressions", "statements", "lines"] && covered >= 0 && total > 0 && covered <= total
+      if covered >= 0 && total > 0 && covered <= total
         then Just (RepositoryCoverageMeasured metric covered total)
         else Nothing
     _ -> Nothing
@@ -1002,7 +1032,6 @@ renderPackageKind packageKind =
     TerraformPackage -> "terraform"
     LatexPackage -> "latex"
     BinaryReleasePackage -> "binary-release"
-    UnknownPackage -> "unknown"
 type ScaffoldPackageKind :: Type
 data ScaffoldPackageKind
   = HaskellScaffold
@@ -1035,9 +1064,8 @@ packageKindForScaffold = \case
   LatexScaffold -> LatexPackage
 validatePackageNameForKind :: PackageKind -> FilePath -> Maybe String
 validatePackageNameForKind packageKind packageName =
-  case packageNameConventionForKind packageKind of
-    Just (conventionName, separator) ->
-      if isDelimitedLowercaseName separator packageName
+  let (conventionName, separator) = packageNameConventionForKind packageKind
+   in if isDelimitedLowercaseName separator packageName
         then Nothing
         else
           Just
@@ -1047,21 +1075,19 @@ validatePackageNameForKind packageKind packageName =
                 ++ renderPackageKind packageKind
                 ++ " packages"
             )
-    Nothing -> validateNewName "package" packageName
-packageNameConventionForKind :: PackageKind -> Maybe (String, Char)
+packageNameConventionForKind :: PackageKind -> (String, Char)
 packageNameConventionForKind packageKind =
   case packageKind of
-    HaskellPackage -> Just ("kebab-case", '-')
-    RustPackage -> Just ("kebab-case", '-')
-    BinaryReleasePackage -> Just ("kebab-case", '-')
-    HtmlPackage -> Just ("snake_case", '_')
-    PythonLatexPackage -> Just ("snake_case", '_')
-    PythonPackage -> Just ("snake_case", '_')
-    PythonPyPIPackage -> Just ("snake_case", '_')
-    CPackage -> Just ("snake_case", '_')
-    TerraformPackage -> Just ("snake_case", '_')
-    LatexPackage -> Just ("snake_case", '_')
-    UnknownPackage -> Nothing
+    HaskellPackage -> ("kebab-case", '-')
+    RustPackage -> ("kebab-case", '-')
+    BinaryReleasePackage -> ("kebab-case", '-')
+    HtmlPackage -> ("snake_case", '_')
+    PythonLatexPackage -> ("snake_case", '_')
+    PythonPackage -> ("snake_case", '_')
+    PythonPyPIPackage -> ("snake_case", '_')
+    CPackage -> ("snake_case", '_')
+    TerraformPackage -> ("snake_case", '_')
+    LatexPackage -> ("snake_case", '_')
 isDelimitedLowercaseName :: Char -> String -> Bool
 isDelimitedLowercaseName separator packageName =
   all isValidNamePart (T.split (== separator) (T.pack packageName))
@@ -1070,15 +1096,6 @@ isDelimitedLowercaseName separator packageName =
     isValidNamePart namePart =
       not (T.null namePart)
         && T.all (\character -> isAsciiLower character || isDigit character) namePart
-validateNewName :: String -> FilePath -> Maybe String
-validateNewName nameKind name
-  | null name = Just (nameKind ++ " name must not be empty")
-  | name `elem` [".", ".."] = Just (nameKind ++ " name must not be '.' or '..'")
-  | any Windows.isPathSeparator name = Just (nameKind ++ " name must not contain path separators")
-  | not (all isAllowedNameCharacter name) = Just (nameKind ++ " name must contain only letters, digits, '.', '-', or '_'")
-  | otherwise = Nothing
-  where
-    isAllowedNameCharacter character = isAlphaNum character || character `elem` ("._-" :: String)
 type ScaffoldFile :: Type
 data ScaffoldFile = ScaffoldFile
   { scaffoldFileRelativePath :: FilePath,
@@ -1357,7 +1374,7 @@ checkRepositoryStructure = do
         ]
       packageAllowedPathRegexes =
         concat
-          [ allowedPathRegexesForPackageKind (packageRootPath packageInfo) (packageRootDirectoryName packageInfo) (detectedPackageKind packageInfo)
+          [ allowedPathRegexesForPackageKind (packageRootPath packageInfo) (packageRootDirectoryName packageInfo) (packageKindFromDetection (packageDetection packageInfo))
           | packageInfo <- packageInfos
           ]
       allowedPathRegexes = globalAllowedPathRegexes ++ packageAllowedPathRegexes
@@ -1413,15 +1430,18 @@ data PackageKind
   | TerraformPackage
   | LatexPackage
   | BinaryReleasePackage
-  | UnknownPackage
   deriving stock (Eq, Ord, Show)
 type PackageInfo :: Type
 data PackageInfo = PackageInfo
   { packageRootPath :: FilePath,
     packageRootDirectoryName :: FilePath,
-    detectedPackageKind :: PackageKind,
-    matchedPackageMarkers :: [String]
+    packageDetection :: PackageDetection
   }
+type PackageDetection :: Type
+data PackageDetection
+  = DetectedPackageKind PackageKind
+  | AmbiguousPackageMarkers (NonEmpty String)
+  | UnrecognizedPackageMarkers
 buildPackageInfo :: Set.Set FilePath -> FilePath -> PackageInfo
 buildPackageInfo leafPaths packageRootDirectory =
   let packageDirectoryName = takeBaseName packageRootDirectory
@@ -1430,8 +1450,7 @@ buildPackageInfo leafPaths packageRootDirectory =
    in PackageInfo
         { packageRootPath = packageRootDirectory,
           packageRootDirectoryName = packageDirectoryName,
-          detectedPackageKind = detectPackageKindFromMarkers markers,
-          matchedPackageMarkers = map fst markers
+          packageDetection = detectPackageKindFromMarkers markers
         }
 detectPackageMarkers :: [FilePath] -> [(String, PackageKind)]
 detectPackageMarkers packageRelativeLeafPaths =
@@ -1458,36 +1477,46 @@ detectPackageMarkers packageRelativeLeafPaths =
         | null projectMarkers && not (hasLeafPathWithPrefix "Cargo.toml")
         ]
    in projectMarkers ++ binaryLayoutMarker
-detectPackageKindFromMarkers :: [(String, PackageKind)] -> PackageKind
+detectPackageKindFromMarkers :: [(String, PackageKind)] -> PackageDetection
 detectPackageKindFromMarkers markers =
-  case map snd markers of
-    [markerKind] -> markerKind
-    _ -> UnknownPackage
+  case markers of
+    [] -> UnrecognizedPackageMarkers
+    [(_, markerKind)] -> DetectedPackageKind markerKind
+    firstMarker : remainingMarkers ->
+      AmbiguousPackageMarkers (fst firstMarker :| map fst remainingMarkers)
+packageKindFromDetection :: PackageDetection -> Maybe PackageKind
+packageKindFromDetection = \case
+  DetectedPackageKind packageKind -> Just packageKind
+  AmbiguousPackageMarkers _ -> Nothing
+  UnrecognizedPackageMarkers -> Nothing
 ambiguousPackageMarkerIssuesForPackage :: PackageInfo -> [String]
 ambiguousPackageMarkerIssuesForPackage packageInfo =
-  [ packageRootPath packageInfo
-      ++ ": has ambiguous project markers: "
-      ++ intercalate ", " (matchedPackageMarkers packageInfo)
-  | length (matchedPackageMarkers packageInfo) > 1
-  ]
-allowedPathRegexesForPackageKind :: FilePath -> FilePath -> PackageKind -> [String]
-allowedPathRegexesForPackageKind packageRootDirectory packageDirectoryName packageKind =
+  case packageDetection packageInfo of
+    AmbiguousPackageMarkers matchedPackageMarkers ->
+      [ packageRootPath packageInfo
+          ++ ": has ambiguous project markers: "
+          ++ intercalate ", " (NE.toList matchedPackageMarkers)
+      ]
+    DetectedPackageKind _ -> []
+    UnrecognizedPackageMarkers -> []
+allowedPathRegexesForPackageKind :: FilePath -> FilePath -> Maybe PackageKind -> [String]
+allowedPathRegexesForPackageKind packageRootDirectory packageDirectoryName maybePackageKind =
   let escapedPackageRootDirectory = escapeRegexLiteral packageRootDirectory
       escapedPackageDirectoryName = escapeRegexLiteral packageDirectoryName
       basePackagePathRegexes = ["^" ++ escapedPackageRootDirectory ++ "/default\\.nix$", "^" ++ escapedPackageRootDirectory ++ "/\\.gitignore$"]
       withBasePackagePathRegexes additionalPathRegexes = basePackagePathRegexes ++ additionalPathRegexes
-   in case packageKind of
-        HaskellPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/Main\\.hs$", "^" ++ escapedPackageRootDirectory ++ "/" ++ escapedPackageDirectoryName ++ "\\.cabal$"]
-        RustPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/Cargo\\.toml$", "^" ++ escapedPackageRootDirectory ++ "/Cargo\\.lock$", "^" ++ escapedPackageRootDirectory ++ "/src/main\\.rs$"]
-        HtmlPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/index\\.html$", "^" ++ escapedPackageRootDirectory ++ "/script\\.js$", "^" ++ escapedPackageRootDirectory ++ "/style\\.css$"]
-        PythonLatexPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/main\\.py$", "^" ++ escapedPackageRootDirectory ++ "/ms\\.tex$", "^" ++ escapedPackageRootDirectory ++ "/ms\\.bib$", "^" ++ escapedPackageRootDirectory ++ "/refs\\.bib$", "^" ++ escapedPackageRootDirectory ++ "/figures(/.*)?$"]
-        PythonPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/main\\.py$"]
-        PythonPyPIPackage -> basePackagePathRegexes
-        CPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/main\\.c$"]
-        TerraformPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/main\\.tf$", "^" ++ escapedPackageRootDirectory ++ "/\\.terraform(/.*)?$", "^" ++ escapedPackageRootDirectory ++ "/\\.terraform\\.lock\\.hcl$"]
-        LatexPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/ms\\.tex$", "^" ++ escapedPackageRootDirectory ++ "/ms\\.bib$"]
-        BinaryReleasePackage -> basePackagePathRegexes
-        UnknownPackage -> basePackagePathRegexes
+   in case maybePackageKind of
+        Just HaskellPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/Main\\.hs$", "^" ++ escapedPackageRootDirectory ++ "/" ++ escapedPackageDirectoryName ++ "\\.cabal$"]
+        Just RustPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/Cargo\\.toml$", "^" ++ escapedPackageRootDirectory ++ "/Cargo\\.lock$", "^" ++ escapedPackageRootDirectory ++ "/src/main\\.rs$"]
+        Just HtmlPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/index\\.html$", "^" ++ escapedPackageRootDirectory ++ "/script\\.js$", "^" ++ escapedPackageRootDirectory ++ "/style\\.css$"]
+        Just PythonLatexPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/main\\.py$", "^" ++ escapedPackageRootDirectory ++ "/ms\\.tex$", "^" ++ escapedPackageRootDirectory ++ "/ms\\.bib$", "^" ++ escapedPackageRootDirectory ++ "/refs\\.bib$", "^" ++ escapedPackageRootDirectory ++ "/figures(/.*)?$"]
+        Just PythonPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/main\\.py$"]
+        Just PythonPyPIPackage -> basePackagePathRegexes
+        Just CPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/main\\.c$"]
+        Just TerraformPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/main\\.tf$", "^" ++ escapedPackageRootDirectory ++ "/\\.terraform(/.*)?$", "^" ++ escapedPackageRootDirectory ++ "/\\.terraform\\.lock\\.hcl$"]
+        Just LatexPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/ms\\.tex$", "^" ++ escapedPackageRootDirectory ++ "/ms\\.bib$"]
+        Just BinaryReleasePackage -> basePackagePathRegexes
+        Nothing -> basePackagePathRegexes
 escapeRegexLiteral :: String -> String
 escapeRegexLiteral = concatMap escapeCharacter
   where
@@ -2606,7 +2635,7 @@ repositoryCoverageParsingTest = do
     (localGitFlakeReference "/tmp/example-repository")
   assertEqual
     "A valid coverage artifact preserves its labeled numerator and denominator."
-    (Just (RepositoryCoverageMeasured "lines" 91 100))
+    (Just (RepositoryCoverageMeasured LineCoverage 91 100))
     (parseRepositoryCoverageSummary "coverage-v1\tlines\t91\t100\n")
   forM_
     [ "coverage-v2\tlines\t91\t100",
@@ -2676,7 +2705,7 @@ repositorySummaryRenderingTest = do
             repositoryPackageChecks =
               RepositoryPackageChecksSummary
                 { repositoryPackageHasCheck = False,
-                  repositoryPackageCoverage = Just (RepositoryCoverageMeasured "statements" 19 20),
+                  repositoryPackageCoverage = Just (RepositoryCoverageMeasured StatementCoverage 19 20),
                   repositoryPackageProfile = Just (RepositoryProfileMeasured 1.234 (Map.fromList [("Reports \"quoted\" behavior.", 0.125)])),
                   repositoryPackageHasPropertyTestingCheck = False,
                   repositoryPackageHasMutationTestingCheck = False
