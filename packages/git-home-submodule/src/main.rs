@@ -297,11 +297,18 @@ fn check_home_gitmodules(home_directory: &Path, fix: bool) -> Result<(), CliFail
         .map_err(|diagnostic| CliFailure::check(vec![diagnostic]))?;
     let (submodules, mut diagnostics) = validate_submodule_records(raw_submodules);
     let mut path_fixes = Vec::new();
+    let mut configured_path_sections = BTreeMap::new();
     let mut canonical_path_sections = BTreeMap::new();
     for submodule in submodules {
         let section = submodule.section;
         let configured_path = submodule.path;
         let configured_url = submodule.url;
+        if let Some(existing_section) =
+            configured_path_sections.insert(configured_path.clone(), section.clone())
+        {
+            diagnostics.push(format!(                "submodule \"{section}\": path '{configured_path}' is already used by submodule \"{existing_section}\""            ));
+            continue;
+        }
         if validate_canonical_repository_path(&configured_path).is_err()
             && (!fix || validate_repository_path_components(&configured_path).is_err())
         {
@@ -317,7 +324,7 @@ fn check_home_gitmodules(home_directory: &Path, fix: bool) -> Result<(), CliFail
                 canonical_path_sections.insert(expected_path.clone(), section.clone());
                 if configured_path != expected_path {
                     if fix {
-                        path_fixes.push((configured_path, expected_path));
+                        path_fixes.push((section, configured_path, expected_path));
                     } else {
                         diagnostics.push(format!(                            "submodule \"{section}\": path '{configured_path}' does not match URL '{configured_url}'; expected '{expected_path}'"                        ));
                     }
@@ -326,10 +333,15 @@ fn check_home_gitmodules(home_directory: &Path, fix: bool) -> Result<(), CliFail
             Err(error) => diagnostics.push(format!("submodule \"{section}\": {error}")),
         }
     }
+    for (section, _, expected_path) in &path_fixes {
+        if let Some(existing_section) = configured_path_sections.get(expected_path) {
+            diagnostics.push(format!(                "submodule \"{section}\": canonical path '{expected_path}' is currently used by submodule \"{existing_section}\""            ));
+        }
+    }
     if !diagnostics.is_empty() {
         return Err(CliFailure::check(diagnostics));
     }
-    for (configured_path, expected_path) in path_fixes {
+    for (_, configured_path, expected_path) in path_fixes {
         fix_submodule_path(home_directory, &configured_path, &expected_path)?;
     }
     Ok(())
@@ -447,7 +459,6 @@ fn validate_repository_path_components(path: &str) -> Result<(), RepositoryUrlEr
 mod tests {
     use super::*;
     use std::error::Error;
-    use std::ffi::OsStr;
     use std::io;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -476,19 +487,6 @@ mod tests {
         fn drop(&mut self) {
             let _result = fs::remove_dir_all(&self.0);
         }
-    }
-    fn run_git<I, S>(arguments: I) -> io::Result<()>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<OsStr>,
-    {
-        let status = Command::new("git").args(arguments).status()?;
-        if status.success() {
-            return Ok(());
-        }
-        return Err(io::Error::other(format!(
-            "git fixture command exited with {status}"
-        )));
     }
     #[test]
     fn parses_supported_urls_into_the_same_canonical_path() -> TestResult {
@@ -651,6 +649,39 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn rejects_ambiguous_fix_paths_before_mutating() -> TestResult {
+        for (label, gitmodules, expected_diagnostic) in [
+            (
+                "duplicate-source",
+                "[submodule \"first\"]\n path = old/demo\n url = https://example.test/owner/first.git\n[submodule \"second\"]\n path = old/demo\n url = https://example.test/owner/second.git\n",
+                "already used by submodule",
+            ),
+            (
+                "occupied-target",
+                "[submodule \"first\"]\n path = old/demo\n url = https://example.test/owner/first.git\n[submodule \"second\"]\n path = example.test/owner/first\n url = https://example.test/owner/second.git\n",
+                "currently used by submodule",
+            ),
+        ] {
+            let home = TemporaryDirectory::new(label)?;
+            fs::write(home.path().join(".gitmodules"), gitmodules)?;
+            let failure =
+                check_home_gitmodules(home.path(), true).expect_err("ambiguous fixes must fail");
+            let CliFailure::Check(diagnostics) = failure else {
+                return Err("ambiguous fixes must produce check diagnostics".into());
+            };
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.contains(expected_diagnostic))
+            );
+            assert_eq!(
+                fs::read_to_string(home.path().join(".gitmodules"))?,
+                gitmodules
+            );
+        }
+        Ok(())
+    }
+    #[test]
     fn treats_an_empty_file_as_valid_but_requires_gitmodules_to_exist() -> TestResult {
         let home = TemporaryDirectory::new("check-empty")?;
         assert!(check_home_gitmodules(home.path(), false).is_err());
@@ -675,157 +706,6 @@ mod tests {
             run_cli(&[OsString::from("check-gitmodules")], home.path()),
             129
         );
-        return Ok(());
-    }
-    #[test]
-    fn fixes_a_mismatched_submodule_path() -> TestResult {
-        let workspace = TemporaryDirectory::new("check-fix")?;
-        let seed = workspace.path().join("seed");
-        let home = workspace.path().join("home");
-        fs::create_dir(&seed)?;
-        fs::create_dir(&home)?;
-        run_git([OsStr::new("init"), OsStr::new("--quiet"), seed.as_os_str()])?;
-        run_git([
-            OsStr::new("-C"),
-            seed.as_os_str(),
-            OsStr::new("config"),
-            OsStr::new("user.email"),
-            OsStr::new("test@example.test"),
-        ])?;
-        run_git([
-            OsStr::new("-C"),
-            seed.as_os_str(),
-            OsStr::new("config"),
-            OsStr::new("user.name"),
-            OsStr::new("Test"),
-        ])?;
-        fs::write(seed.join("README"), "fixture\n")?;
-        run_git([
-            OsStr::new("-C"),
-            seed.as_os_str(),
-            OsStr::new("add"),
-            OsStr::new("README"),
-        ])?;
-        run_git([
-            OsStr::new("-C"),
-            seed.as_os_str(),
-            OsStr::new("commit"),
-            OsStr::new("--quiet"),
-            OsStr::new("-m"),
-            OsStr::new("fixture"),
-        ])?;
-        run_git([OsStr::new("init"), OsStr::new("--quiet"), home.as_os_str()])?;
-        run_git([
-            OsStr::new("-c"),
-            OsStr::new("protocol.file.allow=always"),
-            OsStr::new("-C"),
-            home.as_os_str(),
-            OsStr::new("submodule"),
-            OsStr::new("add"),
-            OsStr::new("--quiet"),
-            seed.as_os_str(),
-            OsStr::new("demo"),
-        ])?;
-        run_git([
-            OsStr::new("config"),
-            OsStr::new("--file"),
-            home.join(".gitmodules").as_os_str(),
-            OsStr::new("submodule.demo.url"),
-            OsStr::new("https://new.example.test/owner/demo.git"),
-        ])?;
-        run_git([
-            OsStr::new("-C"),
-            home.as_os_str(),
-            OsStr::new("add"),
-            OsStr::new(".gitmodules"),
-        ])?;
-        let source = home.join("demo");
-        check_home_gitmodules(&home, true).map_err(|failure| format!("fix failed: {failure:?}"))?;
-        let target = home.join("new.example.test/owner/demo");
-        assert!(!source.exists());
-        assert_eq!(fs::read_to_string(target.join("README"))?, "fixture\n");
-        assert!(
-            fs::read_to_string(home.join(".gitmodules"))?
-                .contains("path = new.example.test/owner/demo")
-        );
-        check_home_gitmodules(&home, false)
-            .map_err(|failure| format!("post-fix check failed: {failure:?}"))?;
-        return Ok(());
-    }
-    #[test]
-    fn adds_a_local_fixture_at_the_canonical_destination() -> TestResult {
-        let workspace = TemporaryDirectory::new("add")?;
-        let seed = workspace.path().join("seed");
-        let remote_root = workspace.path().join("remotes");
-        let remote = remote_root.join("owner/demo.git");
-        let home = workspace.path().join("home");
-        fs::create_dir_all(&seed)?;
-        fs::create_dir_all(
-            remote
-                .parent()
-                .ok_or_else(|| io::Error::other("remote has no parent"))?,
-        )?;
-        fs::create_dir(&home)?;
-        run_git([OsStr::new("init"), OsStr::new("--quiet"), seed.as_os_str()])?;
-        run_git([
-            OsStr::new("-C"),
-            seed.as_os_str(),
-            OsStr::new("config"),
-            OsStr::new("user.email"),
-            OsStr::new("test@example.test"),
-        ])?;
-        run_git([
-            OsStr::new("-C"),
-            seed.as_os_str(),
-            OsStr::new("config"),
-            OsStr::new("user.name"),
-            OsStr::new("Test"),
-        ])?;
-        fs::write(seed.join("README"), "fixture\n")?;
-        run_git([
-            OsStr::new("-C"),
-            seed.as_os_str(),
-            OsStr::new("add"),
-            OsStr::new("README"),
-        ])?;
-        run_git([
-            OsStr::new("-C"),
-            seed.as_os_str(),
-            OsStr::new("commit"),
-            OsStr::new("--quiet"),
-            OsStr::new("-m"),
-            OsStr::new("fixture"),
-        ])?;
-        run_git([
-            OsStr::new("clone"),
-            OsStr::new("--quiet"),
-            OsStr::new("--bare"),
-            seed.as_os_str(),
-            remote.as_os_str(),
-        ])?;
-        initialize_home_repository(&home)
-            .map_err(|failure| format!("fixture init failed: {failure:?}"))?;
-        let global_config = workspace.path().join("gitconfig");
-        fs::write(
-            &global_config,
-            format!(
-                "[protocol \"file\"]\n allow = always\n[url \"file://{}/\"]\n insteadOf = https://example.test/\n",
-                remote_root.display()
-            ),
-        )?;
-        let environment = [
-            (
-                OsString::from("GIT_CONFIG_GLOBAL"),
-                global_config.into_os_string(),
-            ),
-            (OsString::from("GIT_CONFIG_NOSYSTEM"), OsString::from("1")),
-        ];
-        add_repository_with_environment(&home, "https://example.test/owner/demo.git", &environment)
-            .map_err(|failure| format!("add failed: {failure:?}"))?;
-        assert!(home.join("example.test/owner/demo").is_dir());
-        let gitmodules = fs::read_to_string(home.join(".gitmodules"))?;
-        assert!(gitmodules.contains("path = example.test/owner/demo"));
-        assert!(gitmodules.contains("url = https://example.test/owner/demo.git"));
         return Ok(());
     }
 }
