@@ -41,7 +41,7 @@ import Nix.Utils (Path (Path))
 import Numeric (showFFloat)
 import Prettyprinter (defaultLayoutOptions, layoutPretty)
 import Prettyprinter.Render.Text (renderStrict)
-import System.Directory (canonicalizePath, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, doesPathExist, findExecutable, getCurrentDirectory, getTemporaryDirectory, listDirectory, removeFile, removePathForcibly, withCurrentDirectory)
+import System.Directory (canonicalizePath, createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, doesPathExist, findExecutable, getCurrentDirectory, getTemporaryDirectory, listDirectory, pathIsSymbolicLink, removeFile, removePathForcibly, withCurrentDirectory)
 import System.Environment (getArgs)
 import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitFailure, exitSuccess, exitWith)
 import System.FilePath ((<.>), (</>))
@@ -1216,7 +1216,7 @@ renderScaffoldHaskellCabal packageName packageDescription =
     ]
 checkRepositoryStructure :: IO [String]
 checkRepositoryStructure = do
-  repositoryPaths <- collectRepositoryPaths "."
+  (repositoryPaths, symbolicLinkPaths) <- collectRepositoryPaths "."
   let relativePaths = sort [path | path <- repositoryPaths, path /= "."]
       leafPaths = Set.fromList (filter (isLeafPath relativePaths) relativePaths)
       packageRootPaths = Set.fromList (mapMaybe packageRootPathFromRepositoryPath relativePaths)
@@ -1282,13 +1282,17 @@ checkRepositoryStructure = do
         | path <- Set.toList leafPaths,
           not (any (path =~) allowedPathRegexes)
         ]
+      symbolicLinkIssues =
+        [ path ++ ": symbolic links are not allowed"
+        | path <- symbolicLinkPaths
+        ]
   packageNameConventionIssues <-
     fmap catMaybes $
       forM (Set.toList packageRootPaths) $ \packageRootDirectory -> do
         let packageName = takeBaseName packageRootDirectory
         packageKind <- detectPackageKindForPackage packageName
         pure (((packageRootDirectory ++ ": ") ++) <$> validatePackageNameForKind packageKind packageName)
-  pure (missingPackageDefaultNixIssues ++ missingHostConfigurationIssues ++ missingCabalForMainHaskellIssues ++ misnamedCabalFileIssues ++ packageNameConventionIssues ++ ambiguousPackageMarkerIssues ++ disallowedPathIssues)
+  pure (symbolicLinkIssues ++ missingPackageDefaultNixIssues ++ missingHostConfigurationIssues ++ missingCabalForMainHaskellIssues ++ misnamedCabalFileIssues ++ packageNameConventionIssues ++ ambiguousPackageMarkerIssues ++ disallowedPathIssues)
 type PackageKind :: Type
 data PackageKind
   = HaskellPackage
@@ -1394,19 +1398,25 @@ escapeRegexLiteral = concatMap escapeCharacter
     escapeCharacter character
       | character `elem` ("\\.^$|?*+()[]{}" :: String) = ['\\', character]
       | otherwise = [character]
-collectRepositoryPaths :: FilePath -> IO [FilePath]
+collectRepositoryPaths :: FilePath -> IO ([FilePath], [FilePath])
 collectRepositoryPaths rootPath = do
   childNames <- listDirectory rootPath
   let childPaths = sort [rootPath </> childName | childName <- childNames]
-  descendantPaths <- fmap concat $
+  descendantResults <-
     forM childPaths $ \childPath -> do
-      isDirectory <- doesDirectoryExist childPath
       let relativeChildPath = toRelativePath childPath
-      case (isDirectory, shouldTraverseDirectory relativeChildPath) of
-        (True, True) -> collectRepositoryPaths childPath
-        (True, False) -> pure []
-        (False, _) -> pure [relativeChildPath]
-  pure (toRelativePath rootPath : descendantPaths)
+      isSymbolicLink <- pathIsSymbolicLink childPath
+      if isSymbolicLink
+        then pure ([relativeChildPath], [relativeChildPath])
+        else do
+          isDirectory <- doesDirectoryExist childPath
+          case (isDirectory, shouldTraverseDirectory relativeChildPath) of
+            (True, True) -> collectRepositoryPaths childPath
+            (True, False) -> pure ([], [])
+            (False, _) -> pure ([relativeChildPath], [])
+  let descendantPaths = concatMap fst descendantResults
+      symbolicLinkPaths = concatMap snd descendantResults
+  pure (toRelativePath rootPath : descendantPaths, symbolicLinkPaths)
 toRelativePath :: FilePath -> FilePath
 toRelativePath = makeRelative "."
 shouldTraverseDirectory :: FilePath -> Bool
@@ -1434,7 +1444,14 @@ listSubdirectoryNames parentDirectory = do
     then pure []
     else do
       childNames <- listDirectory parentDirectory
-      sort <$> filterM (doesDirectoryExist . (parentDirectory </>)) childNames
+      sort
+        <$> filterM
+          ( \childName -> do
+              let childPath = parentDirectory </> childName
+              isSymbolicLink <- pathIsSymbolicLink childPath
+              if isSymbolicLink then pure False else doesDirectoryExist childPath
+          )
+          childNames
 checkPackage :: FilePath -> IO [String]
 checkPackage packageName = do
   let packageDefaultNixPath = "packages" </> packageName </> "default.nix"
@@ -1557,8 +1574,15 @@ detectPackageKindForPackage packageName = do
   pure packageKind
 readTextFileIfExists :: FilePath -> IO (Maybe T.Text)
 readTextFileIfExists filePath = do
-  fileExists <- doesFileExist filePath
-  if fileExists then Just <$> TIO.readFile filePath else pure Nothing
+  pathExists <- doesPathExist filePath
+  if not pathExists
+    then pure Nothing
+    else do
+      isSymbolicLink <- pathIsSymbolicLink filePath
+      fileExists <- doesFileExist filePath
+      if isSymbolicLink || not fileExists
+        then pure Nothing
+        else Just <$> TIO.readFile filePath
 checkDefaultNixConventions :: FilePath -> PackageKind -> IO [String]
 checkDefaultNixConventions packageName packageKind = do
   let packageDefaultNixPath = "packages" </> packageName </> "default.nix"
@@ -2395,6 +2419,7 @@ hUnitPackageTests =
       TestLabel "Humanizes conventional test identifiers across frameworks." (TestCase testIdentifierSpecificationTest),
       TestLabel "Parses versioned coverage summaries strictly." (TestCase repositoryCoverageParsingTest),
       TestLabel "Ignores formatter-only Cargo inline-table spacing." (TestCase cargoTomlFormattingNormalizationTest),
+      TestLabel "Rejects symbolic links without following them." (TestCase symbolicLinkStructureTest),
       TestLabel "Renders stable text and JSON repository summaries." (TestCase repositorySummaryRenderingTest),
       TestLabel "Reports concise Nix template parameter differences." (TestCase nixTemplateParameterDifferenceTest),
       TestLabel "Accepts python_template without inputs or shellHook." (TestCase pythonTemplateOptionalInputsAndShellHookTest),
@@ -2486,6 +2511,15 @@ cargoTomlFormattingNormalizationTest =
     "Taplo's inline-table spacing does not change Cargo policy compliance."
     (normalizeCargoTomlForBaselineComparison "remove-empty-lines" rustCargoTomlBaseline)
     (normalizeCargoTomlForBaselineComparison "remove-empty-lines" removeEmptyLinesCargoTomlFixture)
+symbolicLinkStructureTest :: IO ()
+symbolicLinkStructureTest =
+  withTemporaryPackageRepository "symbolic-link-structure" $ \temporaryRepository -> do
+    writeFile (temporaryRepository </> "README") ""
+    createFileLink "README" (temporaryRepository </> "LICENSE")
+    issues <- withCurrentDirectory temporaryRepository checkRepositoryStructure
+    assertBool
+      "symbolic-link diagnostic"
+      ("LICENSE: symbolic links are not allowed" `elem` issues)
 repositoryCoverageParsingTest :: IO ()
 repositoryCoverageParsingTest = do
   assertEqual
