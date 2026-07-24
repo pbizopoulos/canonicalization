@@ -25,6 +25,7 @@ pkgs.rustPlatform.buildRustPackage rec {
   ];
   passthru.rustCheckNativeBuildInputs = [
     pkgs.cargo
+    pkgs.git
     pkgs.rustc
     pkgs.stdenv.cc
   ];

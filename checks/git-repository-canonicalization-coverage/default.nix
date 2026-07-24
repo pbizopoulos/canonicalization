@@ -15,6 +15,7 @@ pkgs.runCommand checkName
     nativeBuildInputs = [
       packageDrv
       pkgs.git
+      pkgs.time
       testGhc
     ];
     src = ../.. + "/packages/${packageName}";
@@ -22,18 +23,37 @@ pkgs.runCommand checkName
   ''
     export HOME="$PWD"
     workspace="$PWD/workspace"
+    packageName="${packageName}"
     mkdir -p "$out/html" "$workspace/coverage" "$workspace/hpc"
     cd "$workspace"
-    cat > TestMain.hs <<EOF
+    cat > "$workspace/TestMain.hs" <<EOF
     module TestMain (main) where
     import qualified Main as PackageMain
+    import System.Environment (getEnv)
     main :: IO ()
-    main = PackageMain.runPackageTests
+    main = getEnv "PROFILE_TIMINGS_PATH" >>= PackageMain.runPackageTestsWithTimings
     EOF
-    ghc -fhpc -hpcdir "$workspace/hpc" -main-is TestMain.main \
-      -i"$src" -outputdir "$workspace" -odir "$workspace" -hidir "$workspace" \
-      -o "${packageName}" TestMain.hs "$src/Main.hs"
-    HPCTIXFILE="$workspace/coverage/${packageName}.tix" "./${packageName}"
+    "${testGhc}/bin/ghc" \
+      -fhpc \
+      -hpcdir "$workspace/hpc" \
+      -prof \
+      -fprof-auto \
+      -rtsopts \
+      -O2 \
+      -main-is TestMain.main \
+      -i"$src" \
+      -outputdir "$workspace" \
+      -odir "$workspace" \
+      -hidir "$workspace" \
+      -o "$workspace/$packageName" \
+      "$workspace/TestMain.hs" \
+      "$src/Main.hs"
+    PROFILE_TIMINGS_PATH="$out/test-timings.tsv" HPCTIXFILE="$workspace/coverage/$packageName.tix" \
+      ${pkgs.time}/bin/time -f %e -o "$out/total-seconds" \
+      "$workspace/$packageName" +RTS -p -RTS
+    mv "$workspace/$packageName.prof" "$out/profile-report.prof"
+    printf 'profile-v1\ttotal-seconds\t%s\n' "$(cat "$out/total-seconds")" > "$out/profile-summary.tsv"
+    cat "$out/test-timings.tsv" >> "$out/profile-summary.tsv"
     hpc markup "$workspace/coverage/${packageName}.tix" --hpcdir="$workspace/hpc" --destdir="$out/html"
     hpc report "$workspace/coverage/${packageName}.tix" --hpcdir="$workspace/hpc" | tee "$out/report.txt"
     coverageCounts="$(sed -n 's/.*expressions used (\([0-9][0-9]*\)\/\([0-9][0-9]*\)).*/\1 \2/p' "$out/report.txt")"

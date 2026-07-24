@@ -6,18 +6,16 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneKindSignatures #-}
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE TupleSections #-}
 {-# OPTIONS_GHC -Wno-missing-import-lists -Wno-unsafe #-}
 module Main (main, runPackageTests, runPackageTestsWithTimings) where
 import Control.Applicative ((<|>))
 import Control.Exception (IOException, finally, try)
-import Control.Monad (filterM, forM, forM_, when)
+import Control.Monad (filterM, forM, forM_, guard, when)
 import Data.Char (isAlphaNum, isAsciiLower, isDigit, isLower, isSpace, isUpper, toLower, toUpper)
-import Data.Either (partitionEithers)
 import Data.Fix (Fix (Fix))
 import Data.Functor.Compose (Compose (Compose))
 import Data.Kind (Type)
-import Data.List (find, intercalate, isInfixOf, isPrefixOf, isSuffixOf, mapAccumL, maximumBy, partition, sort, sortOn, stripPrefix)
+import Data.List (find, intercalate, isInfixOf, isPrefixOf, isSuffixOf, mapAccumL, maximumBy, sort, sortOn, stripPrefix)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
@@ -67,6 +65,7 @@ defaultAllowedNixDifferenceKeys =
       "nativeCheckInputs",
       "nativeInstallCheckInputs",
       "postInstall",
+      "passthru.rustCheckNativeBuildInputs",
       "meta",
       "meta.description",
       "propagatedBuildInputs",
@@ -226,12 +225,6 @@ checkTemplateSpecs =
         checkTemplateComparisonMode = ExactCheckTemplate
       },
     CheckTemplateSpec
-      { checkTemplateName = "haskell_profile_check",
-        checkTemplateMatches = matchesHaskellProfileCheck,
-        checkTemplateBaselineSource = haskellProfileCheckBaselineNixSource,
-        checkTemplateComparisonMode = ExactCheckTemplate
-      },
-    CheckTemplateSpec
       { checkTemplateName = "python_coverage_check",
         checkTemplateMatches = matchesPythonCoverageCheck,
         checkTemplateBaselineSource = pythonCoverageCheckBaselineNixSource,
@@ -241,12 +234,6 @@ checkTemplateSpecs =
       { checkTemplateName = "rust_coverage_check",
         checkTemplateMatches = matchesRustCoverageCheck,
         checkTemplateBaselineSource = rustCoverageCheckBaselineNixSource,
-        checkTemplateComparisonMode = ExactCheckTemplate
-      },
-    CheckTemplateSpec
-      { checkTemplateName = "rust_profile_check",
-        checkTemplateMatches = matchesRustProfileCheck,
-        checkTemplateBaselineSource = rustProfileCheckBaselineNixSource,
         checkTemplateComparisonMode = ExactCheckTemplate
       },
     CheckTemplateSpec
@@ -270,14 +257,10 @@ checkTemplateSpecs =
   ]
 matchesHaskellCoverageCheck :: FilePath -> String -> IO Bool
 matchesHaskellCoverageCheck = matchesCheckNameSuffixAndSourceContains "-coverage" ["ghcWithPackages", "-fhpc"]
-matchesHaskellProfileCheck :: FilePath -> String -> IO Bool
-matchesHaskellProfileCheck = matchesCheckNameSuffixAndSourceContains "-profile" ["ghcWithPackages", "-fprof-auto"]
 matchesPythonCoverageCheck :: FilePath -> String -> IO Bool
 matchesPythonCoverageCheck = matchesCheckNameSuffixAndSourceContains "_coverage" ["--cov=\"$src\""]
 matchesRustCoverageCheck :: FilePath -> String -> IO Bool
 matchesRustCoverageCheck = matchesCheckNameSuffixAndSourceContains "-coverage" ["cargo llvm-cov"]
-matchesRustProfileCheck :: FilePath -> String -> IO Bool
-matchesRustProfileCheck = matchesCheckNameSuffixAndSourceContains "-profile" ["pkgs.perf", "perf record"]
 matchesCPackageVmCheck :: FilePath -> String -> IO Bool
 matchesCPackageVmCheck checkName nixSource = do
   packageKind <- detectPackageKindForPackage checkName
@@ -290,11 +273,6 @@ isCPackageVmCheckShape packageKind nixSource =
     && "pkgs.testers.runNixOSTest" `isInfixOf` nixSource
     && "nodes.machine" `isInfixOf` nixSource
     && "testScript = ''" `isInfixOf` nixSource
-type RepositoryCheckKind :: Type
-data RepositoryCheckKind
-  = RepositoryCoverageCheck
-  | RepositoryProfileCheck
-  deriving stock (Eq, Ord, Show)
 type CanonicalizationSettings :: Type
 newtype CanonicalizationSettings = CanonicalizationSettings
   { canonicalizationPythonPackageAttribute :: String
@@ -308,8 +286,8 @@ type Command :: Type
 data Command
   = CheckCommand
   | SummaryCommand Bool
-  | AddCommand String FilePath (Maybe String) (Set.Set RepositoryCheckKind)
-  | AddChecksCommand FilePath (Set.Set RepositoryCheckKind)
+  | AddCommand String FilePath (Maybe String)
+  | AddChecksCommand FilePath
 type CommandParseResult :: Type
 data CommandParseResult
   = ParsedCommand Command
@@ -329,7 +307,7 @@ runCli canonicalizationSettings commandLineArgs =
         canonicalizationSettings
         (if jsonOutput then renderRepositorySummariesJson else renderRepositorySummariesText)
         "."
-    ParsedCommand (AddCommand packageKindName packageName packageDescription requestedCheckKinds) ->
+    ParsedCommand (AddCommand packageKindName packageName packageDescription) ->
       runInGitRepositoryRoot "." $
         case parseSupportedAddPackageKind packageKindName of
           Nothing -> do
@@ -337,11 +315,11 @@ runCli canonicalizationSettings commandLineArgs =
             hPutStrLn stderr ("hint: supported package types: " ++ intercalate ", " (map fst supportedAddPackageKinds))
             exitFailure
           Just scaffoldPackageKind -> do
-            addResult <- addPackageToCurrentRepositoryWith canonicalizationSettings scaffoldPackageKind packageName packageDescription requestedCheckKinds
+            addResult <- addPackageToCurrentRepositoryWith canonicalizationSettings scaffoldPackageKind packageName packageDescription
             stageGeneratedPathsOrExit addResult
-    ParsedCommand (AddChecksCommand packageName requestedCheckKinds) ->
+    ParsedCommand (AddChecksCommand packageName) ->
       runInGitRepositoryRoot "." $ do
-        addResult <- addChecksToExistingPackage Nothing packageName Nothing requestedCheckKinds
+        addResult <- addChecksToExistingPackage Nothing packageName Nothing
         stageGeneratedPathsOrExit addResult
 stageGeneratedPathsOrExit :: Either String [FilePath] -> IO a
 stageGeneratedPathsOrExit = \case
@@ -361,12 +339,12 @@ parseCommand commandLineArgs =
     ["summary", "--json"] -> ParsedCommand (SummaryCommand True)
     _ ->
       case parseAddChecksArgs commandLineArgs of
-        Just (packageName, requestedCheckKinds) ->
-          ParsedCommand (AddChecksCommand packageName requestedCheckKinds)
+        Just packageName ->
+          ParsedCommand (AddChecksCommand packageName)
         Nothing ->
           case parseAddPackageArgs commandLineArgs of
-            Just (packageKindName, packageName, packageDescription, requestedCheckKinds) ->
-              ParsedCommand (AddCommand packageKindName packageName packageDescription requestedCheckKinds)
+            Just (packageKindName, packageName, packageDescription) ->
+              ParsedCommand (AddCommand packageKindName packageName packageDescription)
             Nothing -> InvalidCommand usageExitCode (listToMaybe commandLineArgs)
 printMainHelpAndExit :: IO a
 printMainHelpAndExit = do
@@ -377,8 +355,8 @@ usageExitCode = ExitFailure 129
 mainUsageText :: String
 mainUsageText =
   unlines
-    [ "usage: git repository-canonicalization add [<options>] <package-type> <package-name> [<description>...]",
-      "   or: git repository-canonicalization add [<options>] <existing-package-name>",
+    [ "usage: git repository-canonicalization add <package-type> <package-name> [<description>...]",
+      "   or: git repository-canonicalization add <existing-package-name>",
       "   or: git repository-canonicalization check",
       "   or: git repository-canonicalization summary [--json]"
     ]
@@ -391,8 +369,8 @@ mainHelpText =
       "    git-repository-canonicalization - Check, summarize, and scaffold canonical repositories",
       "",
       "SYNOPSIS",
-      "    git repository-canonicalization add [<options>] <package-type> <package-name> [<description>...]",
-      "    git repository-canonicalization add [<options>] <existing-package-name>",
+      "    git repository-canonicalization add <package-type> <package-name> [<description>...]",
+      "    git repository-canonicalization add <existing-package-name>",
       "    git repository-canonicalization check",
       "    git repository-canonicalization summary [--json]",
       "",
@@ -401,14 +379,11 @@ mainHelpText =
       "    packages and checks. Use 'git -C <location>' to select a repository.",
       "",
       "COMMANDS",
-      "    add [<options>] <package-type> <package-name> [<description>...]",
-      "    add [<options>] <existing-package-name>",
-      "        Add a package and its requested checks, or infer the type of an",
-      "        existing package and add requested checks to it. Generated files",
+      "    add <package-type> <package-name> [<description>...]",
+      "    add <existing-package-name>",
+      "        Add a package and its combined coverage/profiling check, or infer",
+      "        the type of an existing package and add its check. Generated files",
       "        are staged with git add.",
-      "",
-      "        --coverage            add a coverage check",
-      "        --profile             add a profiling check",
       "",
       "    check",
       "        Check that the repository follows the canonical package and check",
@@ -424,15 +399,12 @@ usageTextForCommand :: Maybe String -> String
 usageTextForCommand = \case
   Just "add" ->
     unlines
-      [ "usage: git repository-canonicalization add [<options>] <package-type> <package-name> [<description>...]",
-        "   or: git repository-canonicalization add [<options>] <existing-package-name>",
+      [ "usage: git repository-canonicalization add <package-type> <package-name> [<description>...]",
+        "   or: git repository-canonicalization add <existing-package-name>",
         "",
-        "Add a package and its requested checks. For an existing package, omit",
-        "the package type and description; its type is inferred.",
+        "Add a package and its combined coverage/profiling check. For an existing",
+        "package, omit the package type and description; its type is inferred.",
         "Generated files are staged with git add.",
-        "",
-        "    --coverage            add a coverage check",
-        "    --profile             add a profiling check",
         ""
       ]
   Just "summary" ->
@@ -452,31 +424,15 @@ usageTextForCommand = \case
         ""
       ]
   _ -> mainUsageText
-parseAddChecksArgs :: [String] -> Maybe (FilePath, Set.Set RepositoryCheckKind)
-parseAddChecksArgs ("add" : packageName : flagArguments)
-  | all ("--" `isPrefixOf`) flagArguments =
-      (packageName,) <$> parseRepositoryCheckFlags flagArguments
+parseAddChecksArgs :: [String] -> Maybe FilePath
+parseAddChecksArgs ["add", packageName] = Just packageName
 parseAddChecksArgs _ = Nothing
-parseAddPackageArgs :: [String] -> Maybe (String, FilePath, Maybe String, Set.Set RepositoryCheckKind)
+parseAddPackageArgs :: [String] -> Maybe (String, FilePath, Maybe String)
 parseAddPackageArgs ("add" : packageKindName : packageName : remainingArguments) = do
-  let (flagArguments, packageDescriptionArguments) =
-        partition ("--" `isPrefixOf`) remainingArguments
-      packageDescription = unwords . NE.toList <$> NE.nonEmpty packageDescriptionArguments
-  requestedCheckKinds <- parseRepositoryCheckFlags flagArguments
-  pure (packageKindName, packageName, packageDescription, requestedCheckKinds)
+  guard (not (any ("--" `isPrefixOf`) remainingArguments))
+  let packageDescription = unwords . NE.toList <$> NE.nonEmpty remainingArguments
+  pure (packageKindName, packageName, packageDescription)
 parseAddPackageArgs _ = Nothing
-parseRepositoryCheckFlags :: [String] -> Maybe (Set.Set RepositoryCheckKind)
-parseRepositoryCheckFlags flagArguments =
-  Set.fromList
-    <$> mapM
-      ( \repositoryCheckFlag ->
-          lookup
-            repositoryCheckFlag
-            [ ("--coverage", RepositoryCoverageCheck),
-              ("--profile", RepositoryProfileCheck)
-            ]
-      )
-      flagArguments
 runInGitRepositoryRoot :: FilePath -> IO a -> IO a
 runInGitRepositoryRoot repositoryDirectory action = do
   canonicalRepositoryRoot <- discoverGitRepositoryRoot repositoryDirectory
@@ -632,7 +588,7 @@ summarizeRepositoryAt canonicalizationSettings repositoryPath repositoryRoot =
         exitFailure
       Right (RepositoryComplianceSuccess packageNames checkNames) -> do
         let repositoryCheckNames = Set.fromList checkNames
-            resultCheckNames = filter (\checkName -> any (`isSuffixOf` checkName) ["-coverage", "_coverage", "-profile", "_profile"]) checkNames
+            resultCheckNames = filter (\checkName -> any (`isSuffixOf` checkName) ["-coverage", "_coverage"]) checkNames
         checkOutputPaths <- resolveRepositoryCheckOutputPaths resultCheckNames
         packageSummaries <- forM packageNames (summarizeRepositoryPackage checkOutputPaths repositoryCheckNames)
         pure
@@ -839,19 +795,14 @@ summarizeRepositoryPackage checkOutputPaths repositoryCheckNames packageName = d
             maybeMainPythonSourceText <- readTextFileIfExists (packageRoot </> "main.py")
             pure (maybe [] (discoverPythonUnitTestNamesFromSource . T.unpack) maybeMainPythonSourceText)
       _ -> pure []
-  let configuredRepositoryCheckName checkKind =
-        repositoryCheckNameForKind packageKind packageName checkKind
+  let configuredRepositoryCheckName =
+        repositoryCheckNameForPackage packageKind packageName
           >>= \checkName ->
             if checkName `Set.member` repositoryCheckNames
               then Just checkName
               else Nothing
-      coverageCheckName = configuredRepositoryCheckName RepositoryCoverageCheck
-      profileCheckName =
-        case configuredRepositoryCheckName RepositoryProfileCheck of
-          Just checkName -> Just checkName
-          Nothing
-            | packageKind `elem` [PythonPackage, PythonLatexPackage] -> coverageCheckName
-          Nothing -> Nothing
+      coverageCheckName = configuredRepositoryCheckName
+      profileCheckName = coverageCheckName
   repositoryPackageCoverageValue <-
     traverse (summarizeRepositoryPackageCoverage checkOutputPaths) coverageCheckName
   repositoryPackageProfileValue <-
@@ -1125,8 +1076,8 @@ data RepositoryCheckSpec = RepositoryCheckSpec
   { repositoryCheckNameSuffix :: String,
     repositoryCheckSource :: T.Text
   }
-addPackageToCurrentRepositoryWith :: CanonicalizationSettings -> ScaffoldPackageKind -> FilePath -> Maybe String -> Set.Set RepositoryCheckKind -> IO (Either String [FilePath])
-addPackageToCurrentRepositoryWith canonicalizationSettings scaffoldPackageKind packageName packageDescription requestedCheckKinds =
+addPackageToCurrentRepositoryWith :: CanonicalizationSettings -> ScaffoldPackageKind -> FilePath -> Maybe String -> IO (Either String [FilePath])
+addPackageToCurrentRepositoryWith canonicalizationSettings scaffoldPackageKind packageName packageDescription =
   case packageKindForScaffold scaffoldPackageKind of
     Nothing -> pure (Left "internal error: missing scaffold package specification")
     Just packageKind -> case validatePackageNameForKind packageKind packageName of
@@ -1140,20 +1091,17 @@ addPackageToCurrentRepositoryWith canonicalizationSettings scaffoldPackageKind p
               (Just packageKind)
               packageName
               packageDescription
-              requestedCheckKinds
-          else case validateRepositoryCheckSelection packageKind requestedCheckKinds of
-            Left validationError -> pure (Left validationError)
-            Right requestedCheckSpecs -> do
-              let packageScaffoldFiles =
-                    [ RepositoryScaffoldFile
-                        (packageRootDirectory </> scaffoldFileRelativePath scaffoldFile)
-                        (scaffoldFileContents scaffoldFile)
-                    | scaffoldFile <- renderScaffoldFilesWith canonicalizationSettings scaffoldPackageKind packageName packageDescription
-                    ]
-                  checkScaffoldFiles = renderRepositoryCheckScaffoldFiles packageName requestedCheckSpecs
-              createRepositoryScaffoldFiles (packageScaffoldFiles ++ checkScaffoldFiles)
-addChecksToExistingPackage :: Maybe PackageKind -> FilePath -> Maybe String -> Set.Set RepositoryCheckKind -> IO (Either String [FilePath])
-addChecksToExistingPackage maybeRequestedPackageKind packageName packageDescription requestedCheckKinds = do
+          else do
+            let packageScaffoldFiles =
+                  [ RepositoryScaffoldFile
+                      (packageRootDirectory </> scaffoldFileRelativePath scaffoldFile)
+                      (scaffoldFileContents scaffoldFile)
+                  | scaffoldFile <- renderScaffoldFilesWith canonicalizationSettings scaffoldPackageKind packageName packageDescription
+                  ]
+                checkScaffoldFiles = renderRepositoryCheckScaffoldFiles packageName (maybeToList (repositoryCheckSpecForPackageKind packageKind))
+            createRepositoryScaffoldFiles (packageScaffoldFiles ++ checkScaffoldFiles)
+addChecksToExistingPackage :: Maybe PackageKind -> FilePath -> Maybe String -> IO (Either String [FilePath])
+addChecksToExistingPackage maybeRequestedPackageKind packageName packageDescription = do
   let packageRootDirectory = "packages" </> packageName
   packageRootExists <- doesPathExist packageRootDirectory
   packageRootIsDirectory <- doesDirectoryExist packageRootDirectory
@@ -1165,31 +1113,28 @@ addChecksToExistingPackage maybeRequestedPackageKind packageName packageDescript
         else case packageDescription of
           Just _ ->
             pure (Left ("cannot set a description when adding checks to existing package: " ++ packageRootDirectory))
-          Nothing ->
-            if Set.null requestedCheckKinds
-              then pure (Left ("package already exists; specify at least one check option: " ++ packageRootDirectory))
-              else do
-                detectedPackageKind <- detectPackageKindForPackage packageName
-                case maybeRequestedPackageKind of
-                  Just requestedPackageKind
-                    | detectedPackageKind /= requestedPackageKind ->
-                        pure
-                          ( Left
-                              ( packageRootDirectory
-                                  ++ " is a "
-                                  ++ renderPackageKind detectedPackageKind
-                                  ++ " package, not "
-                                  ++ renderPackageKind requestedPackageKind
-                              )
+          Nothing -> do
+            detectedPackageKind <- detectPackageKindForPackage packageName
+            case maybeRequestedPackageKind of
+              Just requestedPackageKind
+                | detectedPackageKind /= requestedPackageKind ->
+                    pure
+                      ( Left
+                          ( packageRootDirectory
+                              ++ " is a "
+                              ++ renderPackageKind detectedPackageKind
+                              ++ " package, not "
+                              ++ renderPackageKind requestedPackageKind
                           )
-                  _ ->
-                    case validatePackageNameForKind detectedPackageKind packageName of
-                      Just validationError -> pure (Left validationError)
-                      Nothing ->
-                        case validateRepositoryCheckSelection detectedPackageKind requestedCheckKinds of
-                          Left validationError -> pure (Left validationError)
-                          Right requestedCheckSpecs ->
-                            createRepositoryScaffoldFiles (renderRepositoryCheckScaffoldFiles packageName requestedCheckSpecs)
+                      )
+              _ ->
+                case validatePackageNameForKind detectedPackageKind packageName of
+                  Just validationError -> pure (Left validationError)
+                  Nothing ->
+                    case repositoryCheckSpecForPackageKind detectedPackageKind of
+                      Nothing -> pure (Left ("package type has no combined coverage/profiling check: " ++ renderPackageKind detectedPackageKind))
+                      Just checkSpec ->
+                        createRepositoryScaffoldFiles (renderRepositoryCheckScaffoldFiles packageName [checkSpec])
 createRepositoryScaffoldFiles :: [RepositoryScaffoldFile] -> IO (Either String [FilePath])
 createRepositoryScaffoldFiles scaffoldFiles = do
   let scaffoldPaths = map repositoryScaffoldFilePath scaffoldFiles
@@ -1202,28 +1147,6 @@ createRepositoryScaffoldFiles scaffoldFiles = do
         createDirectoryIfMissing True (takeDirectory absolutePath)
         TIO.writeFile absolutePath (repositoryScaffoldFileContents repositoryScaffoldFile)
       pure (Right scaffoldPaths)
-validateRepositoryCheckSelection :: PackageKind -> Set.Set RepositoryCheckKind -> Either String [RepositoryCheckSpec]
-validateRepositoryCheckSelection packageKind requestedCheckKinds =
-  let (unsupportedCheckKinds, requestedCheckSpecs) =
-        partitionEithers
-          [ maybe (Left requestedCheckKind) Right (repositoryCheckSpecForKind packageKind requestedCheckKind)
-          | requestedCheckKind <- Set.toList requestedCheckKinds
-          ]
-   in case NE.nonEmpty unsupportedCheckKinds of
-        Nothing -> Right requestedCheckSpecs
-        Just unsupportedCheckKindsNonEmpty ->
-          Left
-            ( "unsupported checks for package type "
-                ++ renderPackageKind packageKind
-                ++ ": "
-                ++ intercalate
-                  ", "
-                  [ case repositoryCheckKind of
-                      RepositoryCoverageCheck -> "--coverage"
-                      RepositoryProfileCheck -> "--profile"
-                  | repositoryCheckKind <- NE.toList unsupportedCheckKindsNonEmpty
-                  ]
-            )
 renderRepositoryCheckScaffoldFiles :: FilePath -> [RepositoryCheckSpec] -> [RepositoryScaffoldFile]
 renderRepositoryCheckScaffoldFiles packageName requestedCheckSpecs =
   [ RepositoryScaffoldFile
@@ -1231,26 +1154,24 @@ renderRepositoryCheckScaffoldFiles packageName requestedCheckSpecs =
       (repositoryCheckSource checkSpec)
   | checkSpec <- requestedCheckSpecs
   ]
-repositoryCheckNameForKind :: PackageKind -> FilePath -> RepositoryCheckKind -> Maybe FilePath
-repositoryCheckNameForKind packageKind packageName repositoryCheckKind =
+repositoryCheckNameForPackage :: PackageKind -> FilePath -> Maybe FilePath
+repositoryCheckNameForPackage packageKind packageName =
   (\checkSpec -> packageName ++ repositoryCheckNameSuffix checkSpec)
-    <$> repositoryCheckSpecForKind packageKind repositoryCheckKind
-repositoryCheckSpecForKind :: PackageKind -> RepositoryCheckKind -> Maybe RepositoryCheckSpec
-repositoryCheckSpecForKind packageKind repositoryCheckKind =
-  lookup (packageKind, repositoryCheckKind) repositoryCheckSpecs
-repositoryCheckSpecs :: [((PackageKind, RepositoryCheckKind), RepositoryCheckSpec)]
+    <$> repositoryCheckSpecForPackageKind packageKind
+repositoryCheckSpecForPackageKind :: PackageKind -> Maybe RepositoryCheckSpec
+repositoryCheckSpecForPackageKind packageKind =
+  lookup packageKind repositoryCheckSpecs
+repositoryCheckSpecs :: [(PackageKind, RepositoryCheckSpec)]
 repositoryCheckSpecs =
-  [ spec HaskellPackage RepositoryCoverageCheck "-coverage" haskellCoverageCheckBaselineNixSource,
-    spec HaskellPackage RepositoryProfileCheck "-profile" haskellProfileCheckBaselineNixSource,
-    spec RustPackage RepositoryCoverageCheck "-coverage" rustCoverageCheckBaselineNixSource,
-    spec RustPackage RepositoryProfileCheck "-profile" rustProfileCheckBaselineNixSource,
-    spec PythonPackage RepositoryCoverageCheck "_coverage" pythonCoverageCheckBaselineNixSource,
-    spec PythonLatexPackage RepositoryCoverageCheck "_coverage" pythonCoverageCheckBaselineNixSource
+  [ spec HaskellPackage "-coverage" haskellCoverageCheckBaselineNixSource,
+    spec RustPackage "-coverage" rustCoverageCheckBaselineNixSource,
+    spec PythonPackage "_coverage" pythonCoverageCheckBaselineNixSource,
+    spec PythonLatexPackage "_coverage" pythonCoverageCheckBaselineNixSource
   ]
   where
-    spec :: PackageKind -> RepositoryCheckKind -> String -> T.Text -> ((PackageKind, RepositoryCheckKind), RepositoryCheckSpec)
-    spec packageKind checkKind suffix source =
-      ((packageKind, checkKind), RepositoryCheckSpec suffix source)
+    spec :: PackageKind -> String -> T.Text -> (PackageKind, RepositoryCheckSpec)
+    spec packageKind suffix source =
+      (packageKind, RepositoryCheckSpec suffix source)
 renderScaffoldFilesWith :: CanonicalizationSettings -> ScaffoldPackageKind -> FilePath -> Maybe String -> [ScaffoldFile]
 renderScaffoldFilesWith canonicalizationSettings scaffoldPackageKind packageName packageDescription =
   case scaffoldPackageKind of
@@ -1703,10 +1624,8 @@ checkPackageAssociation :: FilePath -> FilePath -> Maybe (FilePath, [PackageKind
 checkPackageAssociation matchedCheckTemplateName checkName =
   case matchedCheckTemplateName of
     "haskell_coverage_check" -> withSuffix "-coverage" [HaskellPackage]
-    "haskell_profile_check" -> withSuffix "-profile" [HaskellPackage]
     "python_coverage_check" -> withSuffix "_coverage" [PythonPackage, PythonLatexPackage]
     "rust_coverage_check" -> withSuffix "-coverage" [RustPackage]
-    "rust_profile_check" -> withSuffix "-profile" [RustPackage]
     _ -> Nothing
   where
     withSuffix :: String -> [PackageKind] -> Maybe (FilePath, [PackageKind])
@@ -2612,7 +2531,7 @@ hUnitPackageTests =
       TestLabel "Reports the phase and file when a package check fails." (TestCase corruptedPackageCheckEndToEndTest),
       TestLabel "Rejects unknown package options without creating partial output." (TestCase unknownAddOptionEndToEndTest),
       TestLabel "Rejects package names that violate the package convention." (TestCase invalidPackageNameEndToEndTest),
-      TestLabel "Rejects unsupported checks without creating partial output." (TestCase unsupportedPackageCheckEndToEndTest)
+      TestLabel "Scaffolds package types without a combined check." (TestCase packageWithoutCheckEndToEndTest)
     ]
 haskellTestDiscoveryTest :: IO ()
 haskellTestDiscoveryTest =
@@ -2867,7 +2786,7 @@ addPackageEndToEndTest =
     (addExit, addStdout, addStderr) <-
       runEndToEndCommandIn
         nestedDirectory
-        ["add", "python", "demo", "Demo package", "--coverage"]
+        ["add", "python", "demo", "Demo package"]
     assertEqual "Adding a package through the installed CLI succeeds." ExitSuccess addExit
     assertEqual "A successful add produces no stdout." "" addStdout
     assertEqual "A successful add leaves stderr empty." "" addStderr
@@ -2883,19 +2802,29 @@ addPackageEndToEndTest =
     assertBool "The installed CLI creates the package and requested checks on disk." generatedFilesExist
 addChecksToExistingPackageEndToEndTest :: IO ()
 addChecksToExistingPackageEndToEndTest =
-  withGeneratedHaskellPackageRepository "add-checks-to-existing-package" $ \temporaryRepository -> do
+  withEmptyCanonicalRepository "add-checks-to-existing-package" $ \temporaryRepository -> do
     let packageDefaultNixPath = temporaryRepository </> "packages/demo/default.nix"
         packageMainPath = temporaryRepository </> "packages/demo/Main.hs"
-        profileCheckPath = temporaryRepository </> "checks/demo-profile/default.nix"
+        coverageCheckPath = temporaryRepository </> "checks/demo-coverage/default.nix"
+        packageRoot = temporaryRepository </> "packages/demo"
+    createDirectoryIfMissing True packageRoot
+    forM_ (renderScaffoldFilesWith defaultCanonicalizationSettings HaskellScaffold "demo" (Just "Demo package")) $ \scaffoldFile ->
+      TIO.writeFile
+        (packageRoot </> scaffoldFileRelativePath scaffoldFile)
+        (scaffoldFileContents scaffoldFile)
+    runGitFixtureCommand ["-C", temporaryRepository, "add", "--", "packages/demo"]
+    runGitFixtureCommand ["-C", temporaryRepository, "config", "user.name", "Canonicalization Tests"]
+    runGitFixtureCommand ["-C", temporaryRepository, "config", "user.email", "canonicalization@example.test"]
+    runGitFixtureCommand ["-C", temporaryRepository, "commit", "--quiet", "-m", "Add legacy package without check"]
     packageDefaultNixBefore <- TIO.readFile packageDefaultNixPath
     packageMainBefore <- TIO.readFile packageMainPath
     (addExit, addStdout, addStderr) <-
-      runEndToEndCommandIn temporaryRepository ["add", "demo", "--profile"]
+      runEndToEndCommandIn temporaryRepository ["add", "demo"]
     assertEqual "Adding a check to an existing package succeeds." ExitSuccess addExit
     assertEqual "Successful check addition produces no stdout." "" addStdout
     assertEqual "Successful check addition leaves stderr empty." "" addStderr
-    profileCheckExists <- doesFileExist profileCheckPath
-    assertBool "The requested check is created." profileCheckExists
+    coverageCheckExists <- doesFileExist coverageCheckPath
+    assertBool "The requested check is created." coverageCheckExists
     packageDefaultNixAfter <- TIO.readFile packageDefaultNixPath
     packageMainAfter <- TIO.readFile packageMainPath
     assertEqual "The existing default.nix remains unchanged." packageDefaultNixBefore packageDefaultNixAfter
@@ -2903,7 +2832,7 @@ addChecksToExistingPackageEndToEndTest =
     (stagedExit, stagedStdout, stagedStderr) <-
       readProcessWithExitCode "git" ["-C", temporaryRepository, "diff", "--cached", "--name-only"] ""
     assertEqual "Inspecting staged paths succeeds." ExitSuccess stagedExit
-    assertEqual "Only the generated check is staged." "checks/demo-profile/default.nix\n" stagedStdout
+    assertEqual "Only the generated check is staged." "checks/demo-coverage/default.nix\n" stagedStdout
     assertEqual "Inspecting staged paths leaves stderr empty." "" stagedStderr
 validateExistingPackageAddEndToEndTest :: IO ()
 validateExistingPackageAddEndToEndTest =
@@ -2914,16 +2843,13 @@ validateExistingPackageAddEndToEndTest =
     assertEqual "Inspecting the initial repository status leaves stderr empty." "" statusBeforeStderr
     let rejectedCommands :: [([String], String)]
         rejectedCommands =
-          [ ( ["add", "demo"],
-              "specify at least one check option"
-            ),
-            ( ["add", "missing", "--profile"],
+          [ ( ["add", "missing"],
               "package does not exist"
             ),
-            ( ["add", "python", "demo", "Replacement description", "--profile"],
+            ( ["add", "python", "demo", "Replacement description"],
               "cannot set a description"
             ),
-            ( ["add", "rust", "demo", "--profile"],
+            ( ["add", "rust", "demo"],
               "is a python package, not rust"
             )
           ]
@@ -2932,8 +2858,6 @@ validateExistingPackageAddEndToEndTest =
       assertEqual "Invalid existing-package augmentation fails." (ExitFailure 1) addExit
       assertEqual "Invalid existing-package augmentation produces no stdout." "" addStdout
       assertBool "Invalid existing-package augmentation reports its cause." (expectedError `isInfixOf` addStderr)
-    profileCheckExists <- doesPathExist (temporaryRepository </> "checks/demo_profile")
-    assertBool "Rejected augmentations create no check." (not profileCheckExists)
     (statusExit, statusStdout, statusStderr) <-
       readProcessWithExitCode "git" ["-C", temporaryRepository, "status", "--short"] ""
     assertEqual "Inspecting the repository status succeeds." ExitSuccess statusExit
@@ -2942,20 +2866,15 @@ validateExistingPackageAddEndToEndTest =
 existingCheckCollisionEndToEndTest :: IO ()
 existingCheckCollisionEndToEndTest =
   withGeneratedHaskellPackageRepository "existing-check-collision" $ \temporaryRepository -> do
-    (setupExit, _setupStdout, setupStderr) <-
-      runEndToEndCommandIn temporaryRepository ["add", "demo", "--coverage"]
-    assertEqual ("Preparing the colliding check succeeds: " ++ setupStderr) ExitSuccess setupExit
     (addExit, addStdout, addStderr) <-
       runEndToEndCommandIn
         temporaryRepository
-        ["add", "demo", "--coverage", "--profile"]
-    assertEqual "A colliding check batch fails." (ExitFailure 1) addExit
-    assertEqual "A colliding check batch produces no stdout." "" addStdout
+        ["add", "demo"]
+    assertEqual "A colliding check fails." (ExitFailure 1) addExit
+    assertEqual "A colliding check produces no stdout." "" addStdout
     assertBool
-      "A colliding check batch reports the existing path."
+      "A colliding check reports the existing path."
       ("path already exists: checks/demo-coverage/default.nix" `isInfixOf` addStderr)
-    profileCheckExists <- doesPathExist (temporaryRepository </> "checks/demo-profile")
-    assertBool "A colliding check batch creates no partial check." (not profileCheckExists)
 textSummaryEndToEndTest :: IO ()
 textSummaryEndToEndTest =
   withGeneratedPythonPackageRepository "text-summary-end-to-end" $ \temporaryRepository -> do
@@ -3046,16 +2965,18 @@ invalidPackageNameEndToEndTest =
     assertBool "An invalid package name reports its convention." ("must use snake_case" `isInfixOf` invalidNameStderr)
     packageDirectoryExists <- doesDirectoryExist (temporaryRepository </> "packages/demo-python")
     assertBool "An invalid name does not leave a partial package directory." (not packageDirectoryExists)
-unsupportedPackageCheckEndToEndTest :: IO ()
-unsupportedPackageCheckEndToEndTest =
-  withEmptyCanonicalRepository "unsupported-package-check-end-to-end" $ \temporaryRepository -> do
-    (unsupportedCheckExit, unsupportedCheckStdout, unsupportedCheckStderr) <-
-      runEndToEndCommandIn temporaryRepository ["add", "html", "demo", "--coverage"]
-    assertEqual "An unsupported check selection fails." (ExitFailure 1) unsupportedCheckExit
-    assertEqual "An unsupported check selection leaves stdout empty." "" unsupportedCheckStdout
-    assertBool "An unsupported check selection reports the rejected option." ("unsupported checks for package type html: --coverage" `isInfixOf` unsupportedCheckStderr)
+packageWithoutCheckEndToEndTest :: IO ()
+packageWithoutCheckEndToEndTest =
+  withEmptyCanonicalRepository "package-without-check-end-to-end" $ \temporaryRepository -> do
+    (addExit, addStdout, addStderr) <-
+      runEndToEndCommandIn temporaryRepository ["add", "html", "demo"]
+    assertEqual "Adding a package type without a combined check succeeds." ExitSuccess addExit
+    assertEqual "Adding the package leaves stdout empty." "" addStdout
+    assertEqual "Adding the package leaves stderr empty." "" addStderr
     packageDirectoryExists <- doesDirectoryExist (temporaryRepository </> "packages/demo")
-    assertBool "An unsupported check does not leave a partial package directory." (not packageDirectoryExists)
+    assertBool "The package is created." packageDirectoryExists
+    checkDirectoryExists <- doesPathExist (temporaryRepository </> "checks/demo")
+    assertBool "No unsupported check is invented." (not checkDirectoryExists)
 withEmptyCanonicalRepository :: String -> (FilePath -> IO a) -> IO a
 withEmptyCanonicalRepository temporaryName action =
   withTemporaryPackageRepository temporaryName $ \temporaryRepository -> do
@@ -3071,7 +2992,7 @@ withGeneratedPythonPackageRepository temporaryName action =
     (addExit, _addStdout, addStderr) <-
       runEndToEndCommandIn
         nestedDirectory
-        ["add", "python", "demo", "Demo package", "--coverage"]
+        ["add", "python", "demo", "Demo package"]
     when (addExit /= ExitSuccess) $
       assertFailure ("Failed to generate the Python package fixture: " ++ addStderr)
     runGitFixtureCommand ["-C", temporaryRepository, "config", "user.name", "Canonicalization Tests"]
@@ -3124,8 +3045,8 @@ expectedGeneratedHaskellPackageSummary =
       repositoryPackageTestNames = ["Renders the sample message."],
       repositoryPackageChecks =
         RepositoryPackageChecksSummary
-          { repositoryPackageCoverage = Nothing,
-            repositoryPackageProfile = Nothing
+          { repositoryPackageCoverage = Just (RepositoryCoverageUnavailable Map.empty),
+            repositoryPackageProfile = Just RepositoryProfileUnavailable
           }
     }
 runEndToEndCommandIn :: FilePath -> [String] -> IO (ExitCode, String, String)
@@ -4362,6 +4283,7 @@ haskellCoverageCheckBaselineNixSource =
       "    nativeBuildInputs = [",
       "      packageDrv",
       "      pkgs.git",
+      "      pkgs.time",
       "      testGhc",
       "    ];",
       "    src = ../.. + \"/packages/${packageName}\";",
@@ -4369,56 +4291,8 @@ haskellCoverageCheckBaselineNixSource =
       "  ''",
       "    export HOME=\"$PWD\"",
       "    workspace=\"$PWD/workspace\"",
-      "    mkdir -p \"$out/html\" \"$workspace/coverage\" \"$workspace/hpc\"",
-      "    cd \"$workspace\"",
-      "    cat > TestMain.hs <<EOF",
-      "    module TestMain (main) where",
-      "    import qualified Main as PackageMain",
-      "    main :: IO ()",
-      "    main = PackageMain.runPackageTests",
-      "    EOF",
-      "    ghc -fhpc -hpcdir \"$workspace/hpc\" -main-is TestMain.main \\",
-      "      -i\"$src\" -outputdir \"$workspace\" -odir \"$workspace\" -hidir \"$workspace\" \\",
-      "      -o \"${packageName}\" TestMain.hs \"$src/Main.hs\"",
-      "    HPCTIXFILE=\"$workspace/coverage/${packageName}.tix\" \"./${packageName}\"",
-      "    hpc markup \"$workspace/coverage/${packageName}.tix\" --hpcdir=\"$workspace/hpc\" --destdir=\"$out/html\"",
-      "    hpc report \"$workspace/coverage/${packageName}.tix\" --hpcdir=\"$workspace/hpc\" | tee \"$out/report.txt\"",
-      "    coverageCounts=\"$(sed -n 's/.*expressions used (\\([0-9][0-9]*\\)\\/\\([0-9][0-9]*\\)).*/\\1 \\2/p' \"$out/report.txt\")\"",
-      "    read -r covered total <<< \"$coverageCounts\"",
-      "    test -n \"$covered\" -a -n \"$total\"",
-      "    printf 'coverage-v1\\texpressions\\t%s\\t%s\\n' \"$covered\" \"$total\" > \"$out/coverage-summary.tsv\"",
-      "  ''"
-    ]
-haskellProfileCheckBaselineNixSource :: T.Text
-haskellProfileCheckBaselineNixSource =
-  T.unlines
-    [ "{",
-      "  pkgs,",
-      "  ...",
-      "}:",
-      "let",
-      "  checkName = builtins.baseNameOf ./.;",
-      "  packageDrv = import (../.. + \"/packages/${packageName}/default.nix\") {",
-      "    inherit pkgs;",
-      "  };",
-      "  packageName = pkgs.lib.removeSuffix \"-profile\" checkName;",
-      "  profileGhc = pkgs.haskellPackages.ghcWithPackages (_: packageDrv.passthru.haskellExecutableDepends);",
-      "in",
-      "pkgs.runCommand checkName",
-      "  {",
-      "    nativeBuildInputs = [",
-      "      packageDrv",
-      "      pkgs.git",
-      "      pkgs.time",
-      "      profileGhc",
-      "    ];",
-      "    src = ../.. + \"/packages/${packageName}\";",
-      "  }",
-      "  ''",
-      "    export HOME=\"$PWD\"",
-      "    workspace=\"$PWD/workspace\"",
       "    packageName=\"${packageName}\"",
-      "    mkdir -p \"$out\" \"$workspace\"",
+      "    mkdir -p \"$out/html\" \"$workspace/coverage\" \"$workspace/hpc\"",
       "    cd \"$workspace\"",
       "    cat > \"$workspace/TestMain.hs\" <<EOF",
       "    module TestMain (main) where",
@@ -4427,7 +4301,9 @@ haskellProfileCheckBaselineNixSource =
       "    main :: IO ()",
       "    main = getEnv \"PROFILE_TIMINGS_PATH\" >>= PackageMain.runPackageTestsWithTimings",
       "    EOF",
-      "    \"${profileGhc}/bin/ghc\" \\",
+      "    \"${testGhc}/bin/ghc\" \\",
+      "      -fhpc \\",
+      "      -hpcdir \"$workspace/hpc\" \\",
       "      -prof \\",
       "      -fprof-auto \\",
       "      -rtsopts \\",
@@ -4440,11 +4316,18 @@ haskellProfileCheckBaselineNixSource =
       "      -o \"$workspace/$packageName\" \\",
       "      \"$workspace/TestMain.hs\" \\",
       "      \"$src/Main.hs\"",
-      "    PROFILE_TIMINGS_PATH=\"$out/test-timings.tsv\" ${pkgs.time}/bin/time -f %e -o \"$out/total-seconds\" \\",
+      "    PROFILE_TIMINGS_PATH=\"$out/test-timings.tsv\" HPCTIXFILE=\"$workspace/coverage/$packageName.tix\" \\",
+      "      ${pkgs.time}/bin/time -f %e -o \"$out/total-seconds\" \\",
       "      \"$workspace/$packageName\" +RTS -p -RTS",
-      "    mv \"$workspace/$packageName.prof\" \"$out/report.prof\"",
+      "    mv \"$workspace/$packageName.prof\" \"$out/profile-report.prof\"",
       "    printf 'profile-v1\\ttotal-seconds\\t%s\\n' \"$(cat \"$out/total-seconds\")\" > \"$out/profile-summary.tsv\"",
       "    cat \"$out/test-timings.tsv\" >> \"$out/profile-summary.tsv\"",
+      "    hpc markup \"$workspace/coverage/${packageName}.tix\" --hpcdir=\"$workspace/hpc\" --destdir=\"$out/html\"",
+      "    hpc report \"$workspace/coverage/${packageName}.tix\" --hpcdir=\"$workspace/hpc\" | tee \"$out/report.txt\"",
+      "    coverageCounts=\"$(sed -n 's/.*expressions used (\\([0-9][0-9]*\\)\\/\\([0-9][0-9]*\\)).*/\\1 \\2/p' \"$out/report.txt\")\"",
+      "    read -r covered total <<< \"$coverageCounts\"",
+      "    test -n \"$covered\" -a -n \"$total\"",
+      "    printf 'coverage-v1\\texpressions\\t%s\\t%s\\n' \"$covered\" \"$total\" > \"$out/coverage-summary.tsv\"",
       "  ''"
     ]
 pythonCoverageCheckBaselineNixSource :: T.Text
@@ -4533,8 +4416,12 @@ rustCoverageCheckBaselineNixSource =
       "  {",
       "    nativeBuildInputs = rustBaseInputs ++ [",
       "      pkgs.cargo-llvm-cov",
+      "      pkgs.cargo-nextest",
       "      pkgs.jq",
       "      pkgs.llvmPackages.llvm",
+      "      pkgs.perf",
+      "      pkgs.python3",
+      "      pkgs.time",
       "    ];",
       "    src = ../.. + \"/packages/${packageName}\";",
       "  }",
@@ -4546,76 +4433,45 @@ rustCoverageCheckBaselineNixSource =
       "    install -Dm644 \"${cargoDeps}/.cargo/config.toml\" \"$workspace/.cargo/config.toml\"",
       "    substituteInPlace \"$workspace/.cargo/config.toml\" \\",
       "      --replace-fail \"@vendor@\" \"${cargoDeps}\"",
-      "    cd \"$workspace\"",
-      "    mkdir -p \"$out\"",
-      "    cargo llvm-cov --json --summary-only --output-path \"$out/report.json\"",
-      "    covered=\"$(jq -r '.data[0].totals.lines.covered' \"$out/report.json\")\"",
-      "    total=\"$(jq -r '.data[0].totals.lines.count' \"$out/report.json\")\"",
-      "    test \"$covered\" != null -a \"$total\" != null",
-      "    printf 'coverage-v1\\tlines\\t%s\\t%s\\n' \"$covered\" \"$total\" > \"$out/coverage-summary.tsv\"",
-      "  ''"
-    ]
-rustProfileCheckBaselineNixSource :: T.Text
-rustProfileCheckBaselineNixSource =
-  T.unlines
-    [ "{",
-      "  inputs,",
-      "  pkgs,",
-      "  ...",
-      "}:",
-      "let",
-      "  inherit (packageDrv) cargoDeps;",
-      "  checkName = builtins.baseNameOf ./.;",
-      "  packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${packageName};",
-      "  packageName = pkgs.lib.removeSuffix \"-profile\" checkName;",
-      "  rustBaseInputs = packageDrv.passthru.rustCheckNativeBuildInputs;",
-      "in",
-      "pkgs.runCommand \"${checkName}\"",
-      "  {",
-      "    nativeBuildInputs = rustBaseInputs ++ [",
-      "      pkgs.cargo-nextest",
-      "      pkgs.perf",
-      "      pkgs.python3",
-      "      pkgs.time",
-      "    ];",
-      "    src = ../.. + \"/packages/${packageName}\";",
-      "  }",
-      "  ''",
-      "    workspace=\"$PWD/workspace\"",
-      "    cp -R --no-preserve=mode \"$src\" \"$workspace\"",
-      "    install -Dm644 \"${cargoDeps}/.cargo/config.toml\" \"$workspace/.cargo/config.toml\"",
-      "    substituteInPlace \"$workspace/.cargo/config.toml\" \\",
-      "      --replace-fail \"@vendor@\" \"${cargoDeps}\"",
       "    mkdir -p \"$out\" \"$workspace/.config\"",
       "    cat > \"$workspace/.config/nextest.toml\" <<EOF",
       "    [profile.profile.junit]",
       "    path = \"$out/junit.xml\"",
       "    EOF",
       "    cd \"$workspace\"",
+      "    cargo llvm-cov clean --workspace",
+      "    eval \"$(cargo llvm-cov show-env --sh)\"",
       "    cargo nextest list --profile profile >/dev/null",
+      "    cargo llvm-cov clean --profraw-only",
       "    if perf stat -e cpu-clock true >/dev/null 2>&1; then",
       "      NEXTEST_TEST_THREADS=1 ${pkgs.time}/bin/time -f %e -o \"$out/total-seconds\" \\",
       "        perf record --no-buildid-mmap --call-graph dwarf -e cpu-clock -o \"$out/perf.data\" -- \\",
       "        cargo nextest run --profile profile",
-      "      perf report --stdio -i \"$out/perf.data\" > \"$out/report.txt\"",
+      "      perf report --stdio -i \"$out/perf.data\" > \"$out/profile-report.txt\"",
       "    else",
-      "      echo \"perf is unavailable in this environment; timings were still recorded.\" > \"$out/report.txt\"",
+      "      echo \"perf is unavailable in this environment; timings were still recorded.\" > \"$out/profile-report.txt\"",
       "      NEXTEST_TEST_THREADS=1 ${pkgs.time}/bin/time -f %e -o \"$out/total-seconds\" \\",
       "        cargo nextest run --profile profile",
       "    fi",
-      "    python - \"$out/junit.xml\" \"$out/total-seconds\" \"$out/profile-summary.tsv\" <<'PY'",
+      "    cargo llvm-cov report --json --summary-only --output-path \"$out/report.json\"",
+      "    covered=\"$(jq -r '.data[0].totals.lines.covered' \"$out/report.json\")\"",
+      "    total=\"$(jq -r '.data[0].totals.lines.count' \"$out/report.json\")\"",
+      "    test \"$covered\" != null -a \"$total\" != null",
+      "    printf 'coverage-v1\\tlines\\t%s\\t%s\\n' \"$covered\" \"$total\" > \"$out/coverage-summary.tsv\"",
+      "    python - \"$out/junit.xml\" \"$out/total-seconds\" \"$out/test-timings.tsv\" \"$out/profile-summary.tsv\" <<'PY'",
       "    import pathlib",
       "    import re",
       "    import sys",
       "    import xml.etree.ElementTree as ET",
-      "    junit_path, total_path, output_path = map(pathlib.Path, sys.argv[1:])",
+      "    junit_path, total_path, timings_path, profile_path = map(pathlib.Path, sys.argv[1:])",
       "    lines = [f\"profile-v1\\ttotal-seconds\\t{total_path.read_text().strip()}\"]",
       "    for test_case in sorted(ET.parse(junit_path).iter(\"testcase\"), key=lambda element: element.attrib[\"name\"]):",
       "        identifier = test_case.attrib[\"name\"].rsplit(\"::\", 1)[-1]",
       "        words = re.sub(r\"^(?:test|quickcheck)_\", \"\", identifier).replace(\"_\", \" \")",
       "        test_name = words[:1].upper() + words[1:] + \".\"",
       "        lines.append(f\"test\\t{test_case.attrib['time']}\\t{test_name}\")",
-      "    output_path.write_text(\"\\n\".join(lines) + \"\\n\")",
+      "    timings_path.write_text(\"\\n\".join(lines[1:]) + \"\\n\")",
+      "    profile_path.write_text(\"\\n\".join(lines) + \"\\n\")",
       "    PY",
       "  ''"
     ]
