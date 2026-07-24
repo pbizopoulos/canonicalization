@@ -10,6 +10,7 @@ let
     pkgs.haskellPackages.bytestring
     pkgs.haskellPackages.hnix
     pkgs.haskellPackages.prettyprinter
+    pkgs.haskellPackages.process
     pkgs.haskellPackages.temporary
   ];
   ghcForTests = pkgs.haskellPackages.ghcWithPackages (_: executableHaskellDepends);

@@ -31,6 +31,7 @@ pkgs.runCommand checkName
     substituteInPlace "$workspace/.cargo/config.toml" \
       --replace-fail "@vendor@" "${cargoDeps}"
     mkdir -p "$out" "$workspace/.config"
+    export PACKAGE_E2E_EXECUTABLE="${packageDrv}/bin/${packageName}"
     cat > "$workspace/.config/nextest.toml" <<EOF
     [profile.profile.junit]
     path = "$out/junit.xml"

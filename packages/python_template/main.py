@@ -3,8 +3,8 @@
 
 from __future__ import annotations
 
-import contextlib
-import io
+import os
+import subprocess
 
 SAMPLE_MESSAGE = "Hello World Python"
 
@@ -20,18 +20,25 @@ def main() -> None:
 
 
 def test_render_message_returns_sample_message() -> None:
-    """The package should render its sample message."""
+    """Renders the package's sample message."""
     if render_message() != SAMPLE_MESSAGE:
         msg = "rendered sample message should match"
         raise AssertionError(msg)
 
 
 def test_main_prints_sample_message() -> None:
-    """The executable should print the sample message."""
-    output = io.StringIO()
-    with contextlib.redirect_stdout(output):
-        main()
-    if output.getvalue() != f"{SAMPLE_MESSAGE}\n":
+    """Prints the sample message from the executable."""
+    completed = subprocess.run(  # noqa: S603
+        [os.environ["PACKAGE_E2E_EXECUTABLE"]],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if (
+        completed.returncode != 0
+        or completed.stdout != f"{SAMPLE_MESSAGE}\n"
+        or completed.stderr
+    ):
         msg = "executable output should match the sample message"
         raise AssertionError(msg)
 

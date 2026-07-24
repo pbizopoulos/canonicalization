@@ -12,6 +12,7 @@ executable nix-alphabetize
     , hnix
     , HUnit
     , prettyprinter
+    , process
     , QuickCheck
     , temporary
     , text

@@ -17,6 +17,7 @@ python.pkgs.buildPythonPackage rec {
   '';
   installPhase = ''
     datadir="$out/share/${pname}"
+    install -Dm755 main.py "$out/bin/${pname}"
     install -Dm644 main.py ms.tex ms.bib -t "$datadir"
     install -Dm644 tmp/ms.pdf "$out/ms.pdf"
     install -Dm644 main.py $out/${python.sitePackages}/${pname}.py

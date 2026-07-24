@@ -29,9 +29,8 @@ pkgs.runCommand checkName
     cat > "$workspace/TestMain.hs" <<EOF
     module TestMain (main) where
     import qualified Main as PackageMain
-    import System.Environment (getEnv)
     main :: IO ()
-    main = getEnv "PROFILE_TIMINGS_PATH" >>= PackageMain.runPackageTestsWithTimings
+    main = PackageMain.runPackageTestsWithTimings "$workspace/test-timings.tsv"
     EOF
     "${testGhc}/bin/ghc" \
       -fhpc \
@@ -48,7 +47,7 @@ pkgs.runCommand checkName
       -o "$workspace/$packageName" \
       "$workspace/TestMain.hs" \
       "$src/Main.hs"
-    PROFILE_TIMINGS_PATH="$workspace/test-timings.tsv" HPCTIXFILE="$workspace/coverage/$packageName.tix" \
+    PACKAGE_E2E_EXECUTABLE="${packageDrv}/bin/${packageName}" HPCTIXFILE="$workspace/coverage/$packageName.tix" \
       ${pkgs.time}/bin/time -f %e -o "$workspace/total-seconds" \
       "$workspace/$packageName" +RTS -p -RTS
     mv "$workspace/$packageName.prof" "$out/profile-report.prof"

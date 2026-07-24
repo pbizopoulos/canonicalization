@@ -57,12 +57,12 @@ import Nix.Utils (Path (Path))
 import Numeric (showFFloat)
 import Prettyprinter (defaultLayoutOptions, layoutPretty)
 import Prettyprinter.Render.Text (renderStrict)
-import System.Directory (doesDirectoryExist, doesFileExist, listDirectory, makeAbsolute, pathIsSymbolicLink)
-import System.Environment (getArgs)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory, makeAbsolute, pathIsSymbolicLink)
+import System.Environment (getArgs, lookupEnv, setEnv)
 import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitFailure)
 import System.FilePath (normalise, pathSeparator, takeDirectory, takeExtension, (</>))
 import System.IO (hClose)
-import System.IO.Temp (withSystemTempFile)
+import System.IO.Temp (withSystemTempDirectory, withSystemTempFile)
 import System.Process (readProcessWithExitCode)
 import Test.HUnit
   ( Counts (errors, failures),
@@ -637,27 +637,27 @@ timeTestAction timingsPath testName testAction = do
 hUnitPackageTests :: Test
 hUnitPackageTests =
   TestList
-    [ TestLabel "A literal assignment equal to its default should be removed." $
+    [ TestLabel "Removes a literal assignment equal to its default." $
         makeRemovalTest
           (Map.singleton (OptionPath ("boot" :| ["enabled"])) (LiteralBool False))
           (pack "{ boot.enabled = false; keep = true; }")
           (pack "{ keep = true; }"),
-      TestLabel "A literal assignment different from its default should be preserved." $
+      TestLabel "Preserves a literal assignment different from its default." $
         makeRemovalTest
           (Map.singleton (OptionPath ("boot" :| ["enabled"])) (LiteralBool True))
           (pack "{ boot.enabled = false; }")
           (pack "{ boot.enabled = false; }"),
-      TestLabel "Now-empty structural parent sets should be removed." $
+      TestLabel "Removes now-empty structural parent sets." $
         makeRemovalTest
           (Map.singleton (OptionPath ("services" :| ["example", "enable"])) (LiteralBool False))
           (pack "{ services = { example = { enable = false; }; }; keep = 1; }")
           (pack "{ keep = 1; }"),
-      TestLabel "Literal list defaults should be removed." $
+      TestLabel "Removes literal list defaults." $
         makeRemovalTest
           (Map.singleton (OptionPath ("environment" :| ["systemPackages"])) (LiteralList []))
           (pack "{ environment.systemPackages = [ ]; }")
           (pack "{}"),
-      TestLabel "String, integer, null, and attribute-set defaults should be removed." $
+      TestLabel "Removes string, integer, null, and attribute-set defaults." $
         makeRemovalTest
           ( Map.fromList
               [ (OptionPath ("example" :| ["count"]), LiteralInteger 3),
@@ -668,34 +668,34 @@ hUnitPackageTests =
           )
           (pack "{ example.count = 3; example.label = \"default\"; example.optional = null; example.settings = { enabled = true; }; }")
           (pack "{}"),
-      TestLabel "Context-dependent expressions should be preserved." $
+      TestLabel "Preserves context-dependent expressions." $
         makeRemovalTest
           (Map.singleton (OptionPath ("example" :| ["value"])) (LiteralInteger 1))
           (pack "{ example.value = let x = 1; in x; }")
           (pack "{ example.value = let   x = 1; in x; }"),
-      TestLabel "A top-level config attribute should be treated as the option root." $
+      TestLabel "Treats a top-level config attribute as the option root." $
         makeRemovalTest
           (Map.singleton (OptionPath ("networking" :| ["useDHCP"])) (LiteralBool True))
           (pack "{ config.networking.useDHCP = true; options.example = { }; }")
           (pack "{ options.example = {}; }"),
-      TestLabel "The returned set of a let-wrapped module should be traversed." $
+      TestLabel "Traverses the returned set of a let-wrapped module." $
         makeRemovalTest
           (Map.singleton (OptionPath ("boot" :| ["initrd", "systemd", "enable"])) (LiteralBool True))
           (pack "{ pkgs, ... }: let hostName = \"default\"; in { boot.initrd.systemd.enable = true; networking.hostName = hostName; }")
           (pack "{ pkgs, ... }:\n  let   hostName = \"default\"; in { networking.hostName = hostName; }"),
-      TestLabel "The transformation should be idempotent." $ TestCase $ do
+      TestLabel "Transformation is idempotent." $ TestCase $ do
         let defaults :: Map OptionPath Literal
             defaults = Map.singleton (OptionPath ("example" :| ["enable"])) (LiteralBool False)
             input = pack "{ example.enable = false; keep = true; }"
         once <- formatWithDefaults defaults input
         twice <- formatWithDefaults defaults once
         assertEqual "second transformation" once twice,
-      TestLabel "Defaults inside a treefmt evalModule argument should be removed." $
+      TestLabel "Removes defaults inside a treefmt evalModule argument." $
         makeTreefmtRemovalTest
           (Map.singleton (OptionPath ("programs" :| ["shfmt", "simplify"])) (LiteralBool True))
           (pack "{ inputs, pkgs, ... }: let treefmtEval = inputs.treefmt-nix.lib.evalModule pkgs { programs.shfmt.simplify = true; keep = false; }; in treefmtEval.config.build.wrapper")
           (pack "{ inputs, pkgs, ... }:\n  let\n    treefmtEval = inputs.treefmt-nix.lib.evalModule pkgs { keep = false; };\n  in treefmtEval.config.build.wrapper"),
-      TestLabel "Candidate records should form the NixOS default-definition lookup expression." $ TestCase $ do
+      TestLabel "Builds candidate records into the NixOS default-definition lookup expression." $ TestCase $ do
         let expression =
               nixosDefaultDefinitionFilesExpression
                 "/repository"
@@ -704,7 +704,7 @@ hUnitPackageTests =
         assertBool
           "candidate records"
           ("candidates = [ { path = [ \"boot\" \"initrd\" \"systemd\" \"enable\" ]; value = true; } ]" `isInfixOf` expression),
-      TestLabel "Defaults should be compared using their parsed literal shape." $ TestCase $ do
+      TestLabel "Compares defaults using the parsed literal shape." $ TestCase $ do
         let expression =
               nixosDefaultDefinitionFilesExpression
                 "/repository"
@@ -713,7 +713,7 @@ hUnitPackageTests =
         assertBool
           "literal comparison"
           ("literalEquals = expected: actual:" `isInfixOf` expression),
-      TestLabel "Each candidate should return its path, value, and matching definition files." $ TestCase $ do
+      TestLabel "Returns path, value, and matching definition files for each candidate." $ TestCase $ do
         let expression =
               nixosDefaultDefinitionFilesExpression
                 "/repository"
@@ -722,17 +722,17 @@ hUnitPackageTests =
         assertBool
           "candidate result"
           ("candidateFiles = candidate: { inherit (candidate) path value; files =" `isInfixOf` expression),
-      TestLabel "Empty option paths from Nix JSON should be rejected." $
+      TestLabel "Rejects empty option paths from Nix JSON." $
         TestCase $
           case (eitherDecodeStrict' (Text.encodeUtf8 "[]") :: Either String OptionPath) of
             Left diagnostic -> assertBool "non-empty path diagnostic" ("must not be empty" `isInfixOf` diagnostic)
             Right _ -> assertFailure "empty option path decoded successfully",
-      TestLabel "JSON decoding diagnostics should be preserved." $
+      TestLabel "Preserves JSON decoding diagnostics." $
         TestCase $
           case (eitherDecodeStrict' (Text.encodeUtf8 "null") :: Either String String) of
             Left diagnostic -> assertBool "typed decode failure" ("expected String" `isInfixOf` diagnostic)
             Right _ -> assertFailure "null decoded as a string",
-      TestLabel "Unicode Nix JSON should decode without byte truncation." $
+      TestLabel "Decodes Unicode Nix JSON without byte truncation." $
         TestCase $
           assertEqual
             "Unicode record"
@@ -741,13 +741,13 @@ hUnitPackageTests =
                 (Text.encodeUtf8 "{\"path\":[\"naïve\"],\"default\":\"λ\"}") ::
                 Either String TreefmtDefaultRecord
             ),
-      TestLabel "Non-finite floating literals should be rejected." $
+      TestLabel "Rejects non-finite floating literals." $
         TestCase $ do
           let oversizedFraction = pack (replicate 400 '9' ++ ".1")
           case (eitherDecodeStrict' (Text.encodeUtf8 oversizedFraction) :: Either String Literal) of
             Left diagnostic -> assertBool "finite floating literal diagnostic" ("must be finite" `isInfixOf` diagnostic)
             Right _ -> assertFailure "non-finite floating literal decoded successfully",
-      TestLabel "The underlying Nix evaluation diagnostic should be propagated." $
+      TestLabel "Propagates the underlying Nix evaluation diagnostic." $
         TestCase $ do
           result <-
             readJsonFromNixWith
@@ -756,5 +756,34 @@ hUnitPackageTests =
           assertEqual
             "Nix failure"
             (Left "nix evaluation failed: underlying evaluation failure\n")
-            (result :: Either String String)
+            (result :: Either String String),
+      TestLabel "The installed executable discovers a flake from a nested directory." $
+        TestCase $
+          withSystemTempDirectory "nix-remove-defaults-e2e" $ \temporaryDirectory -> do
+            maybeExecutable <- lookupEnv "PACKAGE_E2E_EXECUTABLE"
+            case maybeExecutable of
+              Nothing -> pure ()
+              Just executable -> do
+                let nestedDirectory = temporaryDirectory </> "nested"
+                    modulePath = temporaryDirectory </> "empty-module.nix"
+                createDirectoryIfMissing True nestedDirectory
+                TIO.writeFile
+                  (temporaryDirectory </> "flake.nix")
+                  (pack "{ outputs = { self }: { nixosConfigurations = { }; }; }")
+                TIO.writeFile modulePath (pack "{ }")
+                setEnv "NIX_CONFIG" "experimental-features = nix-command flakes"
+                (commandExit, commandStdout, commandStderr) <-
+                  readProcessWithExitCode executable [nestedDirectory] ""
+                assertEqual
+                  ( "installed command output: stdout="
+                      ++ show commandStdout
+                      ++ " stderr="
+                      ++ show commandStderr
+                  )
+                  ExitSuccess
+                  commandExit
+                assertEqual "installed command stdout" "" commandStdout
+                assertEqual "installed command stderr" "" commandStderr
+                moduleContents <- TIO.readFile modulePath
+                assertEqual "empty module remains unchanged" (pack "{ }") moduleContents
     ]

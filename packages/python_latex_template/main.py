@@ -4,10 +4,11 @@
 from __future__ import annotations
 
 import math
+import os
+import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from unittest import mock
 
 import matplotlib as mpl
 
@@ -126,7 +127,7 @@ def main() -> None:
 
 
 def test_samples_contains_expected_summary() -> None:
-    """Summary statistics should remain stable for the default dataset."""
+    """Keeps summary statistics stable for the default dataset."""
     expected = (
         ("count", 5.0),
         ("total", 32.0),
@@ -140,7 +141,7 @@ def test_samples_contains_expected_summary() -> None:
 
 
 def test_samples_rejects_invalid_values() -> None:
-    """Samples should reject empty and non-finite sequences."""
+    """Rejects empty and non-finite sample sequences."""
     for values in ((), (math.nan,), (math.inf,)):
         try:
             Samples(values)
@@ -151,7 +152,7 @@ def test_samples_rejects_invalid_values() -> None:
 
 
 def test_render_table_contains_expected_metrics() -> None:
-    """Table output should expose the expected summary metrics and values."""
+    """Renders the expected summary metrics and values in the table."""
     table = render_table(DEFAULT_SAMPLES)
     expected_fragments = (
         "\\begin{tabular}{lr}",
@@ -169,7 +170,7 @@ def test_render_table_contains_expected_metrics() -> None:
 
 
 def test_latex_escape_handles_special_characters() -> None:
-    """LaTeX-special characters should be escaped in generated text."""
+    """Escapes LaTeX-special characters in generated text."""
     escaped = latex_escape(r"value_#1 & 50%")
     if escaped != r"value\_\#1 \& 50\%":
         msg = "LaTeX-special characters should be escaped"
@@ -177,7 +178,7 @@ def test_latex_escape_handles_special_characters() -> None:
 
 
 def test_create_figure_writes_non_empty_png() -> None:
-    """Figure generation should create a non-empty PNG."""
+    """Creates a non-empty PNG figure."""
     with tempfile.TemporaryDirectory() as tmpdir:
         figure_path = Path(tmpdir) / "figure.png"
         create_figure(figure_path, DEFAULT_SAMPLES)
@@ -187,11 +188,19 @@ def test_create_figure_writes_non_empty_png() -> None:
 
 
 def test_main_creates_latex_workspace_artifacts() -> None:
-    """The executable should create the LaTeX workspace artifacts."""
+    """Creates the LaTeX workspace artifacts from the executable."""
     with tempfile.TemporaryDirectory() as tmpdir:
         working_directory = Path(tmpdir)
-        with mock.patch("pathlib.Path.cwd", return_value=working_directory):
-            main()
+        completed = subprocess.run(  # noqa: S603
+            [os.environ["PACKAGE_E2E_EXECUTABLE"]],
+            cwd=working_directory,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0 or completed.stdout or completed.stderr:
+            msg = "the executable should succeed without console output"
+            raise AssertionError(msg)
         workspace = working_directory / "tmp"
         figure_path = workspace / "figure.png"
         table_path = workspace / "table.tex"

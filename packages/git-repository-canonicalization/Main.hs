@@ -2430,29 +2430,30 @@ timeTestAction timingsPath testName testAction = do
 hUnitPackageTests :: Test
 hUnitPackageTests =
   TestList
-    [ TestLabel "Conventional Haskell tests should become behavioral specifications." (TestCase haskellTestDiscoveryTest),
-      TestLabel "Haskell discovery should ignore strings and comments that are not tests." (TestCase haskellTestDiscoveryFalsePositiveTest),
-      TestLabel "Python test docstrings should become behavioral specifications." (TestCase pythonTestDiscoveryTest),
-      TestLabel "Conventional test identifiers should be humanized across frameworks." (TestCase testIdentifierSpecificationTest),
-      TestLabel "Versioned coverage summaries should be parsed strictly." (TestCase repositoryCoverageParsingTest),
-      TestLabel "Cargo policy checks should ignore formatter-only inline-table spacing." (TestCase cargoTomlFormattingNormalizationTest),
-      TestLabel "Repository entries must have allowlisted filesystem kinds." (TestCase entryKindStructureTest),
-      TestLabel "Text and JSON repository summaries should render stably." (TestCase repositorySummaryRenderingTest),
-      TestLabel "Nix template parameter differences should be concise." (TestCase nixTemplateParameterDifferenceTest),
-      TestLabel "python_template should allow inputs and shellHook to be absent." (TestCase pythonTemplateOptionalInputsAndShellHookTest),
-      TestLabel "Command help should be documented and invoked consistently." (TestCase commandLineHelpEndToEndTest),
-      TestLabel "Missing and unknown commands should fail with usage on stderr." (TestCase invalidCommandEndToEndTest),
-      TestLabel "Package scaffolding should work from a nested directory." (TestCase addPackageEndToEndTest),
-      TestLabel "Package creation should fail when its path already exists." (TestCase existingPackageCollisionEndToEndTest),
-      TestLabel "Text summaries should report generated package behavior." (TestCase textSummaryEndToEndTest),
-      TestLabel "JSON summaries should report generated package behavior." (TestCase jsonSummaryEndToEndTest),
-      TestLabel "Generated Haskell package summaries should report conventional tests." (TestCase haskellSummaryEndToEndTest),
-      TestLabel "Repository checks should accept a generated package." (TestCase generatedPackageCheckEndToEndTest),
-      TestLabel "Repository checks should reject unlabeled HUnit cases." (TestCase unlabeledHaskellPackageCheckEndToEndTest),
-      TestLabel "Package-check failures should report their phase and file." (TestCase corruptedPackageCheckEndToEndTest),
-      TestLabel "Unknown package options should not create partial output." (TestCase unknownAddOptionEndToEndTest),
-      TestLabel "Package names must follow their package convention." (TestCase invalidPackageNameEndToEndTest),
-      TestLabel "Package types without a combined check should still be scaffolded." (TestCase packageWithoutCheckEndToEndTest)
+    [ TestLabel "Discovers conventional Haskell tests as behavioral specifications." (TestCase haskellTestDiscoveryTest),
+      TestLabel "Ignores non-test Haskell strings and comments during discovery." (TestCase haskellTestDiscoveryFalsePositiveTest),
+      TestLabel "Uses Python test docstrings as behavioral specifications." (TestCase pythonTestDiscoveryTest),
+      TestLabel "Humanizes conventional test identifiers across frameworks." (TestCase testIdentifierSpecificationTest),
+      TestLabel "Parses versioned coverage summaries strictly." (TestCase repositoryCoverageParsingTest),
+      TestLabel "Ignores formatter-only Cargo inline-table spacing." (TestCase cargoTomlFormattingNormalizationTest),
+      TestLabel "Requires allowlisted filesystem entry kinds." (TestCase entryKindStructureTest),
+      TestLabel "Renders stable text and JSON repository summaries." (TestCase repositorySummaryRenderingTest),
+      TestLabel "Reports concise Nix template parameter differences." (TestCase nixTemplateParameterDifferenceTest),
+      TestLabel "Accepts python_template without inputs or shellHook." (TestCase pythonTemplateOptionalInputsAndShellHookTest),
+      TestLabel "Documents help and invokes it consistently." (TestCase commandLineHelpEndToEndTest),
+      TestLabel "Rejects missing and unknown commands with usage on stderr." (TestCase invalidCommandEndToEndTest),
+      TestLabel "Scaffolds a package and its check from a nested directory." (TestCase addPackageEndToEndTest),
+      TestLabel "Scaffolds and checks every supported package kind." (TestCase allPackageKindsEndToEndTest),
+      TestLabel "Rejects package creation when its path already exists." (TestCase existingPackageCollisionEndToEndTest),
+      TestLabel "Reports generated package behavior in the text summary." (TestCase textSummaryEndToEndTest),
+      TestLabel "Reports generated package behavior in the JSON summary." (TestCase jsonSummaryEndToEndTest),
+      TestLabel "Reports conventional tests for generated Haskell packages." (TestCase haskellSummaryEndToEndTest),
+      TestLabel "Accepts a generated package during repository checks." (TestCase generatedPackageCheckEndToEndTest),
+      TestLabel "Rejects unlabeled HUnit cases in generated Haskell packages." (TestCase unlabeledHaskellPackageCheckEndToEndTest),
+      TestLabel "Reports the phase and file when a package check fails." (TestCase corruptedPackageCheckEndToEndTest),
+      TestLabel "Rejects unknown package options without creating partial output." (TestCase unknownAddOptionEndToEndTest),
+      TestLabel "Rejects package names that violate the package convention." (TestCase invalidPackageNameEndToEndTest),
+      TestLabel "Scaffolds package types without a combined check." (TestCase packageWithoutCheckEndToEndTest)
     ]
 haskellTestDiscoveryTest :: IO ()
 haskellTestDiscoveryTest =
@@ -2728,6 +2729,35 @@ addPackageEndToEndTest =
             temporaryRepository </> "checks/demo_coverage/default.nix"
           ]
     assertBool "The installed CLI creates the package and its check on disk." generatedFilesExist
+allPackageKindsEndToEndTest :: IO ()
+allPackageKindsEndToEndTest =
+  withEmptyCanonicalRepository "all-package-kinds-end-to-end" $ \temporaryRepository -> do
+    forM_
+      [ ("haskell", "demo-haskell", "Main.hs", Just "demo-haskell-coverage"),
+        ("rust", "demo-rust", "Cargo.toml", Just "demo-rust-coverage"),
+        ("html", "demo_html", "index.html", Nothing),
+        ("python", "demo_python", "main.py", Just "demo_python_coverage"),
+        ("python-latex", "demo_python_latex", "main.py", Just "demo_python_latex_coverage"),
+        ("c", "demo_c", "main.c", Nothing),
+        ("latex", "demo_latex", "ms.tex", Nothing)
+      ]
+      $ \(packageKindName, packageName, markerFile, maybeCheckName) -> do
+        (addExit, addStdout, addStderr) <-
+          runEndToEndCommandIn
+            temporaryRepository
+            ["add", packageKindName, packageName, "E2E package"]
+        assertEqual ("Scaffolding " ++ packageKindName ++ " succeeds.") ExitSuccess addExit
+        assertEqual ("Scaffolding " ++ packageKindName ++ " leaves stdout empty.") "" addStdout
+        assertEqual ("Scaffolding " ++ packageKindName ++ " leaves stderr empty.") "" addStderr
+        markerExists <- doesFileExist (temporaryRepository </> "packages" </> packageName </> markerFile)
+        assertBool ("Scaffolding " ++ packageKindName ++ " creates its marker file.") markerExists
+        forM_ maybeCheckName $ \checkName -> do
+          checkExists <- doesFileExist (temporaryRepository </> "checks" </> checkName </> "default.nix")
+          assertBool ("Scaffolding " ++ packageKindName ++ " creates its combined check.") checkExists
+    (checkExit, checkStdout, checkStderr) <- runEndToEndCommandIn temporaryRepository ["check"]
+    assertEqual "The repository containing every supported scaffold passes its check." ExitSuccess checkExit
+    assertEqual "The successful scaffold-matrix check leaves stdout empty." "" checkStdout
+    assertEqual "The successful scaffold-matrix check leaves stderr empty." "" checkStderr
 existingPackageCollisionEndToEndTest :: IO ()
 existingPackageCollisionEndToEndTest =
   withGeneratedHaskellPackageRepository "existing-package-collision" $ \temporaryRepository -> do
@@ -2791,7 +2821,7 @@ unlabeledHaskellPackageCheckEndToEndTest =
   withGeneratedHaskellPackageRepository "unlabeled-haskell-check-end-to-end" $ \temporaryRepository -> do
     let mainPath = temporaryRepository </> "packages/demo/Main.hs"
     mainSource <- TIO.readFile mainPath
-    TIO.writeFile mainPath (T.replace "TestLabel \"The sample message should render.\" $ " "" mainSource)
+    TIO.writeFile mainPath (T.replace "TestLabel \"Renders the sample message.\" $ " "" mainSource)
     (checkExit, checkStdout, checkStderr) <- runEndToEndCommandIn temporaryRepository ["check"]
     assertEqual "An unlabeled HUnit package fails its repository check." (ExitFailure 1) checkExit
     assertEqual "An unlabeled HUnit package produces no stdout." "" checkStdout
@@ -2886,8 +2916,8 @@ expectedGeneratedPythonPackageSummary =
       repositoryPackageKind = PythonPackage,
       repositoryPackageDescription = Just "Demo package",
       repositoryPackageTestNames =
-        [ "The executable should print the sample message.",
-          "The package should render its sample message."
+        [ "Prints the sample message from the executable.",
+          "Renders the package's sample message."
         ],
       repositoryPackageCheck = Just RepositoryPackageCheckUnavailable
     }
@@ -2897,12 +2927,13 @@ expectedGeneratedHaskellPackageSummary =
     { repositoryPackageName = "demo",
       repositoryPackageKind = HaskellPackage,
       repositoryPackageDescription = Just "Demo package",
-      repositoryPackageTestNames = ["The sample message should render."],
+      repositoryPackageTestNames = ["Renders the sample message."],
       repositoryPackageCheck = Just RepositoryPackageCheckUnavailable
     }
 runEndToEndCommandIn :: FilePath -> [String] -> IO (ExitCode, String, String)
 runEndToEndCommandIn workingDirectory arguments =
-  readProcessWithExitCode "git" (["-C", workingDirectory, "repository-canonicalization"] ++ arguments) ""
+  withCurrentDirectory workingDirectory $
+    readProcessWithExitCode "git-repository-canonicalization" arguments ""
 initializeGitRepositoryFixture :: FilePath -> IO ()
 initializeGitRepositoryFixture repositoryPath =
   findExecutable "git" >>= \case
@@ -2985,12 +3016,12 @@ pythonMainSource =
       "",
       "",
       "def test_render_message_returns_sample_message() -> None:",
-      "    \"\"\"The package should render its sample message.\"\"\"",
+      "    \"\"\"Renders the package's sample message.\"\"\"",
       "    assert render_message() == SAMPLE_MESSAGE",
       "",
       "",
       "def test_main_prints_sample_message() -> None:",
-      "    \"\"\"The executable should print the sample message.\"\"\"",
+      "    \"\"\"Prints the sample message from the executable.\"\"\"",
       "    output = io.StringIO()",
       "    with contextlib.redirect_stdout(output):",
       "        main()",
@@ -3114,7 +3145,7 @@ pythonLatexMainSource =
       "",
       "",
       "def test_summarize_samples_contains_expected_metrics() -> None:",
-      "    \"\"\"Summary statistics should remain stable for the default dataset.\"\"\"",
+      "    \"\"\"Keeps summary statistics stable for the default dataset.\"\"\"",
       "    summary = dict(summarize_samples(DEFAULT_SAMPLES))",
       "    expected = {",
       "        \"count\": 5.0,",
@@ -3127,7 +3158,7 @@ pythonLatexMainSource =
       "",
       "",
       "def test_create_table_contains_expected_metrics() -> None:",
-      "    \"\"\"Table output should expose the expected summary metrics and values.\"\"\"",
+      "    \"\"\"Renders the expected summary metrics and values in the table.\"\"\"",
       "    with tempfile.TemporaryDirectory() as tmpdir:",
       "        table_path = Path(tmpdir) / \"table.tex\"",
       "        create_table(table_path, DEFAULT_SAMPLES)",
@@ -3147,7 +3178,7 @@ pythonLatexMainSource =
       "",
       "",
       "def test_create_figure_writes_non_empty_png() -> None:",
-      "    \"\"\"Figure generation should create a real PNG file.\"\"\"",
+      "    \"\"\"Creates a real PNG figure.\"\"\"",
       "    with tempfile.TemporaryDirectory() as tmpdir:",
       "        figure_path = Path(tmpdir) / \"figure.png\"",
       "        create_figure(figure_path, DEFAULT_SAMPLES)",
@@ -3156,12 +3187,12 @@ pythonLatexMainSource =
       "",
       "",
       "def test_latex_escape_handles_special_characters() -> None:",
-      "    \"\"\"LaTeX-special characters should be escaped in generated text.\"\"\"",
+      "    \"\"\"Escapes LaTeX-special characters in generated text.\"\"\"",
       "    assert latex_escape(r\"value_#1 & 50%\") == r\"value\\_\\#1 \\& 50\\%\"",
       "",
       "",
       "def test_main_generates_workspace_artifacts_in_current_directory() -> None:",
-      "    \"\"\"main() should write artifacts into <cwd>/tmp.\"\"\"",
+      "    \"\"\"Writes workspace artifacts into <cwd>/tmp.\"\"\"",
       "    with tempfile.TemporaryDirectory() as tmpdir:",
       "        fake_cwd = Path(tmpdir)",
       "        with mock.patch(\"pathlib.Path.cwd\", return_value=fake_cwd):",
@@ -3218,7 +3249,7 @@ haskellMainSource =
       "hUnitPackageTests :: Test",
       "hUnitPackageTests =",
       "  TestList",
-      "    [ TestLabel \"The sample message should render.\" $ TestCase $ do",
+      "    [ TestLabel \"Renders the sample message.\" $ TestCase $ do",
       "        assertEqual \"sample message\" \"Hello World Haskell\" renderMessage",
       "    ]",
       "",
@@ -3320,7 +3351,7 @@ rustMainSource =
       "        rendered",
       "    }",
       "    #[test]",
-      "    fn test_process_root_path_should_remove_empty_lines_from_text_files() -> Result<()> {",
+      "    fn test_process_root_path_removes_empty_lines_from_text_files() -> Result<()> {",
       "        use tempfile::tempdir;",
       "        let dir = tempdir()?;",
       "        let root = dir.path();",
@@ -3332,7 +3363,7 @@ rustMainSource =
       "        Ok(())",
       "    }",
       "    #[test]",
-      "    fn test_process_root_path_should_respect_gitignore_and_skip_binary_files() -> Result<()> {",
+      "    fn test_process_root_path_respects_gitignore_and_skips_binary_files() -> Result<()> {",
       "        use tempfile::tempdir;",
       "        let dir = tempdir()?;",
       "        let root = dir.path();",
@@ -3350,7 +3381,7 @@ rustMainSource =
       "        Ok(())",
       "    }",
       "    #[test]",
-      "    fn test_main_should_process_current_directory_when_no_args() -> Result<()> {",
+      "    fn test_main_processes_current_directory_when_no_args() -> Result<()> {",
       "        use tempfile::tempdir;",
       "        let dir = tempdir()?;",
       "        let root = dir.path();",
@@ -3366,7 +3397,7 @@ rustMainSource =
       "        Ok(())",
       "    }",
       "    #[test]",
-      "    fn quickcheck_strip_empty_lines_should_match_filtered_sequence() {",
+      "    fn quickcheck_strip_empty_lines_matches_filtered_sequence() {",
       "        fn property(lines: Vec<LogicalLine>) -> TestResult {",
       "            let input = render_lines(&lines);",
       "            match strip_empty_lines_from_bytes(&input) {",
@@ -3379,7 +3410,7 @@ rustMainSource =
       "            .quickcheck(property as fn(Vec<LogicalLine>) -> TestResult);",
       "    }",
       "    #[test]",
-      "    fn quickcheck_strip_empty_lines_should_be_idempotent() {",
+      "    fn quickcheck_strip_empty_lines_is_idempotent() {",
       "        fn property(lines: Vec<LogicalLine>) -> TestResult {",
       "            let input = render_lines(&lines);",
       "            match strip_empty_lines_from_bytes(&input) {",
@@ -3943,6 +3974,7 @@ pythonLatexTemplateBaselineNixSource =
       "  '';",
       "  installPhase = ''",
       "    datadir=\"$out/share/${pname}\"",
+      "    install -Dm755 main.py \"$out/bin/${pname}\"",
       "    install -Dm644 main.py ms.tex ms.bib -t \"$datadir\"",
       "    install -Dm644 tmp/ms.pdf \"$out/ms.pdf\"",
       "    install -Dm644 main.py $out/${python.sitePackages}/${pname}.py",
@@ -3997,9 +4029,8 @@ haskellCoverageCheckBaselineNixSource =
       "    cat > \"$workspace/TestMain.hs\" <<EOF",
       "    module TestMain (main) where",
       "    import qualified Main as PackageMain",
-      "    import System.Environment (getEnv)",
       "    main :: IO ()",
-      "    main = getEnv \"PROFILE_TIMINGS_PATH\" >>= PackageMain.runPackageTestsWithTimings",
+      "    main = PackageMain.runPackageTestsWithTimings \"$workspace/test-timings.tsv\"",
       "    EOF",
       "    \"${testGhc}/bin/ghc\" \\",
       "      -fhpc \\",
@@ -4016,7 +4047,7 @@ haskellCoverageCheckBaselineNixSource =
       "      -o \"$workspace/$packageName\" \\",
       "      \"$workspace/TestMain.hs\" \\",
       "      \"$src/Main.hs\"",
-      "    PROFILE_TIMINGS_PATH=\"$workspace/test-timings.tsv\" HPCTIXFILE=\"$workspace/coverage/$packageName.tix\" \\",
+      "    PACKAGE_E2E_EXECUTABLE=\"${packageDrv}/bin/${packageName}\" HPCTIXFILE=\"$workspace/coverage/$packageName.tix\" \\",
       "      ${pkgs.time}/bin/time -f %e -o \"$workspace/total-seconds\" \\",
       "      \"$workspace/$packageName\" +RTS -p -RTS",
       "    mv \"$workspace/$packageName.prof\" \"$out/profile-report.prof\"",
@@ -4064,7 +4095,7 @@ pythonCoverageCheckBaselineNixSource =
       "  ''",
       "    export HOME=\"$(mktemp -d)\"",
       "    mkdir -p \"$out/html\"",
-      "    python -m pytest -p no:cacheprovider --profile --pstats-dir \"$out/prof\" --cov=\"$src\" --cov-report term --cov-report \"json:$out/report.json\" --cov-report \"html:$out/html\" --junitxml=\"$out/junit.xml\" \"$src/main.py\"",
+      "    PACKAGE_E2E_EXECUTABLE=\"${packageDrv}/bin/${packageName}\" python -m pytest -p no:cacheprovider --profile --pstats-dir \"$out/prof\" --cov=\"$src\" --cov-report term --cov-report \"json:$out/report.json\" --cov-report \"html:$out/html\" --junitxml=\"$out/junit.xml\" \"$src/main.py\"",
       "    python - \"$src/main.py\" \"$out/report.json\" \"$out/junit.xml\" \"$out/coverage-summary.tsv\" \"$out/prof/combined.prof\" \"$out/profile-report.txt\" \"$out/profile-summary.tsv\" <<'PY'",
       "    import ast",
       "    import json",
@@ -4132,6 +4163,7 @@ rustCoverageCheckBaselineNixSource =
       "    substituteInPlace \"$workspace/.cargo/config.toml\" \\",
       "      --replace-fail \"@vendor@\" \"${cargoDeps}\"",
       "    mkdir -p \"$out\" \"$workspace/.config\"",
+      "    export PACKAGE_E2E_EXECUTABLE=\"${packageDrv}/bin/${packageName}\"",
       "    cat > \"$workspace/.config/nextest.toml\" <<EOF",
       "    [profile.profile.junit]",
       "    path = \"$out/junit.xml\"",

@@ -29,7 +29,7 @@ pkgs.runCommand checkName
   ''
     export HOME="$(mktemp -d)"
     mkdir -p "$out/html"
-    python -m pytest -p no:cacheprovider --profile --pstats-dir "$out/prof" --cov="$src" --cov-report term --cov-report "json:$out/report.json" --cov-report "html:$out/html" --junitxml="$out/junit.xml" "$src/main.py"
+    PACKAGE_E2E_EXECUTABLE="${packageDrv}/bin/${packageName}" python -m pytest -p no:cacheprovider --profile --pstats-dir "$out/prof" --cov="$src" --cov-report term --cov-report "json:$out/report.json" --cov-report "html:$out/html" --junitxml="$out/junit.xml" "$src/main.py"
     python - "$src/main.py" "$out/report.json" "$out/junit.xml" "$out/coverage-summary.tsv" "$out/prof/combined.prof" "$out/profile-report.txt" "$out/profile-summary.tsv" <<'PY'
     import ast
     import json

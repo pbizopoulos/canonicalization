@@ -474,8 +474,34 @@ mod tests {
             let _result = fs::remove_dir_all(&self.0);
         }
     }
+    fn run_installed(
+        home_directory: &Path,
+        arguments: &[&str],
+    ) -> io::Result<std::process::Output> {
+        let executable = env::var_os("PACKAGE_E2E_EXECUTABLE")
+            .ok_or_else(|| io::Error::other("PACKAGE_E2E_EXECUTABLE is not set"))?;
+        Command::new(executable)
+            .args(arguments)
+            .env("HOME", home_directory)
+            .output()
+    }
+    fn run_git_fixture(home_directory: &Path, arguments: &[&str]) -> TestResult {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(home_directory)
+            .args(arguments)
+            .output()?;
+        if !output.status.success() {
+            return Err(format!(
+                "git fixture command failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .into());
+        }
+        Ok(())
+    }
     #[test]
-    fn supported_urls_should_map_to_the_same_canonical_path() -> TestResult {
+    fn parses_supported_urls_into_the_same_canonical_path() -> TestResult {
         for repository_url in [
             "https://github.com/owner/demo.git",
             "ssh://git@github.com/owner/demo.git",
@@ -494,7 +520,7 @@ mod tests {
         return Ok(());
     }
     #[test]
-    fn unsupported_and_unsafe_urls_should_be_rejected() {
+    fn rejects_unsupported_and_unsafe_urls() {
         for repository_url in [
             "../demo.git",
             "http://github.com/owner/demo.git",
@@ -507,7 +533,7 @@ mod tests {
         }
     }
     #[test]
-    fn raw_submodule_parsing_should_be_separate_from_cardinality_validation() -> TestResult {
+    fn separates_raw_submodule_parsing_from_cardinality_validation() -> TestResult {
         let raw = parse_raw_submodule_fields(            b"submodule.demo.path\nhost/owner/demo\0submodule.demo.path\nhost/owner/other\0submodule.demo.url\nhttps://host/owner/demo.git\0",        )?;
         let (records, diagnostics) = validate_submodule_records(raw);
         assert!(records.is_empty());
@@ -517,7 +543,7 @@ mod tests {
         return Ok(());
     }
     #[test]
-    fn unsafe_canonical_paths_should_be_rejected_centrally() {
+    fn rejects_unsafe_canonical_paths_centrally() {
         for path in [
             "host",
             "host/../demo",
@@ -529,18 +555,21 @@ mod tests {
         assert!(validate_canonical_repository_path("host/owner/demo").is_ok());
     }
     #[test]
-    fn compatible_home_repositories_should_initialize_and_reinitialize() -> TestResult {
+    fn initializes_and_reinitializes_a_compatible_home_repository() -> TestResult {
+        if env::var_os("PACKAGE_E2E_EXECUTABLE").is_none() {
+            return Ok(());
+        }
         let home = TemporaryDirectory::new("init")?;
-        initialize_home_repository(home.path())
-            .map_err(|failure| format!("init failed: {failure:?}"))?;
+        let initial = run_installed(home.path(), &["init"])?;
+        assert!(initial.status.success());
         assert!(home.path().join(".git").is_dir());
         assert_eq!(
             fs::read_to_string(home.path().join(".gitignore"))?,
             DEFAULT_GITIGNORE
         );
         fs::write(home.path().join(".gitignore"), "*\n!github.com/")?;
-        initialize_home_repository(home.path())
-            .map_err(|failure| format!("reinit failed: {failure:?}"))?;
+        let repeated = run_installed(home.path(), &["init"])?;
+        assert!(repeated.status.success());
         assert_eq!(
             fs::read_to_string(home.path().join(".gitignore"))?,
             "*\n!github.com/\n!.gitignore\n!.gitmodules\n"
@@ -548,7 +577,7 @@ mod tests {
         return Ok(());
     }
     #[test]
-    fn conflicting_initialization_should_fail_without_side_effects() -> TestResult {
+    fn rejects_conflicting_initialization_without_side_effects() -> TestResult {
         let home = TemporaryDirectory::new("init-conflict")?;
         fs::write(home.path().join(".gitignore"), "*.tmp\n")?;
         let failure = initialize_home_repository(home.path())
@@ -558,7 +587,7 @@ mod tests {
         return Ok(());
     }
     #[test]
-    fn a_non_regular_gitignore_should_fail_without_side_effects() -> TestResult {
+    fn rejects_a_non_regular_gitignore_without_side_effects() -> TestResult {
         let home = TemporaryDirectory::new("init-non-regular-gitignore")?;
         fs::create_dir(home.path().join(".gitignore"))?;
         let failure = initialize_home_repository(home.path())
@@ -568,7 +597,7 @@ mod tests {
         return Ok(());
     }
     #[test]
-    fn matching_submodule_urls_and_paths_should_pass_the_check() -> TestResult {
+    fn checks_matching_submodule_urls_and_paths() -> TestResult {
         let home = TemporaryDirectory::new("check")?;
         fs::write(
             home.path().join(".gitmodules"),
@@ -579,7 +608,7 @@ mod tests {
         return Ok(());
     }
     #[test]
-    fn invalid_entries_should_report_every_detected_problem() -> TestResult {
+    fn reports_incomplete_unsupported_unsafe_and_mismatched_entries() -> TestResult {
         let home = TemporaryDirectory::new("check-invalid")?;
         fs::write(
             home.path().join(".gitmodules"),
@@ -606,7 +635,7 @@ mod tests {
         return Ok(());
     }
     #[test]
-    fn every_entry_should_be_validated_before_paths_are_fixed() -> TestResult {
+    fn validates_every_entry_before_fixing_paths() -> TestResult {
         let home = TemporaryDirectory::new("check-fix-invalid")?;
         let gitmodules = "[submodule \"mismatch\"]\n path = old/demo\n url = https://example.test/owner/demo.git\n[submodule \"invalid\"]\n path = example.test/owner/invalid\n url = ../invalid.git\n";
         fs::write(home.path().join(".gitmodules"), gitmodules)?;
@@ -620,7 +649,7 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn duplicate_canonical_destinations_should_be_rejected() -> TestResult {
+    fn rejects_duplicate_canonical_destinations() -> TestResult {
         let home = TemporaryDirectory::new("check-duplicate-destination")?;
         fs::write(
             home.path().join(".gitmodules"),
@@ -635,7 +664,7 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn ambiguous_fix_paths_should_be_rejected_before_mutation() -> TestResult {
+    fn rejects_ambiguous_fix_paths_before_mutating() -> TestResult {
         for (label, gitmodules, expected_diagnostic) in [
             (
                 "duplicate-source",
@@ -668,7 +697,7 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn gitmodules_should_exist_but_may_be_empty() -> TestResult {
+    fn treats_an_empty_file_as_valid_but_requires_gitmodules_to_exist() -> TestResult {
         let home = TemporaryDirectory::new("check-empty")?;
         assert!(check_home_gitmodules(home.path(), false).is_err());
         fs::write(home.path().join(".gitmodules"), "")?;
@@ -677,20 +706,61 @@ mod tests {
         return Ok(());
     }
     #[test]
-    fn the_cli_should_expose_check_and_its_fix_option() -> TestResult {
+    fn exposes_check_and_its_fix_option() -> TestResult {
+        if env::var_os("PACKAGE_E2E_EXECUTABLE").is_none() {
+            return Ok(());
+        }
         let home = TemporaryDirectory::new("check-command")?;
         fs::write(home.path().join(".gitmodules"), "")?;
-        assert_eq!(run_cli(&[OsString::from("check")], home.path()), 0);
-        assert_eq!(
-            run_cli(
-                &[OsString::from("check"), OsString::from("--fix"),],
-                home.path(),
-            ),
-            0
+        assert!(run_installed(home.path(), &["check"])?.status.success());
+        assert!(
+            run_installed(home.path(), &["check", "--fix"])?
+                .status
+                .success()
         );
         assert_eq!(
-            run_cli(&[OsString::from("check-gitmodules")], home.path()),
-            129
+            run_installed(home.path(), &["check-gitmodules"])?
+                .status
+                .code(),
+            Some(USAGE_EXIT_CODE)
+        );
+        return Ok(());
+    }
+    #[test]
+    fn fixes_a_mismatched_path_through_the_installed_cli() -> TestResult {
+        if env::var_os("PACKAGE_E2E_EXECUTABLE").is_none() {
+            return Ok(());
+        }
+        let home = TemporaryDirectory::new("check-fix-success")?;
+        assert!(run_installed(home.path(), &["init"])?.status.success());
+        fs::write(
+            home.path().join(".gitignore"),
+            "*\n!.gitignore\n!.gitmodules\n!old/\n!old/demo/\n!old/demo/file.txt\n!example.test/\n!example.test/owner/\n!example.test/owner/demo/\n!example.test/owner/demo/file.txt\n",
+        )?;
+        fs::create_dir_all(home.path().join("old/demo"))?;
+        fs::write(home.path().join("old/demo/file.txt"), "fixture\n")?;
+        fs::write(
+            home.path().join(".gitmodules"),
+            "[submodule \"demo\"]\n path = old/demo\n url = https://example.test/owner/demo.git\n",
+        )?;
+        run_git_fixture(
+            home.path(),
+            &["add", ".gitignore", ".gitmodules", "old/demo/file.txt"],
+        )?;
+        let output = run_installed(home.path(), &["check", "--fix"])?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!home.path().join("old/demo").exists());
+        assert_eq!(
+            fs::read_to_string(home.path().join("example.test/owner/demo/file.txt"))?,
+            "fixture\n"
+        );
+        assert!(
+            fs::read_to_string(home.path().join(".gitmodules"))?
+                .contains("example.test/owner/demo")
         );
         return Ok(());
     }
