@@ -194,7 +194,7 @@ pathsAreUnambiguous (bindingPath : remainingPaths) =
 nextLevelBindings :: Binding NExprLoc -> [Binding NExprLoc]
 nextLevelBindings (NamedVar (_ :| bindingKey : restKeys) valExpr bindingPos) =
   [NamedVar (bindingKey :| restKeys) valExpr bindingPos]
-nextLevelBindings (NamedVar (_ :| []) (Fix (Compose (AnnUnit _ (NSet _ nested)))) _) = nested
+nextLevelBindings (NamedVar (_ :| []) (Fix (Compose (AnnUnit _ (NSet NonRecursive nested)))) _) = nested
 nextLevelBindings _ = []
 makeFormattingTest :: Text -> Text -> Test
 makeFormattingTest input expectedOutput = TestCase $ do
@@ -388,6 +388,10 @@ hUnitPackageTests =
         makeFormattingTest
           (pack "{ b = { z = 1; x = 2; }; a = 1; }")
           (pack "{\n  a = 1;\n  b = {\n    x = 2;\n    z = 1;\n  };\n}"),
+      TestLabel "Preserves recursive nested attribute sets." $
+        makeFormattingTest
+          (pack "{ a = rec { y = x; x = 1; }; }")
+          (pack "{\n  a = rec {\n    x = 1;\n    y = x;\n  };\n}"),
       TestLabel "Collapses dotted list assignments." $
         makeFormattingTest
           (pack "{ a = { b = [ \"c\" ]; }; }")
