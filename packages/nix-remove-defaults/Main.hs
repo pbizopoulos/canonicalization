@@ -24,7 +24,7 @@ import Data.Fix (Fix (Fix))
 import Data.Foldable (toList)
 import Data.Functor.Compose (Compose (Compose))
 import Data.Kind (Type)
-import Data.List (isInfixOf, isSuffixOf, nub, sortBy)
+import Data.List (isInfixOf, isSuffixOf, nub, sort, sortBy)
 import Data.List qualified as List
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.List.NonEmpty qualified as NE
@@ -84,7 +84,6 @@ import Prelude
     Ord,
     Show,
     String,
-    and,
     any,
     appendFile,
     concat,
@@ -246,8 +245,8 @@ processRepository repositoryRoot = do
               putStrLn diagnostic
               pure False
             (Right nixosDefinitionFiles, Right treefmtDefaults) -> do
-              successResults <- mapM (processParsedRepositoryFile repositoryRoot flakeSourcePath nixosDefinitionFiles treefmtDefaults) parsedFiles
-              pure (and successResults)
+              mapM_ (processParsedRepositoryFile repositoryRoot flakeSourcePath nixosDefinitionFiles treefmtDefaults) parsedFiles
+              pure True
         else do
           mapM_ putStrLn parseErrors
           pure False
@@ -263,7 +262,7 @@ findFlakeRootFrom directoryPath = do
             else findFlakeRootFrom parentDirectory
 findNixFiles :: FilePath -> IO [FilePath]
 findNixFiles directoryPath = do
-  entries <- listDirectory directoryPath
+  entries <- sort <$> listDirectory directoryPath
   nestedFiles <-
     mapM
       ( \entryName -> do
@@ -292,11 +291,10 @@ shouldSkipDirectory directoryName =
 parseRepositoryFile :: FilePath -> IO (Either String ParsedNixFile)
 parseRepositoryFile filePath = do
   parseResult <- parseNixFileLoc (Path filePath)
-  case parseResult of
-    Left parseError -> do
-      pure (Left ("Error parsing " ++ filePath ++ ": " ++ show parseError))
-    Right expr -> pure (Right (filePath, expr))
-processParsedRepositoryFile :: FilePath -> FilePath -> Map NixosCandidate [FilePath] -> Map OptionPath Literal -> ParsedNixFile -> IO Bool
+  pure $ case parseResult of
+    Left parseError -> Left ("Error parsing " ++ filePath ++ ": " ++ show parseError)
+    Right expr -> Right (filePath, expr)
+processParsedRepositoryFile :: FilePath -> FilePath -> Map NixosCandidate [FilePath] -> Map OptionPath Literal -> ParsedNixFile -> IO ()
 processParsedRepositoryFile repositoryRoot flakeSourcePath nixosDefinitionFiles treefmtDefaults (filePath, expr) = do
   let nixosRemovals = nixosRemovalsForFile repositoryRoot flakeSourcePath filePath nixosDefinitionFiles (collectCandidates expr)
       treefmtRemovals = removalsFromDefaults treefmtDefaults (collectTreefmtCandidates expr)
@@ -306,14 +304,13 @@ processParsedRepositoryFile repositoryRoot flakeSourcePath nixosDefinitionFiles 
           treefmtRemovals
           (rewriteModuleExpression nixosRemovals expr)
   when changed $ TIO.writeFile filePath (renderExpression transformed)
-  pure True
 renderExpression :: NExprLoc -> Text
 renderExpression =
   renderStrict . layoutPretty defaultLayoutOptions . prettyNix . stripAnnotation
-removeDefaultAssignments :: DefaultResolver -> NExprLoc -> IO (Bool, NExprLoc)
+removeDefaultAssignments :: DefaultResolver -> NExprLoc -> IO NExprLoc
 removeDefaultAssignments resolveDefault expr = do
   removals <- resolveLiteralRemovals resolveDefault (collectCandidates expr)
-  pure (not (Set.null removals), rewriteModuleExpression removals expr)
+  pure (rewriteModuleExpression removals expr)
 resolveLiteralRemovals :: DefaultResolver -> [(OptionPath, Literal)] -> IO (Set OptionPath)
 resolveLiteralRemovals resolveDefault candidates = do
   resolutions <-
@@ -625,7 +622,7 @@ formatWithDefaults defaults input =
     parseResult <- parseNixFileLoc (Path tmpFile)
     case parseResult of
       Right expr -> do
-        (_changed, transformed) <- removeDefaultAssignments (pure . (`Map.lookup` defaults)) expr
+        transformed <- removeDefaultAssignments (pure . (`Map.lookup` defaults)) expr
         pure (renderExpression transformed)
       Left parseError -> assertFailure ("Test fixture failed to parse: " ++ show parseError)
 formatTreefmtWithDefaults :: Map OptionPath Literal -> Text -> IO Text

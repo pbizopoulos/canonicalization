@@ -1942,12 +1942,15 @@ normalizeCargoTomlForBaselineComparison packageName tomlContents =
         | currentTomlSectionHeader == Just "[[bin]]" && isTomlNameAssignment trimmedLine =
             (currentTomlSectionHeader, Just normalizedNameLine)
         | otherwise =
-            (currentTomlSectionHeader, Just trimmedLine)
+            (currentTomlSectionHeader, Just (normalizeCargoLine currentTomlSectionHeader trimmedLine))
         where
           trimmedLine = T.strip sourceLine
       (_, normalizedLines) = mapAccumL step Nothing (T.lines tomlContents)
       normalizedNameLine = "name = \"" <> T.pack packageName <> "\""
    in T.unlines (catMaybes normalizedLines)
+normalizeCargoLine :: Maybe T.Text -> T.Text -> T.Text
+normalizeCargoLine (Just "[lints.clippy]") = T.replace " }" "}" . T.replace "{ " "{"
+normalizeCargoLine _ = id
 isCargoDependencySectionHeader :: T.Text -> Bool
 isCargoDependencySectionHeader trimmedLine =
   trimmedLine == "[dependencies]"
@@ -2391,6 +2394,7 @@ hUnitPackageTests =
       TestLabel "Uses Python test docstrings as behavioral specifications." (TestCase pythonTestDiscoveryTest),
       TestLabel "Humanizes conventional test identifiers across frameworks." (TestCase testIdentifierSpecificationTest),
       TestLabel "Parses versioned coverage summaries strictly." (TestCase repositoryCoverageParsingTest),
+      TestLabel "Ignores formatter-only Cargo inline-table spacing." (TestCase cargoTomlFormattingNormalizationTest),
       TestLabel "Renders stable text and JSON repository summaries." (TestCase repositorySummaryRenderingTest),
       TestLabel "Reports concise Nix template parameter differences." (TestCase nixTemplateParameterDifferenceTest),
       TestLabel "Accepts python_template without inputs or shellHook." (TestCase pythonTemplateOptionalInputsAndShellHookTest),
@@ -2476,6 +2480,12 @@ testIdentifierSpecificationTest =
           "prop_attributeSetsCanonicalizeByKeyOrder"
         ]
     )
+cargoTomlFormattingNormalizationTest :: IO ()
+cargoTomlFormattingNormalizationTest =
+  assertEqual
+    "Taplo's inline-table spacing does not change Cargo policy compliance."
+    (normalizeCargoTomlForBaselineComparison "remove-empty-lines" rustCargoTomlBaseline)
+    (normalizeCargoTomlForBaselineComparison "remove-empty-lines" removeEmptyLinesCargoTomlFixture)
 repositoryCoverageParsingTest :: IO ()
 repositoryCoverageParsingTest = do
   assertEqual
@@ -3554,10 +3564,10 @@ removeEmptyLinesCargoTomlFixture =
       "tempfile = \"3.8\"",
       "",
       "[lints.clippy]",
-      "all = { level = \"deny\", priority = -1 }",
-      "pedantic = { level = \"deny\", priority = -1 }",
-      "nursery = { level = \"deny\", priority = -1 }",
-      "cargo = { level = \"deny\", priority = -1 }",
+      "all = {level = \"deny\", priority = -1}",
+      "pedantic = {level = \"deny\", priority = -1}",
+      "nursery = {level = \"deny\", priority = -1}",
+      "cargo = {level = \"deny\", priority = -1}",
       "",
       "[lints.rust]",
       "unsafe_code = \"forbid\"",
@@ -3585,10 +3595,10 @@ rustCargoTomlBaseline =
       "colored = \"2.1.0\"",
       "",
       "[lints.clippy]",
-      "all = {level = \"deny\", priority = -1}",
-      "pedantic = {level = \"deny\", priority = -1}",
-      "nursery = {level = \"deny\", priority = -1}",
-      "cargo = {level = \"deny\", priority = -1}",
+      "all = { level = \"deny\", priority = -1 }",
+      "pedantic = { level = \"deny\", priority = -1 }",
+      "nursery = { level = \"deny\", priority = -1 }",
+      "cargo = { level = \"deny\", priority = -1 }",
       "",
       "[lints.rust]",
       "unsafe_code = \"forbid\"",

@@ -296,6 +296,8 @@ fn check_home_gitmodules(home_directory: &Path, fix: bool) -> Result<(), CliFail
     let raw_submodules = parse_raw_submodule_fields(&output.stdout)
         .map_err(|diagnostic| CliFailure::check(vec![diagnostic]))?;
     let (submodules, mut diagnostics) = validate_submodule_records(raw_submodules);
+    let mut path_fixes = Vec::new();
+    let mut canonical_path_sections = BTreeMap::new();
     for submodule in submodules {
         let section = submodule.section;
         let configured_path = submodule.path;
@@ -308,9 +310,14 @@ fn check_home_gitmodules(home_directory: &Path, fix: bool) -> Result<(), CliFail
         }
         match parse_repository_url(&configured_url) {
             Ok(expected_path) => {
+                if let Some(existing_section) = canonical_path_sections.get(&expected_path) {
+                    diagnostics.push(format!(                        "submodule \"{section}\": URL resolves to canonical path '{expected_path}', already used by submodule \"{existing_section}\""                    ));
+                    continue;
+                }
+                canonical_path_sections.insert(expected_path.clone(), section.clone());
                 if configured_path != expected_path {
                     if fix {
-                        fix_submodule_path(home_directory, &configured_path, &expected_path)?;
+                        path_fixes.push((configured_path, expected_path));
                     } else {
                         diagnostics.push(format!(                            "submodule \"{section}\": path '{configured_path}' does not match URL '{configured_url}'; expected '{expected_path}'"                        ));
                     }
@@ -319,10 +326,13 @@ fn check_home_gitmodules(home_directory: &Path, fix: bool) -> Result<(), CliFail
             Err(error) => diagnostics.push(format!("submodule \"{section}\": {error}")),
         }
     }
-    if diagnostics.is_empty() {
-        return Ok(());
+    if !diagnostics.is_empty() {
+        return Err(CliFailure::check(diagnostics));
     }
-    return Err(CliFailure::check(diagnostics));
+    for (configured_path, expected_path) in path_fixes {
+        fix_submodule_path(home_directory, &configured_path, &expected_path)?;
+    }
+    Ok(())
 }
 fn validate_submodule_records(
     submodules: BTreeMap<String, RawSubmoduleFields>,
@@ -610,6 +620,35 @@ mod tests {
             );
         }
         return Ok(());
+    }
+    #[test]
+    fn validates_every_entry_before_fixing_paths() -> TestResult {
+        let home = TemporaryDirectory::new("check-fix-invalid")?;
+        let gitmodules = "[submodule \"mismatch\"]\n path = old/demo\n url = https://example.test/owner/demo.git\n[submodule \"invalid\"]\n path = example.test/owner/invalid\n url = ../invalid.git\n";
+        fs::write(home.path().join(".gitmodules"), gitmodules)?;
+        let failure = check_home_gitmodules(home.path(), true)
+            .expect_err("invalid entries must prevent fixes");
+        assert!(matches!(failure, CliFailure::Check(_)));
+        assert_eq!(
+            fs::read_to_string(home.path().join(".gitmodules"))?,
+            gitmodules
+        );
+        Ok(())
+    }
+    #[test]
+    fn rejects_duplicate_canonical_destinations() -> TestResult {
+        let home = TemporaryDirectory::new("check-duplicate-destination")?;
+        fs::write(
+            home.path().join(".gitmodules"),
+            "[submodule \"first\"]\n path = example.test/owner/demo\n url = https://example.test/owner/demo.git\n[submodule \"second\"]\n path = another/path\n url = git@example.test:owner/demo.git\n",
+        )?;
+        let failure = check_home_gitmodules(home.path(), false)
+            .expect_err("canonical destinations must be unique");
+        let CliFailure::Check(diagnostics) = failure else {
+            return Err("duplicate destinations must produce check diagnostics".into());
+        };
+        assert!(diagnostics[0].contains("already used by submodule"));
+        Ok(())
     }
     #[test]
     fn treats_an_empty_file_as_valid_but_requires_gitmodules_to_exist() -> TestResult {
