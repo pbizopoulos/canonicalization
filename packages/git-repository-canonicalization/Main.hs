@@ -273,15 +273,6 @@ isCPackageVmCheckShape packageKind nixSource =
     && "pkgs.testers.runNixOSTest" `isInfixOf` nixSource
     && "nodes.machine" `isInfixOf` nixSource
     && "testScript = ''" `isInfixOf` nixSource
-type CanonicalizationSettings :: Type
-newtype CanonicalizationSettings = CanonicalizationSettings
-  { canonicalizationPythonPackageAttribute :: String
-  }
-defaultCanonicalizationSettings :: CanonicalizationSettings
-defaultCanonicalizationSettings =
-  CanonicalizationSettings
-    { canonicalizationPythonPackageAttribute = defaultPythonPackageAttribute
-    }
 type Command :: Type
 data Command
   = CheckCommand
@@ -293,17 +284,16 @@ data CommandParseResult
   | MainHelp
   | InvalidCommand ExitCode (Maybe String)
 main :: IO ()
-main = getArgs >>= runCli defaultCanonicalizationSettings
-runCli :: CanonicalizationSettings -> [String] -> IO ()
-runCli canonicalizationSettings commandLineArgs =
+main = getArgs >>= runCli
+runCli :: [String] -> IO ()
+runCli commandLineArgs =
   case parseCommand commandLineArgs of
     MainHelp -> printMainHelpAndExit
     InvalidCommand exitCode maybeCommand ->
       hPutStr stderr (usageTextForCommand maybeCommand) >> exitWith exitCode
-    ParsedCommand CheckCommand -> checkRepositoryLocation canonicalizationSettings "."
+    ParsedCommand CheckCommand -> checkRepositoryLocation "."
     ParsedCommand (SummaryCommand jsonOutput) ->
       summarizeRepositoryLocation
-        canonicalizationSettings
         (if jsonOutput then renderRepositorySummariesJson else renderRepositorySummariesText)
         "."
     ParsedCommand (AddCommand packageKindName packageName packageDescription) ->
@@ -314,7 +304,7 @@ runCli canonicalizationSettings commandLineArgs =
             hPutStrLn stderr ("hint: supported package types: " ++ intercalate ", " (map fst supportedAddPackageKinds))
             exitFailure
           Just scaffoldPackageKind -> do
-            addResult <- addPackageToCurrentRepositoryWith canonicalizationSettings scaffoldPackageKind packageName packageDescription
+            addResult <- addPackageToCurrentRepository scaffoldPackageKind packageName packageDescription
             stageGeneratedPathsOrExit addResult
 stageGeneratedPathsOrExit :: Either String [FilePath] -> IO a
 stageGeneratedPathsOrExit = \case
@@ -435,11 +425,11 @@ captureGitOrExit gitArguments = do
       exitWith gitExit
 delegateToGit :: [String] -> IO a
 delegateToGit gitArguments = executeFile "git" True gitArguments Nothing
-checkRepositoryLocation :: CanonicalizationSettings -> FilePath -> IO ()
-checkRepositoryLocation canonicalizationSettings location = do
+checkRepositoryLocation :: FilePath -> IO ()
+checkRepositoryLocation location = do
   repositoryRoot <- discoverGitRepositoryRoot location
   withCurrentDirectory repositoryRoot $
-    collectRepositoryComplianceWith canonicalizationSettings >>= \case
+    collectRepositoryCompliance >>= \case
       Left repositoryComplianceFailure -> do
         reportCheckRepositoryFailure repositoryComplianceFailure
         exitFailure
@@ -457,20 +447,20 @@ data RepositoryCheckPhase
   | FileCompliancePhase
 type RepositoryComplianceFailure :: Type
 data RepositoryComplianceFailure = RepositoryComplianceFailure RepositoryCheckPhase (NonEmpty String)
-collectRepositoryComplianceWith :: CanonicalizationSettings -> IO (Either RepositoryComplianceFailure RepositoryComplianceSuccess)
-collectRepositoryComplianceWith canonicalizationSettings = do
+collectRepositoryCompliance :: IO (Either RepositoryComplianceFailure RepositoryComplianceSuccess)
+collectRepositoryCompliance = do
   requiredRootFileIssues <- checkRequiredRepositoryRootFiles
   case requiredRootFileIssues of
-    [] -> collectRepositoryContentComplianceWith canonicalizationSettings
+    [] -> collectRepositoryContentCompliance
     firstIssue : remainingIssues ->
       pure (Left (RepositoryComplianceFailure RequiredRootFilesPhase (firstIssue :| remainingIssues)))
-collectRepositoryContentComplianceWith :: CanonicalizationSettings -> IO (Either RepositoryComplianceFailure RepositoryComplianceSuccess)
-collectRepositoryContentComplianceWith canonicalizationSettings = do
+collectRepositoryContentCompliance :: IO (Either RepositoryComplianceFailure RepositoryComplianceSuccess)
+collectRepositoryContentCompliance = do
   repositoryStructureIssues <- checkRepositoryStructure
   case repositoryStructureIssues of
     [] -> do
       packageNames <- listSubdirectoryNames "packages"
-      packageComplianceIssues <- concat <$> forM packageNames (checkPackageWith canonicalizationSettings)
+      packageComplianceIssues <- concat <$> forM packageNames checkPackage
       checkNames <- listSubdirectoryNames "checks"
       checkComplianceIssues <- concat <$> forM checkNames checkTemplateWith
       case packageComplianceIssues ++ checkComplianceIssues of
@@ -552,16 +542,16 @@ data RepositorySummary = RepositorySummary
     repositorySummaryPackages :: [RepositoryPackageSummary]
   }
   deriving stock (Eq, Show)
-summarizeRepositoryLocation :: CanonicalizationSettings -> ([RepositorySummary] -> String) -> FilePath -> IO ()
-summarizeRepositoryLocation canonicalizationSettings render location = do
+summarizeRepositoryLocation :: ([RepositorySummary] -> String) -> FilePath -> IO ()
+summarizeRepositoryLocation render location = do
   repositoryRoot <- discoverGitRepositoryRoot location
   repositoryPath <- canonicalizePath repositoryRoot
-  repositorySummary <- summarizeRepositoryAt canonicalizationSettings repositoryPath repositoryRoot
+  repositorySummary <- summarizeRepositoryAt repositoryPath repositoryRoot
   putStr (render [repositorySummary])
-summarizeRepositoryAt :: CanonicalizationSettings -> FilePath -> FilePath -> IO RepositorySummary
-summarizeRepositoryAt canonicalizationSettings repositoryPath repositoryRoot =
+summarizeRepositoryAt :: FilePath -> FilePath -> IO RepositorySummary
+summarizeRepositoryAt repositoryPath repositoryRoot =
   withCurrentDirectory repositoryRoot $
-    collectRepositoryComplianceWith canonicalizationSettings >>= \case
+    collectRepositoryCompliance >>= \case
       Left repositoryComplianceFailure -> do
         hPutStrLn stderr ("error: repository: " ++ repositoryPath)
         reportCheckRepositoryFailure repositoryComplianceFailure
@@ -628,7 +618,10 @@ renderRepositoryPackageTestsText packageSummary =
     [] -> []
     testNames ->
       (renderRepositoryPackageFieldName "tests" ++ renderRepositoryPackageTestAggregate packageSummary)
-        : [repositoryPackageValueIndent ++ renderRepositoryPackageTestText packageSummary testName | testName <- testNames]
+        : [repositoryPackageValueIndent ++ renderRepositoryPackageTestText testDurations durationWidth testName | testName <- testNames]
+      where
+        testDurations = repositoryPackageTestDurations packageSummary
+        durationWidth = maximum (0 : map (length . renderProfileSeconds) (Map.elems testDurations))
 renderRepositoryPackageFieldName :: String -> String
 renderRepositoryPackageFieldName fieldName =
   replicate (length ("description" :: String) - length fieldName) ' ' ++ fieldName ++ ":"
@@ -655,12 +648,18 @@ renderRepositoryPackageTestsJson packageSummary
       [ "      \"tests\": {",
         "        \"coverage\": " ++ renderRepositoryPackageCoverageJson (repositoryPackageCheck packageSummary) ++ ",",
         "        \"profile\": " ++ renderRepositoryPackageProfileJson (repositoryPackageCheck packageSummary) ++ ",",
-        "        \"durationsSeconds\": " ++ renderRepositoryPackageTestDurationsJson (repositoryPackageTestDurations packageSummary) ++ ",",
-        "        \"cases\": " ++ "[" ++ intercalate ", " (map renderJsonString testNames) ++ "]",
+        "        \"cases\": [" ++ intercalate ", " (map (renderRepositoryPackageTestCaseJson testDurations) testNames) ++ "]",
         "      }"
       ]
   where
     testNames = repositoryPackageTestNames packageSummary
+    testDurations = repositoryPackageTestDurations packageSummary
+renderRepositoryPackageTestCaseJson :: Map.Map String Duration -> String -> String
+renderRepositoryPackageTestCaseJson testDurations testName =
+  "{ \"name\": "
+    ++ renderJsonString testName
+    ++ maybe "" (\seconds -> ", \"durationSeconds\": " ++ renderProfileSeconds seconds) (Map.lookup testName testDurations)
+    ++ " }"
 renderRepositoryPackageTestAggregate :: RepositoryPackageSummary -> String
 renderRepositoryPackageTestAggregate packageSummary =
   case repositoryPackageCheck packageSummary of
@@ -710,28 +709,18 @@ renderRepositoryPackageProfileJson = \case
   Just (RepositoryPackageCheckMeasured _ RepositoryProfileUnavailable) -> "{ \"status\": \"unavailable\" }"
   Just (RepositoryPackageCheckMeasured _ (RepositoryProfileMeasured totalSeconds _)) ->
     "{ \"status\": \"measured\", \"totalSeconds\": " ++ renderProfileSeconds totalSeconds ++ " }"
-renderRepositoryPackageTestText :: RepositoryPackageSummary -> String -> String
-renderRepositoryPackageTestText packageSummary testName =
+renderRepositoryPackageTestText :: Map.Map String Duration -> Int -> String -> String
+renderRepositoryPackageTestText testDurations durationWidth testName =
   case Map.lookup testName testDurations of
     Just seconds ->
       let renderedSeconds = renderProfileSeconds seconds
-          durationWidth = maximum (map (length . renderProfileSeconds) (Map.elems testDurations))
        in "(" ++ replicate (durationWidth - length renderedSeconds) ' ' ++ renderedSeconds ++ "s) " ++ testName
     Nothing -> testName
-  where
-    testDurations = repositoryPackageTestDurations packageSummary
 repositoryPackageTestDurations :: RepositoryPackageSummary -> Map.Map String Duration
 repositoryPackageTestDurations packageSummary =
   case repositoryPackageCheck packageSummary of
     Just (RepositoryPackageCheckMeasured _ (RepositoryProfileMeasured _ profileTestDurations)) -> profileTestDurations
     _ -> Map.empty
-renderRepositoryPackageTestDurationsJson :: Map.Map String Duration -> String
-renderRepositoryPackageTestDurationsJson testDurations
-  | not (Map.null testDurations) =
-      "{ "
-        ++ intercalate ", " [renderJsonString testName ++ ": " ++ renderProfileSeconds seconds | (testName, seconds) <- Map.toAscList testDurations]
-        ++ " }"
-  | otherwise = "{}"
 renderProfileSeconds :: Duration -> String
 renderProfileSeconds (Duration seconds) = showFFloat (Just 3) seconds ""
 summarizeRepositoryPackage :: Maybe (Map.Map FilePath FilePath) -> Set.Set FilePath -> FilePath -> IO RepositoryPackageSummary
@@ -1019,21 +1008,16 @@ isDelimitedLowercaseName separator packageName =
         && T.all (\character -> isAsciiLower character || isDigit character) namePart
 type ScaffoldFile :: Type
 data ScaffoldFile = ScaffoldFile
-  { scaffoldFileRelativePath :: FilePath,
+  { scaffoldFilePath :: FilePath,
     scaffoldFileContents :: T.Text
-  }
-type RepositoryScaffoldFile :: Type
-data RepositoryScaffoldFile = RepositoryScaffoldFile
-  { repositoryScaffoldFilePath :: FilePath,
-    repositoryScaffoldFileContents :: T.Text
   }
 type RepositoryCheckSpec :: Type
 data RepositoryCheckSpec = RepositoryCheckSpec
   { repositoryCheckNameSuffix :: String,
     repositoryCheckSource :: T.Text
   }
-addPackageToCurrentRepositoryWith :: CanonicalizationSettings -> ScaffoldPackageKind -> FilePath -> Maybe String -> IO (Either String [FilePath])
-addPackageToCurrentRepositoryWith canonicalizationSettings scaffoldPackageKind packageName packageDescription =
+addPackageToCurrentRepository :: ScaffoldPackageKind -> FilePath -> Maybe String -> IO (Either String [FilePath])
+addPackageToCurrentRepository scaffoldPackageKind packageName packageDescription =
   case packageKindForScaffold scaffoldPackageKind of
     Nothing -> pure (Left "internal error: missing scaffold package specification")
     Just packageKind -> case validatePackageNameForKind packageKind packageName of
@@ -1044,29 +1028,24 @@ addPackageToCurrentRepositoryWith canonicalizationSettings scaffoldPackageKind p
         if packageRootExists
           then pure (Left ("path already exists: " ++ packageRootDirectory))
           else do
-            let packageScaffoldFiles =
-                  [ RepositoryScaffoldFile
-                      (packageRootDirectory </> scaffoldFileRelativePath scaffoldFile)
-                      (scaffoldFileContents scaffoldFile)
-                  | scaffoldFile <- renderScaffoldFilesWith canonicalizationSettings scaffoldPackageKind packageName packageDescription
-                  ]
+            let packageScaffoldFiles = renderScaffoldFiles scaffoldPackageKind packageName packageDescription
                 checkScaffoldFiles = maybeToList (renderRepositoryCheckScaffoldFile packageName <$> repositoryCheckSpecForPackageKind packageKind)
-            createRepositoryScaffoldFiles (packageScaffoldFiles ++ checkScaffoldFiles)
-createRepositoryScaffoldFiles :: [RepositoryScaffoldFile] -> IO (Either String [FilePath])
-createRepositoryScaffoldFiles scaffoldFiles = do
-  let scaffoldPaths = map repositoryScaffoldFilePath scaffoldFiles
+            createScaffoldFiles (packageScaffoldFiles ++ checkScaffoldFiles)
+createScaffoldFiles :: [ScaffoldFile] -> IO (Either String [FilePath])
+createScaffoldFiles scaffoldFiles = do
+  let scaffoldPaths = map scaffoldFilePath scaffoldFiles
   existingPaths <- filterM doesPathExist scaffoldPaths
   case existingPaths of
     existingPath : _ -> pure (Left ("path already exists: " ++ existingPath))
     [] -> do
-      forM_ scaffoldFiles $ \repositoryScaffoldFile -> do
-        let absolutePath = repositoryScaffoldFilePath repositoryScaffoldFile
-        createDirectoryIfMissing True (takeDirectory absolutePath)
-        TIO.writeFile absolutePath (repositoryScaffoldFileContents repositoryScaffoldFile)
+      forM_ scaffoldFiles $ \scaffoldFile -> do
+        let path = scaffoldFilePath scaffoldFile
+        createDirectoryIfMissing True (takeDirectory path)
+        TIO.writeFile path (scaffoldFileContents scaffoldFile)
       pure (Right scaffoldPaths)
-renderRepositoryCheckScaffoldFile :: FilePath -> RepositoryCheckSpec -> RepositoryScaffoldFile
+renderRepositoryCheckScaffoldFile :: FilePath -> RepositoryCheckSpec -> ScaffoldFile
 renderRepositoryCheckScaffoldFile packageName checkSpec =
-  RepositoryScaffoldFile
+  ScaffoldFile
     ("checks" </> (packageName ++ repositoryCheckNameSuffix checkSpec) </> "default.nix")
     (repositoryCheckSource checkSpec)
 repositoryCheckNameForPackage :: PackageKind -> FilePath -> Maybe FilePath
@@ -1083,51 +1062,57 @@ repositoryCheckSpecForPackageKind = \case
   where
     spec :: String -> T.Text -> RepositoryCheckSpec
     spec = RepositoryCheckSpec
-renderScaffoldFilesWith :: CanonicalizationSettings -> ScaffoldPackageKind -> FilePath -> Maybe String -> [ScaffoldFile]
-renderScaffoldFilesWith canonicalizationSettings scaffoldPackageKind packageName packageDescription =
-  case scaffoldPackageKind of
-    HaskellScaffold ->
-      [ ScaffoldFile ".gitignore" haskellGitignoreSource,
-        ScaffoldFile "default.nix" haskellTemplateBaselineNixSource,
-        ScaffoldFile "Main.hs" haskellMainSource,
-        ScaffoldFile (packageName <.> "cabal") (renderScaffoldHaskellCabal packageName packageDescription)
-      ]
-    RustScaffold ->
-      [ ScaffoldFile ".gitignore" rustGitignoreSource,
-        ScaffoldFile "default.nix" rustTemplateBaselineNixSource,
-        ScaffoldFile "Cargo.toml" (renderScaffoldCargoToml packageName packageDescription),
-        ScaffoldFile "src/main.rs" rustMainSource
-      ]
-    HtmlScaffold ->
-      [ ScaffoldFile ".gitignore" htmlGitignoreSource,
-        ScaffoldFile "default.nix" (renderNixTemplateDescription defaultHtmlTemplateDescription packageDescription htmlTemplateBaselineNixSource),
-        ScaffoldFile "index.html" htmlIndexSource,
-        ScaffoldFile "script.js" htmlScriptSource,
-        ScaffoldFile "style.css" htmlStyleSource
-      ]
-    PythonLatexScaffold ->
-      [ ScaffoldFile ".gitignore" pythonLatexGitignoreSource,
-        ScaffoldFile "default.nix" (renderNixTemplateDescription defaultPythonLatexTemplateDescription packageDescription pythonLatexTemplateBaselineNixSource),
-        ScaffoldFile "main.py" pythonLatexMainSource,
-        ScaffoldFile "ms.tex" latexMsTexSource,
-        ScaffoldFile "ms.bib" latexMsBibSource
-      ]
-    PythonScaffold ->
-      [ ScaffoldFile ".gitignore" pythonGitignoreSource,
-        ScaffoldFile "default.nix" (renderPythonTemplateBaselineNixSourceWith (scaffoldDescription defaultPythonTemplateDescription packageDescription) (canonicalizationPythonPackageAttribute canonicalizationSettings)),
-        ScaffoldFile "main.py" pythonMainSource
-      ]
-    CScaffold ->
-      [ ScaffoldFile ".gitignore" cGitignoreSource,
-        ScaffoldFile "default.nix" (renderNixTemplateDescription defaultCTemplateDescription packageDescription cTemplateBaselineNixSource),
-        ScaffoldFile "main.c" cMainSource
-      ]
-    LatexScaffold ->
-      [ ScaffoldFile ".gitignore" latexGitignoreSource,
-        ScaffoldFile "default.nix" (renderNixTemplateDescription defaultLatexTemplateDescription packageDescription latexTemplateBaselineNixSource),
-        ScaffoldFile "ms.tex" latexMsTexSource,
-        ScaffoldFile "ms.bib" latexMsBibSource
-      ]
+renderScaffoldFiles :: ScaffoldPackageKind -> FilePath -> Maybe String -> [ScaffoldFile]
+renderScaffoldFiles scaffoldPackageKind packageName packageDescription =
+  map prefixPackagePath $
+    case scaffoldPackageKind of
+      HaskellScaffold ->
+        [ ScaffoldFile ".gitignore" haskellGitignoreSource,
+          ScaffoldFile "default.nix" haskellTemplateBaselineNixSource,
+          ScaffoldFile "Main.hs" haskellMainSource,
+          ScaffoldFile (packageName <.> "cabal") (renderScaffoldHaskellCabal packageName packageDescription)
+        ]
+      RustScaffold ->
+        [ ScaffoldFile ".gitignore" rustGitignoreSource,
+          ScaffoldFile "default.nix" rustTemplateBaselineNixSource,
+          ScaffoldFile "Cargo.toml" (renderScaffoldCargoToml packageName packageDescription),
+          ScaffoldFile "src/main.rs" rustMainSource
+        ]
+      HtmlScaffold ->
+        [ ScaffoldFile ".gitignore" htmlGitignoreSource,
+          ScaffoldFile "default.nix" (renderNixTemplateDescription defaultHtmlTemplateDescription packageDescription htmlTemplateBaselineNixSource),
+          ScaffoldFile "index.html" htmlIndexSource,
+          ScaffoldFile "script.js" htmlScriptSource,
+          ScaffoldFile "style.css" htmlStyleSource
+        ]
+      PythonLatexScaffold ->
+        [ ScaffoldFile ".gitignore" pythonLatexGitignoreSource,
+          ScaffoldFile "default.nix" (renderNixTemplateDescription defaultPythonLatexTemplateDescription packageDescription pythonLatexTemplateBaselineNixSource),
+          ScaffoldFile "main.py" pythonLatexMainSource,
+          ScaffoldFile "ms.tex" latexMsTexSource,
+          ScaffoldFile "ms.bib" latexMsBibSource
+        ]
+      PythonScaffold ->
+        [ ScaffoldFile ".gitignore" pythonGitignoreSource,
+          ScaffoldFile "default.nix" (renderPythonTemplateNixSource (scaffoldDescription defaultPythonTemplateDescription packageDescription)),
+          ScaffoldFile "main.py" pythonMainSource
+        ]
+      CScaffold ->
+        [ ScaffoldFile ".gitignore" cGitignoreSource,
+          ScaffoldFile "default.nix" (renderNixTemplateDescription defaultCTemplateDescription packageDescription cTemplateBaselineNixSource),
+          ScaffoldFile "main.c" cMainSource
+        ]
+      LatexScaffold ->
+        [ ScaffoldFile ".gitignore" latexGitignoreSource,
+          ScaffoldFile "default.nix" (renderNixTemplateDescription defaultLatexTemplateDescription packageDescription latexTemplateBaselineNixSource),
+          ScaffoldFile "ms.tex" latexMsTexSource,
+          ScaffoldFile "ms.bib" latexMsBibSource
+        ]
+  where
+    prefixPackagePath scaffoldFile =
+      scaffoldFile
+        { scaffoldFilePath = "packages" </> packageName </> scaffoldFilePath scaffoldFile
+        }
 defaultPythonTemplateDescription :: String
 defaultPythonTemplateDescription = "A Python template package."
 defaultHaskellScaffoldDescription :: String
@@ -1142,8 +1127,6 @@ defaultCTemplateDescription :: String
 defaultCTemplateDescription = "A C template package."
 defaultLatexTemplateDescription :: String
 defaultLatexTemplateDescription = "A LaTeX template package."
-defaultPythonPackageAttribute :: String
-defaultPythonPackageAttribute = "python312"
 scaffoldDescription :: String -> Maybe String -> String
 scaffoldDescription defaultDescription = maybe defaultDescription (unwords . words)
 escapeNixDoubleQuotedString :: String -> String
@@ -1159,15 +1142,15 @@ renderNixTemplateDescription defaultDescription packageDescription =
   T.replace
     (T.pack defaultDescription)
     (T.pack (escapeNixDoubleQuotedString (scaffoldDescription defaultDescription packageDescription)))
-renderPythonTemplateBaselineNixSourceWith :: String -> String -> T.Text
-renderPythonTemplateBaselineNixSourceWith packageDescription pythonPackageAttribute =
+renderPythonTemplateNixSource :: String -> T.Text
+renderPythonTemplateNixSource packageDescription =
   T.unlines
     [ "{",
       "  inputs,",
       "  pkgs ? import <nixpkgs> { },",
       "}:",
       "let",
-      T.pack ("  python = pkgs." ++ pythonPackageAttribute ++ ";"),
+      "  python = pkgs.python3;",
       "in",
       "python.pkgs.buildPythonPackage rec {",
       "  installPhase = ''",
@@ -1205,8 +1188,7 @@ renderPythonTemplateBaselineNixSourceWith packageDescription pythonPackageAttrib
       ""
     ]
 pythonTemplateBaselineNixSource :: T.Text
-pythonTemplateBaselineNixSource =
-  renderPythonTemplateBaselineNixSourceWith defaultPythonTemplateDescription defaultPythonPackageAttribute
+pythonTemplateBaselineNixSource = renderPythonTemplateNixSource defaultPythonTemplateDescription
 renderScaffoldCargoToml :: FilePath -> Maybe String -> T.Text
 renderScaffoldCargoToml packageName packageDescription =
   T.unlines
@@ -1453,8 +1435,8 @@ listSubdirectoryNames parentDirectory = do
     else do
       childNames <- listDirectory parentDirectory
       sort <$> filterM (doesDirectoryExist . (parentDirectory </>)) childNames
-checkPackageWith :: CanonicalizationSettings -> FilePath -> IO [String]
-checkPackageWith canonicalizationSettings packageName = do
+checkPackage :: FilePath -> IO [String]
+checkPackage packageName = do
   let packageDefaultNixPath = "packages" </> packageName </> "default.nix"
   packageKind <- detectPackageKindForPackage packageName
   maybePackageDefaultNixSource <- readTextFileIfExists packageDefaultNixPath
@@ -1474,12 +1456,9 @@ checkPackageWith canonicalizationSettings packageName = do
                     else templateAllowedDifferenceKeys templateSpec
                 templateSource =
                   case matchedTemplateName of
-                    "python_template" ->
-                      renderPythonTemplateBaselineNixSourceWith defaultPythonTemplateDescription (canonicalizationPythonPackageAttribute canonicalizationSettings)
-                    "python_pypi_template" ->
-                      pythonPyPITemplateBaselineNixSourceWith (canonicalizationPythonPackageAttribute canonicalizationSettings)
-                    "python_pypi_application_template" ->
-                      pythonPyPIApplicationTemplateBaselineNixSourceWith (canonicalizationPythonPackageAttribute canonicalizationSettings)
+                    "python_template" -> pythonTemplateBaselineNixSource
+                    "python_pypi_template" -> pythonPyPITemplateBaselineNixSource
+                    "python_pypi_application_template" -> pythonPyPIApplicationTemplateBaselineNixSource
                     _ -> templateBaselineSource templateSpec
             comparePackageDefaultNixWithTemplate packageName packageDefaultNixPath ("packages" </> matchedTemplateName </> "default.nix") allowedNixDifferenceKeysForPackage templateSource
   cargoTomlIssues <- checkCargoToml packageName
@@ -2093,14 +2072,14 @@ optionalTemplateFunctionParams packageKind templateBaselineNixPath =
 compareCheckTemplateWithBaseline :: FilePath -> T.Text -> IO [String]
 compareCheckTemplateWithBaseline checkTemplatePath templateBaselineText = do
   checkTemplateSource <- TIO.readFile checkTemplatePath
-  let normalizedCheckDefaultNix = normalizePythonPackageAttributeReferences (T.strip checkTemplateSource)
-      normalizedTemplateDefaultNix = normalizePythonPackageAttributeReferences (T.strip templateBaselineText)
+  let strippedCheckSource = T.strip checkTemplateSource
+      strippedBaselineSource = T.strip templateBaselineText
   pure $
-    if normalizedCheckDefaultNix == normalizedTemplateDefaultNix
+    if strippedCheckSource == strippedBaselineSource
       then []
       else
-        let checkDefaultNixLines = T.lines normalizedCheckDefaultNix
-            templateDefaultNixLines = T.lines normalizedTemplateDefaultNix
+        let checkDefaultNixLines = T.lines strippedCheckSource
+            templateDefaultNixLines = T.lines strippedBaselineSource
             mismatchDetails =
               case firstMismatchedLine checkDefaultNixLines templateDefaultNixLines of
                 Just (lineNumber, actualLine, expectedLine) ->
@@ -2109,26 +2088,13 @@ compareCheckTemplateWithBaseline checkTemplatePath templateBaselineText = do
                     "    actual:   " ++ truncateDiagnosticValue (T.unpack actualLine)
                   ]
                 Nothing ->
-                  [ "  - expected normalized form: " ++ truncateDiagnosticValue (compactTextToSingleLine normalizedTemplateDefaultNix),
-                    "  - actual normalized form:   " ++ truncateDiagnosticValue (compactTextToSingleLine normalizedCheckDefaultNix)
+                  [ "  - expected form: " ++ truncateDiagnosticValue (compactTextToSingleLine strippedBaselineSource),
+                    "  - actual form:   " ++ truncateDiagnosticValue (compactTextToSingleLine strippedCheckSource)
                   ]
          in [ checkTemplatePath
                 ++ ": differs from embedded check template\n"
                 ++ intercalate "\n" mismatchDetails
             ]
-normalizePythonPackageAttributeReferences :: T.Text -> T.Text
-normalizePythonPackageAttributeReferences =
-  T.pack . go . T.unpack
-  where
-    go [] = []
-    go textValue@(sourceChar : remainingChars) =
-      case stripPrefix "pkgs.python" textValue of
-        Just remainder ->
-          let (pythonVersionDigits, remainderAfterVersion) = span (`elem` ['0' .. '9']) remainder
-           in if null pythonVersionDigits
-                then sourceChar : go remainingChars
-                else "pkgs.python3" ++ go remainderAfterVersion
-        Nothing -> sourceChar : go remainingChars
 validateCheckTemplate :: FilePath -> FilePath -> CheckTemplateSpec -> IO [String]
 validateCheckTemplate checkName checkTemplatePath checkTemplateSpec =
   case checkTemplateComparisonMode checkTemplateSpec of
@@ -2631,8 +2597,7 @@ repositorySummaryRenderingTest = do
           "          \"tests\": {",
           "            \"coverage\": { \"status\": \"measured\", \"metric\": \"statements\", \"covered\": 19, \"total\": 20, \"percent\": 95.0 },",
           "            \"profile\": { \"status\": \"measured\", \"totalSeconds\": 1.234 },",
-          "            \"durationsSeconds\": { \"Reports \\\"quoted\\\" behavior.\": 0.125 },",
-          "            \"cases\": [\"Reports \\\"quoted\\\" behavior.\"]",
+          "            \"cases\": [{ \"name\": \"Reports \\\"quoted\\\" behavior.\", \"durationSeconds\": 0.125 }]",
           "          }",
           "        }",
           "      ]",
@@ -3951,15 +3916,13 @@ deployHostTemplateBaselineNixSource =
       ""
     ]
 pythonPyPITemplateBaselineNixSource :: T.Text
-pythonPyPITemplateBaselineNixSource = pythonPyPITemplateBaselineNixSourceWith defaultPythonPackageAttribute
-pythonPyPITemplateBaselineNixSourceWith :: String -> T.Text
-pythonPyPITemplateBaselineNixSourceWith pythonPackageAttribute =
+pythonPyPITemplateBaselineNixSource =
   T.unlines
     [ "{",
       "  pkgs ? import <nixpkgs> { },",
       "}:",
       "let",
-      T.pack ("  python = pkgs." ++ pythonPackageAttribute ++ ";"),
+      "  python = pkgs.python3;",
       "in",
       "python.pkgs.buildPythonPackage rec {",
       "  format = \"wheel\";",
@@ -3982,16 +3945,14 @@ pythonPyPITemplateBaselineNixSourceWith pythonPackageAttribute =
       "}"
     ]
 pythonPyPIApplicationTemplateBaselineNixSource :: T.Text
-pythonPyPIApplicationTemplateBaselineNixSource = pythonPyPIApplicationTemplateBaselineNixSourceWith defaultPythonPackageAttribute
-pythonPyPIApplicationTemplateBaselineNixSourceWith :: String -> T.Text
-pythonPyPIApplicationTemplateBaselineNixSourceWith pythonPackageAttribute =
+pythonPyPIApplicationTemplateBaselineNixSource =
   T.unlines
     [ "{",
       "  inputs,",
       "  pkgs ? import <nixpkgs> { },",
       "}:",
       "let",
-      T.pack ("  python = pkgs." ++ pythonPackageAttribute ++ ";"),
+      "  python = pkgs.python3;",
       "in",
       "python.pkgs.buildPythonApplication rec {",
       "  format = \"wheel\";",
