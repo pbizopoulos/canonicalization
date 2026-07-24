@@ -47,6 +47,7 @@ import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitFailure, exitSucces
 import System.FilePath ((<.>), (</>))
 import System.FilePath.Posix (makeRelative, splitDirectories, takeBaseName, takeDirectory, takeFileName)
 import System.IO (hClose, hPutStr, hPutStrLn, openTempFile, stderr)
+import System.Posix.Files qualified as Posix
 import System.Posix.Process (executeFile)
 import System.Process (readProcessWithExitCode)
 import Test.HUnit (Counts (errors, failures), Test (TestCase, TestLabel, TestList), assertBool, assertEqual, assertFailure, runTestTT)
@@ -1210,15 +1211,15 @@ renderScaffoldHaskellCabal packageName packageDescription =
     ]
 checkRepositoryStructure :: IO [String]
 checkRepositoryStructure = do
-  (repositoryPaths, symbolicLinkPaths) <- collectRepositoryPaths "."
-  let relativePaths = sort [path | path <- repositoryPaths, path /= "."]
-      leafPaths = Set.fromList (filter (isLeafPath relativePaths) relativePaths)
+  repositoryEntries <- collectRepositoryEntries "."
+  let relativePaths = sort (map fst repositoryEntries)
+      leafPaths = Set.fromList relativePaths
       packageRootPaths = Set.fromList (mapMaybe packageRootPathFromRepositoryPath relativePaths)
       hostRootPaths = Set.fromList (mapMaybe hostRootPathFromRepositoryPath relativePaths)
       packageInfos = map (buildPackageInfo leafPaths) (Set.toList packageRootPaths)
-      globalAllowedPathRegexes :: [String]
-      globalAllowedPathRegexes =
-        [ "^\\.git(/.*)?$",
+      globalRegularFileRegexes :: [String]
+      globalRegularFileRegexes =
+        [ "^\\.git$",
           "^AGENTS\\.md$",
           "^\\.github/workflows/workflow\\.yml$",
           "^\\.gitignore$",
@@ -1231,18 +1232,18 @@ checkRepositoryStructure = do
           "^formatter\\.nix$",
           "^hosts/[^/]+/configuration\\.nix$",
           "^hosts/[^/]+/hardware-configuration\\.nix$",
-          "^prm/[^/]+$",
-          "^result$",
           "^secrets/secrets\\.age$",
           "^secrets/secrets\\.env\\.example$",
           "^secrets/secrets\\.nix$"
         ]
-      packageAllowedPathRegexes =
+      packageRegularFileRegexes =
         concat
-          [ allowedPathRegexesForPackageKind (packageRootPath packageInfo) (packageRootDirectoryName packageInfo) (packageKindFromDetection (packageDetection packageInfo))
+          [ allowedRegularFileRegexesForPackageKind (packageRootPath packageInfo) (packageRootDirectoryName packageInfo) (packageKindFromDetection (packageDetection packageInfo))
           | packageInfo <- packageInfos
           ]
-      allowedPathRegexes = globalAllowedPathRegexes ++ packageAllowedPathRegexes
+      allowedEntryRules =
+        map RegularFileRule (globalRegularFileRegexes ++ packageRegularFileRegexes)
+          ++ map DirectoryRule opaqueDirectoryRegexes
       missingPackageDefaultNixIssues =
         [ packageRootDirectory ++ ": missing required file default.nix"
         | packageRootDirectory <- Set.toList packageRootPaths,
@@ -1271,22 +1272,56 @@ checkRepositoryStructure = do
         ]
       ambiguousPackageMarkerIssues =
         concatMap ambiguousPackageMarkerIssuesForPackage packageInfos
-      disallowedPathIssues =
-        [ path ++ ": is not allowed"
-        | path <- Set.toList leafPaths,
-          not (any (path =~) allowedPathRegexes)
-        ]
-      symbolicLinkIssues =
-        [ path ++ ": symbolic links are not allowed"
-        | path <- symbolicLinkPaths
-        ]
+      entryPolicyIssues = mapMaybe (validateRepositoryEntry allowedEntryRules) repositoryEntries
   packageNameConventionIssues <-
     fmap catMaybes $
       forM (Set.toList packageRootPaths) $ \packageRootDirectory -> do
         let packageName = takeBaseName packageRootDirectory
         packageKind <- detectPackageKindForPackage packageName
         pure (((packageRootDirectory ++ ": ") ++) <$> validatePackageNameForKind packageKind packageName)
-  pure (symbolicLinkIssues ++ missingPackageDefaultNixIssues ++ missingHostConfigurationIssues ++ missingCabalForMainHaskellIssues ++ misnamedCabalFileIssues ++ packageNameConventionIssues ++ ambiguousPackageMarkerIssues ++ disallowedPathIssues)
+  pure (entryPolicyIssues ++ missingPackageDefaultNixIssues ++ missingHostConfigurationIssues ++ missingCabalForMainHaskellIssues ++ misnamedCabalFileIssues ++ packageNameConventionIssues ++ ambiguousPackageMarkerIssues)
+type RepositoryEntry :: Type
+type RepositoryEntry = (FilePath, Posix.FileStatus)
+type EntryRule :: Type
+data EntryRule
+  = RegularFileRule String
+  | DirectoryRule String
+validateRepositoryEntry :: [EntryRule] -> RepositoryEntry -> Maybe String
+validateRepositoryEntry rules (path, status) =
+  case filter ((path =~) . entryRuleRegex) rules of
+    [] -> Just (path ++ ": is not allowed")
+    matchingRules
+      | any (`entryRuleAccepts` status) matchingRules -> Nothing
+      | otherwise -> Just (path ++ ": expected " ++ intercalate " or " (map renderEntryRule matchingRules) ++ ", found " ++ renderFileStatus status)
+entryRuleRegex :: EntryRule -> String
+entryRuleRegex = \case
+  RegularFileRule pathRegex -> pathRegex
+  DirectoryRule pathRegex -> pathRegex
+entryRuleAccepts :: EntryRule -> Posix.FileStatus -> Bool
+entryRuleAccepts = \case
+  RegularFileRule _ -> Posix.isRegularFile
+  DirectoryRule _ -> Posix.isDirectory
+renderEntryRule :: EntryRule -> String
+renderEntryRule = \case
+  RegularFileRule _ -> "regular file"
+  DirectoryRule _ -> "directory"
+renderFileStatus :: Posix.FileStatus -> String
+renderFileStatus status
+  | Posix.isSymbolicLink status = "symbolic link"
+  | Posix.isRegularFile status = "regular file"
+  | Posix.isDirectory status = "directory"
+  | otherwise = "special file"
+opaqueDirectoryRegexes :: [String]
+opaqueDirectoryRegexes =
+  [ "^\\.agents$",
+    "^\\.codex$",
+    "^\\.git$",
+    "^prm$",
+    "^result$",
+    "^tmp$",
+    "^checks/[^/]+/(result|tmp)$",
+    "^packages/[^/]+/(prm|result|target|tmp)$"
+  ]
 type PackageKind :: Type
 data PackageKind
   = HaskellPackage
@@ -1368,8 +1403,8 @@ ambiguousPackageMarkerIssuesForPackage packageInfo =
       ]
     DetectedPackageKind _ -> []
     UnrecognizedPackageMarkers -> []
-allowedPathRegexesForPackageKind :: FilePath -> FilePath -> Maybe PackageKind -> [String]
-allowedPathRegexesForPackageKind packageRootDirectory packageDirectoryName maybePackageKind =
+allowedRegularFileRegexesForPackageKind :: FilePath -> FilePath -> Maybe PackageKind -> [String]
+allowedRegularFileRegexesForPackageKind packageRootDirectory packageDirectoryName maybePackageKind =
   let escapedPackageRootDirectory = escapeRegexLiteral packageRootDirectory
       escapedPackageDirectoryName = escapeRegexLiteral packageDirectoryName
       basePackagePathRegexes = ["^" ++ escapedPackageRootDirectory ++ "/default\\.nix$", "^" ++ escapedPackageRootDirectory ++ "/\\.gitignore$"]
@@ -1392,35 +1427,26 @@ escapeRegexLiteral = concatMap escapeCharacter
     escapeCharacter character
       | character `elem` ("\\.^$|?*+()[]{}" :: String) = ['\\', character]
       | otherwise = [character]
-collectRepositoryPaths :: FilePath -> IO ([FilePath], [FilePath])
-collectRepositoryPaths rootPath = do
+collectRepositoryEntries :: FilePath -> IO [RepositoryEntry]
+collectRepositoryEntries rootPath = do
   childNames <- listDirectory rootPath
   let childPaths = sort [rootPath </> childName | childName <- childNames]
-  descendantResults <-
-    forM childPaths $ \childPath -> do
-      let relativeChildPath = toRelativePath childPath
-      isSymbolicLink <- pathIsSymbolicLink childPath
-      if isSymbolicLink
-        then pure ([relativeChildPath], [relativeChildPath])
-        else do
-          isDirectory <- doesDirectoryExist childPath
-          case (isDirectory, shouldTraverseDirectory relativeChildPath) of
-            (True, True) -> collectRepositoryPaths childPath
-            (True, False) -> pure ([], [])
-            (False, _) -> pure ([relativeChildPath], [])
-  let descendantPaths = concatMap fst descendantResults
-      symbolicLinkPaths = concatMap snd descendantResults
-  pure (toRelativePath rootPath : descendantPaths, symbolicLinkPaths)
+  concat <$> mapM collectRepositoryEntry childPaths
+collectRepositoryEntry :: FilePath -> IO [RepositoryEntry]
+collectRepositoryEntry path = do
+  status <- Posix.getSymbolicLinkStatus path
+  let relativePath = toRelativePath path
+  case () of
+    _
+      | not (Posix.isDirectory status) -> pure [(relativePath, status)]
+      | isOpaqueDirectory relativePath -> pure [(relativePath, status)]
+      | otherwise -> do
+          descendants <- collectRepositoryEntries path
+          pure (if null descendants then [(relativePath, status)] else descendants)
 toRelativePath :: FilePath -> FilePath
 toRelativePath = makeRelative "."
-shouldTraverseDirectory :: FilePath -> Bool
-shouldTraverseDirectory repositoryPath =
-  all
-    (`notElem` ["tmp", "prm", "target", "result", ".agents", ".codex"])
-    (splitDirectories repositoryPath)
-isLeafPath :: [FilePath] -> FilePath -> Bool
-isLeafPath repositoryPaths candidatePath =
-  not (any ((== candidatePath) . takeDirectory) repositoryPaths)
+isOpaqueDirectory :: FilePath -> Bool
+isOpaqueDirectory path = any (path =~) opaqueDirectoryRegexes
 packageRootPathFromRepositoryPath :: FilePath -> Maybe FilePath
 packageRootPathFromRepositoryPath repositoryPath =
   case splitDirectories repositoryPath of
@@ -2413,7 +2439,7 @@ hUnitPackageTests =
       TestLabel "Humanizes conventional test identifiers across frameworks." (TestCase testIdentifierSpecificationTest),
       TestLabel "Parses versioned coverage summaries strictly." (TestCase repositoryCoverageParsingTest),
       TestLabel "Ignores formatter-only Cargo inline-table spacing." (TestCase cargoTomlFormattingNormalizationTest),
-      TestLabel "Rejects symbolic links without following them." (TestCase symbolicLinkStructureTest),
+      TestLabel "Requires allowlisted filesystem entry kinds." (TestCase entryKindStructureTest),
       TestLabel "Renders stable text and JSON repository summaries." (TestCase repositorySummaryRenderingTest),
       TestLabel "Reports concise Nix template parameter differences." (TestCase nixTemplateParameterDifferenceTest),
       TestLabel "Accepts python_template without inputs or shellHook." (TestCase pythonTemplateOptionalInputsAndShellHookTest),
@@ -2505,15 +2531,18 @@ cargoTomlFormattingNormalizationTest =
     "Taplo's inline-table spacing does not change Cargo policy compliance."
     (normalizeCargoTomlForBaselineComparison "remove-empty-lines" rustCargoTomlBaseline)
     (normalizeCargoTomlForBaselineComparison "remove-empty-lines" removeEmptyLinesCargoTomlFixture)
-symbolicLinkStructureTest :: IO ()
-symbolicLinkStructureTest =
+entryKindStructureTest :: IO ()
+entryKindStructureTest =
   withTemporaryPackageRepository "symbolic-link-structure" $ \temporaryRepository -> do
     writeFile (temporaryRepository </> "README") ""
     createFileLink "README" (temporaryRepository </> "LICENSE")
+    createDirectoryIfMissing False (temporaryRepository </> "CITATION.bib")
     issues <- withCurrentDirectory temporaryRepository checkRepositoryStructure
-    assertBool
-      "symbolic-link diagnostic"
-      ("LICENSE: symbolic links are not allowed" `elem` issues)
+    forM_
+      [ "LICENSE: expected regular file, found symbolic link",
+        "CITATION.bib: expected regular file, found directory"
+      ]
+      (\expectedIssue -> assertBool "entry-kind diagnostic" (expectedIssue `elem` issues))
 repositoryCoverageParsingTest :: IO ()
 repositoryCoverageParsingTest = do
   assertEqual
