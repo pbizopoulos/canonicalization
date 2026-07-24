@@ -56,7 +56,7 @@ import Nix.Utils (Path (Path))
 import Numeric (showFFloat)
 import Prettyprinter (defaultLayoutOptions, layoutPretty)
 import Prettyprinter.Render.Text (renderStrict)
-import System.Directory (doesDirectoryExist, doesFileExist, listDirectory, makeAbsolute)
+import System.Directory (doesDirectoryExist, doesFileExist, listDirectory, makeAbsolute, pathIsSymbolicLink)
 import System.Environment (getArgs)
 import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitFailure)
 import System.FilePath (normalise, pathSeparator, takeDirectory, takeExtension, (</>))
@@ -264,17 +264,21 @@ findNixFiles directoryPath = do
     mapM
       ( \entryName -> do
           let entryPath = directoryPath </> entryName
-          entryIsDirectory <- doesDirectoryExist entryPath
-          if entryIsDirectory
-            then
-              if shouldSkipDirectory entryName
-                then pure []
-                else findNixFiles entryPath
-            else
-              pure
-                [ entryPath
-                | takeExtension entryName == ".nix"
-                ]
+          entryIsSymbolicLink <- pathIsSymbolicLink entryPath
+          if entryIsSymbolicLink
+            then pure []
+            else do
+              entryIsDirectory <- doesDirectoryExist entryPath
+              if entryIsDirectory
+                then
+                  if shouldSkipDirectory entryName
+                    then pure []
+                    else findNixFiles entryPath
+                else
+                  pure
+                    [ entryPath
+                    | takeExtension entryName == ".nix"
+                    ]
       )
       entries
   pure (concat nestedFiles)
