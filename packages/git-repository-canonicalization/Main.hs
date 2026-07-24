@@ -6,6 +6,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneKindSignatures #-}
 {-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE TupleSections #-}
 {-# OPTIONS_GHC -Wno-missing-import-lists -Wno-unsafe #-}
 module Main (main, runPackageTests, runPackageTestsWithTimings) where
 import Control.Applicative ((<|>))
@@ -372,6 +373,7 @@ data Command
   = CheckCommand
   | SummaryCommand Bool
   | AddCommand String FilePath (Maybe String) (Set.Set RepositoryCheckKind)
+  | AddChecksCommand FilePath (Set.Set RepositoryCheckKind)
 type CommandParseResult :: Type
 data CommandParseResult
   = ParsedCommand Command
@@ -400,11 +402,17 @@ runCli canonicalizationSettings commandLineArgs =
             exitFailure
           Just scaffoldPackageKind -> do
             addResult <- addPackageToCurrentRepositoryWith canonicalizationSettings scaffoldPackageKind packageName packageDescription requestedCheckKinds
-            case addResult of
-              Left addError -> do
-                hPutStrLn stderr ("error: " ++ addError)
-                exitFailure
-              Right generatedPaths -> delegateToGit (["add", "--"] ++ generatedPaths)
+            stageGeneratedPathsOrExit addResult
+    ParsedCommand (AddChecksCommand packageName requestedCheckKinds) ->
+      runInGitRepositoryRoot "." $ do
+        addResult <- addChecksToExistingPackage Nothing packageName Nothing requestedCheckKinds
+        stageGeneratedPathsOrExit addResult
+stageGeneratedPathsOrExit :: Either String [FilePath] -> IO a
+stageGeneratedPathsOrExit = \case
+  Left addError -> do
+    hPutStrLn stderr ("error: " ++ addError)
+    exitFailure
+  Right generatedPaths -> delegateToGit (["add", "--"] ++ generatedPaths)
 parseCommand :: [String] -> CommandParseResult
 parseCommand commandLineArgs =
   case commandLineArgs of
@@ -416,10 +424,14 @@ parseCommand commandLineArgs =
     ["summary"] -> ParsedCommand (SummaryCommand False)
     ["summary", "--json"] -> ParsedCommand (SummaryCommand True)
     _ ->
-      case parseAddPackageArgs commandLineArgs of
-        Just (packageKindName, packageName, packageDescription, requestedCheckKinds) ->
-          ParsedCommand (AddCommand packageKindName packageName packageDescription requestedCheckKinds)
-        Nothing -> InvalidCommand usageExitCode (listToMaybe commandLineArgs)
+      case parseAddChecksArgs commandLineArgs of
+        Just (packageName, requestedCheckKinds) ->
+          ParsedCommand (AddChecksCommand packageName requestedCheckKinds)
+        Nothing ->
+          case parseAddPackageArgs commandLineArgs of
+            Just (packageKindName, packageName, packageDescription, requestedCheckKinds) ->
+              ParsedCommand (AddCommand packageKindName packageName packageDescription requestedCheckKinds)
+            Nothing -> InvalidCommand usageExitCode (listToMaybe commandLineArgs)
 printMainHelpAndExit :: IO a
 printMainHelpAndExit = do
   putStr mainHelpText
@@ -430,6 +442,7 @@ mainUsageText :: String
 mainUsageText =
   unlines
     [ "usage: git repository-canonicalization add [<options>] <package-type> <package-name> [<description>...]",
+      "   or: git repository-canonicalization add [<options>] <existing-package-name>",
       "   or: git repository-canonicalization check",
       "   or: git repository-canonicalization summary [--json]"
     ]
@@ -443,6 +456,7 @@ mainHelpText =
       "",
       "SYNOPSIS",
       "    git repository-canonicalization add [<options>] <package-type> <package-name> [<description>...]",
+      "    git repository-canonicalization add [<options>] <existing-package-name>",
       "    git repository-canonicalization check",
       "    git repository-canonicalization summary [--json]",
       "",
@@ -452,8 +466,10 @@ mainHelpText =
       "",
       "COMMANDS",
       "    add [<options>] <package-type> <package-name> [<description>...]",
-      "        Add a package and its requested checks. Generated files are staged",
-      "        with git add.",
+      "    add [<options>] <existing-package-name>",
+      "        Add a package and its requested checks, or infer the type of an",
+      "        existing package and add requested checks to it. Generated files",
+      "        are staged with git add.",
       "",
       "        --default-check       add the package's default check",
       "        --coverage            add a coverage check",
@@ -476,8 +492,11 @@ usageTextForCommand = \case
   Just "add" ->
     unlines
       [ "usage: git repository-canonicalization add [<options>] <package-type> <package-name> [<description>...]",
+        "   or: git repository-canonicalization add [<options>] <existing-package-name>",
         "",
-        "Generated package and check files are staged with git add.",
+        "Add a package and its requested checks. For an existing package, omit",
+        "the package type and description; its type is inferred.",
+        "Generated files are staged with git add.",
         "",
         "    --default-check       add the package's default check",
         "    --coverage            add a coverage check",
@@ -503,6 +522,11 @@ usageTextForCommand = \case
         ""
       ]
   _ -> mainUsageText
+parseAddChecksArgs :: [String] -> Maybe (FilePath, Set.Set RepositoryCheckKind)
+parseAddChecksArgs ("add" : packageName : flagArguments)
+  | all ("--" `isPrefixOf`) flagArguments =
+      (packageName,) <$> parseRepositoryCheckFlags flagArguments
+parseAddChecksArgs _ = Nothing
 parseAddPackageArgs :: [String] -> Maybe (String, FilePath, Maybe String, Set.Set RepositoryCheckKind)
 parseAddPackageArgs ("add" : packageKindName : packageName : remainingArguments) = do
   let (flagArguments, packageDescriptionArguments) =
@@ -1186,29 +1210,77 @@ addPackageToCurrentRepositoryWith canonicalizationSettings scaffoldPackageKind p
     Nothing -> pure (Left "internal error: missing scaffold package specification")
     Just packageKind -> case validatePackageNameForKind packageKind packageName of
       Just validationError -> pure (Left validationError)
-      Nothing ->
-        case validateRepositoryCheckSelection packageKind requestedCheckKinds of
-          Left validationError -> pure (Left validationError)
-          Right requestedCheckSpecs -> do
-            let packageRootDirectory = "packages" </> packageName
-                packageScaffoldFiles =
-                  [ RepositoryScaffoldFile
-                      (packageRootDirectory </> scaffoldFileRelativePath scaffoldFile)
-                      (scaffoldFileContents scaffoldFile)
-                  | scaffoldFile <- renderScaffoldFilesWith canonicalizationSettings scaffoldPackageKind packageName packageDescription
-                  ]
-                checkScaffoldFiles = renderRepositoryCheckScaffoldFiles packageName requestedCheckSpecs
-                scaffoldFiles = packageScaffoldFiles ++ checkScaffoldFiles
-                scaffoldPaths = map repositoryScaffoldFilePath scaffoldFiles
-            existingPaths <- filterM doesPathExist (packageRootDirectory : scaffoldPaths)
-            case existingPaths of
-              existingPath : _ -> pure (Left ("path already exists: " ++ existingPath))
-              [] -> do
-                forM_ scaffoldFiles $ \repositoryScaffoldFile -> do
-                  let absolutePath = repositoryScaffoldFilePath repositoryScaffoldFile
-                  createDirectoryIfMissing True (takeDirectory absolutePath)
-                  TIO.writeFile absolutePath (repositoryScaffoldFileContents repositoryScaffoldFile)
-                pure (Right scaffoldPaths)
+      Nothing -> do
+        let packageRootDirectory = "packages" </> packageName
+        packageRootExists <- doesPathExist packageRootDirectory
+        if packageRootExists
+          then
+            addChecksToExistingPackage
+              (Just packageKind)
+              packageName
+              packageDescription
+              requestedCheckKinds
+          else case validateRepositoryCheckSelection packageKind requestedCheckKinds of
+            Left validationError -> pure (Left validationError)
+            Right requestedCheckSpecs -> do
+              let packageScaffoldFiles =
+                    [ RepositoryScaffoldFile
+                        (packageRootDirectory </> scaffoldFileRelativePath scaffoldFile)
+                        (scaffoldFileContents scaffoldFile)
+                    | scaffoldFile <- renderScaffoldFilesWith canonicalizationSettings scaffoldPackageKind packageName packageDescription
+                    ]
+                  checkScaffoldFiles = renderRepositoryCheckScaffoldFiles packageName requestedCheckSpecs
+              createRepositoryScaffoldFiles (packageScaffoldFiles ++ checkScaffoldFiles)
+addChecksToExistingPackage :: Maybe PackageKind -> FilePath -> Maybe String -> Set.Set RepositoryCheckKind -> IO (Either String [FilePath])
+addChecksToExistingPackage maybeRequestedPackageKind packageName packageDescription requestedCheckKinds = do
+  let packageRootDirectory = "packages" </> packageName
+  packageRootExists <- doesPathExist packageRootDirectory
+  packageRootIsDirectory <- doesDirectoryExist packageRootDirectory
+  if not packageRootExists
+    then pure (Left ("package does not exist: " ++ packageRootDirectory))
+    else
+      if not packageRootIsDirectory
+        then pure (Left ("path already exists: " ++ packageRootDirectory))
+        else case packageDescription of
+          Just _ ->
+            pure (Left ("cannot set a description when adding checks to existing package: " ++ packageRootDirectory))
+          Nothing ->
+            if Set.null requestedCheckKinds
+              then pure (Left ("package already exists; specify at least one check option: " ++ packageRootDirectory))
+              else do
+                detectedPackageKind <- detectPackageKindForPackage packageName
+                case maybeRequestedPackageKind of
+                  Just requestedPackageKind
+                    | detectedPackageKind /= requestedPackageKind ->
+                        pure
+                          ( Left
+                              ( packageRootDirectory
+                                  ++ " is a "
+                                  ++ renderPackageKind detectedPackageKind
+                                  ++ " package, not "
+                                  ++ renderPackageKind requestedPackageKind
+                              )
+                          )
+                  _ ->
+                    case validatePackageNameForKind detectedPackageKind packageName of
+                      Just validationError -> pure (Left validationError)
+                      Nothing ->
+                        case validateRepositoryCheckSelection detectedPackageKind requestedCheckKinds of
+                          Left validationError -> pure (Left validationError)
+                          Right requestedCheckSpecs ->
+                            createRepositoryScaffoldFiles (renderRepositoryCheckScaffoldFiles packageName requestedCheckSpecs)
+createRepositoryScaffoldFiles :: [RepositoryScaffoldFile] -> IO (Either String [FilePath])
+createRepositoryScaffoldFiles scaffoldFiles = do
+  let scaffoldPaths = map repositoryScaffoldFilePath scaffoldFiles
+  existingPaths <- filterM doesPathExist scaffoldPaths
+  case existingPaths of
+    existingPath : _ -> pure (Left ("path already exists: " ++ existingPath))
+    [] -> do
+      forM_ scaffoldFiles $ \repositoryScaffoldFile -> do
+        let absolutePath = repositoryScaffoldFilePath repositoryScaffoldFile
+        createDirectoryIfMissing True (takeDirectory absolutePath)
+        TIO.writeFile absolutePath (repositoryScaffoldFileContents repositoryScaffoldFile)
+      pure (Right scaffoldPaths)
 validateRepositoryCheckSelection :: PackageKind -> Set.Set RepositoryCheckKind -> Either String [RepositoryCheckSpec]
 validateRepositoryCheckSelection packageKind requestedCheckKinds =
   let (unsupportedCheckKinds, requestedCheckSpecs) =
@@ -2625,6 +2697,9 @@ hUnitPackageTests =
       TestLabel "Documents help and invokes it consistently." (TestCase commandLineHelpEndToEndTest),
       TestLabel "Rejects missing and unknown commands with usage on stderr." (TestCase invalidCommandEndToEndTest),
       TestLabel "Scaffolds a package and its requested checks from a nested directory." (TestCase addPackageEndToEndTest),
+      TestLabel "Adds requested checks without changing an existing package." (TestCase addChecksToExistingPackageEndToEndTest),
+      TestLabel "Validates existing packages before adding checks." (TestCase validateExistingPackageAddEndToEndTest),
+      TestLabel "Rejects colliding check batches without partial output." (TestCase existingCheckCollisionEndToEndTest),
       TestLabel "Reports generated package behavior in the text summary." (TestCase textSummaryEndToEndTest),
       TestLabel "Reports generated package behavior in the JSON summary." (TestCase jsonSummaryEndToEndTest),
       TestLabel "Reports conventional tests for generated Haskell packages." (TestCase haskellSummaryEndToEndTest),
@@ -2906,6 +2981,78 @@ addPackageEndToEndTest =
             temporaryRepository </> "checks/demo_property_testing/default.nix"
           ]
     assertBool "The installed CLI creates the package and requested checks on disk." generatedFilesExist
+addChecksToExistingPackageEndToEndTest :: IO ()
+addChecksToExistingPackageEndToEndTest =
+  withGeneratedPythonPackageRepository "add-checks-to-existing-package" $ \temporaryRepository -> do
+    let packageDefaultNixPath = temporaryRepository </> "packages/demo/default.nix"
+        packageMainPath = temporaryRepository </> "packages/demo/main.py"
+        profileCheckPath = temporaryRepository </> "checks/demo_profile/default.nix"
+    packageDefaultNixBefore <- TIO.readFile packageDefaultNixPath
+    packageMainBefore <- TIO.readFile packageMainPath
+    (addExit, addStdout, addStderr) <-
+      runEndToEndCommandIn temporaryRepository ["add", "demo", "--profile"]
+    assertEqual "Adding a check to an existing package succeeds." ExitSuccess addExit
+    assertEqual "Successful check addition produces no stdout." "" addStdout
+    assertEqual "Successful check addition leaves stderr empty." "" addStderr
+    profileCheckExists <- doesFileExist profileCheckPath
+    assertBool "The requested check is created." profileCheckExists
+    packageDefaultNixAfter <- TIO.readFile packageDefaultNixPath
+    packageMainAfter <- TIO.readFile packageMainPath
+    assertEqual "The existing default.nix remains unchanged." packageDefaultNixBefore packageDefaultNixAfter
+    assertEqual "The existing package source remains unchanged." packageMainBefore packageMainAfter
+    (stagedExit, stagedStdout, stagedStderr) <-
+      readProcessWithExitCode "git" ["-C", temporaryRepository, "diff", "--cached", "--name-only"] ""
+    assertEqual "Inspecting staged paths succeeds." ExitSuccess stagedExit
+    assertEqual "Only the generated check is staged." "checks/demo_profile/default.nix\n" stagedStdout
+    assertEqual "Inspecting staged paths leaves stderr empty." "" stagedStderr
+validateExistingPackageAddEndToEndTest :: IO ()
+validateExistingPackageAddEndToEndTest =
+  withGeneratedPythonPackageRepository "validate-existing-package-add" $ \temporaryRepository -> do
+    (statusBeforeExit, statusBeforeStdout, statusBeforeStderr) <-
+      readProcessWithExitCode "git" ["-C", temporaryRepository, "status", "--short"] ""
+    assertEqual "Inspecting the initial repository status succeeds." ExitSuccess statusBeforeExit
+    assertEqual "Inspecting the initial repository status leaves stderr empty." "" statusBeforeStderr
+    let rejectedCommands :: [([String], String)]
+        rejectedCommands =
+          [ ( ["add", "demo"],
+              "specify at least one check option"
+            ),
+            ( ["add", "missing", "--profile"],
+              "package does not exist"
+            ),
+            ( ["add", "python", "demo", "Replacement description", "--profile"],
+              "cannot set a description"
+            ),
+            ( ["add", "rust", "demo", "--profile"],
+              "is a python package, not rust"
+            )
+          ]
+    forM_ rejectedCommands $ \(arguments, expectedError) -> do
+      (addExit, addStdout, addStderr) <- runEndToEndCommandIn temporaryRepository arguments
+      assertEqual "Invalid existing-package augmentation fails." (ExitFailure 1) addExit
+      assertEqual "Invalid existing-package augmentation produces no stdout." "" addStdout
+      assertBool "Invalid existing-package augmentation reports its cause." (expectedError `isInfixOf` addStderr)
+    profileCheckExists <- doesPathExist (temporaryRepository </> "checks/demo_profile")
+    assertBool "Rejected augmentations create no check." (not profileCheckExists)
+    (statusExit, statusStdout, statusStderr) <-
+      readProcessWithExitCode "git" ["-C", temporaryRepository, "status", "--short"] ""
+    assertEqual "Inspecting the repository status succeeds." ExitSuccess statusExit
+    assertEqual "Rejected augmentations leave the repository unchanged." statusBeforeStdout statusStdout
+    assertEqual "Inspecting the repository status leaves stderr empty." "" statusStderr
+existingCheckCollisionEndToEndTest :: IO ()
+existingCheckCollisionEndToEndTest =
+  withGeneratedPythonPackageRepository "existing-check-collision" $ \temporaryRepository -> do
+    (addExit, addStdout, addStderr) <-
+      runEndToEndCommandIn
+        temporaryRepository
+        ["add", "demo", "--coverage", "--profile"]
+    assertEqual "A colliding check batch fails." (ExitFailure 1) addExit
+    assertEqual "A colliding check batch produces no stdout." "" addStdout
+    assertBool
+      "A colliding check batch reports the existing path."
+      ("path already exists: checks/demo_coverage/default.nix" `isInfixOf` addStderr)
+    profileCheckExists <- doesPathExist (temporaryRepository </> "checks/demo_profile")
+    assertBool "A colliding check batch creates no partial check." (not profileCheckExists)
 textSummaryEndToEndTest :: IO ()
 textSummaryEndToEndTest =
   withGeneratedPythonPackageRepository "text-summary-end-to-end" $ \temporaryRepository -> do
