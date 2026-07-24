@@ -164,12 +164,6 @@ let
         shfmt.options = [
           "--posix"
         ];
-        ssort = {
-          command = pkgs.python3Packages.ssort;
-          includes = [
-            "*.py"
-          ];
-        };
         texfmt.options = [
           "--nowrap"
         ];
