@@ -171,13 +171,6 @@ fn validate_component(component_kind: &str, component: &str) -> Result<(), Repos
     Err(RepositoryUrlError::Validation(message))
 }
 fn add_repository(home_directory: &Path, repository_url: &str) -> Result<(), CliFailure> {
-    return add_repository_with_environment(home_directory, repository_url, &[]);
-}
-fn add_repository_with_environment(
-    home_directory: &Path,
-    repository_url: &str,
-    environment: &[(OsString, OsString)],
-) -> Result<(), CliFailure> {
     let canonical_path = match parse_repository_url(repository_url) {
         Ok(path) => path,
         Err(RepositoryUrlError::Syntax(_)) => {
@@ -192,8 +185,7 @@ fn add_repository_with_environment(
         .arg(home_directory)
         .args(["submodule", "add", "--force"])
         .arg(repository_url)
-        .arg(canonical_path)
-        .envs(environment.iter().cloned());
+        .arg(canonical_path);
     let status = command
         .status()
         .map_err(|error| CliFailure::fatal(format!("failed to execute git: {error}")))?;
