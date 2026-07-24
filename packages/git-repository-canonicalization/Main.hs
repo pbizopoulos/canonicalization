@@ -945,33 +945,27 @@ data ScaffoldPackageKind
   | CScaffold
   | LatexScaffold
   deriving stock (Eq)
-type PackageSpec :: Type
-data PackageSpec = PackageSpec
-  { packageSpecCliName :: String,
-    packageSpecScaffoldKind :: ScaffoldPackageKind,
-    packageSpecPackageKind :: PackageKind
-  }
-packageSpecs :: [PackageSpec]
-packageSpecs =
-  [ PackageSpec "haskell" HaskellScaffold HaskellPackage,
-    PackageSpec "rust" RustScaffold RustPackage,
-    PackageSpec "html" HtmlScaffold HtmlPackage,
-    PackageSpec "python" PythonScaffold PythonPackage,
-    PackageSpec "python-latex" PythonLatexScaffold PythonLatexPackage,
-    PackageSpec "c" CScaffold CPackage,
-    PackageSpec "latex" LatexScaffold LatexPackage
-  ]
 supportedAddPackageKinds :: [(String, ScaffoldPackageKind)]
 supportedAddPackageKinds =
-  [ (packageSpecCliName packageSpec, packageSpecScaffoldKind packageSpec)
-  | packageSpec <- packageSpecs
+  [ ("haskell", HaskellScaffold),
+    ("rust", RustScaffold),
+    ("html", HtmlScaffold),
+    ("python", PythonScaffold),
+    ("python-latex", PythonLatexScaffold),
+    ("c", CScaffold),
+    ("latex", LatexScaffold)
   ]
 parseSupportedAddPackageKind :: String -> Maybe ScaffoldPackageKind
 parseSupportedAddPackageKind packageKindName = lookup packageKindName supportedAddPackageKinds
-packageKindForScaffold :: ScaffoldPackageKind -> Maybe PackageKind
-packageKindForScaffold scaffoldPackageKind =
-  packageSpecPackageKind
-    <$> find ((== scaffoldPackageKind) . packageSpecScaffoldKind) packageSpecs
+packageKindForScaffold :: ScaffoldPackageKind -> PackageKind
+packageKindForScaffold = \case
+  HaskellScaffold -> HaskellPackage
+  RustScaffold -> RustPackage
+  HtmlScaffold -> HtmlPackage
+  PythonLatexScaffold -> PythonLatexPackage
+  PythonScaffold -> PythonPackage
+  CScaffold -> CPackage
+  LatexScaffold -> LatexPackage
 validatePackageNameForKind :: PackageKind -> FilePath -> Maybe String
 validatePackageNameForKind packageKind packageName =
   let (conventionName, separator) = packageNameConventionForKind packageKind
@@ -1018,19 +1012,19 @@ data RepositoryCheckSpec = RepositoryCheckSpec
   }
 addPackageToCurrentRepository :: ScaffoldPackageKind -> FilePath -> Maybe String -> IO (Either String [FilePath])
 addPackageToCurrentRepository scaffoldPackageKind packageName packageDescription =
-  case packageKindForScaffold scaffoldPackageKind of
-    Nothing -> pure (Left "internal error: missing scaffold package specification")
-    Just packageKind -> case validatePackageNameForKind packageKind packageName of
-      Just validationError -> pure (Left validationError)
-      Nothing -> do
-        let packageRootDirectory = "packages" </> packageName
-        packageRootExists <- doesPathExist packageRootDirectory
-        if packageRootExists
-          then pure (Left ("path already exists: " ++ packageRootDirectory))
-          else do
-            let packageScaffoldFiles = renderScaffoldFiles scaffoldPackageKind packageName packageDescription
-                checkScaffoldFiles = maybeToList (renderRepositoryCheckScaffoldFile packageName <$> repositoryCheckSpecForPackageKind packageKind)
-            createScaffoldFiles (packageScaffoldFiles ++ checkScaffoldFiles)
+  case validatePackageNameForKind packageKind packageName of
+    Just validationError -> pure (Left validationError)
+    Nothing -> do
+      let packageRootDirectory = "packages" </> packageName
+      packageRootExists <- doesPathExist packageRootDirectory
+      if packageRootExists
+        then pure (Left ("path already exists: " ++ packageRootDirectory))
+        else do
+          let packageScaffoldFiles = renderScaffoldFiles scaffoldPackageKind packageName packageDescription
+              checkScaffoldFiles = maybeToList (renderRepositoryCheckScaffoldFile packageName <$> repositoryCheckSpecForPackageKind packageKind)
+          createScaffoldFiles (packageScaffoldFiles ++ checkScaffoldFiles)
+  where
+    packageKind = packageKindForScaffold scaffoldPackageKind
 createScaffoldFiles :: [ScaffoldFile] -> IO (Either String [FilePath])
 createScaffoldFiles scaffoldFiles = do
   let scaffoldPaths = map scaffoldFilePath scaffoldFiles

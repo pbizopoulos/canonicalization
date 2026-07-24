@@ -5,6 +5,7 @@
 {-# LANGUAGE Trustworthy #-}
 {-# OPTIONS_GHC -Wno-all-missed-specialisations -Wno-missed-specialisations -Wno-unsafe #-}
 module Main (main, runPackageTests, runPackageTestsWithTimings) where
+import Control.Applicative (liftA2)
 import Control.Exception (IOException, finally, try)
 import Control.Monad (mapM_, unless, when)
 import Data.Aeson
@@ -24,7 +25,7 @@ import Data.Fix (Fix (Fix))
 import Data.Foldable (toList)
 import Data.Functor.Compose (Compose (Compose))
 import Data.Kind (Type)
-import Data.List (isInfixOf, isSuffixOf, nub, sort, sortBy)
+import Data.List (isInfixOf, isSuffixOf, sort, sortBy)
 import Data.List qualified as List
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.List.NonEmpty qualified as NE
@@ -217,14 +218,11 @@ processRepository :: FilePath -> IO Bool
 processRepository repositoryRoot = do
   flakeSourcePathResult <- flakeSourcePathForRepository repositoryRoot
   nixosConfigurationsResult <- nixosConfigurationsForRepository repositoryRoot
-  case (flakeSourcePathResult, nixosConfigurationsResult) of
-    (Left diagnostic, _) -> do
+  case liftA2 (,) flakeSourcePathResult nixosConfigurationsResult of
+    Left diagnostic -> do
       putStrLn diagnostic
       pure False
-    (_, Left diagnostic) -> do
-      putStrLn diagnostic
-      pure False
-    (Right flakeSourcePath, Right nixosConfigurations) -> do
+    Right (flakeSourcePath, nixosConfigurations) -> do
       nixFiles <- findNixFiles repositoryRoot
       parseResults <- mapM parseRepositoryFile nixFiles
       let (parseErrors, parsedFiles) = partitionEithers parseResults
@@ -234,14 +232,11 @@ processRepository repositoryRoot = do
               treefmtCandidates = concatMap (collectTreefmtCandidates . snd) parsedFiles
           nixosDefinitionFilesResult <- resolveNixosDefinitionFiles repositoryRoot nixosConfigurations (uniqueCandidates nixosCandidates)
           treefmtDefaultsResult <- resolveTreefmtDefaults repositoryRoot (uniqueCandidatePaths treefmtCandidates)
-          case (nixosDefinitionFilesResult, treefmtDefaultsResult) of
-            (Left diagnostic, _) -> do
+          case liftA2 (,) nixosDefinitionFilesResult treefmtDefaultsResult of
+            Left diagnostic -> do
               putStrLn diagnostic
               pure False
-            (_, Left diagnostic) -> do
-              putStrLn diagnostic
-              pure False
-            (Right nixosDefinitionFiles, Right treefmtDefaults) -> do
+            Right (nixosDefinitionFiles, treefmtDefaults) -> do
               mapM_ (processParsedRepositoryFile repositoryRoot flakeSourcePath nixosDefinitionFiles treefmtDefaults) parsedFiles
               pure True
         else do
@@ -283,12 +278,7 @@ findNixFiles directoryPath = do
       entries
   pure (concat nestedFiles)
 shouldSkipDirectory :: FilePath -> Bool
-shouldSkipDirectory directoryName =
-  directoryName == ".git"
-    || directoryName == ".codex"
-    || directoryName == "result"
-    || directoryName == "tmp"
-    || directoryName == "prm"
+shouldSkipDirectory directoryName = directoryName `List.elem` [".git", ".codex", "result", "tmp", "prm"]
 parseRepositoryFile :: FilePath -> IO (Either String ParsedNixFile)
 parseRepositoryFile filePath = do
   parseResult <- parseNixFileLoc (Path filePath)
@@ -316,9 +306,9 @@ removalsFromDefaults defaults candidates =
       Map.lookup optionPath defaults == Just literalValue
     ]
 uniqueCandidates :: [NixosCandidate] -> [NixosCandidate]
-uniqueCandidates = nub
+uniqueCandidates = Set.toList . Set.fromList
 uniqueCandidatePaths :: [NixosCandidate] -> [OptionPath]
-uniqueCandidatePaths = nub . map fst
+uniqueCandidatePaths = Set.toList . Set.fromList . map fst
 collectCandidates :: NExprLoc -> [(OptionPath, Literal)]
 collectCandidates = collectModuleExpression []
 collectTreefmtCandidates :: NExprLoc -> [(OptionPath, Literal)]
@@ -557,17 +547,15 @@ stripStoreSourcePrefix path@(_ : remainingPath) =
 nixString :: String -> String
 nixString = unpack . renderOptionKey . pack
 readNixosDefinitionFilesFromNix :: [String] -> IO (Either String [(NixosCandidate, [FilePath])])
-readNixosDefinitionFilesFromNix arguments = do
-  recordsResult <- readJsonFromNix arguments
-  pure (map nixosDefinitionEntry <$> recordsResult)
+readNixosDefinitionFilesFromNix arguments =
+  fmap (map nixosDefinitionEntry) <$> readJsonFromNix arguments
   where
     nixosDefinitionEntry :: NixosDefinitionRecord -> (NixosCandidate, [FilePath])
     nixosDefinitionEntry (NixosDefinitionRecord optionPath literalValue sourceFiles) =
       ((optionPath, literalValue), sourceFiles)
 readTreefmtDefaultsFromNix :: [String] -> IO (Either String [(OptionPath, Literal)])
-readTreefmtDefaultsFromNix arguments = do
-  recordsResult <- readJsonFromNix arguments
-  pure (map treefmtDefaultEntry <$> recordsResult)
+readTreefmtDefaultsFromNix arguments =
+  fmap (map treefmtDefaultEntry) <$> readJsonFromNix arguments
   where
     treefmtDefaultEntry :: TreefmtDefaultRecord -> (OptionPath, Literal)
     treefmtDefaultEntry (TreefmtDefaultRecord optionPath defaultValue) =

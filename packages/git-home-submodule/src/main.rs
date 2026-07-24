@@ -34,12 +34,6 @@ impl CliFailure {
     fn fatal(diagnostic: impl Into<String>) -> Self {
         Self::Fatal(diagnostic.into())
     }
-    fn check(diagnostics: Vec<String>) -> Self {
-        Self::Check(diagnostics)
-    }
-    fn git(exit_status: ExitStatus) -> Self {
-        Self::Git(exit_status)
-    }
 }
 #[derive(Debug, Default)]
 struct RawSubmoduleFields {
@@ -142,15 +136,15 @@ fn parse_repository_url(repository_url: &str) -> Result<String, RepositoryUrlErr
     for component in &path_components {
         validate_component("repository path component", component)?;
     }
-    return Ok(format!("{hostname}/{}", path_components.join("/")));
+    Ok(format!("{hostname}/{}", path_components.join("/")))
 }
 fn split_url_path<'a>(
     repository_url: &str,
     location: &'a str,
 ) -> Result<(&'a str, &'a str), RepositoryUrlError> {
-    return location.split_once('/').ok_or_else(|| {
-        syntax_url_error(repository_url, "unsupported or incomplete repository URL")
-    });
+    location
+        .split_once('/')
+        .ok_or_else(|| syntax_url_error(repository_url, "unsupported or incomplete repository URL"))
 }
 fn syntax_url_error(repository_url: &str, diagnostic: &str) -> RepositoryUrlError {
     RepositoryUrlError::Syntax(format!("{diagnostic}: {repository_url}"))
@@ -192,7 +186,7 @@ fn add_repository(home_directory: &Path, repository_url: &str) -> Result<(), Cli
     if status.success() {
         return Ok(());
     }
-    return Err(CliFailure::git(status));
+    Err(CliFailure::Git(status))
 }
 fn initialize_home_repository(home_directory: &Path) -> Result<(), CliFailure> {
     let gitignore_path = home_directory.join(".gitignore");
@@ -248,18 +242,18 @@ fn initialize_home_repository(home_directory: &Path) -> Result<(), CliFailure> {
         .status()
         .map_err(|error| CliFailure::fatal(format!("failed to execute git: {error}")))?;
     if !status.success() {
-        return Err(CliFailure::git(status));
+        return Err(CliFailure::Git(status));
     }
     if let Some(contents) = updated_gitignore {
         fs::write(&gitignore_path, contents)
             .map_err(|error| CliFailure::fatal(format!("{}: {error}", gitignore_path.display())))?;
     }
-    return Ok(());
+    Ok(())
 }
 fn check_home_gitmodules(home_directory: &Path, fix: bool) -> Result<(), CliFailure> {
     let gitmodules_path = home_directory.join(".gitmodules");
     if !gitmodules_path.is_file() {
-        return Err(CliFailure::check(vec![format!(
+        return Err(CliFailure::Check(vec![format!(
             "missing file: {}",
             gitmodules_path.display()
         )]));
@@ -277,16 +271,16 @@ fn check_home_gitmodules(home_directory: &Path, fix: bool) -> Result<(), CliFail
         .stderr(Stdio::inherit())
         .output()
         .map_err(|error| {
-            CliFailure::check(vec![format!("failed to execute git config: {error}")])
+            CliFailure::Check(vec![format!("failed to execute git config: {error}")])
         })?;
     let exit_code = output.status.code().unwrap_or(1);
     if !(output.status.success()
         || exit_code == 1 && output.stdout.is_empty() && output.stderr.is_empty())
     {
-        return Err(CliFailure::git(output.status));
+        return Err(CliFailure::Git(output.status));
     }
     let raw_submodules = parse_raw_submodule_fields(&output.stdout)
-        .map_err(|diagnostic| CliFailure::check(vec![diagnostic]))?;
+        .map_err(|diagnostic| CliFailure::Check(vec![diagnostic]))?;
     let (submodules, mut diagnostics) = validate_submodule_records(raw_submodules);
     let mut path_fixes = Vec::new();
     let mut configured_path_sections = BTreeMap::new();
@@ -331,7 +325,7 @@ fn check_home_gitmodules(home_directory: &Path, fix: bool) -> Result<(), CliFail
         }
     }
     if !diagnostics.is_empty() {
-        return Err(CliFailure::check(diagnostics));
+        return Err(CliFailure::Check(diagnostics));
     }
     for (_, configured_path, expected_path) in path_fixes {
         fix_submodule_path(home_directory, &configured_path, &expected_path)?;
@@ -366,7 +360,7 @@ fn validate_submodule_records(
             }
         }
     }
-    return (records, diagnostics);
+    (records, diagnostics)
 }
 fn fix_submodule_path(
     home_directory: &Path,
@@ -397,7 +391,7 @@ fn fix_submodule_path(
     if status.success() {
         return Ok(());
     }
-    return Err(CliFailure::git(status));
+    Err(CliFailure::Git(status))
 }
 fn parse_raw_submodule_fields(
     bytes: &[u8],
@@ -431,7 +425,7 @@ fn parse_raw_submodule_fields(
             _ => {}
         }
     }
-    return Ok(submodules);
+    Ok(submodules)
 }
 fn validate_canonical_repository_path(path: &str) -> Result<(), RepositoryUrlError> {
     if path.split('/').count() < 2 {
@@ -439,13 +433,13 @@ fn validate_canonical_repository_path(path: &str) -> Result<(), RepositoryUrlErr
             "repository path must include a host and repository path".to_owned(),
         ));
     }
-    return validate_repository_path_components(path);
+    validate_repository_path_components(path)
 }
 fn validate_repository_path_components(path: &str) -> Result<(), RepositoryUrlError> {
     for component in path.split('/') {
         validate_component("path component", component)?;
     }
-    return Ok(());
+    Ok(())
 }
 #[cfg(test)]
 mod tests {

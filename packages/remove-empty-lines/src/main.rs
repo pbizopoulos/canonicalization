@@ -1,17 +1,18 @@
 #![allow(clippy::multiple_crate_versions)]
 use anyhow::{Context as _, Result};
 use ignore::WalkBuilder;
+use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
 fn main() -> Result<()> {
-    return run(std::env::args().skip(1).collect());
+    return run(&std::env::args_os().skip(1).collect::<Vec<_>>());
 }
-fn run(input_paths: Vec<String>) -> Result<()> {
+fn run(input_paths: &[OsString]) -> Result<()> {
     if input_paths.is_empty() {
         return process_root_path(Path::new("."));
     }
     for input_path in input_paths {
-        process_root_path(Path::new(&input_path))?;
+        process_root_path(Path::new(input_path))?;
     }
     return Ok(());
 }
@@ -135,7 +136,7 @@ mod tests {
         fs::write(&file_path, "line1\n\nline2\n")?;
         let previous_dir = env::current_dir()?;
         env::set_current_dir(root)?;
-        let result = run(Vec::new());
+        let result = run(&[]);
         env::set_current_dir(previous_dir)?;
         result?;
         let content = fs::read_to_string(&file_path)?;

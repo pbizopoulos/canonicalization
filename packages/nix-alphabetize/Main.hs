@@ -7,10 +7,9 @@ import Control.Monad (unless)
 import Data.Fix (Fix (Fix))
 import Data.Function (on)
 import Data.Functor.Compose (Compose (Compose))
-import Data.List (groupBy, isPrefixOf, nub, sort, sortBy)
+import Data.List (groupBy, isPrefixOf, nub, sort, sortOn)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.List.NonEmpty qualified as NE
-import Data.Ord (comparing)
 import Data.Text
   ( Text,
     pack,
@@ -122,7 +121,7 @@ sortExpression :: NExprLoc -> NExprLoc
 sortExpression (Fix (Compose (AnnUnit exprSpan exprF))) =
   Fix . Compose . AnnUnit exprSpan $ case exprF of
     NAbs (ParamSet atPattern variadic paramList) body ->
-      NAbs (ParamSet atPattern variadic (sortBy (comparing fst) paramList)) (sortExpression body)
+      NAbs (ParamSet atPattern variadic (sortOn fst paramList)) (sortExpression body)
     NAbs params body ->
       NAbs params (sortExpression body)
     NList items ->
@@ -130,7 +129,7 @@ sortExpression (Fix (Compose (AnnUnit exprSpan exprF))) =
        in NList $
             if any isStringExpr sortedItems
               then sortedItems
-              else sortBy (comparing renderExpressionText) sortedItems
+              else sortOn renderExpressionText sortedItems
     NSet rec bindings ->
       NSet rec (sortAndCollapseBindings bindings)
     NLet bindings body ->
@@ -151,7 +150,7 @@ sortAndCollapseBindings :: [Binding NExprLoc] -> [Binding NExprLoc]
 sortAndCollapseBindings =
   concatMap collapseNestedBindings
     . groupBy ((==) `on` getBindingName)
-    . sortBy (comparing getBindingName)
+    . sortOn getBindingName
 collapseNestedBindings :: [Binding NExprLoc] -> [Binding NExprLoc]
 collapseNestedBindings [] = []
 collapseNestedBindings bindings@(firstBinding : _) =
@@ -352,7 +351,7 @@ renderNestedAttrSetInput rootKey bindings =
     renderBinding :: (String, Int) -> String
     renderBinding (name, value) = name ++ " = " ++ show value ++ ";"
 sortBindings :: [(String, Int)] -> [(String, Int)]
-sortBindings = sortBy (comparing fst)
+sortBindings = sortOn fst
 extractQuotedStrings :: Text -> [String]
 extractQuotedStrings = go [] [] False . unpack
   where
