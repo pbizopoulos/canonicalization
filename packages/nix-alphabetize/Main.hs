@@ -110,10 +110,8 @@ formatNixFile filePath = do
       putStrLn ("Error parsing " ++ filePath ++ ": " ++ show parseError)
       pure False
     Right expr -> do
-      writeFormattedFile filePath expr
+      TIO.writeFile filePath (formattedExpression expr)
       pure True
-writeFormattedFile :: FilePath -> NExprLoc -> IO ()
-writeFormattedFile filePath = TIO.writeFile filePath . formattedExpression
 renderExpressionText :: NExprLoc -> Text
 renderExpressionText =
   renderStrict . layoutPretty (LayoutOptions (AvailablePerLine 1 1.0)) . prettyNix . stripAnnotation
@@ -296,10 +294,10 @@ simpleStringGen =
   QC.listOf1 (QC.elements (['a' .. 'z'] ++ ['0' .. '9']))
 simpleStringListGen :: QC.Gen [String]
 simpleStringListGen =
-  fmap dedupePreservingOrder (QC.listOf1 simpleStringGen)
+  fmap nub (QC.listOf1 simpleStringGen)
 attrBindingListGen :: QC.Gen [(String, Int)]
 attrBindingListGen = do
-  keys <- fmap dedupePreservingOrder (QC.listOf1 attrKeyGen)
+  keys <- fmap nub (QC.listOf1 attrKeyGen)
   values <- sequence [QC.chooseInt (0, 9) | _ <- keys]
   pure (zip keys values)
 nestedBindingSetGen :: QC.Gen (String, [(String, Int)])
@@ -329,8 +327,6 @@ nixReservedKeywords =
     "then",
     "with"
   ]
-dedupePreservingOrder :: [String] -> [String]
-dedupePreservingOrder = nub
 renderNumberListInput :: [Int] -> Text
 renderNumberListInput values =
   pack ("[ " ++ unwords (map show values) ++ " ]")

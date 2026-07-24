@@ -312,15 +312,7 @@ renderExpression =
   renderStrict . layoutPretty defaultLayoutOptions . prettyNix . stripAnnotation
 removeDefaultAssignments :: DefaultResolver -> NExprLoc -> IO (Bool, NExprLoc)
 removeDefaultAssignments resolveDefault expr = do
-  let candidates = collectCandidates expr
-  resolutions <-
-    mapM
-      ( \(optionPath, literalValue) -> do
-          defaultValue <- resolveDefault optionPath
-          pure (optionPath, defaultValue == Just literalValue)
-      )
-      candidates
-  let removals = Set.fromList [optionPath | (optionPath, True) <- resolutions]
+  removals <- resolveLiteralRemovals resolveDefault (collectCandidates expr)
   pure (not (Set.null removals), rewriteModuleExpression removals expr)
 resolveLiteralRemovals :: DefaultResolver -> [(OptionPath, Literal)] -> IO (Set OptionPath)
 resolveLiteralRemovals resolveDefault candidates = do
@@ -342,7 +334,7 @@ removalsFromDefaults defaults candidates =
 uniqueCandidates :: [NixosCandidate] -> [NixosCandidate]
 uniqueCandidates = nub
 uniqueCandidatePaths :: [NixosCandidate] -> [OptionPath]
-uniqueCandidatePaths candidates = nub (map fst candidates)
+uniqueCandidatePaths = nub . map fst
 collectCandidates :: NExprLoc -> [(OptionPath, Literal)]
 collectCandidates = collectModuleExpression []
 collectTreefmtCandidates :: NExprLoc -> [(OptionPath, Literal)]

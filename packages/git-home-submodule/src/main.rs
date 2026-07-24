@@ -10,48 +10,35 @@ const MAIN_HELP: &str = "GIT-HOME-SUBMODULE(1)\n\nNAME\n    git-home-submodule -
 const ADD_USAGE: &str = "usage: git home-submodule add <repository>\n";
 const DEFAULT_GITIGNORE: &str = "*\n!.gitignore\n!.gitmodules\n";
 const USAGE_EXIT_CODE: i32 = 129;
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RepositoryUrlErrorKind {
-    Syntax,
-    Validation,
-}
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct RepositoryUrlError {
-    kind: RepositoryUrlErrorKind,
-    message: String,
+enum RepositoryUrlError {
+    Syntax(String),
+    Validation(String),
 }
 impl fmt::Display for RepositoryUrlError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        return formatter.write_str(&self.message);
+        match self {
+            Self::Syntax(message) | Self::Validation(message) => formatter.write_str(message),
+        }
     }
 }
 impl std::error::Error for RepositoryUrlError {}
 #[derive(Debug)]
-struct CliFailure {
-    exit_code: i32,
-    diagnostics: Vec<String>,
+enum CliFailure {
+    Fatal(String),
+    Check(Vec<String>),
+    Git(ExitStatus),
+    Usage,
 }
 impl CliFailure {
     fn fatal(diagnostic: impl Into<String>) -> Self {
-        return Self {
-            exit_code: 128,
-            diagnostics: vec![format!("fatal: {}", diagnostic.into())],
-        };
+        Self::Fatal(diagnostic.into())
     }
     fn check(diagnostics: Vec<String>) -> Self {
-        return Self {
-            exit_code: 1,
-            diagnostics: diagnostics
-                .into_iter()
-                .map(|diagnostic| format!("error: {diagnostic}"))
-                .collect(),
-        };
+        Self::Check(diagnostics)
     }
     fn git(exit_status: ExitStatus) -> Self {
-        return Self {
-            exit_code: exit_status.code().unwrap_or(1),
-            diagnostics: Vec::new(),
-        };
+        Self::Git(exit_status)
     }
 }
 #[derive(Debug, Default)]
@@ -106,12 +93,18 @@ fn run_cli(arguments: &[OsString], home_directory: &Path) -> i32 {
     };
     match result {
         Ok(()) => 0,
-        Err(failure) => {
-            for diagnostic in failure.diagnostics {
-                eprintln!("{diagnostic}");
-            }
-            failure.exit_code
+        Err(CliFailure::Fatal(diagnostic)) => {
+            eprintln!("fatal: {diagnostic}");
+            128
         }
+        Err(CliFailure::Check(diagnostics)) => {
+            for diagnostic in diagnostics {
+                eprintln!("error: {diagnostic}");
+            }
+            1
+        }
+        Err(CliFailure::Git(exit_status)) => exit_status.code().unwrap_or(1),
+        Err(CliFailure::Usage) => USAGE_EXIT_CODE,
     }
 }
 fn parse_repository_url(repository_url: &str) -> Result<String, RepositoryUrlError> {
@@ -160,10 +153,7 @@ fn split_url_path<'a>(
     });
 }
 fn syntax_url_error(repository_url: &str, diagnostic: &str) -> RepositoryUrlError {
-    return RepositoryUrlError {
-        kind: RepositoryUrlErrorKind::Syntax,
-        message: format!("{diagnostic}: {repository_url}"),
-    };
+    RepositoryUrlError::Syntax(format!("{diagnostic}: {repository_url}"))
 }
 fn validate_component(component_kind: &str, component: &str) -> Result<(), RepositoryUrlError> {
     let message = if component.is_empty() {
@@ -178,10 +168,7 @@ fn validate_component(component_kind: &str, component: &str) -> Result<(), Repos
     } else {
         return Ok(());
     };
-    return Err(RepositoryUrlError {
-        kind: RepositoryUrlErrorKind::Validation,
-        message,
-    });
+    Err(RepositoryUrlError::Validation(message))
 }
 fn add_repository(home_directory: &Path, repository_url: &str) -> Result<(), CliFailure> {
     return add_repository_with_environment(home_directory, repository_url, &[]);
@@ -193,14 +180,11 @@ fn add_repository_with_environment(
 ) -> Result<(), CliFailure> {
     let canonical_path = match parse_repository_url(repository_url) {
         Ok(path) => path,
-        Err(error) if error.kind == RepositoryUrlErrorKind::Syntax => {
+        Err(RepositoryUrlError::Syntax(_)) => {
             eprint!("{ADD_USAGE}");
-            return Err(CliFailure {
-                exit_code: USAGE_EXIT_CODE,
-                diagnostics: Vec::new(),
-            });
+            return Err(CliFailure::Usage);
         }
-        Err(error) => return Err(CliFailure::fatal(error.message)),
+        Err(RepositoryUrlError::Validation(message)) => return Err(CliFailure::fatal(message)),
     };
     let mut command = Command::new("git");
     command
@@ -332,7 +316,7 @@ fn check_home_gitmodules(home_directory: &Path, fix: bool) -> Result<(), CliFail
                     }
                 }
             }
-            Err(error) => diagnostics.push(format!("submodule \"{section}\": {}", error.message)),
+            Err(error) => diagnostics.push(format!("submodule \"{section}\": {error}")),
         }
     }
     if diagnostics.is_empty() {
@@ -437,10 +421,9 @@ fn parse_raw_submodule_fields(
 }
 fn validate_canonical_repository_path(path: &str) -> Result<(), RepositoryUrlError> {
     if path.split('/').count() < 2 {
-        return Err(RepositoryUrlError {
-            kind: RepositoryUrlErrorKind::Validation,
-            message: "repository path must include a host and repository path".to_owned(),
-        });
+        return Err(RepositoryUrlError::Validation(
+            "repository path must include a host and repository path".to_owned(),
+        ));
     }
     return validate_repository_path_components(path);
 }
@@ -576,7 +559,7 @@ mod tests {
         fs::write(home.path().join(".gitignore"), "*.tmp\n")?;
         let failure = initialize_home_repository(home.path())
             .expect_err("conflicting initialization must fail");
-        assert_eq!(failure.exit_code, 128);
+        assert!(matches!(failure, CliFailure::Fatal(_)));
         assert!(!home.path().join(".git").exists());
         return Ok(());
     }
@@ -586,7 +569,7 @@ mod tests {
         fs::create_dir(home.path().join(".gitignore"))?;
         let failure = initialize_home_repository(home.path())
             .expect_err("a non-regular .gitignore must fail");
-        assert_eq!(failure.exit_code, 128);
+        assert!(matches!(failure, CliFailure::Fatal(_)));
         assert!(!home.path().join(".git").exists());
         return Ok(());
     }
@@ -610,7 +593,10 @@ mod tests {
         )?;
         let failure =
             check_home_gitmodules(home.path(), false).expect_err("invalid entries must fail");
-        let diagnostics = failure.diagnostics.join("\n");
+        let CliFailure::Check(diagnostics) = failure else {
+            return Err("invalid entries must produce check diagnostics".into());
+        };
+        let diagnostics = diagnostics.join("\n");
         for expected in [
             "must have exactly one URL",
             "must have exactly one path",
