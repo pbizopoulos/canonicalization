@@ -232,21 +232,9 @@ checkTemplateSpecs =
         checkTemplateComparisonMode = ExactCheckTemplate
       },
     CheckTemplateSpec
-      { checkTemplateName = "haskell_property_testing_check",
-        checkTemplateMatches = matchesHaskellPropertyTestingCheck,
-        checkTemplateBaselineSource = haskellPropertyTestingCheckBaselineNixSource,
-        checkTemplateComparisonMode = ExactCheckTemplate
-      },
-    CheckTemplateSpec
       { checkTemplateName = "python_coverage_check",
         checkTemplateMatches = matchesPythonCoverageCheck,
         checkTemplateBaselineSource = pythonCoverageCheckBaselineNixSource,
-        checkTemplateComparisonMode = ExactCheckTemplate
-      },
-    CheckTemplateSpec
-      { checkTemplateName = "python_property_testing_check",
-        checkTemplateMatches = matchesPythonPropertyTestingCheck,
-        checkTemplateBaselineSource = pythonPropertyTestingCheckBaselineNixSource,
         checkTemplateComparisonMode = ExactCheckTemplate
       },
     CheckTemplateSpec
@@ -259,30 +247,6 @@ checkTemplateSpecs =
       { checkTemplateName = "rust_profile_check",
         checkTemplateMatches = matchesRustProfileCheck,
         checkTemplateBaselineSource = rustProfileCheckBaselineNixSource,
-        checkTemplateComparisonMode = ExactCheckTemplate
-      },
-    CheckTemplateSpec
-      { checkTemplateName = "rust_property_testing_check",
-        checkTemplateMatches = matchesRustPropertyTestingCheck,
-        checkTemplateBaselineSource = rustPropertyTestingCheckBaselineNixSource,
-        checkTemplateComparisonMode = ExactCheckTemplate
-      },
-    CheckTemplateSpec
-      { checkTemplateName = "rust_mutation_testing_check",
-        checkTemplateMatches = matchesRustMutationTestingCheck,
-        checkTemplateBaselineSource = rustMutationTestingCheckBaselineNixSource,
-        checkTemplateComparisonMode = ExactCheckTemplate
-      },
-    CheckTemplateSpec
-      { checkTemplateName = "html_template_check",
-        checkTemplateMatches = matchesHtmlPackageDefaultCheck,
-        checkTemplateBaselineSource = htmlTemplateCheckBaselineNixSource,
-        checkTemplateComparisonMode = ExactCheckTemplate
-      },
-    CheckTemplateSpec
-      { checkTemplateName = "c_template_check",
-        checkTemplateMatches = \checkName _ -> pure (checkName == "c_template"),
-        checkTemplateBaselineSource = cTemplateCheckBaselineNixSource,
         checkTemplateComparisonMode = ExactCheckTemplate
       },
     CheckTemplateSpec
@@ -308,29 +272,12 @@ matchesHaskellCoverageCheck :: FilePath -> String -> IO Bool
 matchesHaskellCoverageCheck = matchesCheckNameSuffixAndSourceContains "-coverage" ["ghcWithPackages", "-fhpc"]
 matchesHaskellProfileCheck :: FilePath -> String -> IO Bool
 matchesHaskellProfileCheck = matchesCheckNameSuffixAndSourceContains "-profile" ["ghcWithPackages", "-fprof-auto"]
-matchesHaskellPropertyTestingCheck :: FilePath -> String -> IO Bool
-matchesHaskellPropertyTestingCheck = matchesCheckNameSuffixAndSourceContains "-property-testing" ["ghcWithPackages", "runPackageTests"]
 matchesPythonCoverageCheck :: FilePath -> String -> IO Bool
 matchesPythonCoverageCheck = matchesCheckNameSuffixAndSourceContains "_coverage" ["--cov=\"$src\""]
-matchesPythonPropertyTestingCheck :: FilePath -> String -> IO Bool
-matchesPythonPropertyTestingCheck = matchesCheckNameSuffixAndSourceContains "_property_testing" ["python -m pytest -v main.py -k property"]
 matchesRustCoverageCheck :: FilePath -> String -> IO Bool
 matchesRustCoverageCheck = matchesCheckNameSuffixAndSourceContains "-coverage" ["cargo llvm-cov"]
 matchesRustProfileCheck :: FilePath -> String -> IO Bool
 matchesRustProfileCheck = matchesCheckNameSuffixAndSourceContains "-profile" ["pkgs.perf", "perf record"]
-matchesRustPropertyTestingCheck :: FilePath -> String -> IO Bool
-matchesRustPropertyTestingCheck = matchesCheckNameSuffixAndSourceContains "-property-testing" ["cargo test --locked"]
-matchesRustMutationTestingCheck :: FilePath -> String -> IO Bool
-matchesRustMutationTestingCheck = matchesCheckNameSuffixAndSourceContains "-mutation-testing" ["cargo mutants"]
-matchesHtmlPackageDefaultCheck :: FilePath -> String -> IO Bool
-matchesHtmlPackageDefaultCheck checkName nixSource = do
-  packageKind <- detectPackageKindForPackage checkName
-  pure
-    ( packageKind == HtmlPackage
-        && "pkgs.testers.runNixOSTest" `isInfixOf` nixSource
-        && "pkgs.curl" `isInfixOf` nixSource
-        && "Hello World!" `isInfixOf` nixSource
-    )
 matchesCPackageVmCheck :: FilePath -> String -> IO Bool
 matchesCPackageVmCheck checkName nixSource = do
   packageKind <- detectPackageKindForPackage checkName
@@ -345,11 +292,8 @@ isCPackageVmCheckShape packageKind nixSource =
     && "testScript = ''" `isInfixOf` nixSource
 type RepositoryCheckKind :: Type
 data RepositoryCheckKind
-  = RepositoryDefaultCheck
-  | RepositoryCoverageCheck
+  = RepositoryCoverageCheck
   | RepositoryProfileCheck
-  | RepositoryPropertyTestingCheck
-  | RepositoryMutationTestingCheck
   deriving stock (Eq, Ord, Show)
 type CanonicalizationSettings :: Type
 newtype CanonicalizationSettings = CanonicalizationSettings
@@ -463,11 +407,8 @@ mainHelpText =
       "        existing package and add requested checks to it. Generated files",
       "        are staged with git add.",
       "",
-      "        --default-check       add the package's default check",
       "        --coverage            add a coverage check",
       "        --profile             add a profiling check",
-      "        --property-testing    add a property-testing check",
-      "        --mutation-testing    add a mutation-testing check",
       "",
       "    check",
       "        Check that the repository follows the canonical package and check",
@@ -490,11 +431,8 @@ usageTextForCommand = \case
         "the package type and description; its type is inferred.",
         "Generated files are staged with git add.",
         "",
-        "    --default-check       add the package's default check",
         "    --coverage            add a coverage check",
         "    --profile             add a profiling check",
-        "    --property-testing    add a property-testing check",
-        "    --mutation-testing    add a mutation-testing check",
         ""
       ]
   Just "summary" ->
@@ -534,11 +472,8 @@ parseRepositoryCheckFlags flagArguments =
       ( \repositoryCheckFlag ->
           lookup
             repositoryCheckFlag
-            [ ("--default-check", RepositoryDefaultCheck),
-              ("--coverage", RepositoryCoverageCheck),
-              ("--profile", RepositoryProfileCheck),
-              ("--property-testing", RepositoryPropertyTestingCheck),
-              ("--mutation-testing", RepositoryMutationTestingCheck)
+            [ ("--coverage", RepositoryCoverageCheck),
+              ("--profile", RepositoryProfileCheck)
             ]
       )
       flagArguments
@@ -632,11 +567,8 @@ repositoryCheckPhaseHint = \case
   FileCompliancePhase -> "align package files with the expected internal templates and language-specific policy checks."
 type RepositoryPackageChecksSummary :: Type
 data RepositoryPackageChecksSummary = RepositoryPackageChecksSummary
-  { repositoryPackageHasCheck :: Bool,
-    repositoryPackageCoverage :: Maybe RepositoryPackageCoverageSummary,
-    repositoryPackageProfile :: Maybe RepositoryPackageProfileSummary,
-    repositoryPackageHasPropertyTestingCheck :: Bool,
-    repositoryPackageHasMutationTestingCheck :: Bool
+  { repositoryPackageCoverage :: Maybe RepositoryPackageCoverageSummary,
+    repositoryPackageProfile :: Maybe RepositoryPackageProfileSummary
   }
   deriving stock (Eq, Show)
 type RepositoryPackageCoverageSummary :: Type
@@ -792,19 +724,13 @@ renderRepositoryPackageChecksJson packageChecks =
     ++ " }"
 repositoryPackageCheckEntries :: RepositoryPackageChecksSummary -> [(String, Bool)]
 repositoryPackageCheckEntries packageChecks =
-  [ ("default-check", repositoryPackageHasCheck packageChecks),
-    ("coverage", isJust (repositoryPackageCoverage packageChecks)),
-    ("profile", isJust (repositoryPackageProfile packageChecks)),
-    ("property-testing", repositoryPackageHasPropertyTestingCheck packageChecks),
-    ("mutation-testing", repositoryPackageHasMutationTestingCheck packageChecks)
+  [ ("coverage", isJust (repositoryPackageCoverage packageChecks)),
+    ("profile", isJust (repositoryPackageProfile packageChecks))
   ]
 enabledRepositoryPackageCheckNames :: RepositoryPackageSummary -> [String]
 enabledRepositoryPackageCheckNames packageSummary =
-  ["default-check" | repositoryPackageHasCheck packageChecks]
-    ++ ["coverage " ++ renderRepositoryPackageCoverageAnnotation coverage | coverage <- maybeToList (repositoryPackageCoverage packageChecks)]
+  ["coverage " ++ renderRepositoryPackageCoverageAnnotation coverage | coverage <- maybeToList (repositoryPackageCoverage packageChecks)]
     ++ ["profile " ++ renderRepositoryPackageProfileAnnotation profile | profile <- maybeToList (repositoryPackageProfile packageChecks)]
-    ++ ["property-testing" | repositoryPackageHasPropertyTestingCheck packageChecks]
-    ++ ["mutation-testing" | repositoryPackageHasMutationTestingCheck packageChecks]
   where
     packageChecks = repositoryPackageChecks packageSummary
 renderRepositoryPackageCoverageAnnotation :: RepositoryPackageCoverageSummary -> String
@@ -932,11 +858,8 @@ summarizeRepositoryPackage checkOutputPaths repositoryCheckNames packageName = d
     traverse (summarizeRepositoryPackageProfile checkOutputPaths) profileCheckName
   let repositoryPackageChecksValue =
         RepositoryPackageChecksSummary
-          { repositoryPackageHasCheck = isJust (configuredRepositoryCheckName RepositoryDefaultCheck),
-            repositoryPackageCoverage = repositoryPackageCoverageValue,
-            repositoryPackageProfile = repositoryPackageProfileValue,
-            repositoryPackageHasPropertyTestingCheck = isJust (configuredRepositoryCheckName RepositoryPropertyTestingCheck),
-            repositoryPackageHasMutationTestingCheck = isJust (configuredRepositoryCheckName RepositoryMutationTestingCheck)
+          { repositoryPackageCoverage = repositoryPackageCoverageValue,
+            repositoryPackageProfile = repositoryPackageProfileValue
           }
   pure
     RepositoryPackageSummary
@@ -1296,11 +1219,8 @@ validateRepositoryCheckSelection packageKind requestedCheckKinds =
                 ++ intercalate
                   ", "
                   [ case repositoryCheckKind of
-                      RepositoryDefaultCheck -> "--default-check"
                       RepositoryCoverageCheck -> "--coverage"
                       RepositoryProfileCheck -> "--profile"
-                      RepositoryPropertyTestingCheck -> "--property-testing"
-                      RepositoryMutationTestingCheck -> "--mutation-testing"
                   | repositoryCheckKind <- NE.toList unsupportedCheckKindsNonEmpty
                   ]
             )
@@ -1322,17 +1242,10 @@ repositoryCheckSpecs :: [((PackageKind, RepositoryCheckKind), RepositoryCheckSpe
 repositoryCheckSpecs =
   [ spec HaskellPackage RepositoryCoverageCheck "-coverage" haskellCoverageCheckBaselineNixSource,
     spec HaskellPackage RepositoryProfileCheck "-profile" haskellProfileCheckBaselineNixSource,
-    spec HaskellPackage RepositoryPropertyTestingCheck "-property-testing" haskellPropertyTestingCheckBaselineNixSource,
     spec RustPackage RepositoryCoverageCheck "-coverage" rustCoverageCheckBaselineNixSource,
     spec RustPackage RepositoryProfileCheck "-profile" rustProfileCheckBaselineNixSource,
-    spec RustPackage RepositoryPropertyTestingCheck "-property-testing" rustPropertyTestingCheckBaselineNixSource,
-    spec RustPackage RepositoryMutationTestingCheck "-mutation-testing" rustMutationTestingCheckBaselineNixSource,
     spec PythonPackage RepositoryCoverageCheck "_coverage" pythonCoverageCheckBaselineNixSource,
-    spec PythonPackage RepositoryPropertyTestingCheck "_property_testing" pythonPropertyTestingCheckBaselineNixSource,
-    spec PythonLatexPackage RepositoryCoverageCheck "_coverage" pythonCoverageCheckBaselineNixSource,
-    spec PythonLatexPackage RepositoryPropertyTestingCheck "_property_testing" pythonPropertyTestingCheckBaselineNixSource,
-    spec HtmlPackage RepositoryDefaultCheck "" htmlTemplateCheckBaselineNixSource,
-    spec CPackage RepositoryDefaultCheck "" cTemplateCheckBaselineNixSource
+    spec PythonLatexPackage RepositoryCoverageCheck "_coverage" pythonCoverageCheckBaselineNixSource
   ]
   where
     spec :: PackageKind -> RepositoryCheckKind -> String -> T.Text -> ((PackageKind, RepositoryCheckKind), RepositoryCheckSpec)
@@ -1791,13 +1704,9 @@ checkPackageAssociation matchedCheckTemplateName checkName =
   case matchedCheckTemplateName of
     "haskell_coverage_check" -> withSuffix "-coverage" [HaskellPackage]
     "haskell_profile_check" -> withSuffix "-profile" [HaskellPackage]
-    "haskell_property_testing_check" -> withSuffix "-property-testing" [HaskellPackage]
     "python_coverage_check" -> withSuffix "_coverage" [PythonPackage, PythonLatexPackage]
-    "python_property_testing_check" -> withSuffix "_property_testing" [PythonPackage, PythonLatexPackage]
     "rust_coverage_check" -> withSuffix "-coverage" [RustPackage]
     "rust_profile_check" -> withSuffix "-profile" [RustPackage]
-    "rust_property_testing_check" -> withSuffix "-property-testing" [RustPackage]
-    "rust_mutation_testing_check" -> withSuffix "-mutation-testing" [RustPackage]
     _ -> Nothing
   where
     withSuffix :: String -> [PackageKind] -> Maybe (FilePath, [PackageKind])
@@ -2856,16 +2765,13 @@ repositorySummaryRenderingTest = do
             repositoryPackageTestNames = ["Reports \"quoted\" behavior."],
             repositoryPackageChecks =
               RepositoryPackageChecksSummary
-                { repositoryPackageHasCheck = False,
-                  repositoryPackageCoverage =
+                { repositoryPackageCoverage =
                     Just
                       ( RepositoryCoverageMeasured
                           (CoverageMeasurement StatementCoverage 19 20)
                           (Map.fromList [("Reports \"quoted\" behavior.", Duration 9.999)])
                       ),
-                  repositoryPackageProfile = Just (RepositoryProfileMeasured (Duration 1.234) (Map.fromList [("Reports \"quoted\" behavior.", Duration 0.125)])),
-                  repositoryPackageHasPropertyTestingCheck = False,
-                  repositoryPackageHasMutationTestingCheck = False
+                  repositoryPackageProfile = Just (RepositoryProfileMeasured (Duration 1.234) (Map.fromList [("Reports \"quoted\" behavior.", Duration 0.125)]))
                 }
           }
       repositorySummary =
@@ -2905,7 +2811,7 @@ repositorySummaryRenderingTest = do
           "          \"name\": \"demo\",",
           "          \"packageType\": \"python\",",
           "          \"description\": null,",
-          "          \"checks\": { \"default-check\": false, \"coverage\": true, \"profile\": true, \"property-testing\": false, \"mutation-testing\": false },",
+          "          \"checks\": { \"coverage\": true, \"profile\": true },",
           "          \"coverage\": { \"status\": \"measured\", \"metric\": \"statements\", \"covered\": 19, \"total\": 20, \"percent\": 95.0 },",
           "          \"profile\": { \"status\": \"measured\", \"totalSeconds\": 1.234 },",
           "          \"testDurationsSeconds\": { \"Reports \\\"quoted\\\" behavior.\": 0.125 },",
@@ -2961,7 +2867,7 @@ addPackageEndToEndTest =
     (addExit, addStdout, addStderr) <-
       runEndToEndCommandIn
         nestedDirectory
-        ["add", "python", "demo", "Demo package", "--coverage", "--property-testing"]
+        ["add", "python", "demo", "Demo package", "--coverage"]
     assertEqual "Adding a package through the installed CLI succeeds." ExitSuccess addExit
     assertEqual "A successful add produces no stdout." "" addStdout
     assertEqual "A successful add leaves stderr empty." "" addStderr
@@ -2972,8 +2878,7 @@ addPackageEndToEndTest =
           [ temporaryRepository </> "packages/demo/.gitignore",
             temporaryRepository </> "packages/demo/default.nix",
             temporaryRepository </> "packages/demo/main.py",
-            temporaryRepository </> "checks/demo_coverage/default.nix",
-            temporaryRepository </> "checks/demo_property_testing/default.nix"
+            temporaryRepository </> "checks/demo_coverage/default.nix"
           ]
     assertBool "The installed CLI creates the package and requested checks on disk." generatedFilesExist
 addChecksToExistingPackageEndToEndTest :: IO ()
@@ -3166,7 +3071,7 @@ withGeneratedPythonPackageRepository temporaryName action =
     (addExit, _addStdout, addStderr) <-
       runEndToEndCommandIn
         nestedDirectory
-        ["add", "python", "demo", "Demo package", "--coverage", "--property-testing"]
+        ["add", "python", "demo", "Demo package", "--coverage"]
     when (addExit /= ExitSuccess) $
       assertFailure ("Failed to generate the Python package fixture: " ++ addStderr)
     runGitFixtureCommand ["-C", temporaryRepository, "config", "user.name", "Canonicalization Tests"]
@@ -3206,11 +3111,8 @@ expectedGeneratedPythonPackageSummary =
         ],
       repositoryPackageChecks =
         RepositoryPackageChecksSummary
-          { repositoryPackageHasCheck = False,
-            repositoryPackageCoverage = Just (RepositoryCoverageUnavailable Map.empty),
-            repositoryPackageProfile = Just RepositoryProfileUnavailable,
-            repositoryPackageHasPropertyTestingCheck = True,
-            repositoryPackageHasMutationTestingCheck = False
+          { repositoryPackageCoverage = Just (RepositoryCoverageUnavailable Map.empty),
+            repositoryPackageProfile = Just RepositoryProfileUnavailable
           }
     }
 expectedGeneratedHaskellPackageSummary :: RepositoryPackageSummary
@@ -3222,11 +3124,8 @@ expectedGeneratedHaskellPackageSummary =
       repositoryPackageTestNames = ["Renders the sample message."],
       repositoryPackageChecks =
         RepositoryPackageChecksSummary
-          { repositoryPackageHasCheck = False,
-            repositoryPackageCoverage = Nothing,
-            repositoryPackageProfile = Nothing,
-            repositoryPackageHasPropertyTestingCheck = False,
-            repositoryPackageHasMutationTestingCheck = False
+          { repositoryPackageCoverage = Nothing,
+            repositoryPackageProfile = Nothing
           }
     }
 runEndToEndCommandIn :: FilePath -> [String] -> IO (ExitCode, String, String)
@@ -4548,56 +4447,6 @@ haskellProfileCheckBaselineNixSource =
       "    cat \"$out/test-timings.tsv\" >> \"$out/profile-summary.tsv\"",
       "  ''"
     ]
-haskellPropertyTestingCheckBaselineNixSource :: T.Text
-haskellPropertyTestingCheckBaselineNixSource =
-  T.unlines
-    [ "{",
-      "  pkgs,",
-      "  ...",
-      "}:",
-      "let",
-      "  checkName = builtins.baseNameOf ./.;",
-      "  packageDrv = import (../.. + \"/packages/${packageName}/default.nix\") {",
-      "    inherit pkgs;",
-      "  };",
-      "  packageName = pkgs.lib.removeSuffix \"-property-testing\" checkName;",
-      "  testGhc = pkgs.haskellPackages.ghcWithPackages (_: packageDrv.passthru.haskellExecutableDepends);",
-      "in",
-      "pkgs.runCommand \"${checkName}\"",
-      "  {",
-      "    nativeBuildInputs = [",
-      "      packageDrv",
-      "      pkgs.git",
-      "      testGhc",
-      "    ];",
-      "    src = ../.. + \"/packages/${packageName}\";",
-      "  }",
-      "  ''",
-      "    export HOME=\"$PWD\"",
-      "    workspace=\"$PWD/workspace\"",
-      "    packageName=\"${packageName}\"",
-      "    mkdir -p \"$workspace\"",
-      "    cd \"$workspace\"",
-      "    cat > TestMain.hs <<EOF",
-      "    module TestMain (main) where",
-      "    import qualified Main as PackageMain",
-      "    main :: IO ()",
-      "    main = PackageMain.runPackageTests",
-      "    EOF",
-      "    \"${testGhc}/bin/ghc\" \\",
-      "      -O2 \\",
-      "      -main-is TestMain.main \\",
-      "      -i\"$src\" \\",
-      "      -outputdir \"$workspace\" \\",
-      "      -odir \"$workspace\" \\",
-      "      -hidir \"$workspace\" \\",
-      "      -o \"$workspace/$packageName\" \\",
-      "      \"$workspace/TestMain.hs\" \\",
-      "      \"$src/Main.hs\"",
-      "    \"$workspace/$packageName\"",
-      "    touch \"$out\"",
-      "  ''"
-    ]
 pythonCoverageCheckBaselineNixSource :: T.Text
 pythonCoverageCheckBaselineNixSource =
   T.unlines
@@ -4665,45 +4514,6 @@ pythonCoverageCheckBaselineNixSource =
       "    PY",
       "  ''"
     ]
-pythonPropertyTestingCheckBaselineNixSource :: T.Text
-pythonPropertyTestingCheckBaselineNixSource =
-  T.unlines
-    [ "{",
-      "  inputs,",
-      "  pkgs,",
-      "  ...",
-      "}:",
-      "let",
-      "  checkName = builtins.baseNameOf ./.;",
-      "  packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${packageName};",
-      "  packageName = pkgs.lib.removeSuffix \"_property_testing\" checkName;",
-      "  pythonEnv = packageDrv.python.withPackages (",
-      "    _:",
-      "    packageDrv.propagatedBuildInputs",
-      "    ++ [",
-      "      packageDrv.python.pkgs.hypothesis",
-      "    ]",
-      "  );",
-      "in",
-      "pkgs.runCommand checkName",
-      "  {",
-      "    nativeBuildInputs = [",
-      "      pythonEnv",
-      "    ];",
-      "    src = ../.. + \"/packages/${packageName}\";",
-      "  }",
-      "  ''",
-      "    export HOME=\"$(mktemp -d)\"",
-      "    export PYTHONWARNINGS=error",
-      "    workspace=\"$PWD/workspace\"",
-      "    rm -rf \"$workspace\"",
-      "    mkdir -p \"$workspace\"",
-      "    cp -R --no-preserve=mode \"$src\"/. \"$workspace\"",
-      "    cd \"$workspace\"",
-      "    PYTHONPATH=\"$workspace\" python -m pytest -v main.py -k property",
-      "    touch \"$out\"",
-      "  ''"
-    ]
 rustCoverageCheckBaselineNixSource :: T.Text
 rustCoverageCheckBaselineNixSource =
   T.unlines
@@ -4743,42 +4553,6 @@ rustCoverageCheckBaselineNixSource =
       "    total=\"$(jq -r '.data[0].totals.lines.count' \"$out/report.json\")\"",
       "    test \"$covered\" != null -a \"$total\" != null",
       "    printf 'coverage-v1\\tlines\\t%s\\t%s\\n' \"$covered\" \"$total\" > \"$out/coverage-summary.tsv\"",
-      "  ''"
-    ]
-rustMutationTestingCheckBaselineNixSource :: T.Text
-rustMutationTestingCheckBaselineNixSource =
-  T.unlines
-    [ "{",
-      "  inputs,",
-      "  pkgs,",
-      "  ...",
-      "}:",
-      "let",
-      "  inherit (packageDrv) cargoDeps;",
-      "  checkName = builtins.baseNameOf ./.;",
-      "  packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${packageName};",
-      "  packageName = pkgs.lib.removeSuffix \"-mutation-testing\" checkName;",
-      "  rustBaseInputs = packageDrv.passthru.rustCheckNativeBuildInputs;",
-      "in",
-      "pkgs.runCommand \"${checkName}\"",
-      "  {",
-      "    nativeBuildInputs = rustBaseInputs ++ [",
-      "      pkgs.cargo-mutants",
-      "    ];",
-      "    src = ../.. + \"/packages/${packageName}\";",
-      "  }",
-      "  ''",
-      "    workspace=\"$PWD/workspace\"",
-      "    cp -R --no-preserve=mode \"$src\" \"$workspace\"",
-      "    install -Dm644 \"${cargoDeps}/.cargo/config.toml\" \"$workspace/.cargo/config.toml\"",
-      "    substituteInPlace \"$workspace/.cargo/config.toml\" \\",
-      "      --replace-fail \"@vendor@\" \"${cargoDeps}\"",
-      "    cd \"$workspace\"",
-      "    cargo mutants || mutation_status=$?",
-      "    if [ \"''${mutation_status:-0}\" != 0 ] && [ \"''${mutation_status:-0}\" != 2 ]; then",
-      "      exit \"$mutation_status\"",
-      "    fi",
-      "    touch \"$out\"",
       "  ''"
     ]
 rustProfileCheckBaselineNixSource :: T.Text
@@ -4844,57 +4618,6 @@ rustProfileCheckBaselineNixSource =
       "    output_path.write_text(\"\\n\".join(lines) + \"\\n\")",
       "    PY",
       "  ''"
-    ]
-rustPropertyTestingCheckBaselineNixSource :: T.Text
-rustPropertyTestingCheckBaselineNixSource =
-  T.unlines
-    [ "{",
-      "  inputs,",
-      "  pkgs,",
-      "  ...",
-      "}:",
-      "let",
-      "  inherit (packageDrv) cargoDeps;",
-      "  checkName = builtins.baseNameOf ./.;",
-      "  packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${packageName};",
-      "  packageName = pkgs.lib.removeSuffix \"-property-testing\" checkName;",
-      "  rustBaseInputs = packageDrv.passthru.rustCheckNativeBuildInputs;",
-      "in",
-      "pkgs.runCommand \"${checkName}\"",
-      "  {",
-      "    nativeBuildInputs = rustBaseInputs;",
-      "    src = ../.. + \"/packages/${packageName}\";",
-      "  }",
-      "  ''",
-      "    workspace=\"$PWD/workspace\"",
-      "    cp -R --no-preserve=mode \"$src\" \"$workspace\"",
-      "    install -Dm644 \"${cargoDeps}/.cargo/config.toml\" \"$workspace/.cargo/config.toml\"",
-      "    substituteInPlace \"$workspace/.cargo/config.toml\" \\",
-      "      --replace-fail \"@vendor@\" \"${cargoDeps}\"",
-      "    cd \"$workspace\"",
-      "    cargo test --locked",
-      "    touch \"$out\"",
-      "  ''"
-    ]
-htmlTemplateCheckBaselineNixSource :: T.Text
-htmlTemplateCheckBaselineNixSource =
-  T.unlines
-    [ "{",
-      "  inputs,",
-      "  pkgs,",
-      "  ...",
-      "}:",
-      "pkgs.testers.runNixOSTest rec {",
-      "  name = builtins.baseNameOf ./.;",
-      "  nodes.machine.environment.systemPackages = [",
-      "    inputs.self.packages.${pkgs.stdenv.system}.${name}",
-      "    pkgs.curl",
-      "  ];",
-      "  testScript = ''",
-      "    machine.succeed(\"${name} -p 8080 >/tmp/${name}.log 2>&1 &\")",
-      "    machine.wait_until_succeeds(\"curl -fsS http://127.0.0.1:8080 | grep -F 'Hello World!'\")",
-      "  '';",
-      "}"
     ]
 cTemplateCheckBaselineNixSource :: T.Text
 cTemplateCheckBaselineNixSource =
