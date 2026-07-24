@@ -7,9 +7,9 @@ let
   checkName = builtins.baseNameOf ./.;
   packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${packageName};
   packageName = pkgs.lib.removeSuffix "_coverage" checkName;
-  profilingDrv = import ((inputs.canonicalization or inputs.self) + "/packages/pytest_profiling") {
-    inherit pkgs;
-  };
+  profilingDrv = pkgs.callPackage (
+    (inputs.canonicalization or inputs.self) + "/packages/pytest_profiling"
+  ) { };
   pythonEnv = packageDrv.python.withPackages (
     _:
     packageDrv.propagatedBuildInputs
