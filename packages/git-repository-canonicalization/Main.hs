@@ -244,12 +244,6 @@ checkTemplateSpecs =
         checkTemplateComparisonMode = ExactCheckTemplate
       },
     CheckTemplateSpec
-      { checkTemplateName = "python_profile_check",
-        checkTemplateMatches = matchesPythonProfileCheck,
-        checkTemplateBaselineSource = pythonProfileCheckBaselineNixSource,
-        checkTemplateComparisonMode = ExactCheckTemplate
-      },
-    CheckTemplateSpec
       { checkTemplateName = "python_property_testing_check",
         checkTemplateMatches = matchesPythonPropertyTestingCheck,
         checkTemplateBaselineSource = pythonPropertyTestingCheckBaselineNixSource,
@@ -318,8 +312,6 @@ matchesHaskellPropertyTestingCheck :: FilePath -> String -> IO Bool
 matchesHaskellPropertyTestingCheck = matchesCheckNameSuffixAndSourceContains "-property-testing" ["ghcWithPackages", "runPackageTests"]
 matchesPythonCoverageCheck :: FilePath -> String -> IO Bool
 matchesPythonCoverageCheck = matchesCheckNameSuffixAndSourceContains "_coverage" ["--cov=\"$src\""]
-matchesPythonProfileCheck :: FilePath -> String -> IO Bool
-matchesPythonProfileCheck = matchesCheckNameSuffixAndSourceContains "_profile" ["pyinstrument"]
 matchesPythonPropertyTestingCheck :: FilePath -> String -> IO Bool
 matchesPythonPropertyTestingCheck = matchesCheckNameSuffixAndSourceContains "_property_testing" ["python -m pytest -v main.py -k property"]
 matchesRustCoverageCheck :: FilePath -> String -> IO Bool
@@ -928,10 +920,16 @@ summarizeRepositoryPackage checkOutputPaths repositoryCheckNames packageName = d
               then Just checkName
               else Nothing
       coverageCheckName = configuredRepositoryCheckName RepositoryCoverageCheck
+      profileCheckName =
+        case configuredRepositoryCheckName RepositoryProfileCheck of
+          Just checkName -> Just checkName
+          Nothing
+            | packageKind `elem` [PythonPackage, PythonLatexPackage] -> coverageCheckName
+          Nothing -> Nothing
   repositoryPackageCoverageValue <-
     traverse (summarizeRepositoryPackageCoverage checkOutputPaths) coverageCheckName
   repositoryPackageProfileValue <-
-    traverse (summarizeRepositoryPackageProfile checkOutputPaths) (configuredRepositoryCheckName RepositoryProfileCheck)
+    traverse (summarizeRepositoryPackageProfile checkOutputPaths) profileCheckName
   let repositoryPackageChecksValue =
         RepositoryPackageChecksSummary
           { repositoryPackageHasCheck = isJust (configuredRepositoryCheckName RepositoryDefaultCheck),
@@ -1330,10 +1328,8 @@ repositoryCheckSpecs =
     spec RustPackage RepositoryPropertyTestingCheck "-property-testing" rustPropertyTestingCheckBaselineNixSource,
     spec RustPackage RepositoryMutationTestingCheck "-mutation-testing" rustMutationTestingCheckBaselineNixSource,
     spec PythonPackage RepositoryCoverageCheck "_coverage" pythonCoverageCheckBaselineNixSource,
-    spec PythonPackage RepositoryProfileCheck "_profile" pythonProfileCheckBaselineNixSource,
     spec PythonPackage RepositoryPropertyTestingCheck "_property_testing" pythonPropertyTestingCheckBaselineNixSource,
     spec PythonLatexPackage RepositoryCoverageCheck "_coverage" pythonCoverageCheckBaselineNixSource,
-    spec PythonLatexPackage RepositoryProfileCheck "_profile" pythonProfileCheckBaselineNixSource,
     spec PythonLatexPackage RepositoryPropertyTestingCheck "_property_testing" pythonPropertyTestingCheckBaselineNixSource,
     spec HtmlPackage RepositoryDefaultCheck "" htmlTemplateCheckBaselineNixSource,
     spec CPackage RepositoryDefaultCheck "" cTemplateCheckBaselineNixSource
@@ -1797,7 +1793,6 @@ checkPackageAssociation matchedCheckTemplateName checkName =
     "haskell_profile_check" -> withSuffix "-profile" [HaskellPackage]
     "haskell_property_testing_check" -> withSuffix "-property-testing" [HaskellPackage]
     "python_coverage_check" -> withSuffix "_coverage" [PythonPackage, PythonLatexPackage]
-    "python_profile_check" -> withSuffix "_profile" [PythonPackage, PythonLatexPackage]
     "python_property_testing_check" -> withSuffix "_property_testing" [PythonPackage, PythonLatexPackage]
     "rust_coverage_check" -> withSuffix "-coverage" [RustPackage]
     "rust_profile_check" -> withSuffix "-profile" [RustPackage]
@@ -2983,10 +2978,10 @@ addPackageEndToEndTest =
     assertBool "The installed CLI creates the package and requested checks on disk." generatedFilesExist
 addChecksToExistingPackageEndToEndTest :: IO ()
 addChecksToExistingPackageEndToEndTest =
-  withGeneratedPythonPackageRepository "add-checks-to-existing-package" $ \temporaryRepository -> do
+  withGeneratedHaskellPackageRepository "add-checks-to-existing-package" $ \temporaryRepository -> do
     let packageDefaultNixPath = temporaryRepository </> "packages/demo/default.nix"
-        packageMainPath = temporaryRepository </> "packages/demo/main.py"
-        profileCheckPath = temporaryRepository </> "checks/demo_profile/default.nix"
+        packageMainPath = temporaryRepository </> "packages/demo/Main.hs"
+        profileCheckPath = temporaryRepository </> "checks/demo-profile/default.nix"
     packageDefaultNixBefore <- TIO.readFile packageDefaultNixPath
     packageMainBefore <- TIO.readFile packageMainPath
     (addExit, addStdout, addStderr) <-
@@ -3003,7 +2998,7 @@ addChecksToExistingPackageEndToEndTest =
     (stagedExit, stagedStdout, stagedStderr) <-
       readProcessWithExitCode "git" ["-C", temporaryRepository, "diff", "--cached", "--name-only"] ""
     assertEqual "Inspecting staged paths succeeds." ExitSuccess stagedExit
-    assertEqual "Only the generated check is staged." "checks/demo_profile/default.nix\n" stagedStdout
+    assertEqual "Only the generated check is staged." "checks/demo-profile/default.nix\n" stagedStdout
     assertEqual "Inspecting staged paths leaves stderr empty." "" stagedStderr
 validateExistingPackageAddEndToEndTest :: IO ()
 validateExistingPackageAddEndToEndTest =
@@ -3041,7 +3036,10 @@ validateExistingPackageAddEndToEndTest =
     assertEqual "Inspecting the repository status leaves stderr empty." "" statusStderr
 existingCheckCollisionEndToEndTest :: IO ()
 existingCheckCollisionEndToEndTest =
-  withGeneratedPythonPackageRepository "existing-check-collision" $ \temporaryRepository -> do
+  withGeneratedHaskellPackageRepository "existing-check-collision" $ \temporaryRepository -> do
+    (setupExit, _setupStdout, setupStderr) <-
+      runEndToEndCommandIn temporaryRepository ["add", "demo", "--coverage"]
+    assertEqual ("Preparing the colliding check succeeds: " ++ setupStderr) ExitSuccess setupExit
     (addExit, addStdout, addStderr) <-
       runEndToEndCommandIn
         temporaryRepository
@@ -3050,8 +3048,8 @@ existingCheckCollisionEndToEndTest =
     assertEqual "A colliding check batch produces no stdout." "" addStdout
     assertBool
       "A colliding check batch reports the existing path."
-      ("path already exists: checks/demo_coverage/default.nix" `isInfixOf` addStderr)
-    profileCheckExists <- doesPathExist (temporaryRepository </> "checks/demo_profile")
+      ("path already exists: checks/demo-coverage/default.nix" `isInfixOf` addStderr)
+    profileCheckExists <- doesPathExist (temporaryRepository </> "checks/demo-profile")
     assertBool "A colliding check batch creates no partial check." (not profileCheckExists)
 textSummaryEndToEndTest :: IO ()
 textSummaryEndToEndTest =
@@ -3210,7 +3208,7 @@ expectedGeneratedPythonPackageSummary =
         RepositoryPackageChecksSummary
           { repositoryPackageHasCheck = False,
             repositoryPackageCoverage = Just (RepositoryCoverageUnavailable Map.empty),
-            repositoryPackageProfile = Nothing,
+            repositoryPackageProfile = Just RepositoryProfileUnavailable,
             repositoryPackageHasPropertyTestingCheck = True,
             repositoryPackageHasMutationTestingCheck = False
           }
@@ -4612,11 +4610,13 @@ pythonCoverageCheckBaselineNixSource =
       "  checkName = builtins.baseNameOf ./.;",
       "  packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${packageName};",
       "  packageName = pkgs.lib.removeSuffix \"_coverage\" checkName;",
+      "  profilingDrv = inputs.self.packages.${pkgs.stdenv.system}.pytest_profiling;",
       "  pythonEnv = packageDrv.python.withPackages (",
       "    _:",
       "    packageDrv.propagatedBuildInputs",
       "    ++ [",
       "      packageDrv.python.pkgs.pytest-cov",
+      "      profilingDrv",
       "    ]",
       "  );",
       "in",
@@ -4630,15 +4630,16 @@ pythonCoverageCheckBaselineNixSource =
       "  ''",
       "    export HOME=\"$(mktemp -d)\"",
       "    mkdir -p \"$out/html\"",
-      "    python -m pytest --cov=\"$src\" --cov-report term --cov-report \"json:$out/report.json\" --cov-report \"html:$out/html\" --junitxml=\"$out/junit.xml\" \"$src/main.py\"",
-      "    python - \"$src/main.py\" \"$out/report.json\" \"$out/junit.xml\" \"$out/coverage-summary.tsv\" \"$out/test-timings.tsv\" <<'PY'",
+      "    PYTHONWARNINGS=error python -m pytest -p no:cacheprovider --profile --pstats-dir \"$out/prof\" --cov=\"$src\" --cov-report term --cov-report \"json:$out/report.json\" --cov-report \"html:$out/html\" --junitxml=\"$out/junit.xml\" \"$src/main.py\"",
+      "    python - \"$src/main.py\" \"$out/report.json\" \"$out/junit.xml\" \"$out/coverage-summary.tsv\" \"$out/test-timings.tsv\" \"$out/prof/combined.prof\" \"$out/profile-report.txt\" \"$out/profile-summary.tsv\" <<'PY'",
       "    import ast",
       "    import json",
       "    import pathlib",
+      "    import pstats",
       "    import re",
       "    import sys",
       "    import xml.etree.ElementTree as ET",
-      "    source_path, report_path, junit_path, coverage_path, timings_path = map(pathlib.Path, sys.argv[1:])",
+      "    source_path, report_path, junit_path, coverage_path, timings_path, profile_path, profile_report_path, profile_summary_path = map(pathlib.Path, sys.argv[1:])",
       "    totals = json.loads(report_path.read_text())[\"totals\"]",
       "    coverage_path.write_text(",
       "        f\"coverage-v1\\tstatements\\t{totals['covered_lines']}\\t{totals['num_statements']}\\n\"",
@@ -4653,59 +4654,12 @@ pythonCoverageCheckBaselineNixSource =
       "        test_name = test_case.attrib[\"name\"].split(\"[\", 1)[0]",
       "        timing_lines.append(f\"test\\t{test_case.attrib['time']}\\t{specifications[test_name]}\")",
       "    timings_path.write_text(\"\\n\".join(timing_lines) + \"\\n\")",
-      "    PY",
-      "  ''"
-    ]
-pythonProfileCheckBaselineNixSource :: T.Text
-pythonProfileCheckBaselineNixSource =
-  T.unlines
-    [ "{",
-      "  inputs,",
-      "  pkgs,",
-      "  ...",
-      "}:",
-      "let",
-      "  checkName = builtins.baseNameOf ./.;",
-      "  packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${packageName};",
-      "  packageName = pkgs.lib.removeSuffix \"_profile\" checkName;",
-      "  pythonEnv = packageDrv.python.withPackages (",
-      "    _:",
-      "    packageDrv.propagatedBuildInputs",
-      "    ++ [",
-      "      packageDrv.python.pkgs.pyinstrument",
-      "    ]",
-      "  );",
-      "in",
-      "pkgs.runCommand checkName",
-      "  {",
-      "    nativeBuildInputs = [",
-      "      pkgs.time",
-      "      pythonEnv",
-      "    ];",
-      "    src = ../.. + \"/packages/${packageName}\";",
-      "  }",
-      "  ''",
-      "    export HOME=\"$(mktemp -d)\"",
-      "    mkdir -p \"$out\"",
-      "    PYTHONWARNINGS=error ${pkgs.time}/bin/time -f %e -o \"$out/total-seconds\" \\",
-      "      pyinstrument -r text -o \"$out/report.txt\" -m pytest -p no:cacheprovider --junitxml=\"$out/junit.xml\" \"$src/main.py\"",
-      "    python - \"$src/main.py\" \"$out/junit.xml\" \"$out/total-seconds\" \"$out/profile-summary.tsv\" <<'PY'",
-      "    import ast",
-      "    import pathlib",
-      "    import re",
-      "    import sys",
-      "    import xml.etree.ElementTree as ET",
-      "    source_path, junit_path, total_path, output_path = map(pathlib.Path, sys.argv[1:])",
-      "    specifications = {}",
-      "    for node in ast.parse(source_path.read_text()).body:",
-      "        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith(\"test_\"):",
-      "            words = re.sub(r\"^test_(?:property_)?\", \"\", node.name).replace(\"_\", \" \")",
-      "            specifications[node.name] = ast.get_docstring(node) or words[:1].upper() + words[1:] + \".\"",
-      "    lines = [f\"profile-v1\\ttotal-seconds\\t{total_path.read_text().strip()}\"]",
-      "    for test_case in sorted(ET.parse(junit_path).iter(\"testcase\"), key=lambda element: element.attrib[\"name\"]):",
-      "        test_name = test_case.attrib[\"name\"].split(\"[\", 1)[0]",
-      "        lines.append(f\"test\\t{test_case.attrib['time']}\\t{specifications[test_name]}\")",
-      "    output_path.write_text(\"\\n\".join(lines) + \"\\n\")",
+      "    with profile_report_path.open(\"w\") as stream:",
+      "        profile_stats = pstats.Stats(str(profile_path), stream=stream)",
+      "        profile_stats.sort_stats(\"cumulative\").print_stats(20)",
+      "    profile_summary_path.write_text(",
+      "        \"\\n\".join([f\"profile-v1\\ttotal-seconds\\t{profile_stats.total_tt}\", *timing_lines]) + \"\\n\"",
+      "    )",
       "    PY",
       "  ''"
     ]
