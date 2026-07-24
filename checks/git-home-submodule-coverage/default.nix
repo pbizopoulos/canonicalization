@@ -8,11 +8,10 @@ let
   checkName = builtins.baseNameOf ./.;
   packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${packageName};
   packageName = pkgs.lib.removeSuffix "-coverage" checkName;
-  rustBaseInputs = packageDrv.passthru.rustCheckNativeBuildInputs;
 in
-pkgs.runCommand "${checkName}"
+pkgs.runCommand checkName
   {
-    nativeBuildInputs = rustBaseInputs ++ [
+    nativeBuildInputs = packageDrv.passthru.rustCheckNativeBuildInputs ++ [
       pkgs.cargo-llvm-cov
       pkgs.cargo-nextest
       pkgs.jq

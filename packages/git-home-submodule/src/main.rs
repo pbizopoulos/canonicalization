@@ -10,20 +10,6 @@ const MAIN_HELP: &str = "GIT-HOME-SUBMODULE(1)\n\nNAME\n    git-home-submodule -
 const ADD_USAGE: &str = "usage: git home-submodule add <repository>\n";
 const DEFAULT_GITIGNORE: &str = "*\n!.gitignore\n!.gitmodules\n";
 const USAGE_EXIT_CODE: i32 = 129;
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct RepositoryLocation {
-    hostname: String,
-    path_components: Vec<String>,
-    url: String,
-}
-impl RepositoryLocation {
-    fn canonical_path(&self) -> String {
-        let mut components = Vec::with_capacity(self.path_components.len() + 1);
-        components.push(self.hostname.as_str());
-        components.extend(self.path_components.iter().map(String::as_str));
-        return components.join("/");
-    }
-}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RepositoryUrlErrorKind {
     Syntax,
@@ -128,7 +114,7 @@ fn run_cli(arguments: &[OsString], home_directory: &Path) -> i32 {
         }
     }
 }
-fn parse_repository_url(repository_url: &str) -> Result<RepositoryLocation, RepositoryUrlError> {
+fn parse_repository_url(repository_url: &str) -> Result<String, RepositoryUrlError> {
     let (hostname, repository_path) =
         if let Some(location) = repository_url.strip_prefix("https://") {
             split_url_path(repository_url, location)?
@@ -163,11 +149,7 @@ fn parse_repository_url(repository_url: &str) -> Result<RepositoryLocation, Repo
     for component in &path_components {
         validate_component("repository path component", component)?;
     }
-    return Ok(RepositoryLocation {
-        hostname: hostname.to_owned(),
-        path_components,
-        url: repository_url.to_owned(),
-    });
+    return Ok(format!("{hostname}/{}", path_components.join("/")));
 }
 fn split_url_path<'a>(
     repository_url: &str,
@@ -184,25 +166,21 @@ fn syntax_url_error(repository_url: &str, diagnostic: &str) -> RepositoryUrlErro
     };
 }
 fn validate_component(component_kind: &str, component: &str) -> Result<(), RepositoryUrlError> {
-    let diagnostic = if component.is_empty() {
-        Some(format!("{component_kind} name must not be empty"))
+    let message = if component.is_empty() {
+        format!("{component_kind} name must not be empty")
     } else if component == "." || component == ".." {
-        Some(format!("{component_kind} name must not be '.' or '..'"))
+        format!("{component_kind} name must not be '.' or '..'")
     } else if !component
         .chars()
-        .all(|character| character.is_alphanumeric() || matches!(character, '.' | '-' | '_'))
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_'))
     {
-        Some(format!(
-            "{component_kind} name must contain only letters, digits, '.', '-', or '_'"
-        ))
+        format!("{component_kind} name must contain only ASCII letters, digits, '.', '-', or '_'")
     } else {
-        None
+        return Ok(());
     };
-    return diagnostic.map_or(Ok(()), |message| {
-        Err(RepositoryUrlError {
-            kind: RepositoryUrlErrorKind::Validation,
-            message,
-        })
+    return Err(RepositoryUrlError {
+        kind: RepositoryUrlErrorKind::Validation,
+        message,
     });
 }
 fn add_repository(home_directory: &Path, repository_url: &str) -> Result<(), CliFailure> {
@@ -213,8 +191,8 @@ fn add_repository_with_environment(
     repository_url: &str,
     environment: &[(OsString, OsString)],
 ) -> Result<(), CliFailure> {
-    let repository_location = match parse_repository_url(repository_url) {
-        Ok(location) => location,
+    let canonical_path = match parse_repository_url(repository_url) {
+        Ok(path) => path,
         Err(error) if error.kind == RepositoryUrlErrorKind::Syntax => {
             eprint!("{ADD_USAGE}");
             return Err(CliFailure {
@@ -229,8 +207,8 @@ fn add_repository_with_environment(
         .arg("-C")
         .arg(home_directory)
         .args(["submodule", "add", "--force"])
-        .arg(&repository_location.url)
-        .arg(repository_location.canonical_path())
+        .arg(repository_url)
+        .arg(canonical_path)
         .envs(environment.iter().cloned());
     let status = command
         .status()
@@ -338,15 +316,14 @@ fn check_home_gitmodules(home_directory: &Path, fix: bool) -> Result<(), CliFail
         let section = submodule.section;
         let configured_path = submodule.path;
         let configured_url = submodule.url;
-        if validate_repository_path(&configured_path, true).is_err()
-            && (!fix || validate_repository_path(&configured_path, false).is_err())
+        if validate_canonical_repository_path(&configured_path).is_err()
+            && (!fix || validate_repository_path_components(&configured_path).is_err())
         {
             diagnostics.push(format!(                "submodule \"{section}\": invalid path '{configured_path}'; expected <host>/<repository-path> with valid components"            ));
             continue;
         }
         match parse_repository_url(&configured_url) {
-            Ok(repository_location) => {
-                let expected_path = repository_location.canonical_path();
+            Ok(expected_path) => {
                 if configured_path != expected_path {
                     if fix {
                         fix_submodule_path(home_directory, &configured_path, &expected_path)?;
@@ -369,30 +346,27 @@ fn validate_submodule_records(
     let mut records = Vec::new();
     let mut diagnostics = Vec::new();
     for (section, fields) in submodules {
-        if fields.paths.len() != 1 {
-            diagnostics.push(format!(
-                "submodule \"{section}\": must have exactly one path (found {})",
-                fields.paths.len()
-            ));
+        match (fields.paths.as_slice(), fields.urls.as_slice()) {
+            ([path], [url]) => records.push(SubmoduleRecord {
+                section,
+                path: path.clone(),
+                url: url.clone(),
+            }),
+            (paths, urls) => {
+                if paths.len() != 1 {
+                    diagnostics.push(format!(
+                        "submodule \"{section}\": must have exactly one path (found {})",
+                        paths.len()
+                    ));
+                }
+                if urls.len() != 1 {
+                    diagnostics.push(format!(
+                        "submodule \"{section}\": must have exactly one URL (found {})",
+                        urls.len()
+                    ));
+                }
+            }
         }
-        if fields.urls.len() != 1 {
-            diagnostics.push(format!(
-                "submodule \"{section}\": must have exactly one URL (found {})",
-                fields.urls.len()
-            ));
-        }
-        if fields.paths.len() != 1 || fields.urls.len() != 1 {
-            continue;
-        }
-        records.push(SubmoduleRecord {
-            section,
-            path: fields
-                .paths
-                .into_iter()
-                .next()
-                .expect("validated path count"),
-            url: fields.urls.into_iter().next().expect("validated URL count"),
-        });
     }
     return (records, diagnostics);
 }
@@ -461,15 +435,17 @@ fn parse_raw_submodule_fields(
     }
     return Ok(submodules);
 }
-fn validate_repository_path(path: &str, require_host: bool) -> Result<(), RepositoryUrlError> {
-    let components: Vec<&str> = path.split('/').collect();
-    if require_host && components.len() < 2 {
+fn validate_canonical_repository_path(path: &str) -> Result<(), RepositoryUrlError> {
+    if path.split('/').count() < 2 {
         return Err(RepositoryUrlError {
             kind: RepositoryUrlErrorKind::Validation,
             message: "repository path must include a host and repository path".to_owned(),
         });
     }
-    for component in components {
+    return validate_repository_path_components(path);
+}
+fn validate_repository_path_components(path: &str) -> Result<(), RepositoryUrlError> {
+    for component in path.split('/') {
         validate_component("path component", component)?;
     }
     return Ok(());
@@ -530,13 +506,12 @@ mod tests {
             "git@github.com:owner/demo.git",
         ] {
             assert_eq!(
-                parse_repository_url(repository_url)?.canonical_path(),
+                parse_repository_url(repository_url)?,
                 "github.com/owner/demo"
             );
         }
         assert_eq!(
-            parse_repository_url("https://git.example.test/group/nested/demo.git/")?
-                .canonical_path(),
+            parse_repository_url("https://git.example.test/group/nested/demo.git/")?,
             "git.example.test/group/nested/demo"
         );
         return Ok(());
@@ -549,6 +524,7 @@ mod tests {
             "https://github.com/",
             "https://github.com/owner/../demo.git",
             "git@github.com:owner//demo.git",
+            "https://github.com/ownér/demo.git",
         ] {
             assert!(parse_repository_url(repository_url).is_err());
         }
@@ -571,9 +547,9 @@ mod tests {
             "/owner/demo",
             "host/owner/demo name",
         ] {
-            assert!(validate_repository_path(path, true).is_err(), "{path}");
+            assert!(validate_canonical_repository_path(path).is_err(), "{path}");
         }
-        assert!(validate_repository_path("host/owner/demo", true).is_ok());
+        assert!(validate_canonical_repository_path("host/owner/demo").is_ok());
     }
     #[test]
     fn initializes_and_reinitializes_a_compatible_home_repository() -> TestResult {

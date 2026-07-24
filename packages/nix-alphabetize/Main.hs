@@ -7,7 +7,7 @@ import Control.Monad (unless)
 import Data.Fix (Fix (Fix))
 import Data.Function (on)
 import Data.Functor.Compose (Compose (Compose))
-import Data.List (groupBy, isPrefixOf, sort, sortBy)
+import Data.List (groupBy, isPrefixOf, nub, sort, sortBy)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.List.NonEmpty qualified as NE
 import Data.Ord (comparing)
@@ -72,7 +72,6 @@ import Prelude
     any,
     appendFile,
     concatMap,
-    elem,
     fmap,
     fromIntegral,
     fst,
@@ -114,13 +113,7 @@ formatNixFile filePath = do
       writeFormattedFile filePath expr
       pure True
 writeFormattedFile :: FilePath -> NExprLoc -> IO ()
-writeFormattedFile filePath expr = do
-  let finalText =
-        renderStrict $
-          layoutPretty (LayoutOptions (AvailablePerLine 1 1.0)) $
-            prettyNix $
-              stripAnnotation (sortExpression expr)
-  TIO.writeFile filePath finalText
+writeFormattedFile filePath = TIO.writeFile filePath . formattedExpression
 renderExpressionText :: NExprLoc -> Text
 renderExpressionText =
   renderStrict . layoutPretty (LayoutOptions (AvailablePerLine 1 1.0)) . prettyNix . stripAnnotation
@@ -228,12 +221,7 @@ formatText input =
       Left parseError ->
         assertFailure ("Property fixture failed to parse: " ++ show parseError)
 formattedExpression :: NExprLoc -> Text
-formattedExpression =
-  renderStrict
-    . layoutPretty (LayoutOptions (AvailablePerLine 1 1.0))
-    . prettyNix
-    . stripAnnotation
-    . sortExpression
+formattedExpression = renderExpressionText . sortExpression
 runPackageTests :: IO ()
 runPackageTests = runPackageTestsWith Nothing
 runPackageTestsWithTimings :: FilePath -> IO ()
@@ -342,13 +330,7 @@ nixReservedKeywords =
     "with"
   ]
 dedupePreservingOrder :: [String] -> [String]
-dedupePreservingOrder = go []
-  where
-    go :: [String] -> [String] -> [String]
-    go _seen [] = []
-    go seen (value : rest)
-      | value `elem` seen = go seen rest
-      | otherwise = value : go (seen ++ [value]) rest
+dedupePreservingOrder = nub
 renderNumberListInput :: [Int] -> Text
 renderNumberListInput values =
   pack ("[ " ++ unwords (map show values) ++ " ]")

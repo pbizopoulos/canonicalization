@@ -19,11 +19,13 @@ import Data.Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString.Lazy qualified as LBS
+import Data.Either (partitionEithers)
 import Data.Fix (Fix (Fix))
 import Data.Foldable (toList)
 import Data.Functor.Compose (Compose (Compose))
 import Data.Kind (Type)
-import Data.List (isInfixOf, isPrefixOf, isSuffixOf, nub, sortBy)
+import Data.List (isInfixOf, isSuffixOf, nub, sortBy)
+import Data.List qualified as List
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict (Map)
@@ -102,6 +104,7 @@ import Prelude
     pure,
     putStrLn,
     replicate,
+    sequence,
     show,
     snd,
     writeFile,
@@ -228,8 +231,7 @@ processRepository repositoryRoot = do
     (Right flakeSourcePath, Right nixosConfigurations) -> do
       nixFiles <- findNixFiles repositoryRoot
       parseResults <- mapM parseRepositoryFile nixFiles
-      let parseErrors = repositoryParseErrors parseResults
-          parsedFiles = repositoryParsedFiles parseResults
+      let (parseErrors, parsedFiles) = partitionEithers parseResults
       if null parseErrors
         then do
           let nixosCandidates = concatMap (collectCandidates . snd) parsedFiles
@@ -294,14 +296,6 @@ parseRepositoryFile filePath = do
     Left parseError -> do
       pure (Left ("Error parsing " ++ filePath ++ ": " ++ show parseError))
     Right expr -> pure (Right (filePath, expr))
-repositoryParseErrors :: [Either String ParsedNixFile] -> [String]
-repositoryParseErrors [] = []
-repositoryParseErrors (Left parseError : remainingResults) = parseError : repositoryParseErrors remainingResults
-repositoryParseErrors (Right _ : remainingResults) = repositoryParseErrors remainingResults
-repositoryParsedFiles :: [Either String ParsedNixFile] -> [ParsedNixFile]
-repositoryParsedFiles [] = []
-repositoryParsedFiles (Left _ : remainingResults) = repositoryParsedFiles remainingResults
-repositoryParsedFiles (Right parsedFile : remainingResults) = parsedFile : repositoryParsedFiles remainingResults
 processParsedRepositoryFile :: FilePath -> FilePath -> Map NixosCandidate [FilePath] -> Map OptionPath Literal -> ParsedNixFile -> IO Bool
 processParsedRepositoryFile repositoryRoot flakeSourcePath nixosDefinitionFiles treefmtDefaults (filePath, expr) = do
   let nixosRemovals = nixosRemovalsForFile repositoryRoot flakeSourcePath filePath nixosDefinitionFiles (collectCandidates expr)
@@ -483,17 +477,14 @@ isEmptySet :: NExprLoc -> Bool
 isEmptySet (Fix (Compose (AnnUnit _ (NSet _ bindings)))) = null bindings
 isEmptySet _ = False
 wasNonEmptySet :: NExprLoc -> Bool
-wasNonEmptySet (Fix (Compose (AnnUnit _ (NSet _ bindings)))) = notNull bindings
+wasNonEmptySet (Fix (Compose (AnnUnit _ (NSet _ bindings)))) = not (null bindings)
 wasNonEmptySet _ = False
-notNull :: [a] -> Bool
-notNull [] = False
-notNull (_ : _) = True
 flakeSourcePathForRepository :: FilePath -> IO (Either String FilePath)
-flakeSourcePathForRepository repositoryRoot = do
-  readStringFromNix ["eval", "--impure", "--json", "--expr", flakeSourcePathExpression repositoryRoot]
+flakeSourcePathForRepository repositoryRoot =
+  readJsonFromNix ["eval", "--impure", "--json", "--expr", flakeSourcePathExpression repositoryRoot]
 nixosConfigurationsForRepository :: FilePath -> IO (Either String [String])
-nixosConfigurationsForRepository repositoryRoot = do
-  readStringListFromNix ["eval", "--impure", "--json", "--expr", nixosConfigurationsExpression repositoryRoot]
+nixosConfigurationsForRepository repositoryRoot =
+  readJsonFromNix ["eval", "--impure", "--json", "--expr", nixosConfigurationsExpression repositoryRoot]
 resolveNixosDefinitionFiles :: FilePath -> [String] -> [NixosCandidate] -> IO (Either String (Map NixosCandidate [FilePath]))
 resolveNixosDefinitionFiles _ [] _ = pure (Right Map.empty)
 resolveNixosDefinitionFiles _ _ [] = pure (Right Map.empty)
@@ -504,7 +495,7 @@ resolveNixosDefinitionFiles repositoryRoot nixosConfigurations candidates = do
           resolveNixosDefinitionFilesForConfiguration repositoryRoot configurationName candidates
       )
       nixosConfigurations
-  pure (Map.unionsWith (++) <$> sequenceEither definitionMapResults)
+  pure (Map.unionsWith (++) <$> sequence definitionMapResults)
 resolveNixosDefinitionFilesForConfiguration :: FilePath -> String -> [NixosCandidate] -> IO (Either String (Map NixosCandidate [FilePath]))
 resolveNixosDefinitionFilesForConfiguration _ _ [] = pure (Right Map.empty)
 resolveNixosDefinitionFilesForConfiguration repositoryRoot configurationName candidates = do
@@ -522,10 +513,6 @@ resolveTreefmtDefaults _ [] = pure (Right Map.empty)
 resolveTreefmtDefaults repositoryRoot optionPaths = do
   defaultsResult <- readTreefmtDefaultsFromNix ["eval", "--impure", "--json", "--expr", treefmtDefaultsExpression repositoryRoot optionPaths]
   pure (Map.fromList <$> defaultsResult)
-sequenceEither :: [Either String a] -> Either String [a]
-sequenceEither [] = Right []
-sequenceEither (Left diagnostic : _) = Left diagnostic
-sequenceEither (Right value : remaining) = (value :) <$> sequenceEither remaining
 flakeSourcePathExpression :: FilePath -> String
 flakeSourcePathExpression repositoryRoot =
   "(builtins.getFlake (toString (/. + " ++ nixString repositoryRoot ++ "))).outPath"
@@ -552,19 +539,19 @@ treefmtDefaultsExpression repositoryRoot optionPaths =
     ++ "; optionAt = value: path: if path == [] then { success = true; inherit value; } else let key = builtins.head path; remainingPath = builtins.tail path; in if builtins.isAttrs value && builtins.hasAttr key value then optionAt value.${key} remainingPath else { success = false; }; defaultFor = path: let optionAttempt = optionAt evaluated.options path; raw = if optionAttempt.success && builtins.isAttrs optionAttempt.value && optionAttempt.value ? default then optionAttempt.value.default else throw \"missing option default\"; attempted = builtins.tryEval (builtins.deepSeq raw raw); in if attempted.success then [{ inherit path; default = attempted.value; }] else []; in builtins.concatMap defaultFor optionPaths"
 renderStringList :: [String] -> String
 renderStringList values =
-  "[ " ++ intercalateStrings " " (map nixString values) ++ " ]"
+  "[ " ++ List.unwords (map nixString values) ++ " ]"
 renderOptionPathList :: [OptionPath] -> String
 renderOptionPathList optionPaths =
-  "[ " ++ intercalateStrings " " (map renderOptionPathAsList optionPaths) ++ " ]"
+  "[ " ++ List.unwords (map renderOptionPathAsList optionPaths) ++ " ]"
 renderNixosCandidateList :: [NixosCandidate] -> String
 renderNixosCandidateList candidates =
-  "[ " ++ intercalateStrings " " (map renderNixosCandidate candidates) ++ " ]"
+  "[ " ++ List.unwords (map renderNixosCandidate candidates) ++ " ]"
 renderNixosCandidate :: NixosCandidate -> String
 renderNixosCandidate (optionPath, literalValue) =
   "{ path = " ++ renderOptionPathAsList optionPath ++ "; value = " ++ renderLiteral literalValue ++ "; }"
 renderOptionPathAsList :: OptionPath -> String
 renderOptionPathAsList optionPath =
-  "[ " ++ intercalateStrings " " (map (nixString . unpack) (optionPathComponents optionPath)) ++ " ]"
+  "[ " ++ List.unwords (map (nixString . unpack) (optionPathComponents optionPath)) ++ " ]"
 renderLiteral :: Literal -> String
 renderLiteral LiteralNull = "null"
 renderLiteral (LiteralBool True) = "true"
@@ -573,16 +560,12 @@ renderLiteral (LiteralInteger value) = show value
 renderLiteral (LiteralFloat value) = show value
 renderLiteral (LiteralString value) = nixString (unpack value)
 renderLiteral (LiteralList values) =
-  "[ " ++ intercalateStrings " " (map renderLiteral values) ++ " ]"
+  "[ " ++ List.unwords (map renderLiteral values) ++ " ]"
 renderLiteral (LiteralSet bindings) =
-  "{ " ++ intercalateStrings " " (map renderLiteralBinding bindings) ++ " }"
+  "{ " ++ List.unwords (map renderLiteralBinding bindings) ++ " }"
 renderLiteralBinding :: (Text, Literal) -> String
 renderLiteralBinding (key, value) =
   nixString (unpack key) ++ " = " ++ renderLiteral value ++ ";"
-intercalateStrings :: String -> [String] -> String
-intercalateStrings _ [] = ""
-intercalateStrings _ [value] = value
-intercalateStrings separator (value : remainingValues) = value ++ separator ++ intercalateStrings separator remainingValues
 sourceLocationMatches :: FilePath -> FilePath -> FilePath -> FilePath -> Bool
 sourceLocationMatches repositoryRoot flakeSourcePath localFilePath sourceFilePath =
   case stripPathPrefix flakeSourcePath sourceFilePath of
@@ -596,29 +579,17 @@ sourceLocationMatches repositoryRoot flakeSourcePath localFilePath sourceFilePat
 stripPathPrefix :: FilePath -> FilePath -> Maybe FilePath
 stripPathPrefix prefix path
   | prefix == path = Just ""
-  | prefixWithSeparator `isPrefixOf` path = Just (dropPrefix prefixWithSeparator path)
-  | otherwise = Nothing
-  where
-    prefixWithSeparator = prefix ++ [pathSeparator]
+  | otherwise = List.stripPrefix (prefix ++ [pathSeparator]) path
 stripStoreSourcePrefix :: FilePath -> Maybe FilePath
-stripStoreSourcePrefix path
-  | storeSourceMarker `isPrefixOf` path = Just (dropPrefix storeSourceMarker path)
-  | otherwise =
-      case path of
-        _ : remainingPath -> stripStoreSourcePrefix remainingPath
-        [] -> Nothing
+stripStoreSourcePrefix [] = Nothing
+stripStoreSourcePrefix path@(_ : remainingPath) =
+  case List.stripPrefix storeSourceMarker path of
+    Just relativePath -> Just relativePath
+    Nothing -> stripStoreSourcePrefix remainingPath
   where
     storeSourceMarker = "-source" ++ [pathSeparator]
-dropPrefix :: String -> String -> String
-dropPrefix [] path = path
-dropPrefix (_ : remainingPrefix) (_ : remainingPath) = dropPrefix remainingPrefix remainingPath
-dropPrefix _ [] = []
 nixString :: String -> String
 nixString = unpack . renderOptionKey . pack
-readStringFromNix :: [String] -> IO (Either String String)
-readStringFromNix = readJsonFromNix
-readStringListFromNix :: [String] -> IO (Either String [String])
-readStringListFromNix = readJsonFromNix
 readNixosDefinitionFilesFromNix :: [String] -> IO (Either String [(NixosCandidate, [FilePath])])
 readNixosDefinitionFilesFromNix arguments = do
   recordsResult <- readJsonFromNix arguments

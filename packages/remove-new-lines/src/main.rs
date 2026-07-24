@@ -4,22 +4,19 @@ use ignore::WalkBuilder;
 use std::fs;
 use std::path::Path;
 fn main() -> Result<()> {
-    let input_paths: Vec<String> = std::env::args().skip(1).collect();
-    return run(input_paths);
+    return run(std::env::args().skip(1).collect());
 }
 fn run(input_paths: Vec<String>) -> Result<()> {
     if input_paths.is_empty() {
-        process_root_path(Path::new("."))?;
-    } else {
-        for input_path in input_paths {
-            process_root_path(Path::new(&input_path))?;
-        }
+        return process_root_path(Path::new("."));
+    }
+    for input_path in input_paths {
+        process_root_path(Path::new(&input_path))?;
     }
     return Ok(());
 }
 fn process_root_path(root: &Path) -> Result<()> {
-    let walker = WalkBuilder::new(root).require_git(false).build();
-    for result in walker {
+    for result in WalkBuilder::new(root).require_git(false).build() {
         let entry = result.with_context(|| format!("Failed to walk path: {}", root.display()))?;
         let path = entry.path();
         if path.is_file() {
@@ -41,13 +38,11 @@ fn remove_new_lines(path: &Path) -> Result<()> {
     return Ok(());
 }
 fn strip_new_lines_from_bytes(data: &[u8]) -> Vec<u8> {
-    let mut output = Vec::with_capacity(data.len());
-    for byte in data {
-        if *byte != b'\n' && *byte != b'\r' {
-            output.push(*byte);
-        }
-    }
-    return output;
+    return data
+        .iter()
+        .copied()
+        .filter(|byte| return !matches!(byte, b'\n' | b'\r'))
+        .collect();
 }
 #[cfg(test)]
 mod tests {
