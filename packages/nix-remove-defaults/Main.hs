@@ -103,7 +103,6 @@ import Prelude
     pure,
     putStrLn,
     replicate,
-    sequence,
     show,
     snd,
     writeFile,
@@ -462,17 +461,7 @@ resolveNixosDefinitionFiles :: FilePath -> [String] -> [NixosCandidate] -> IO (E
 resolveNixosDefinitionFiles _ [] _ = pure (Right Map.empty)
 resolveNixosDefinitionFiles _ _ [] = pure (Right Map.empty)
 resolveNixosDefinitionFiles repositoryRoot nixosConfigurations candidates = do
-  definitionMapResults <-
-    mapM
-      ( \configurationName ->
-          resolveNixosDefinitionFilesForConfiguration repositoryRoot configurationName candidates
-      )
-      nixosConfigurations
-  pure (Map.unionsWith (++) <$> sequence definitionMapResults)
-resolveNixosDefinitionFilesForConfiguration :: FilePath -> String -> [NixosCandidate] -> IO (Either String (Map NixosCandidate [FilePath]))
-resolveNixosDefinitionFilesForConfiguration _ _ [] = pure (Right Map.empty)
-resolveNixosDefinitionFilesForConfiguration repositoryRoot configurationName candidates = do
-  definitionFilesResult <- readNixosDefinitionFilesFromNix ["eval", "--impure", "--json", "--expr", nixosDefaultDefinitionFilesExpression repositoryRoot [configurationName] candidates]
+  definitionFilesResult <- readNixosDefinitionFilesFromNix ["eval", "--impure", "--json", "--expr", nixosDefaultDefinitionFilesExpression repositoryRoot nixosConfigurations candidates]
   pure (Map.fromListWith (++) <$> definitionFilesResult)
 nixosRemovalsForFile :: FilePath -> FilePath -> FilePath -> Map NixosCandidate [FilePath] -> [NixosCandidate] -> Set OptionPath
 nixosRemovalsForFile repositoryRoot flakeSourcePath localFilePath nixosDefinitionFiles candidates =
