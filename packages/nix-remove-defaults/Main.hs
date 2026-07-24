@@ -183,8 +183,6 @@ instance FromJSON TreefmtDefaultRecord where
       optionPath <- values .: "path"
       defaultValue <- values .: "default"
       pure (TreefmtDefaultRecord optionPath defaultValue)
-type DefaultResolver :: Type
-type DefaultResolver = OptionPath -> IO (Maybe Literal)
 type ParsedNixFile :: Type
 type ParsedNixFile = (FilePath, NExprLoc)
 main :: IO ()
@@ -307,20 +305,6 @@ processParsedRepositoryFile repositoryRoot flakeSourcePath nixosDefinitionFiles 
 renderExpression :: NExprLoc -> Text
 renderExpression =
   renderStrict . layoutPretty defaultLayoutOptions . prettyNix . stripAnnotation
-removeDefaultAssignments :: DefaultResolver -> NExprLoc -> IO NExprLoc
-removeDefaultAssignments resolveDefault expr = do
-  removals <- resolveLiteralRemovals resolveDefault (collectCandidates expr)
-  pure (rewriteModuleExpression removals expr)
-resolveLiteralRemovals :: DefaultResolver -> [(OptionPath, Literal)] -> IO (Set OptionPath)
-resolveLiteralRemovals resolveDefault candidates = do
-  resolutions <-
-    mapM
-      ( \(optionPath, literalValue) -> do
-          defaultValue <- resolveDefault optionPath
-          pure (optionPath, defaultValue == Just literalValue)
-      )
-      candidates
-  pure (Set.fromList [optionPath | (optionPath, True) <- resolutions])
 removalsFromDefaults :: Map OptionPath Literal -> [(OptionPath, Literal)] -> Set OptionPath
 removalsFromDefaults defaults candidates =
   Set.fromList
@@ -622,8 +606,8 @@ formatWithDefaults defaults input =
     parseResult <- parseNixFileLoc (Path tmpFile)
     case parseResult of
       Right expr -> do
-        transformed <- removeDefaultAssignments (pure . (`Map.lookup` defaults)) expr
-        pure (renderExpression transformed)
+        let removals = removalsFromDefaults defaults (collectCandidates expr)
+        pure (renderExpression (rewriteModuleExpression removals expr))
       Left parseError -> assertFailure ("Test fixture failed to parse: " ++ show parseError)
 formatTreefmtWithDefaults :: Map OptionPath Literal -> Text -> IO Text
 formatTreefmtWithDefaults defaults input =
@@ -633,7 +617,7 @@ formatTreefmtWithDefaults defaults input =
     parseResult <- parseNixFileLoc (Path tmpFile)
     case parseResult of
       Right expr -> do
-        removals <- resolveLiteralRemovals (pure . (`Map.lookup` defaults)) (collectTreefmtCandidates expr)
+        let removals = removalsFromDefaults defaults (collectTreefmtCandidates expr)
         pure (renderExpression (rewriteTreefmtEvalModuleArguments removals expr))
       Left parseError -> assertFailure ("Test fixture failed to parse: " ++ show parseError)
 makeRemovalTest :: Map OptionPath Literal -> Text -> Text -> Test
