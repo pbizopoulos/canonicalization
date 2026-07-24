@@ -48,12 +48,12 @@ pkgs.runCommand checkName
       -o "$workspace/$packageName" \
       "$workspace/TestMain.hs" \
       "$src/Main.hs"
-    PROFILE_TIMINGS_PATH="$out/test-timings.tsv" HPCTIXFILE="$workspace/coverage/$packageName.tix" \
-      ${pkgs.time}/bin/time -f %e -o "$out/total-seconds" \
+    PROFILE_TIMINGS_PATH="$workspace/test-timings.tsv" HPCTIXFILE="$workspace/coverage/$packageName.tix" \
+      ${pkgs.time}/bin/time -f %e -o "$workspace/total-seconds" \
       "$workspace/$packageName" +RTS -p -RTS
     mv "$workspace/$packageName.prof" "$out/profile-report.prof"
-    printf 'profile-v1\ttotal-seconds\t%s\n' "$(cat "$out/total-seconds")" > "$out/profile-summary.tsv"
-    cat "$out/test-timings.tsv" >> "$out/profile-summary.tsv"
+    printf 'profile-v1\ttotal-seconds\t%s\n' "$(cat "$workspace/total-seconds")" > "$out/profile-summary.tsv"
+    cat "$workspace/test-timings.tsv" >> "$out/profile-summary.tsv"
     hpc markup "$workspace/coverage/${packageName}.tix" --hpcdir="$workspace/hpc" --destdir="$out/html"
     hpc report "$workspace/coverage/${packageName}.tix" --hpcdir="$workspace/hpc" | tee "$out/report.txt"
     coverageCounts="$(sed -n 's/.*expressions used (\([0-9][0-9]*\)\/\([0-9][0-9]*\)).*/\1 \2/p' "$out/report.txt")"
