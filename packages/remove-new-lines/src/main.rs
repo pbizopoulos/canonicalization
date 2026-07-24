@@ -19,7 +19,10 @@ fn process_root_path(root: &Path) -> Result<()> {
     for result in WalkBuilder::new(root).require_git(false).build() {
         let entry = result.with_context(|| format!("Failed to walk path: {}", root.display()))?;
         let path = entry.path();
-        if path.is_file() {
+        if entry
+            .file_type()
+            .is_some_and(|file_type| return file_type.is_file())
+        {
             remove_new_lines(path)?;
         }
     }
@@ -89,8 +92,10 @@ mod tests {
     }
     #[test]
     fn test_process_root_path_respects_gitignore_and_skips_binary_files() -> Result<()> {
+        use std::os::unix::fs::symlink;
         use tempfile::tempdir;
         let dir = tempdir()?;
+        let external_dir = tempdir()?;
         let root = dir.path();
         let gitignore_path = root.join(".gitignore");
         fs::write(&gitignore_path, "ignored.txt\n")?;
@@ -98,11 +103,15 @@ mod tests {
         fs::write(&ignored_path, "should be ignored\n\n")?;
         let binary_path = root.join("binary.bin");
         fs::write(&binary_path, [0, 15, 255, 0, 1, 2, 3])?;
+        let external_path = external_dir.path().join("external.txt");
+        fs::write(&external_path, "outside\n\n")?;
+        symlink(&external_path, root.join("external.txt"))?;
         process_root_path(root)?;
         let content_ignored = fs::read_to_string(&ignored_path)?;
         assert_eq!(content_ignored, "should be ignored\n\n");
         let content_binary = fs::read(&binary_path)?;
         assert_eq!(content_binary, vec![0, 15, 255, 0, 1, 2, 3]);
+        assert_eq!(fs::read_to_string(external_path)?, "outside\n\n");
         return Ok(());
     }
     #[test]
