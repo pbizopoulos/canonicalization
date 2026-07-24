@@ -475,7 +475,7 @@ mod tests {
         }
     }
     #[test]
-    fn parses_supported_urls_into_the_same_canonical_path() -> TestResult {
+    fn supported_urls_should_map_to_the_same_canonical_path() -> TestResult {
         for repository_url in [
             "https://github.com/owner/demo.git",
             "ssh://git@github.com/owner/demo.git",
@@ -494,7 +494,7 @@ mod tests {
         return Ok(());
     }
     #[test]
-    fn rejects_unsupported_and_unsafe_urls() {
+    fn unsupported_and_unsafe_urls_should_be_rejected() {
         for repository_url in [
             "../demo.git",
             "http://github.com/owner/demo.git",
@@ -507,7 +507,7 @@ mod tests {
         }
     }
     #[test]
-    fn separates_raw_submodule_parsing_from_cardinality_validation() -> TestResult {
+    fn raw_submodule_parsing_should_be_separate_from_cardinality_validation() -> TestResult {
         let raw = parse_raw_submodule_fields(            b"submodule.demo.path\nhost/owner/demo\0submodule.demo.path\nhost/owner/other\0submodule.demo.url\nhttps://host/owner/demo.git\0",        )?;
         let (records, diagnostics) = validate_submodule_records(raw);
         assert!(records.is_empty());
@@ -517,7 +517,7 @@ mod tests {
         return Ok(());
     }
     #[test]
-    fn rejects_unsafe_canonical_paths_centrally() {
+    fn unsafe_canonical_paths_should_be_rejected_centrally() {
         for path in [
             "host",
             "host/../demo",
@@ -529,7 +529,7 @@ mod tests {
         assert!(validate_canonical_repository_path("host/owner/demo").is_ok());
     }
     #[test]
-    fn initializes_and_reinitializes_a_compatible_home_repository() -> TestResult {
+    fn compatible_home_repositories_should_initialize_and_reinitialize() -> TestResult {
         let home = TemporaryDirectory::new("init")?;
         initialize_home_repository(home.path())
             .map_err(|failure| format!("init failed: {failure:?}"))?;
@@ -548,7 +548,7 @@ mod tests {
         return Ok(());
     }
     #[test]
-    fn rejects_conflicting_initialization_without_side_effects() -> TestResult {
+    fn conflicting_initialization_should_fail_without_side_effects() -> TestResult {
         let home = TemporaryDirectory::new("init-conflict")?;
         fs::write(home.path().join(".gitignore"), "*.tmp\n")?;
         let failure = initialize_home_repository(home.path())
@@ -558,7 +558,7 @@ mod tests {
         return Ok(());
     }
     #[test]
-    fn rejects_a_non_regular_gitignore_without_side_effects() -> TestResult {
+    fn a_non_regular_gitignore_should_fail_without_side_effects() -> TestResult {
         let home = TemporaryDirectory::new("init-non-regular-gitignore")?;
         fs::create_dir(home.path().join(".gitignore"))?;
         let failure = initialize_home_repository(home.path())
@@ -568,7 +568,7 @@ mod tests {
         return Ok(());
     }
     #[test]
-    fn checks_matching_submodule_urls_and_paths() -> TestResult {
+    fn matching_submodule_urls_and_paths_should_pass_the_check() -> TestResult {
         let home = TemporaryDirectory::new("check")?;
         fs::write(
             home.path().join(".gitmodules"),
@@ -579,7 +579,7 @@ mod tests {
         return Ok(());
     }
     #[test]
-    fn reports_incomplete_unsupported_unsafe_and_mismatched_entries() -> TestResult {
+    fn invalid_entries_should_report_every_detected_problem() -> TestResult {
         let home = TemporaryDirectory::new("check-invalid")?;
         fs::write(
             home.path().join(".gitmodules"),
@@ -606,7 +606,7 @@ mod tests {
         return Ok(());
     }
     #[test]
-    fn validates_every_entry_before_fixing_paths() -> TestResult {
+    fn every_entry_should_be_validated_before_paths_are_fixed() -> TestResult {
         let home = TemporaryDirectory::new("check-fix-invalid")?;
         let gitmodules = "[submodule \"mismatch\"]\n path = old/demo\n url = https://example.test/owner/demo.git\n[submodule \"invalid\"]\n path = example.test/owner/invalid\n url = ../invalid.git\n";
         fs::write(home.path().join(".gitmodules"), gitmodules)?;
@@ -620,7 +620,7 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn rejects_duplicate_canonical_destinations() -> TestResult {
+    fn duplicate_canonical_destinations_should_be_rejected() -> TestResult {
         let home = TemporaryDirectory::new("check-duplicate-destination")?;
         fs::write(
             home.path().join(".gitmodules"),
@@ -635,7 +635,7 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn rejects_ambiguous_fix_paths_before_mutating() -> TestResult {
+    fn ambiguous_fix_paths_should_be_rejected_before_mutation() -> TestResult {
         for (label, gitmodules, expected_diagnostic) in [
             (
                 "duplicate-source",
@@ -668,7 +668,7 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn treats_an_empty_file_as_valid_but_requires_gitmodules_to_exist() -> TestResult {
+    fn gitmodules_should_exist_but_may_be_empty() -> TestResult {
         let home = TemporaryDirectory::new("check-empty")?;
         assert!(check_home_gitmodules(home.path(), false).is_err());
         fs::write(home.path().join(".gitmodules"), "")?;
@@ -677,7 +677,7 @@ mod tests {
         return Ok(());
     }
     #[test]
-    fn exposes_check_and_its_fix_option() -> TestResult {
+    fn the_cli_should_expose_check_and_its_fix_option() -> TestResult {
         let home = TemporaryDirectory::new("check-command")?;
         fs::write(home.path().join(".gitmodules"), "")?;
         assert_eq!(run_cli(&[OsString::from("check")], home.path()), 0);

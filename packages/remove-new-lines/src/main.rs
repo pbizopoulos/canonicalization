@@ -80,7 +80,7 @@ mod tests {
         return rendered;
     }
     #[test]
-    fn test_process_root_path_removes_new_lines_from_text_files() -> Result<()> {
+    fn test_process_root_path_should_remove_new_lines_from_text_files() -> Result<()> {
         use tempfile::tempdir;
         let dir = tempdir()?;
         let root = dir.path();
@@ -92,7 +92,7 @@ mod tests {
         return Ok(());
     }
     #[test]
-    fn test_process_root_path_respects_gitignore_and_skips_binary_files() -> Result<()> {
+    fn test_process_root_path_should_respect_gitignore_and_skip_binary_files() -> Result<()> {
         use std::os::unix::fs::symlink;
         use tempfile::tempdir;
         let dir = tempdir()?;
@@ -116,7 +116,7 @@ mod tests {
         return Ok(());
     }
     #[test]
-    fn test_main_processes_current_directory_when_no_args() -> Result<()> {
+    fn test_main_should_process_current_directory_when_no_args() -> Result<()> {
         use tempfile::tempdir;
         let dir = tempdir()?;
         let root = dir.path();
@@ -132,19 +132,19 @@ mod tests {
         return Ok(());
     }
     #[test]
-    fn test_run_propagates_missing_root_failures() {
+    fn test_run_should_propagate_missing_root_failures() {
         let missing = env::temp_dir().join("remove-new-lines-definitely-missing-root");
         assert!(process_root_path(&missing).is_err());
     }
     #[test]
-    fn test_byte_transform_handles_non_utf8_data() {
+    fn test_byte_transform_should_handle_non_utf8_data() {
         assert_eq!(
             strip_new_lines_from_bytes(&[0xff, b'\r', b'\n', 0xfe]),
             vec![0xff, 0xfe]
         );
     }
     #[test]
-    fn quickcheck_strip_new_lines_matches_filtered_sequence() {
+    fn quickcheck_strip_new_lines_should_match_filtered_sequence() {
         fn property(lines: Vec<LogicalLine>) -> TestResult {
             let input = render_lines(&lines);
             let actual = strip_new_lines_from_bytes(&input);
@@ -155,7 +155,7 @@ mod tests {
             .quickcheck(property as fn(Vec<LogicalLine>) -> TestResult);
     }
     #[test]
-    fn quickcheck_strip_new_lines_is_idempotent() {
+    fn quickcheck_strip_new_lines_should_be_idempotent() {
         fn property(lines: Vec<LogicalLine>) -> TestResult {
             let input = render_lines(&lines);
             let first_pass = strip_new_lines_from_bytes(&input);

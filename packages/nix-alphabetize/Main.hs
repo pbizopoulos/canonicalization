@@ -235,10 +235,10 @@ runPackageTestsWith maybeTimingsPath = do
     else exitFailure
 quickCheckFormattingProperties :: Maybe FilePath -> IO Bool
 quickCheckFormattingProperties maybeTimingsPath = do
-  sortedListResult <- timedQuickCheck "Non string lists are sorted." (QC.quickCheckResult (QC.withMaxSuccess 100 prop_nonStringListsAreSorted))
-  stringOrderResult <- timedQuickCheck "String lists preserve order." (QC.quickCheckResult (QC.withMaxSuccess 100 prop_stringListsPreserveOrder))
-  attrSetResult <- timedQuickCheck "Attr sets canonicalize by key order." (QC.quickCheckResult (QC.withMaxSuccess 100 prop_attrSetsCanonicalizeByKeyOrder))
-  dottedCollapseResult <- timedQuickCheck "Dotted assignments collapse to canonical nested sets." (QC.quickCheckResult (QC.withMaxSuccess 100 prop_dottedAssignmentsCollapseToCanonicalNestedSets))
+  sortedListResult <- timedQuickCheck "Non string lists should be sorted." (QC.quickCheckResult (QC.withMaxSuccess 100 prop_nonStringListsShouldBeSorted))
+  stringOrderResult <- timedQuickCheck "String list order should be preserved." (QC.quickCheckResult (QC.withMaxSuccess 100 prop_stringListOrderShouldBePreserved))
+  attrSetResult <- timedQuickCheck "Attribute sets should canonicalize by key order." (QC.quickCheckResult (QC.withMaxSuccess 100 prop_attributeSetsShouldCanonicalizeByKeyOrder))
+  dottedCollapseResult <- timedQuickCheck "Dotted assignments should collapse to canonical nested sets." (QC.quickCheckResult (QC.withMaxSuccess 100 prop_dottedAssignmentsShouldCollapseToCanonicalNestedSets))
   pure (all isQuickCheckSuccess [sortedListResult, stringOrderResult, attrSetResult, dottedCollapseResult])
   where
     timedQuickCheck :: String -> IO QC.Result -> IO QC.Result
@@ -259,28 +259,28 @@ timeTestAction timingsPath testName testAction = do
 isQuickCheckSuccess :: QC.Result -> Bool
 isQuickCheckSuccess QC.Success {} = True
 isQuickCheckSuccess _ = False
-prop_nonStringListsAreSorted :: QC.Property
-prop_nonStringListsAreSorted =
+prop_nonStringListsShouldBeSorted :: QC.Property
+prop_nonStringListsShouldBeSorted =
   QC.forAll digitListGen $ \values ->
     QC.ioProperty $ do
       formatted <- formatText (renderNumberListInput values)
       sortedFormatted <- formatText (renderNumberListInput (sort values))
       pure (formatted == sortedFormatted)
-prop_stringListsPreserveOrder :: QC.Property
-prop_stringListsPreserveOrder =
+prop_stringListOrderShouldBePreserved :: QC.Property
+prop_stringListOrderShouldBePreserved =
   QC.forAll simpleStringListGen $ \values ->
     QC.ioProperty $ do
       formatted <- formatText (renderStringListInput values)
       pure (extractQuotedStrings formatted == values)
-prop_attrSetsCanonicalizeByKeyOrder :: QC.Property
-prop_attrSetsCanonicalizeByKeyOrder =
+prop_attributeSetsShouldCanonicalizeByKeyOrder :: QC.Property
+prop_attributeSetsShouldCanonicalizeByKeyOrder =
   QC.forAll attrBindingListGen $ \bindings ->
     QC.ioProperty $ do
       formatted <- formatText (renderAttrSetInput bindings)
       sortedFormatted <- formatText (renderAttrSetInput (sortBindings bindings))
       pure (formatted == sortedFormatted)
-prop_dottedAssignmentsCollapseToCanonicalNestedSets :: QC.Property
-prop_dottedAssignmentsCollapseToCanonicalNestedSets =
+prop_dottedAssignmentsShouldCollapseToCanonicalNestedSets :: QC.Property
+prop_dottedAssignmentsShouldCollapseToCanonicalNestedSets =
   QC.forAll nestedBindingSetGen $ \(rootKey, bindings) ->
     QC.ioProperty $ do
       dottedFormatted <- formatText (renderDottedAttrSetInput rootKey bindings)
@@ -367,83 +367,83 @@ extractQuotedStrings = go [] [] False . unpack
 hUnitPackageTests :: Test
 hUnitPackageTests =
   TestList
-    [ TestLabel "Sorts non-string lists." $
+    [ TestLabel "An example non-string list should be sorted." $
         makeFormattingTest
           (pack "[ 3 1 2 ]")
           (pack "[\n  1\n  2\n  3\n]"),
-      TestLabel "Preserves string-list order." $
+      TestLabel "An example string list should preserve its order." $
         makeFormattingTest
           (pack "[ \"c\" \"a\" \"b\" ]")
           (pack "[\n  \"c\"\n  \"a\"\n  \"b\"\n]"),
-      TestLabel "Sorts function parameters." $
+      TestLabel "Function parameters should be sorted." $
         makeFormattingTest
           (pack "{ x = { z, x, y }: x + y + z; }")
           (pack "{\n  x = { x\n    , y\n    , z }:\n    x + y + z;\n}"),
-      TestLabel "Sorts attribute sets." $
+      TestLabel "Attribute sets should be sorted." $
         makeFormattingTest
           (pack "{ c = 1; a = 2; b = 3; }")
           (pack "{\n  a = 2;\n  b = 3;\n  c = 1;\n}"),
-      TestLabel "Sorts nested attribute sets." $
+      TestLabel "Nested attribute sets should be sorted." $
         makeFormattingTest
           (pack "{ b = { z = 1; x = 2; }; a = 1; }")
           (pack "{\n  a = 1;\n  b = {\n    x = 2;\n    z = 1;\n  };\n}"),
-      TestLabel "Preserves recursive nested attribute sets." $
+      TestLabel "Recursive nested attribute sets should be preserved." $
         makeFormattingTest
           (pack "{ a = rec { y = x; x = 1; }; }")
           (pack "{\n  a = rec {\n    x = 1;\n    y = x;\n  };\n}"),
-      TestLabel "Collapses dotted list assignments." $
+      TestLabel "Dotted list assignments should collapse." $
         makeFormattingTest
           (pack "{ a = { b = [ \"c\" ]; }; }")
           (pack "{\n  a.b = [\n    \"c\"\n  ];\n}"),
-      TestLabel "Collapses dotted nested assignments." $
+      TestLabel "Dotted nested assignments should collapse." $
         makeFormattingTest
           (pack "{ b = { z = 1; }; a = 1; }")
           (pack "{\n  a = 1;\n  b.z = 1;\n}"),
-      TestLabel "Preserves dotted attribute assignments." $
+      TestLabel "Dotted attribute assignments should be preserved." $
         makeFormattingTest
           (pack "{ b.z = 1; a = 1; }")
           (pack "{\n  a = 1;\n  b.z = 1;\n}"),
-      TestLabel "Converts dotted assignments to nested sets." $
+      TestLabel "Dotted assignments should become nested sets." $
         makeFormattingTest
           (pack "{ b.z = 1; b.x = 2; a = 1; }")
           (pack "{\n  a = 1;\n  b = {\n    x = 2;\n    z = 1;\n  };\n}"),
-      TestLabel "Converts multi-dotted assignments to nested sets." $
+      TestLabel "Multi-dotted assignments should become nested sets." $
         makeFormattingTest
           (pack "{ b.z.b = 1; b.z.a = 2; }")
           (pack "{\n  b.z = {\n    a = 2;\n    b = 1;\n  };\n}"),
-      TestLabel "Sorts let expressions." $
+      TestLabel "Let expressions should be sorted." $
         makeFormattingTest
           (pack "let c = 1; a = 2; b = 3; in a + b + c")
           (pack "let\n  a = 2;\n  b = 3;\n  c = 1;\nin a + b + c"),
-      TestLabel "Sorts let expressions with nested sets." $
+      TestLabel "Let expressions with nested sets should be sorted." $
         makeFormattingTest
           (pack "let c = { z = 1; x = 2; }; a = 1; in a + c.x + c.z")
           (pack "let\n  a = 1;\n  c = {\n    x = 2;\n    z = 1;\n  };\nin a + c.x + c.z"),
-      TestLabel "Collapses deep nested assignments." $
+      TestLabel "Deep nested assignments should collapse." $
         makeFormattingTest
           (pack "{ c = { z = { x = 2; }; }; }")
           (pack "{\n  c.z.x = 2;\n}"),
-      TestLabel "Sorts string-key assignments." $
+      TestLabel "String-key assignments should be sorted." $
         makeFormattingTest
           (pack "{ \"b\".val1 = 1; \"a\".val2 = 2; }")
           (pack "{\n  \"a\".val2 = 2;\n  \"b\".val1 = 1;\n}"),
-      TestLabel "Preserves inherited and ambiguous dynamic bindings." $
+      TestLabel "Inherited and ambiguous dynamic bindings should be preserved." $
         makeFormattingTest
           (pack "{ inherit a; ${name}.x = 1; ${other}.y = 2; }")
           (pack "{\n  inherit a;\n  ${name}.x = 1;\n  ${other}.y = 2;\n}"),
-      TestLabel "Preserves conflicting scalar and dotted bindings." $
+      TestLabel "Conflicting scalar and dotted bindings should be preserved." $
         makeFormattingTest
           (pack "{ a = 1; a.b = 2; }")
           (pack "{\n  a = 1;\n  a.b = 2;\n}"),
-      TestLabel "Preserves duplicate dotted bindings." $
+      TestLabel "Duplicate dotted bindings should be preserved." $
         makeFormattingTest
           (pack "{ a.b = 1; a.b = 2; }")
           (pack "{\n  a.b = 1;\n  a.b = 2;\n}"),
-      TestLabel "Preserves prefix-conflicting dotted bindings." $
+      TestLabel "Prefix-conflicting dotted bindings should be preserved." $
         makeFormattingTest
           (pack "{ a.b = 1; a.b.c = 2; }")
           (pack "{\n  a.b = 1;\n  a.b.c = 2;\n}"),
-      TestLabel "Reports parse failure without rewriting the file." $
+      TestLabel "Parse failures should not rewrite the file." $
         TestCase $
           withSystemTempFile "malformed.nix" $ \tmpFile tmpHandle -> do
             hClose tmpHandle
@@ -453,11 +453,11 @@ hUnitPackageTests =
             contents <- TIO.readFile tmpFile
             assertEqual "parse status" False succeeded
             assertEqual "unchanged contents" malformed contents,
-      TestLabel "Preserves multiline string formatting." $
+      TestLabel "Multiline string formatting should be preserved." $
         makeFormattingTest
           (pack "{ a = ''\n  line1\n  line2\n''; }")
           (pack "{\n  a = ''\n    line1\n    line2\n    '';\n}"),
-      TestLabel "Preserves python template installPhase formatting." $
+      TestLabel "The python template installPhase formatting should be preserved." $
         makeFormattingTest
           (pack "{ installPhase = ''\nmkdir -p $out/bin\ncp ./main.py $out/bin/${pname}\n''; }")
           (pack "{\n  installPhase = ''\n    mkdir -p $out/bin\n    cp ./main.py $out/bin/${pname}\n    '';\n}")

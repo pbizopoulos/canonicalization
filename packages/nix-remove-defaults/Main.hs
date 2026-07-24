@@ -637,27 +637,27 @@ timeTestAction timingsPath testName testAction = do
 hUnitPackageTests :: Test
 hUnitPackageTests =
   TestList
-    [ TestLabel "Removes a literal assignment equal to its default." $
+    [ TestLabel "A literal assignment equal to its default should be removed." $
         makeRemovalTest
           (Map.singleton (OptionPath ("boot" :| ["enabled"])) (LiteralBool False))
           (pack "{ boot.enabled = false; keep = true; }")
           (pack "{ keep = true; }"),
-      TestLabel "Preserves a literal assignment different from its default." $
+      TestLabel "A literal assignment different from its default should be preserved." $
         makeRemovalTest
           (Map.singleton (OptionPath ("boot" :| ["enabled"])) (LiteralBool True))
           (pack "{ boot.enabled = false; }")
           (pack "{ boot.enabled = false; }"),
-      TestLabel "Removes now-empty structural parent sets." $
+      TestLabel "Now-empty structural parent sets should be removed." $
         makeRemovalTest
           (Map.singleton (OptionPath ("services" :| ["example", "enable"])) (LiteralBool False))
           (pack "{ services = { example = { enable = false; }; }; keep = 1; }")
           (pack "{ keep = 1; }"),
-      TestLabel "Removes literal list defaults." $
+      TestLabel "Literal list defaults should be removed." $
         makeRemovalTest
           (Map.singleton (OptionPath ("environment" :| ["systemPackages"])) (LiteralList []))
           (pack "{ environment.systemPackages = [ ]; }")
           (pack "{}"),
-      TestLabel "Removes string, integer, null, and attribute-set defaults." $
+      TestLabel "String, integer, null, and attribute-set defaults should be removed." $
         makeRemovalTest
           ( Map.fromList
               [ (OptionPath ("example" :| ["count"]), LiteralInteger 3),
@@ -668,34 +668,34 @@ hUnitPackageTests =
           )
           (pack "{ example.count = 3; example.label = \"default\"; example.optional = null; example.settings = { enabled = true; }; }")
           (pack "{}"),
-      TestLabel "Preserves context-dependent expressions." $
+      TestLabel "Context-dependent expressions should be preserved." $
         makeRemovalTest
           (Map.singleton (OptionPath ("example" :| ["value"])) (LiteralInteger 1))
           (pack "{ example.value = let x = 1; in x; }")
           (pack "{ example.value = let   x = 1; in x; }"),
-      TestLabel "Treats a top-level config attribute as the option root." $
+      TestLabel "A top-level config attribute should be treated as the option root." $
         makeRemovalTest
           (Map.singleton (OptionPath ("networking" :| ["useDHCP"])) (LiteralBool True))
           (pack "{ config.networking.useDHCP = true; options.example = { }; }")
           (pack "{ options.example = {}; }"),
-      TestLabel "Traverses the returned set of a let-wrapped module." $
+      TestLabel "The returned set of a let-wrapped module should be traversed." $
         makeRemovalTest
           (Map.singleton (OptionPath ("boot" :| ["initrd", "systemd", "enable"])) (LiteralBool True))
           (pack "{ pkgs, ... }: let hostName = \"default\"; in { boot.initrd.systemd.enable = true; networking.hostName = hostName; }")
           (pack "{ pkgs, ... }:\n  let   hostName = \"default\"; in { networking.hostName = hostName; }"),
-      TestLabel "Transformation is idempotent." $ TestCase $ do
+      TestLabel "The transformation should be idempotent." $ TestCase $ do
         let defaults :: Map OptionPath Literal
             defaults = Map.singleton (OptionPath ("example" :| ["enable"])) (LiteralBool False)
             input = pack "{ example.enable = false; keep = true; }"
         once <- formatWithDefaults defaults input
         twice <- formatWithDefaults defaults once
         assertEqual "second transformation" once twice,
-      TestLabel "Removes defaults inside a treefmt evalModule argument." $
+      TestLabel "Defaults inside a treefmt evalModule argument should be removed." $
         makeTreefmtRemovalTest
           (Map.singleton (OptionPath ("programs" :| ["shfmt", "simplify"])) (LiteralBool True))
           (pack "{ inputs, pkgs, ... }: let treefmtEval = inputs.treefmt-nix.lib.evalModule pkgs { programs.shfmt.simplify = true; keep = false; }; in treefmtEval.config.build.wrapper")
           (pack "{ inputs, pkgs, ... }:\n  let\n    treefmtEval = inputs.treefmt-nix.lib.evalModule pkgs { keep = false; };\n  in treefmtEval.config.build.wrapper"),
-      TestLabel "Builds candidate records into the NixOS default-definition lookup expression." $ TestCase $ do
+      TestLabel "Candidate records should form the NixOS default-definition lookup expression." $ TestCase $ do
         let expression =
               nixosDefaultDefinitionFilesExpression
                 "/repository"
@@ -704,7 +704,7 @@ hUnitPackageTests =
         assertBool
           "candidate records"
           ("candidates = [ { path = [ \"boot\" \"initrd\" \"systemd\" \"enable\" ]; value = true; } ]" `isInfixOf` expression),
-      TestLabel "Compares defaults using the parsed literal shape." $ TestCase $ do
+      TestLabel "Defaults should be compared using their parsed literal shape." $ TestCase $ do
         let expression =
               nixosDefaultDefinitionFilesExpression
                 "/repository"
@@ -713,7 +713,7 @@ hUnitPackageTests =
         assertBool
           "literal comparison"
           ("literalEquals = expected: actual:" `isInfixOf` expression),
-      TestLabel "Returns path, value, and matching definition files for each candidate." $ TestCase $ do
+      TestLabel "Each candidate should return its path, value, and matching definition files." $ TestCase $ do
         let expression =
               nixosDefaultDefinitionFilesExpression
                 "/repository"
@@ -722,17 +722,17 @@ hUnitPackageTests =
         assertBool
           "candidate result"
           ("candidateFiles = candidate: { inherit (candidate) path value; files =" `isInfixOf` expression),
-      TestLabel "Rejects empty option paths from Nix JSON." $
+      TestLabel "Empty option paths from Nix JSON should be rejected." $
         TestCase $
           case (eitherDecodeStrict' (Text.encodeUtf8 "[]") :: Either String OptionPath) of
             Left diagnostic -> assertBool "non-empty path diagnostic" ("must not be empty" `isInfixOf` diagnostic)
             Right _ -> assertFailure "empty option path decoded successfully",
-      TestLabel "Preserves JSON decoding diagnostics." $
+      TestLabel "JSON decoding diagnostics should be preserved." $
         TestCase $
           case (eitherDecodeStrict' (Text.encodeUtf8 "null") :: Either String String) of
             Left diagnostic -> assertBool "typed decode failure" ("expected String" `isInfixOf` diagnostic)
             Right _ -> assertFailure "null decoded as a string",
-      TestLabel "Decodes Unicode Nix JSON without byte truncation." $
+      TestLabel "Unicode Nix JSON should decode without byte truncation." $
         TestCase $
           assertEqual
             "Unicode record"
@@ -741,13 +741,13 @@ hUnitPackageTests =
                 (Text.encodeUtf8 "{\"path\":[\"naïve\"],\"default\":\"λ\"}") ::
                 Either String TreefmtDefaultRecord
             ),
-      TestLabel "Rejects non-finite floating literals." $
+      TestLabel "Non-finite floating literals should be rejected." $
         TestCase $ do
           let oversizedFraction = pack (replicate 400 '9' ++ ".1")
           case (eitherDecodeStrict' (Text.encodeUtf8 oversizedFraction) :: Either String Literal) of
             Left diagnostic -> assertBool "finite floating literal diagnostic" ("must be finite" `isInfixOf` diagnostic)
             Right _ -> assertFailure "non-finite floating literal decoded successfully",
-      TestLabel "Propagates the underlying Nix evaluation diagnostic." $
+      TestLabel "The underlying Nix evaluation diagnostic should be propagated." $
         TestCase $ do
           result <-
             readJsonFromNixWith

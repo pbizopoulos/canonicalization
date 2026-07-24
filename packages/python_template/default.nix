@@ -20,10 +20,6 @@ python.pkgs.buildPythonPackage rec {
   };
   passthru.python = python;
   pname = baseNameOf ./.;
-  propagatedBuildInputs = [
-    python.pkgs.hypothesis
-    python.pkgs.pytest
-  ];
   pyproject = false;
   shellHook = ''
     source ${

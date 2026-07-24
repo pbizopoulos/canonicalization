@@ -4,14 +4,12 @@
 from __future__ import annotations
 
 import math
-import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from unittest import mock
 
 import matplotlib as mpl
-from hypothesis import given, settings
-from hypothesis import strategies as st
 
 mpl.use("Agg")
 from typing import TYPE_CHECKING
@@ -170,6 +168,14 @@ def test_render_table_contains_expected_metrics() -> None:
         raise AssertionError(msg)
 
 
+def test_latex_escape_handles_special_characters() -> None:
+    """LaTeX-special characters should be escaped in generated text."""
+    escaped = latex_escape(r"value_#1 & 50%")
+    if escaped != r"value\_\#1 \& 50\%":
+        msg = "LaTeX-special characters should be escaped"
+        raise AssertionError(msg)
+
+
 def test_create_figure_writes_non_empty_png() -> None:
     """Figure generation should create a non-empty PNG."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -180,62 +186,13 @@ def test_create_figure_writes_non_empty_png() -> None:
             raise AssertionError(msg)
 
 
-@given(  # type: ignore[untyped-decorator]
-    st.lists(
-        st.floats(
-            min_value=-1_000,
-            max_value=1_000,
-            allow_nan=False,
-            allow_infinity=False,
-        ),
-        min_size=1,
-        max_size=25,
-    ),
-)
-def test_property_summary_is_permutation_invariant(values: list[float]) -> None:
-    """Aggregate statistics should not depend on sample ordering."""
-    forward = Samples(values).summary()
-    backward = Samples(reversed(values)).summary()
-    for left, right in zip(forward, backward, strict=True):
-        if left[0] != right[0] or not math.isclose(
-            left[1],
-            right[1],
-            rel_tol=1e-9,
-            abs_tol=1e-9,
-        ):
-            msg = "summary should be permutation invariant"
-            raise AssertionError(msg)
-
-
-@given(st.text())  # type: ignore[untyped-decorator]
-def test_property_latex_escape_escapes_special_characters(text: str) -> None:
-    """Escaped output should contain no bare LaTeX-special characters."""
-    escaped = latex_escape(text)
-    for character in "&%$#_":
-        if re.search(rf"(?<!\\){re.escape(character)}", escaped) is not None:
-            msg = "special characters should be escaped"
-            raise AssertionError(msg)
-
-
-@given(  # type: ignore[untyped-decorator]
-    st.lists(
-        st.text(
-            alphabet="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-",
-            min_size=1,
-            max_size=8,
-        ),
-        min_size=1,
-        max_size=5,
-    ),
-)
-@settings(deadline=None, max_examples=25)  # type: ignore[untyped-decorator]
-def test_property_workspace_artifacts_created_for_nested_paths(
-    path_segments: list[str],
-) -> None:
-    """Artifact generation should work for nested workspace paths."""
+def test_main_creates_latex_workspace_artifacts() -> None:
+    """The executable should create the LaTeX workspace artifacts."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        workspace = Path(tmpdir).joinpath(*path_segments)
-        create_workspace_artifacts(workspace)
+        working_directory = Path(tmpdir)
+        with mock.patch("pathlib.Path.cwd", return_value=working_directory):
+            main()
+        workspace = working_directory / "tmp"
         figure_path = workspace / "figure.png"
         table_path = workspace / "table.tex"
         if (

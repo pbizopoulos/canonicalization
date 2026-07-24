@@ -32,10 +32,7 @@ python.pkgs.buildPythonPackage rec {
     inherit python;
   };
   pname = baseNameOf ./.;
-  propagatedBuildInputs = pythonDeps ++ [
-    python.pkgs.hypothesis
-    python.pkgs.pytest
-  ];
+  propagatedBuildInputs = pythonDeps;
   pyproject = false;
   src = ./.;
   strictDeps = true;
