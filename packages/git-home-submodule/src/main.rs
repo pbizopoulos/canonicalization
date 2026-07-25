@@ -5,8 +5,8 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command, ExitStatus, Stdio};
-const MAIN_USAGE: &str = "usage: git home-submodule add <repository>\n   or: git home-submodule check [--fix]\n   or: git home-submodule init\n";
-const MAIN_HELP: &str = "GIT-HOME-SUBMODULE(1)\n\nNAME\n    git-home-submodule - Manage canonical submodules in an allowlisted home directory\n\nSYNOPSIS\n    git home-submodule add <repository>\n    git home-submodule check [--fix]\n    git home-submodule init\n\nDESCRIPTION\n    Manages repositories as submodules of a Git superproject in $HOME.\n\n    Every repository is placed at its canonical\n    <hostname>/<repository-path> location. Repository URLs must use HTTPS or\n    SSH, and the home directory's .gitignore acts as an explicit allowlist.\n\nCOMMANDS\n    add <repository>\n        Add <repository> as a submodule at its canonical path. HTTPS and SSH\n        repository URLs are supported.\n\n    check [--fix]\n        Check that every path in $HOME/.gitmodules matches the canonical path\n        derived from its repository URL.\n\n        With --fix, move mismatched submodules and update their paths in\n        .gitmodules.\n\n    init\n        Initialize $HOME as a Git superproject with an allowlist .gitignore.\n        The rules !.gitignore and !.gitmodules are required; additional rules\n        must start with !.\n";
+const MAIN_USAGE: &str = "usage: git home-submodule init\n   or: git home-submodule add <repository>\n   or: git home-submodule check [--fix]\n";
+const MAIN_HELP: &str = "usage: git home-submodule init\n   or: git home-submodule add <repository>\n   or: git home-submodule check [--fix]\n\nManage repositories as canonical submodules of the home directory.\n\ninit\n    For a new home repository, equivalent to:\n        git init ~\n        printf '*\\n!.gitignore\\n!.gitmodules\\n' > ~/.gitignore\n    A compatible existing .gitignore is preserved and completed.\n\nadd <repository>\n    Add an HTTPS or SSH repository at its canonical path, equivalent to:\n        git -C ~ submodule add --force <repository> <host>/<repository-path>\n\ncheck [--fix]\n    Check .gitmodules paths; with --fix, move and update mismatches.\n";
 const ADD_USAGE: &str = "usage: git home-submodule add <repository>\n";
 const DEFAULT_GITIGNORE: &str = "*\n!.gitignore\n!.gitmodules\n";
 const USAGE_EXIT_CODE: i32 = 129;
@@ -498,6 +498,18 @@ mod tests {
             )
             .into());
         }
+        Ok(())
+    }
+    #[test]
+    fn prints_concise_top_level_help() -> TestResult {
+        if env::var_os("PACKAGE_E2E_EXECUTABLE").is_none() {
+            return Ok(());
+        }
+        let home = TemporaryDirectory::new("help")?;
+        let output = run_installed(home.path(), &["-h"])?;
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stdout)?, MAIN_HELP);
+        assert!(output.stderr.is_empty());
         Ok(())
     }
     #[test]

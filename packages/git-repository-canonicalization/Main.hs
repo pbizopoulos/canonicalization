@@ -344,33 +344,21 @@ mainUsageText =
 mainHelpText :: String
 mainHelpText =
   unlines
-    [ "GIT-REPOSITORY-CANONICALIZATION(1)",
+    [ "usage: git repository-canonicalization add <package-type> <package-name> [<description>...]",
+      "   or: git repository-canonicalization check",
+      "   or: git repository-canonicalization summary [--json]",
       "",
-      "NAME",
-      "    git-repository-canonicalization - Check, summarize, and scaffold canonical repositories",
+      "Manage packages and checks in the nearest Git repository.",
+      "Use git -C <location> to select a repository.",
       "",
-      "SYNOPSIS",
-      "    git repository-canonicalization add <package-type> <package-name> [<description>...]",
-      "    git repository-canonicalization check",
-      "    git repository-canonicalization summary [--json]",
+      "add <package-type> <package-name> [<description>...]",
+      "    Add a package and its coverage/profiling check, then stage the files.",
       "",
-      "DESCRIPTION",
-      "    Checks and summarizes the nearest Git repository and scaffolds its",
-      "    packages and checks. Use 'git -C <location>' to select a repository.",
+      "check",
+      "    Check that the repository follows the canonical conventions.",
       "",
-      "COMMANDS",
-      "    add <package-type> <package-name> [<description>...]",
-      "        Add a package and its combined coverage/profiling check. Generated",
-      "        files are staged with git add.",
-      "",
-      "    check",
-      "        Check that the repository follows the canonical package and check",
-      "        conventions.",
-      "",
-      "    summary [--json]",
-      "        Show a summary of the repository's packages and checks.",
-      "",
-      "        With --json, output the repository summary as JSON.",
+      "summary [--json]",
+      "    Summarize packages and checks; with --json, output JSON.",
       ""
     ]
 usageTextForCommand :: Maybe String -> String
@@ -2682,11 +2670,11 @@ commandLineHelpEndToEndTest =
     (helpExit, helpStdout, helpStderr) <- runEndToEndCommandIn temporaryDirectory ["-h"]
     assertEqual "The top-level help command succeeds." ExitSuccess helpExit
     assertBool
-      "The top-level help command prints manual-style help to stdout."
-      ( "GIT-REPOSITORY-CANONICALIZATION(1)" `isPrefixOf` helpStdout
-          && "SYNOPSIS" `isInfixOf` helpStdout
-          && "DESCRIPTION" `isInfixOf` helpStdout
-          && "COMMANDS" `isInfixOf` helpStdout
+      "The top-level help command prints concise usage and commands to stdout."
+      ( mainUsageText `isPrefixOf` helpStdout
+          && "\nadd <package-type>" `isInfixOf` helpStdout
+          && "\ncheck\n" `isInfixOf` helpStdout
+          && "\nsummary [--json]\n" `isInfixOf` helpStdout
       )
     assertEqual "The top-level help command leaves stderr empty." "" helpStderr
     (commandHelpExit, commandHelpStdout, commandHelpStderr) <- runEndToEndCommandIn temporaryDirectory ["check", "--help"]
