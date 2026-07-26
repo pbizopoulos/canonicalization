@@ -93,18 +93,6 @@ mod tests {
         return rendered;
     }
     #[test]
-    fn test_process_root_path_removes_empty_lines_from_text_files() -> Result<()> {
-        use tempfile::tempdir;
-        let dir = tempdir()?;
-        let root = dir.path();
-        let file1_path = root.join("test.txt");
-        fs::write(&file1_path, "line1\n\nline2\n   \nline3\n")?;
-        process_root_path(root)?;
-        let content1 = fs::read_to_string(&file1_path)?;
-        assert_eq!(content1, "line1\nline2\nline3\n");
-        return Ok(());
-    }
-    #[test]
     fn test_process_root_path_respects_gitignore_and_skips_binary_files() -> Result<()> {
         use std::os::unix::fs::symlink;
         use tempfile::tempdir;
@@ -137,13 +125,13 @@ mod tests {
         let dir = tempdir()?;
         let root = dir.path();
         let file_path = root.join("test.txt");
-        fs::write(&file_path, "line1\n\nline2\n")?;
+        fs::write(&file_path, "line1\n\nline2\n   \nline3\n")?;
         let output = Command::new(executable).current_dir(root).output()?;
         assert!(output.status.success());
         assert!(output.stdout.is_empty());
         assert!(output.stderr.is_empty());
         let content = fs::read_to_string(&file_path)?;
-        assert_eq!(content, "line1\nline2\n");
+        assert_eq!(content, "line1\nline2\nline3\n");
         return Ok(());
     }
     #[test]
