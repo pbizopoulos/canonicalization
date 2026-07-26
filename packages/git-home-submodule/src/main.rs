@@ -327,8 +327,8 @@ fn check_home_gitmodules(home_directory: &Path, fix: bool) -> Result<(), CliFail
     if !diagnostics.is_empty() {
         return Err(CliFailure::Check(diagnostics));
     }
-    for (_, configured_path, expected_path) in path_fixes {
-        fix_submodule_path(home_directory, &configured_path, &expected_path)?;
+    for (section, configured_path, expected_path) in path_fixes {
+        fix_submodule_path(home_directory, &section, &configured_path, &expected_path)?;
     }
     Ok(())
 }
@@ -364,6 +364,7 @@ fn validate_submodule_records(
 }
 fn fix_submodule_path(
     home_directory: &Path,
+    section: &str,
     configured_path: &str,
     expected_path: &str,
 ) -> Result<(), CliFailure> {
@@ -388,10 +389,22 @@ fn fix_submodule_path(
         .arg(expected_path)
         .status()
         .map_err(|error| CliFailure::fatal(format!("failed to execute git mv: {error}")))?;
-    if status.success() {
-        return Ok(());
+    if !status.success() {
+        return Err(CliFailure::Git(status));
     }
-    Err(CliFailure::Git(status))
+    let status = Command::new("git")
+        .args(["config", "set", "--file"])
+        .arg(home_directory.join(".gitmodules"))
+        .arg(format!("submodule.{section}.path"))
+        .arg(expected_path)
+        .status()
+        .map_err(|error| {
+            CliFailure::fatal(format!("failed to update .gitmodules path: {error}"))
+        })?;
+    if !status.success() {
+        return Err(CliFailure::Git(status));
+    }
+    Ok(())
 }
 fn parse_raw_submodule_fields(
     bytes: &[u8],
@@ -510,6 +523,12 @@ mod tests {
         assert!(output.status.success());
         assert_eq!(String::from_utf8(output.stdout)?, MAIN_HELP);
         assert!(output.stderr.is_empty());
+        assert_eq!(
+            run_installed(home.path(), &["check-gitmodules"])?
+                .status
+                .code(),
+            Some(USAGE_EXIT_CODE)
+        );
         Ok(())
     }
     #[test]
@@ -718,28 +737,7 @@ mod tests {
         return Ok(());
     }
     #[test]
-    fn exposes_check_and_its_fix_option() -> TestResult {
-        if env::var_os("PACKAGE_E2E_EXECUTABLE").is_none() {
-            return Ok(());
-        }
-        let home = TemporaryDirectory::new("check-command")?;
-        fs::write(home.path().join(".gitmodules"), "")?;
-        assert!(run_installed(home.path(), &["check"])?.status.success());
-        assert!(
-            run_installed(home.path(), &["check", "--fix"])?
-                .status
-                .success()
-        );
-        assert_eq!(
-            run_installed(home.path(), &["check-gitmodules"])?
-                .status
-                .code(),
-            Some(USAGE_EXIT_CODE)
-        );
-        return Ok(());
-    }
-    #[test]
-    fn fixes_a_mismatched_path_through_the_installed_cli() -> TestResult {
+    fn fixes_and_checks_a_mismatched_path_through_the_installed_cli() -> TestResult {
         if env::var_os("PACKAGE_E2E_EXECUTABLE").is_none() {
             return Ok(());
         }
@@ -770,9 +768,22 @@ mod tests {
             fs::read_to_string(home.path().join("example.test/owner/demo/file.txt"))?,
             "fixture\n"
         );
+        let gitmodules = fs::read_to_string(home.path().join(".gitmodules"))?;
         assert!(
-            fs::read_to_string(home.path().join(".gitmodules"))?
-                .contains("example.test/owner/demo")
+            gitmodules
+                .lines()
+                .any(|line| line.trim() == "path = example.test/owner/demo")
+        );
+        assert!(
+            !gitmodules
+                .lines()
+                .any(|line| line.trim() == "path = old/demo")
+        );
+        let check_output = run_installed(home.path(), &["check"])?;
+        assert!(
+            check_output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&check_output.stderr)
         );
         return Ok(());
     }

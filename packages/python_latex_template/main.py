@@ -126,20 +126,6 @@ def main() -> None:
     create_workspace_artifacts(Path.cwd().resolve() / "tmp")
 
 
-def test_samples_contains_expected_summary() -> None:
-    """Keeps summary statistics stable for the default dataset."""
-    expected = (
-        ("count", 5.0),
-        ("total", 32.0),
-        ("mean", 6.4),
-        ("min", 2.0),
-        ("max", 12.0),
-    )
-    if DEFAULT_SAMPLES.summary() != expected:
-        msg = "summary statistics should remain stable"
-        raise AssertionError(msg)
-
-
 def test_samples_rejects_invalid_values() -> None:
     """Rejects empty and non-finite sample sequences."""
     for values in ((), (math.nan,), (math.inf,)):
@@ -148,24 +134,6 @@ def test_samples_rejects_invalid_values() -> None:
         except ValueError:
             continue
         msg = "invalid samples must be rejected"
-        raise AssertionError(msg)
-
-
-def test_render_table_contains_expected_metrics() -> None:
-    """Renders the expected summary metrics and values in the table."""
-    table = render_table(DEFAULT_SAMPLES)
-    expected_fragments = (
-        "\\begin{tabular}{lr}",
-        "Metric & Value \\\\",
-        "count & 5.00 \\\\",
-        "total & 32.00 \\\\",
-        "mean & 6.40 \\\\",
-        "min & 2.00 \\\\",
-        "max & 12.00 \\\\",
-        "\\end{tabular}",
-    )
-    if not all(fragment in table for fragment in expected_fragments):
-        msg = "table output should contain expected fragments"
         raise AssertionError(msg)
 
 
@@ -200,6 +168,20 @@ def test_main_creates_latex_workspace_artifacts() -> None:
             or not table_path.is_file()
         ):
             msg = "workspace artifacts should be complete"
+            raise AssertionError(msg)
+        table = table_path.read_text(encoding="utf-8")
+        expected_fragments = (
+            "\\begin{tabular}{lr}",
+            "Metric & Value \\\\",
+            "count & 5.00 \\\\",
+            "total & 32.00 \\\\",
+            "mean & 6.40 \\\\",
+            "min & 2.00 \\\\",
+            "max & 12.00 \\\\",
+            "\\end{tabular}",
+        )
+        if not all(fragment in table for fragment in expected_fragments):
+            msg = "generated table should contain the expected summary"
             raise AssertionError(msg)
 
 

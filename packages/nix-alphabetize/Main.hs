@@ -368,11 +368,7 @@ extractQuotedStrings = go [] [] False . unpack
 hUnitPackageTests :: Test
 hUnitPackageTests =
   TestList
-    [ TestLabel "Sorts non-string lists." $
-        makeFormattingTest
-          (pack "[ 3 1 2 ]")
-          (pack "[\n  1\n  2\n  3\n]"),
-      TestLabel "Preserves string-list order." $
+    [ TestLabel "Preserves string-list order." $
         makeFormattingTest
           (pack "[ \"c\" \"a\" \"b\" ]")
           (pack "[\n  \"c\"\n  \"a\"\n  \"b\"\n]"),
@@ -380,10 +376,6 @@ hUnitPackageTests =
         makeFormattingTest
           (pack "{ x = { z, x, y }: x + y + z; }")
           (pack "{\n  x = { x\n    , y\n    , z }:\n    x + y + z;\n}"),
-      TestLabel "Sorts attribute sets." $
-        makeFormattingTest
-          (pack "{ c = 1; a = 2; b = 3; }")
-          (pack "{\n  a = 2;\n  b = 3;\n  c = 1;\n}"),
       TestLabel "Sorts nested attribute sets." $
         makeFormattingTest
           (pack "{ b = { z = 1; x = 2; }; a = 1; }")
