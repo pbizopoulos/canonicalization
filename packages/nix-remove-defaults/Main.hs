@@ -25,18 +25,18 @@ import Data.Fix (Fix (Fix))
 import Data.Foldable (toList)
 import Data.Functor.Compose (Compose (Compose))
 import Data.Kind (Type)
-import Data.List (isInfixOf, isSuffixOf, sort, sortBy)
+import Data.List (isInfixOf, isSuffixOf, sort)
 import Data.List qualified as List
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe)
-import Data.Ord (comparing)
 import Data.Scientific (floatingOrInteger)
 import Data.Set (Set)
 import Data.Set qualified as Set
-import Data.Text (Text, intercalate, pack, unpack)
+import Data.Text (Text, pack, unpack)
+import Data.Text qualified as T
 import Data.Text.Encoding qualified as Text
 import Data.Text.IO qualified as TIO
 import GHC.Clock (getMonotonicTimeNSec)
@@ -125,7 +125,7 @@ data Literal
   | LiteralFloat Float
   | LiteralString Text
   | LiteralList [Literal]
-  | LiteralSet [(Text, Literal)]
+  | LiteralSet (Map Text Literal)
   deriving stock (Eq, Ord, Show)
 type OptionPath :: Type
 newtype OptionPath = OptionPath (NonEmpty Text)
@@ -163,7 +163,7 @@ instance FromJSON Literal where
       Right integerValue -> pure (LiteralInteger integerValue)
   parseJSON (Array values) = LiteralList <$> mapM parseJSON (toList values)
   parseJSON (Object values) =
-    LiteralSet . sortLiteralBindings
+    LiteralSet . Map.fromList
       <$> mapM
         ( \(key, value) -> do
             literalValue <- parseJSON value
@@ -421,13 +421,13 @@ expressionLiteral (Fix (Compose (AnnUnit _ exprF))) =
     NConstant (NFloat value) -> Just (LiteralFloat value)
     NStr stringValue -> LiteralString <$> plainString stringValue
     NList values -> LiteralList <$> mapM expressionLiteral values
-    NSet NonRecursive bindings -> LiteralSet . sortLiteralBindings <$> mapM literalBinding bindings
+    NSet NonRecursive bindings -> LiteralSet . Map.fromList <$> mapM literalBinding bindings
     _ -> Nothing
 plainString :: NString NExprLoc -> Maybe Text
 plainString (DoubleQuoted parts) = plainParts parts
 plainString (Indented _ parts) = plainParts parts
 plainParts :: [Antiquoted Text NExprLoc] -> Maybe Text
-plainParts parts = intercalate (pack "") <$> mapM plainPart parts
+plainParts parts = T.concat <$> mapM plainPart parts
 plainPart :: Antiquoted Text NExprLoc -> Maybe Text
 plainPart (Plain textValue) = Just textValue
 plainPart _ = Nothing
@@ -437,8 +437,6 @@ literalBinding (NamedVar (keyName :| []) valueExpr _) = do
   literalValue <- expressionLiteral valueExpr
   pure (keyText, literalValue)
 literalBinding _ = Nothing
-sortLiteralBindings :: [(Text, Literal)] -> [(Text, Literal)]
-sortLiteralBindings = sortBy (comparing fst)
 isEmptySet :: NExprLoc -> Bool
 isEmptySet (Fix (Compose (AnnUnit _ (NSet _ bindings)))) = null bindings
 isEmptySet _ = False
@@ -518,7 +516,7 @@ renderLiteral (LiteralString value) = nixString (unpack value)
 renderLiteral (LiteralList values) =
   "[ " ++ List.unwords (map renderLiteral values) ++ " ]"
 renderLiteral (LiteralSet bindings) =
-  "{ " ++ List.unwords (map renderLiteralBinding bindings) ++ " }"
+  "{ " ++ List.unwords (map renderLiteralBinding (Map.toAscList bindings)) ++ " }"
 renderLiteralBinding :: (Text, Literal) -> String
 renderLiteralBinding (key, value) =
   nixString (unpack key) ++ " = " ++ renderLiteral value ++ ";"
@@ -663,7 +661,7 @@ hUnitPackageTests =
               [ (OptionPath ("example" :| ["count"]), LiteralInteger 3),
                 (OptionPath ("example" :| ["label"]), LiteralString "default"),
                 (OptionPath ("example" :| ["optional"]), LiteralNull),
-                (OptionPath ("example" :| ["settings"]), LiteralSet [("enabled", LiteralBool True)])
+                (OptionPath ("example" :| ["settings"]), LiteralSet (Map.singleton "enabled" (LiteralBool True)))
               ]
           )
           (pack "{ example.count = 3; example.label = \"default\"; example.optional = null; example.settings = { enabled = true; }; }")

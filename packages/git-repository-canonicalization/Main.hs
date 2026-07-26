@@ -969,18 +969,9 @@ validatePackageNameForKind packageKind packageName =
                 ++ " packages"
             )
 packageNameConventionForKind :: PackageKind -> (String, Char)
-packageNameConventionForKind packageKind =
-  case packageKind of
-    HaskellPackage -> ("kebab-case", '-')
-    RustPackage -> ("kebab-case", '-')
-    BinaryReleasePackage -> ("kebab-case", '-')
-    HtmlPackage -> ("snake_case", '_')
-    PythonLatexPackage -> ("snake_case", '_')
-    PythonPackage -> ("snake_case", '_')
-    PythonPyPIPackage -> ("snake_case", '_')
-    CPackage -> ("snake_case", '_')
-    TerraformPackage -> ("snake_case", '_')
-    LatexPackage -> ("snake_case", '_')
+packageNameConventionForKind packageKind
+  | packageKind `elem` [HaskellPackage, RustPackage, BinaryReleasePackage] = ("kebab-case", '-')
+  | otherwise = ("snake_case", '_')
 isDelimitedLowercaseName :: Char -> String -> Bool
 isDelimitedLowercaseName separator packageName =
   all isValidNamePart (T.split (== separator) (T.pack packageName))

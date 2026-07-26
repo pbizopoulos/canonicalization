@@ -137,11 +137,9 @@ sortExpression (Fix (Compose (AnnUnit exprSpan exprF))) =
       NLet (sortAndCollapseBindings bindings) (sortExpression body)
     otherExpr -> fmap sortExpression otherExpr
 getBindingName :: Binding r -> Maybe Text
-getBindingName (NamedVar (StaticKey (VarName keyText) :| _) _ _) = Just keyText
-getBindingName (NamedVar (DynamicKey (Plain (DoubleQuoted [Plain keyText])) :| _) _ _) = Just keyText
-getBindingName _ = Nothing
-getBindingPath :: Binding r -> Maybe [Text]
-getBindingPath (NamedVar bindingKeys _ _) = mapM getBindingKeyName (NE.toList bindingKeys)
+getBindingName = fmap NE.head . getBindingPath
+getBindingPath :: Binding r -> Maybe (NonEmpty Text)
+getBindingPath (NamedVar bindingKeys _ _) = mapM getBindingKeyName bindingKeys
 getBindingPath _ = Nothing
 getBindingKeyName :: NKeyName r -> Maybe Text
 getBindingKeyName (StaticKey (VarName keyText)) = Just keyText
@@ -177,7 +175,7 @@ bindingsAreStructurallyCompatible [] = False
 bindingsAreStructurallyCompatible [binding] = not (null (nextLevelBindings binding))
 bindingsAreStructurallyCompatible bindings =
   all isDottedBinding bindings
-    && maybe False pathsAreUnambiguous (mapM getBindingPath bindings)
+    && maybe False (pathsAreUnambiguous . map NE.toList) (mapM getBindingPath bindings)
 isDottedBinding :: Binding r -> Bool
 isDottedBinding (NamedVar (_ :| _ : _) _ _) = True
 isDottedBinding _ = False

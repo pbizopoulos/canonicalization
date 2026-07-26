@@ -9,14 +9,9 @@ import subprocess
 SAMPLE_MESSAGE = "Hello World Python"
 
 
-def render_message() -> str:
-    """Return the package's sample message."""
-    return SAMPLE_MESSAGE
-
-
 def main() -> None:
     """Print the package's sample message."""
-    print(render_message())  # noqa: T201
+    print(SAMPLE_MESSAGE)  # noqa: T201
 
 
 def test_main_prints_sample_message() -> None:
