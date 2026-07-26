@@ -368,7 +368,7 @@ rewriteModuleExpression removals = goModule []
                 then Nothing
                 else
                   let rewrittenValue = rewriteNested pathComponents valueExpr
-                   in if isEmptySet rewrittenValue && wasNonEmptySet valueExpr
+                   in if setBecameEmpty valueExpr rewrittenValue
                         then Nothing
                         else Just (NamedVar keyPath rewrittenValue bindingPos)
     rewriteBinding _ binding = Just binding
@@ -437,12 +437,11 @@ literalBinding (NamedVar (keyName :| []) valueExpr _) = do
   literalValue <- expressionLiteral valueExpr
   pure (keyText, literalValue)
 literalBinding _ = Nothing
-isEmptySet :: NExprLoc -> Bool
-isEmptySet (Fix (Compose (AnnUnit _ (NSet _ bindings)))) = null bindings
-isEmptySet _ = False
-wasNonEmptySet :: NExprLoc -> Bool
-wasNonEmptySet (Fix (Compose (AnnUnit _ (NSet _ bindings)))) = not (null bindings)
-wasNonEmptySet _ = False
+setBecameEmpty :: NExprLoc -> NExprLoc -> Bool
+setBecameEmpty
+  (Fix (Compose (AnnUnit _ (NSet _ (_ : _)))))
+  (Fix (Compose (AnnUnit _ (NSet _ [])))) = True
+setBecameEmpty _ _ = False
 flakeSourcePathForRepository :: FilePath -> IO (Either String FilePath)
 flakeSourcePathForRepository repositoryRoot =
   readJsonFromNix ["eval", "--impure", "--json", "--expr", flakeSourcePathExpression repositoryRoot]
@@ -565,13 +564,12 @@ readJsonFromNixWith runNix arguments = do
   processResult <- runNix arguments
   case processResult of
     Left processError -> pure (Left ("cannot execute nix: " ++ show processError))
-    Right (exitCode, standardOutput, standardError) ->
-      case exitCode of
-        ExitSuccess ->
-          case eitherDecodeStrict' (Text.encodeUtf8 (pack standardOutput)) of
-            Right jsonValue -> pure (Right jsonValue)
-            Left diagnostic -> pure (Left ("cannot decode Nix JSON output: " ++ diagnostic))
-        _ -> pure (Left ("nix evaluation failed: " ++ standardError))
+    Right (ExitFailure _, _, standardError) ->
+      pure (Left ("nix evaluation failed: " ++ standardError))
+    Right (ExitSuccess, standardOutput, _) ->
+      pure $ case eitherDecodeStrict' (Text.encodeUtf8 (pack standardOutput)) of
+        Right jsonValue -> Right jsonValue
+        Left diagnostic -> Left ("cannot decode Nix JSON output: " ++ diagnostic)
 tryReadNixProcess :: [String] -> IO (Either IOException (ExitCode, String, String))
 tryReadNixProcess arguments =
   try (readProcessWithExitCode "nix" arguments "")

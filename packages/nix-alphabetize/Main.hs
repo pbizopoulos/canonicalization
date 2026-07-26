@@ -72,6 +72,7 @@ import Prelude
     any,
     appendFile,
     concatMap,
+    drop,
     fmap,
     fromIntegral,
     fst,
@@ -89,6 +90,7 @@ import Prelude
     unwords,
     writeFile,
     zip,
+    zipWith,
     ($),
     (&&),
     (++),
@@ -180,15 +182,9 @@ isDottedBinding :: Binding r -> Bool
 isDottedBinding (NamedVar (_ :| _ : _) _ _) = True
 isDottedBinding _ = False
 pathsAreUnambiguous :: [[Text]] -> Bool
-pathsAreUnambiguous [] = True
-pathsAreUnambiguous (bindingPath : remainingPaths) =
-  all
-    ( \otherPath ->
-        not (bindingPath `isPrefixOf` otherPath)
-          && not (otherPath `isPrefixOf` bindingPath)
-    )
-    remainingPaths
-    && pathsAreUnambiguous remainingPaths
+pathsAreUnambiguous paths =
+  let sortedPaths = sort paths
+   in and (zipWith (\path nextPath -> not (path `isPrefixOf` nextPath)) sortedPaths (drop 1 sortedPaths))
 nextLevelBindings :: Binding NExprLoc -> [Binding NExprLoc]
 nextLevelBindings (NamedVar (_ :| bindingKey : restKeys) valExpr bindingPos) =
   [NamedVar (bindingKey :| restKeys) valExpr bindingPos]

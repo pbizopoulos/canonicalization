@@ -183,10 +183,10 @@ fn add_repository(home_directory: &Path, repository_url: &str) -> Result<(), Cli
     let status = command
         .status()
         .map_err(|error| CliFailure::fatal(format!("failed to execute git: {error}")))?;
-    if status.success() {
-        return Ok(());
+    if !status.success() {
+        return Err(CliFailure::Git(status));
     }
-    Err(CliFailure::Git(status))
+    Ok(())
 }
 fn initialize_home_repository(home_directory: &Path) -> Result<(), CliFailure> {
     let gitignore_path = home_directory.join(".gitignore");
@@ -409,7 +409,7 @@ fn fix_submodule_path(
 fn parse_raw_submodule_fields(
     bytes: &[u8],
 ) -> Result<BTreeMap<String, RawSubmoduleFields>, String> {
-    let mut submodules = BTreeMap::new();
+    let mut submodules: BTreeMap<String, RawSubmoduleFields> = BTreeMap::new();
     for record in bytes
         .split(|byte| *byte == 0)
         .filter(|record| !record.is_empty())
@@ -429,9 +429,7 @@ fn parse_raw_submodule_fields(
             Some(parts) if !parts.0.is_empty() => parts,
             _ => continue,
         };
-        let fields = submodules
-            .entry(section.to_owned())
-            .or_insert_with(RawSubmoduleFields::default);
+        let fields = submodules.entry(section.to_owned()).or_default();
         match field {
             "path" => fields.paths.push(value.to_owned()),
             "url" => fields.urls.push(value.to_owned()),
