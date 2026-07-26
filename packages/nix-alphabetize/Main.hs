@@ -192,18 +192,11 @@ nextLevelBindings (NamedVar (_ :| []) (Fix (Compose (AnnUnit _ (NSet NonRecursiv
 nextLevelBindings _ = []
 makeFormattingTest :: Text -> Text -> Test
 makeFormattingTest input expectedOutput = TestCase $ do
-  withSystemTempFile "test.nix" $ \tmpFile tmpHandle -> do
-    hClose tmpHandle
-    TIO.writeFile tmpFile input
-    parseResult <- parseNixFileLoc (Path tmpFile)
-    case parseResult of
-      Right expr -> do
-        assertEqual "formatted output" expectedOutput (formattedExpression expr)
-      Left parseError ->
-        assertFailure $ "Parse error in formatting test: " ++ show parseError
+  actualOutput <- formatText input
+  assertEqual "formatted output" expectedOutput actualOutput
 formatText :: Text -> IO Text
 formatText input =
-  withSystemTempFile "property.nix" $ \tmpFile tmpHandle -> do
+  withSystemTempFile "test.nix" $ \tmpFile tmpHandle -> do
     hClose tmpHandle
     TIO.writeFile tmpFile input
     parseResult <- parseNixFileLoc (Path tmpFile)
@@ -211,7 +204,7 @@ formatText input =
       Right expr -> do
         pure (formattedExpression expr)
       Left parseError ->
-        assertFailure ("Property fixture failed to parse: " ++ show parseError)
+        assertFailure ("Formatting fixture failed to parse: " ++ show parseError)
 formattedExpression :: NExprLoc -> Text
 formattedExpression = renderExpressionText . sortExpression
 runPackageTests :: IO ()

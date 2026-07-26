@@ -5,7 +5,7 @@
 {-# LANGUAGE Trustworthy #-}
 {-# OPTIONS_GHC -Wno-all-missed-specialisations -Wno-missed-specialisations -Wno-unsafe #-}
 module Main (main, runPackageTests, runPackageTestsWithTimings) where
-import Control.Applicative (liftA2)
+import Control.Applicative (liftA2, (<*>))
 import Control.Exception (IOException, finally, try)
 import Control.Monad (mapM_, unless, when)
 import Data.Aeson
@@ -172,17 +172,17 @@ instance FromJSON Literal where
         (KeyMap.toList values)
 instance FromJSON NixosDefinitionRecord where
   parseJSON =
-    withObject "NixOS definition record" $ \values -> do
-      optionPath <- values .: "path"
-      literalValue <- values .: "value"
-      sourceFiles <- values .: "files"
-      pure (NixosDefinitionRecord optionPath literalValue sourceFiles)
+    withObject "NixOS definition record" $ \values ->
+      NixosDefinitionRecord
+        <$> values .: "path"
+        <*> values .: "value"
+        <*> values .: "files"
 instance FromJSON TreefmtDefaultRecord where
   parseJSON =
-    withObject "treefmt default record" $ \values -> do
-      optionPath <- values .: "path"
-      defaultValue <- values .: "default"
-      pure (TreefmtDefaultRecord optionPath defaultValue)
+    withObject "treefmt default record" $ \values ->
+      TreefmtDefaultRecord
+        <$> values .: "path"
+        <*> values .: "default"
 type ParsedNixFile :: Type
 type ParsedNixFile = (FilePath, NExprLoc)
 main :: IO ()

@@ -32,18 +32,16 @@ fn remove_new_lines(path: &Path) -> Result<()> {
     if content_inspector::inspect(&data).is_binary() {
         return Ok(());
     }
-    let output = strip_new_lines_from_bytes(&data);
-    if output != data {
+    let input_length = data.len();
+    let output = strip_new_lines_from_bytes(data);
+    if output.len() != input_length {
         fs::write(path, output).with_context(|| format!("Failed to write file: {path_display}"))?;
     }
     return Ok(());
 }
-fn strip_new_lines_from_bytes(data: &[u8]) -> Vec<u8> {
-    return data
-        .iter()
-        .copied()
-        .filter(|byte| return !matches!(byte, b'\n' | b'\r'))
-        .collect();
+fn strip_new_lines_from_bytes(mut data: Vec<u8>) -> Vec<u8> {
+    data.retain(|byte| return !matches!(*byte, b'\n' | b'\r'));
+    return data;
 }
 #[cfg(test)]
 mod tests {
@@ -127,7 +125,7 @@ mod tests {
     #[test]
     fn test_byte_transform_handles_non_utf8_data() {
         assert_eq!(
-            strip_new_lines_from_bytes(&[0xff, b'\r', b'\n', 0xfe]),
+            strip_new_lines_from_bytes(vec![0xff, b'\r', b'\n', 0xfe]),
             vec![0xff, 0xfe]
         );
     }
@@ -135,7 +133,7 @@ mod tests {
     fn quickcheck_strip_new_lines_matches_filtered_sequence() {
         fn property(lines: Vec<LogicalLine>) -> TestResult {
             let input = render_lines(&lines);
-            let actual = strip_new_lines_from_bytes(&input);
+            let actual = strip_new_lines_from_bytes(input);
             return TestResult::from_bool(actual == expected_without_new_lines(&lines));
         }
         QuickCheck::new()
