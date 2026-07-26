@@ -1305,6 +1305,7 @@ opaqueDirectoryRegexes =
     "^result$",
     "^tmp$",
     "^checks/[^/]+/(result|tmp)$",
+    "^hosts/[^/]+/prm$",
     "^packages/[^/]+/(prm|result|target|tmp)$"
   ]
 type PackageKind :: Type
@@ -2425,6 +2426,7 @@ hUnitPackageTests =
       TestLabel "Parses versioned coverage summaries strictly." (TestCase repositoryCoverageParsingTest),
       TestLabel "Ignores formatter-only Cargo inline-table spacing." (TestCase cargoTomlFormattingNormalizationTest),
       TestLabel "Requires allowlisted filesystem entry kinds." (TestCase entryKindStructureTest),
+      TestLabel "Treats parameter directories as opaque user data." (TestCase parameterDirectoryStructureTest),
       TestLabel "Renders stable text and JSON repository summaries." (TestCase repositorySummaryRenderingTest),
       TestLabel "Reports concise Nix template parameter differences." (TestCase nixTemplateParameterDifferenceTest),
       TestLabel "Accepts python_template without inputs or shellHook." (TestCase pythonTemplateOptionalInputsAndShellHookTest),
@@ -2529,6 +2531,23 @@ entryKindStructureTest =
         "CITATION.bib: expected regular file, found directory"
       ]
       (\expectedIssue -> assertBool "entry-kind diagnostic" (expectedIssue `elem` issues))
+parameterDirectoryStructureTest :: IO ()
+parameterDirectoryStructureTest =
+  withTemporaryPackageRepository "parameter-directory-structure" $ \temporaryRepository -> do
+    let parameterDirectories =
+          [ temporaryRepository </> "prm",
+            temporaryRepository </> "hosts/demo/prm",
+            temporaryRepository </> "packages/demo/prm"
+          ]
+    createDirectoryIfMissing True (temporaryRepository </> "hosts/demo")
+    createDirectoryIfMissing True (temporaryRepository </> "packages/demo")
+    writeFile (temporaryRepository </> "hosts/demo/configuration.nix") ""
+    writeFile (temporaryRepository </> "packages/demo/default.nix") ""
+    forM_ parameterDirectories $ \parameterDirectory -> do
+      createDirectoryIfMissing True (parameterDirectory </> "arbitrary/nested")
+      writeFile (parameterDirectory </> "arbitrary/nested/user.data") ""
+    issues <- withCurrentDirectory temporaryRepository checkRepositoryStructure
+    assertEqual "Parameter directory contents do not participate in repository structure policy." [] issues
 repositoryCoverageParsingTest :: IO ()
 repositoryCoverageParsingTest = do
   assertEqual
