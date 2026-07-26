@@ -1,30 +1,27 @@
 #![allow(clippy::multiple_crate_versions)]
 use anyhow::{Context as _, Result};
 use ignore::WalkBuilder;
-use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
 fn main() -> Result<()> {
-    return run(&std::env::args_os().skip(1).collect::<Vec<_>>());
-}
-fn run(input_paths: &[OsString]) -> Result<()> {
-    if input_paths.is_empty() {
-        return process_root_path(Path::new("."));
-    }
-    for input_path in input_paths {
-        process_root_path(Path::new(input_path))?;
+    let mut input_paths = std::env::args_os().skip(1).peekable();
+    if input_paths.peek().is_none() {
+        process_root_path(Path::new("."))?;
+    } else {
+        for input_path in input_paths {
+            process_root_path(Path::new(&input_path))?;
+        }
     }
     return Ok(());
 }
 fn process_root_path(root: &Path) -> Result<()> {
     for result in WalkBuilder::new(root).require_git(false).build() {
         let entry = result.with_context(|| format!("Failed to walk path: {}", root.display()))?;
-        let path = entry.path();
         if entry
             .file_type()
             .is_some_and(|file_type| return file_type.is_file())
         {
-            remove_empty_lines(path)?;
+            remove_empty_lines(entry.path())?;
         }
     }
     return Ok(());
@@ -48,11 +45,8 @@ fn strip_empty_lines_from_bytes(data: &[u8]) -> Vec<u8> {
         let contents = without_newline
             .strip_suffix(b"\r")
             .unwrap_or(without_newline);
-        let is_empty =
-            core::str::from_utf8(contents).is_ok_and(|text| return text.trim().is_empty());
-        if !is_empty {
-            output.extend_from_slice(contents);
-            output.push(b'\n');
+        if !core::str::from_utf8(contents).is_ok_and(|text| return text.trim().is_empty()) {
+            output.extend_from_slice(line);
         }
     }
     return output;
@@ -144,6 +138,13 @@ mod tests {
         assert_eq!(
             strip_empty_lines_from_bytes(&[0xff, b'\n', b' ', b'\r', b'\n']),
             vec![0xff, b'\n']
+        );
+    }
+    #[test]
+    fn test_byte_transform_only_removes_empty_lines() {
+        assert_eq!(
+            strip_empty_lines_from_bytes(b"first\r\n \t\r\nlast"),
+            b"first\r\nlast"
         );
     }
     #[test]

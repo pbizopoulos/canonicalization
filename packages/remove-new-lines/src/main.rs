@@ -1,30 +1,27 @@
 #![allow(clippy::multiple_crate_versions)]
 use anyhow::{Context as _, Result};
 use ignore::WalkBuilder;
-use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
 fn main() -> Result<()> {
-    return run(&std::env::args_os().skip(1).collect::<Vec<_>>());
-}
-fn run(input_paths: &[OsString]) -> Result<()> {
-    if input_paths.is_empty() {
-        return process_root_path(Path::new("."));
-    }
-    for input_path in input_paths {
-        process_root_path(Path::new(input_path))?;
+    let mut input_paths = std::env::args_os().skip(1).peekable();
+    if input_paths.peek().is_none() {
+        process_root_path(Path::new("."))?;
+    } else {
+        for input_path in input_paths {
+            process_root_path(Path::new(&input_path))?;
+        }
     }
     return Ok(());
 }
 fn process_root_path(root: &Path) -> Result<()> {
     for result in WalkBuilder::new(root).require_git(false).build() {
         let entry = result.with_context(|| format!("Failed to walk path: {}", root.display()))?;
-        let path = entry.path();
         if entry
             .file_type()
             .is_some_and(|file_type| return file_type.is_file())
         {
-            remove_new_lines(path)?;
+            remove_new_lines(entry.path())?;
         }
     }
     return Ok(());
