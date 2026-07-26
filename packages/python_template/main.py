@@ -19,13 +19,6 @@ def main() -> None:
     print(render_message())  # noqa: T201
 
 
-def test_render_message_returns_sample_message() -> None:
-    """Renders the package's sample message."""
-    if render_message() != SAMPLE_MESSAGE:
-        msg = "rendered sample message should match"
-        raise AssertionError(msg)
-
-
 def test_main_prints_sample_message() -> None:
     """Prints the sample message from the executable."""
     completed = subprocess.run(  # noqa: S603

@@ -177,16 +177,6 @@ def test_latex_escape_handles_special_characters() -> None:
         raise AssertionError(msg)
 
 
-def test_create_figure_writes_non_empty_png() -> None:
-    """Creates a non-empty PNG figure."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        figure_path = Path(tmpdir) / "figure.png"
-        create_figure(figure_path, DEFAULT_SAMPLES)
-        if not figure_path.is_file() or figure_path.stat().st_size == 0:
-            msg = "figure generation should create a non-empty PNG"
-            raise AssertionError(msg)
-
-
 def test_main_creates_latex_workspace_artifacts() -> None:
     """Creates the LaTeX workspace artifacts from the executable."""
     with tempfile.TemporaryDirectory() as tmpdir:

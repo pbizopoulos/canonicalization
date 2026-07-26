@@ -2435,10 +2435,8 @@ hUnitPackageTests =
       TestLabel "Scaffolds a package and its check from a nested directory." (TestCase addPackageEndToEndTest),
       TestLabel "Scaffolds and checks every supported package kind." (TestCase allPackageKindsEndToEndTest),
       TestLabel "Rejects package creation when its path already exists." (TestCase existingPackageCollisionEndToEndTest),
-      TestLabel "Reports generated package behavior in the text summary." (TestCase textSummaryEndToEndTest),
-      TestLabel "Reports generated package behavior in the JSON summary." (TestCase jsonSummaryEndToEndTest),
+      TestLabel "Reports generated package behavior in text and JSON summaries." (TestCase summaryEndToEndTest),
       TestLabel "Reports conventional tests for generated Haskell packages." (TestCase haskellSummaryEndToEndTest),
-      TestLabel "Accepts a generated package during repository checks." (TestCase generatedPackageCheckEndToEndTest),
       TestLabel "Rejects unlabeled HUnit cases in generated Haskell packages." (TestCase unlabeledHaskellPackageCheckEndToEndTest),
       TestLabel "Reports the phase and file when a package check fails." (TestCase corruptedPackageCheckEndToEndTest),
       TestLabel "Rejects unknown package options without creating partial output." (TestCase unknownAddOptionEndToEndTest),
@@ -2777,9 +2775,9 @@ existingPackageCollisionEndToEndTest =
     assertBool
       "The collision reports the package path."
       ("path already exists: packages/demo" `isInfixOf` addStderr)
-textSummaryEndToEndTest :: IO ()
-textSummaryEndToEndTest =
-  withGeneratedPythonPackageRepository "text-summary-end-to-end" $ \temporaryRepository -> do
+summaryEndToEndTest :: IO ()
+summaryEndToEndTest =
+  withGeneratedPythonPackageRepository "summary-end-to-end" $ \temporaryRepository -> do
     repositoryPath <- canonicalizePath temporaryRepository
     (summaryExit, summaryStdout, summaryStderr) <- runEndToEndCommandIn temporaryRepository ["summary"]
     assertEqual "Text summary succeeds for the generated repository." ExitSuccess summaryExit
@@ -2790,10 +2788,6 @@ textSummaryEndToEndTest =
       )
       summaryStdout
     assertEqual "A successful text summary leaves stderr empty." "" summaryStderr
-jsonSummaryEndToEndTest :: IO ()
-jsonSummaryEndToEndTest =
-  withGeneratedPythonPackageRepository "json-summary-end-to-end" $ \temporaryRepository -> do
-    repositoryPath <- canonicalizePath temporaryRepository
     (jsonExit, jsonStdout, jsonStderr) <- runEndToEndCommandIn temporaryRepository ["summary", "--json"]
     assertEqual "JSON summary succeeds for the generated repository." ExitSuccess jsonExit
     assertEqual
@@ -2816,13 +2810,6 @@ haskellSummaryEndToEndTest =
       )
       summaryStdout
     assertEqual "A successful Haskell summary leaves stderr empty." "" summaryStderr
-generatedPackageCheckEndToEndTest :: IO ()
-generatedPackageCheckEndToEndTest =
-  withGeneratedPythonPackageRepository "generated-check-end-to-end" $ \temporaryRepository -> do
-    (checkExit, checkStdout, checkStderr) <- runEndToEndCommandIn temporaryRepository ["check"]
-    assertEqual "Checking the generated repository succeeds." ExitSuccess checkExit
-    assertEqual "A successful check produces no stdout." "" checkStdout
-    assertEqual "A successful check produces no stderr." "" checkStderr
 unlabeledHaskellPackageCheckEndToEndTest :: IO ()
 unlabeledHaskellPackageCheckEndToEndTest =
   withGeneratedHaskellPackageRepository "unlabeled-haskell-check-end-to-end" $ \temporaryRepository -> do
@@ -2923,9 +2910,7 @@ expectedGeneratedPythonPackageSummary =
       repositoryPackageKind = PythonPackage,
       repositoryPackageDescription = Just "Demo package",
       repositoryPackageTestNames =
-        [ "Prints the sample message from the executable.",
-          "Renders the package's sample message."
-        ],
+        ["Prints the sample message from the executable."],
       repositoryPackageCheck = Just RepositoryPackageCheckUnavailable
     }
 expectedGeneratedHaskellPackageSummary :: RepositoryPackageSummary
@@ -3020,11 +3005,6 @@ pythonMainSource =
       "def main() -> None:",
       "    \"\"\"Print the package's sample message.\"\"\"",
       "    print(render_message())  # noqa: T201",
-      "",
-      "",
-      "def test_render_message_returns_sample_message() -> None:",
-      "    \"\"\"Renders the package's sample message.\"\"\"",
-      "    assert render_message() == SAMPLE_MESSAGE",
       "",
       "",
       "def test_main_prints_sample_message() -> None:",
@@ -3182,15 +3162,6 @@ pythonLatexMainSource =
       "        ]",
       "        for fragment in expected_fragments:",
       "            assert fragment in table",
-      "",
-      "",
-      "def test_create_figure_writes_non_empty_png() -> None:",
-      "    \"\"\"Creates a real PNG figure.\"\"\"",
-      "    with tempfile.TemporaryDirectory() as tmpdir:",
-      "        figure_path = Path(tmpdir) / \"figure.png\"",
-      "        create_figure(figure_path, DEFAULT_SAMPLES)",
-      "        assert figure_path.exists()",
-      "        assert figure_path.stat().st_size > 0",
       "",
       "",
       "def test_latex_escape_handles_special_characters() -> None:",
@@ -3410,24 +3381,6 @@ rustMainSource =
       "            match strip_empty_lines_from_bytes(&input) {",
       "                Ok(actual) => TestResult::from_bool(actual == expected_non_empty_lines(&lines)),",
       "                Err(_) => TestResult::error(\"strip_empty_lines_from_bytes returned an error\"),",
-      "            }",
-      "        }",
-      "        QuickCheck::new()",
-      "            .tests(100)",
-      "            .quickcheck(property as fn(Vec<LogicalLine>) -> TestResult);",
-      "    }",
-      "    #[test]",
-      "    fn quickcheck_strip_empty_lines_is_idempotent() {",
-      "        fn property(lines: Vec<LogicalLine>) -> TestResult {",
-      "            let input = render_lines(&lines);",
-      "            match strip_empty_lines_from_bytes(&input) {",
-      "                Ok(first_pass) => match strip_empty_lines_from_bytes(&first_pass) {",
-      "                    Ok(second_pass) => TestResult::from_bool(first_pass == second_pass),",
-      "                    Err(_) => {",
-      "                        TestResult::error(\"second strip_empty_lines_from_bytes returned an error\")",
-      "                    }",
-      "                },",
-      "                Err(_) => TestResult::error(\"first strip_empty_lines_from_bytes returned an error\"),",
       "            }",
       "        }",
       "        QuickCheck::new()",

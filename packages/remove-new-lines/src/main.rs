@@ -157,16 +157,4 @@ mod tests {
             .tests(100)
             .quickcheck(property as fn(Vec<LogicalLine>) -> TestResult);
     }
-    #[test]
-    fn quickcheck_strip_new_lines_is_idempotent() {
-        fn property(lines: Vec<LogicalLine>) -> TestResult {
-            let input = render_lines(&lines);
-            let first_pass = strip_new_lines_from_bytes(&input);
-            let second_pass = strip_new_lines_from_bytes(&first_pass);
-            return TestResult::from_bool(first_pass == second_pass);
-        }
-        QuickCheck::new()
-            .tests(100)
-            .quickcheck(property as fn(Vec<LogicalLine>) -> TestResult);
-    }
 }

@@ -695,7 +695,7 @@ hUnitPackageTests =
           (Map.singleton (OptionPath ("programs" :| ["shfmt", "simplify"])) (LiteralBool True))
           (pack "{ inputs, pkgs, ... }: let treefmtEval = inputs.treefmt-nix.lib.evalModule pkgs { programs.shfmt.simplify = true; keep = false; }; in treefmtEval.config.build.wrapper")
           (pack "{ inputs, pkgs, ... }:\n  let\n    treefmtEval = inputs.treefmt-nix.lib.evalModule pkgs { keep = false; };\n  in treefmtEval.config.build.wrapper"),
-      TestLabel "Builds candidate records into the NixOS default-definition lookup expression." $ TestCase $ do
+      TestLabel "Builds the NixOS default-definition lookup expression." $ TestCase $ do
         let expression =
               nixosDefaultDefinitionFilesExpression
                 "/repository"
@@ -703,22 +703,10 @@ hUnitPackageTests =
                 [(OptionPath ("boot" :| ["initrd", "systemd", "enable"]), LiteralBool True)]
         assertBool
           "candidate records"
-          ("candidates = [ { path = [ \"boot\" \"initrd\" \"systemd\" \"enable\" ]; value = true; } ]" `isInfixOf` expression),
-      TestLabel "Compares defaults using the parsed literal shape." $ TestCase $ do
-        let expression =
-              nixosDefaultDefinitionFilesExpression
-                "/repository"
-                ["default"]
-                [(OptionPath ("boot" :| ["initrd", "systemd", "enable"]), LiteralBool True)]
+          ("candidates = [ { path = [ \"boot\" \"initrd\" \"systemd\" \"enable\" ]; value = true; } ]" `isInfixOf` expression)
         assertBool
           "literal comparison"
-          ("literalEquals = expected: actual:" `isInfixOf` expression),
-      TestLabel "Returns path, value, and matching definition files for each candidate." $ TestCase $ do
-        let expression =
-              nixosDefaultDefinitionFilesExpression
-                "/repository"
-                ["default"]
-                [(OptionPath ("boot" :| ["initrd", "systemd", "enable"]), LiteralBool True)]
+          ("literalEquals = expected: actual:" `isInfixOf` expression)
         assertBool
           "candidate result"
           ("candidateFiles = candidate: { inherit (candidate) path value; files =" `isInfixOf` expression),
