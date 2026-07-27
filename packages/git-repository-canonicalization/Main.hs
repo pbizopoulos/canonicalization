@@ -528,6 +528,7 @@ data RepositoryPackageSummary = RepositoryPackageSummary
 type RepositorySummary :: Type
 data RepositorySummary = RepositorySummary
   { repositorySummaryPath :: FilePath,
+    repositorySummaryDependencies :: [String],
     repositorySummaryPackages :: [RepositoryPackageSummary]
   }
   deriving stock (Eq, Show)
@@ -548,11 +549,16 @@ summarizeRepositoryAt repositoryPath repositoryRoot =
       Right (RepositoryComplianceSuccess packageNames checkNames) -> do
         let repositoryCheckNames = Set.fromList checkNames
             resultCheckNames = filter (\checkName -> any (`isSuffixOf` checkName) ["-coverage", "_coverage"]) checkNames
+        repositoryDependencies <-
+          parseNixExprFromFile "flake.nix" >>= \case
+            Left _ -> pure []
+            Right flakeExpression -> pure (extractFlakeInputNames flakeExpression)
         checkOutputPaths <- resolveRepositoryCheckOutputPaths resultCheckNames
         packageSummaries <- forM packageNames (summarizeRepositoryPackage checkOutputPaths repositoryCheckNames)
         pure
           RepositorySummary
             { repositorySummaryPath = repositoryPath,
+              repositorySummaryDependencies = repositoryDependencies,
               repositorySummaryPackages = packageSummaries
             }
 renderRepositorySummariesText :: [RepositorySummary] -> String
@@ -562,9 +568,15 @@ renderRepositorySummariesText repositorySummaries =
     [ "repository: "
         ++ repositorySummaryPath repositorySummary
         ++ "\n"
+        ++ renderRepositoryDependenciesText (repositorySummaryDependencies repositorySummary)
         ++ renderRepositoryPackageSummariesText (repositorySummaryPackages repositorySummary)
     | repositorySummary <- repositorySummaries
     ]
+renderRepositoryDependenciesText :: [String] -> String
+renderRepositoryDependenciesText repositoryDependencies =
+  case repositoryDependencies of
+    [] -> "dependencies: (none)\n"
+    _ -> "dependencies:\n" ++ unlines ["  " ++ dependencyName | dependencyName <- repositoryDependencies]
 renderRepositorySummariesJson :: [RepositorySummary] -> String
 renderRepositorySummariesJson repositorySummaries =
   unlines
@@ -580,6 +592,7 @@ renderRepositorySummaryJson repositorySummary =
     "\n"
     [ "    {",
       "      \"path\": " ++ renderJsonString (repositorySummaryPath repositorySummary) ++ ",",
+      "      \"dependencies\": [" ++ intercalate ", " (map renderJsonString (repositorySummaryDependencies repositorySummary)) ++ "],",
       "      \"packages\": [",
       intercalate ",\n" (map (indentText 4 . renderRepositoryPackageSummaryJson) (repositorySummaryPackages repositorySummary)),
       "      ]",
@@ -2365,6 +2378,29 @@ extractNamedNixBindings bindings =
   | NamedVar keyPath bindingValue _ <- bindings,
     let bindingKey = T.intercalate "." (mapMaybe nixKeyNameText (NE.toList keyPath))
   ]
+extractFlakeInputNames :: NExprLoc -> [String]
+extractFlakeInputNames (Fix (Compose (AnnUnit _ expressionFunctor))) =
+  case expressionFunctor of
+    NSet _ bindings ->
+      sort . Set.toList . Set.fromList . concatMap extractInputNamesFromRootBinding $ bindings
+    _ -> []
+  where
+    extractInputNamesFromRootBinding :: Binding NExprLoc -> [String]
+    extractInputNamesFromRootBinding (NamedVar keyPath bindingValue _) =
+      case mapMaybe nixKeyNameText (NE.toList keyPath) of
+        ["inputs"] -> extractInputNamesFromSet bindingValue
+        "inputs" : inputName : _ -> [T.unpack inputName]
+        _ -> []
+    extractInputNamesFromRootBinding Inherit {} = []
+    extractInputNamesFromSet :: NExprLoc -> [String]
+    extractInputNamesFromSet (Fix (Compose (AnnUnit _ inputExpressionFunctor))) =
+      case inputExpressionFunctor of
+        NSet _ inputBindings ->
+          [ T.unpack inputName
+          | NamedVar inputKeyPath _ _ <- inputBindings,
+            inputName : _ <- [mapMaybe nixKeyNameText (NE.toList inputKeyPath)]
+          ]
+        _ -> []
 normalizeRenderedNixBindingValue :: T.Text -> T.Text -> T.Text
 normalizeRenderedNixBindingValue bindingKey renderedBindingValue =
   let normalizedValue = T.pack (compactTextToSingleLine renderedBindingValue)
@@ -2419,6 +2455,7 @@ hUnitPackageTests =
       TestLabel "Requires allowlisted filesystem entry kinds." (TestCase entryKindStructureTest),
       TestLabel "Treats parameter directories as opaque user data." (TestCase parameterDirectoryStructureTest),
       TestLabel "Renders stable text and JSON repository summaries." (TestCase repositorySummaryRenderingTest),
+      TestLabel "Extracts direct flake dependencies." (TestCase flakeDependencyExtractionTest),
       TestLabel "Reports concise Nix template parameter differences." (TestCase nixTemplateParameterDifferenceTest),
       TestLabel "Accepts python_template without inputs or shellHook." (TestCase pythonTemplateOptionalInputsAndShellHookTest),
       TestLabel "Documents help and invokes it consistently." (TestCase commandLineHelpEndToEndTest),
@@ -2624,6 +2661,7 @@ repositorySummaryRenderingTest = do
       repositorySummary =
         RepositorySummary
           { repositorySummaryPath = "example.test/owner/demo",
+            repositorySummaryDependencies = ["blueprint", "nixpkgs"],
             repositorySummaryPackages = [packageSummary]
           }
   assertEqual
@@ -2634,6 +2672,9 @@ repositorySummaryRenderingTest = do
     "Text rendering has stable fields, indentation, and fallbacks."
     ( unlines
         [ "repository: example.test/owner/demo",
+          "dependencies:",
+          "  blueprint",
+          "  nixpkgs",
           "       name: demo",
           "       type: python",
           "description: (none)",
@@ -2650,6 +2691,7 @@ repositorySummaryRenderingTest = do
           "  \"repositories\": [",
           "    {",
           "      \"path\": \"example.test/owner/demo\",",
+          "      \"dependencies\": [\"blueprint\", \"nixpkgs\"],",
           "      \"packages\": [",
           "        {",
           "          \"name\": \"demo\",",
@@ -2672,6 +2714,29 @@ repositorySummaryRenderingTest = do
     "JSON string rendering escapes embedded newlines."
     "\"line one\\nline two\""
     (renderJsonString "line one\nline two")
+flakeDependencyExtractionTest :: IO ()
+flakeDependencyExtractionTest = do
+  parseNixExprFromText
+    ( T.unlines
+        [ "{",
+          "  inputs = {",
+          "    agenix = {",
+          "      inputs.nixpkgs.follows = \"nixpkgs\";",
+          "      url = \"github:ryantm/agenix\";",
+          "    };",
+          "    nixpkgs.url = \"github:NixOS/nixpkgs\";",
+          "  };",
+          "  outputs = inputs: inputs;",
+          "}"
+        ]
+    )
+    >>= \case
+      Left parseError -> assertFailure ("The flake dependency fixture must parse: " ++ parseError)
+      Right flakeExpression ->
+        assertEqual
+          "Only sorted direct flake inputs are reported."
+          ["agenix", "nixpkgs"]
+          (extractFlakeInputNames flakeExpression)
 commandLineHelpEndToEndTest :: IO ()
 commandLineHelpEndToEndTest =
   withTemporaryPackageRepository "command-line-help" $ \temporaryDirectory -> do
@@ -2775,7 +2840,7 @@ summaryEndToEndTest =
     assertEqual
       "Text summary exactly reports generated metadata, checks, and discovered tests."
       ( renderRepositorySummariesText
-          [RepositorySummary repositoryPath [expectedGeneratedPythonPackageSummary]]
+          [RepositorySummary repositoryPath [] [expectedGeneratedPythonPackageSummary]]
       )
       summaryStdout
     assertEqual "A successful text summary leaves stderr empty." "" summaryStderr
@@ -2784,7 +2849,7 @@ summaryEndToEndTest =
     assertEqual
       "JSON summary exactly reports generated metadata, checks, and discovered tests."
       ( renderRepositorySummariesJson
-          [RepositorySummary repositoryPath [expectedGeneratedPythonPackageSummary]]
+          [RepositorySummary repositoryPath [] [expectedGeneratedPythonPackageSummary]]
       )
       jsonStdout
     assertEqual "A successful JSON summary leaves stderr empty." "" jsonStderr
@@ -2797,7 +2862,7 @@ haskellSummaryEndToEndTest =
     assertEqual
       "The summary reports its conventional HUnit label."
       ( renderRepositorySummariesText
-          [RepositorySummary repositoryPath [expectedGeneratedHaskellPackageSummary]]
+          [RepositorySummary repositoryPath [] [expectedGeneratedHaskellPackageSummary]]
       )
       summaryStdout
     assertEqual "A successful Haskell summary leaves stderr empty." "" summaryStderr
