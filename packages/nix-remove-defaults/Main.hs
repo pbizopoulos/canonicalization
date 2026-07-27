@@ -57,7 +57,7 @@ import Nix.Utils (Path (Path))
 import Numeric (showFFloat)
 import Prettyprinter (defaultLayoutOptions, layoutPretty)
 import Prettyprinter.Render.Text (renderStrict)
-import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory, makeAbsolute, pathIsSymbolicLink)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory, makeAbsolute, pathIsSymbolicLink, withCurrentDirectory)
 import System.Environment (getArgs, lookupEnv, setEnv)
 import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitFailure)
 import System.FilePath (normalise, pathSeparator, takeDirectory, takeExtension, (</>))
@@ -189,6 +189,9 @@ main :: IO ()
 main = do
   args <- getArgs
   case args of
+    [] -> do
+      succeeded <- processRepositoryArgument "."
+      unless succeeded exitFailure
     [repositoryPath] -> do
       succeeded <- processRepositoryArgument repositoryPath
       unless succeeded exitFailure
@@ -741,7 +744,7 @@ hUnitPackageTests =
             "Nix failure"
             (Left "nix evaluation failed: underlying evaluation failure\n")
             (result :: Either String String),
-      TestLabel "The installed executable discovers a flake from a nested directory." $
+      TestLabel "The installed executable defaults to the current directory and discovers its flake." $
         TestCase $
           withSystemTempDirectory "nix-remove-defaults-e2e" $ \temporaryDirectory -> do
             maybeExecutable <- lookupEnv "PACKAGE_E2E_EXECUTABLE"
@@ -757,7 +760,7 @@ hUnitPackageTests =
                 TIO.writeFile modulePath (pack "{ }")
                 setEnv "NIX_CONFIG" "experimental-features = nix-command flakes"
                 (commandExit, commandStdout, commandStderr) <-
-                  readProcessWithExitCode executable [nestedDirectory] ""
+                  withCurrentDirectory nestedDirectory (readProcessWithExitCode executable [] "")
                 assertEqual
                   ( "installed command output: stdout="
                       ++ show commandStdout

@@ -606,9 +606,9 @@ renderRepositoryPackageSummariesText packageSummaries =
 renderRepositoryPackageDependenciesText :: RepositoryPackageSummary -> [String]
 renderRepositoryPackageDependenciesText packageSummary =
   case repositoryPackageDependencies packageSummary of
-    [] -> ["dependencies: (none)"]
+    [] -> [renderRepositoryPackageFieldName "dependencies" ++ " (none)"]
     dependencyNames ->
-      "dependencies:"
+      renderRepositoryPackageFieldName "dependencies"
         : [repositoryPackageValueIndent ++ dependencyName | dependencyName <- dependencyNames]
 renderRepositoryPackageTestsText :: RepositoryPackageSummary -> [String]
 renderRepositoryPackageTestsText packageSummary =
@@ -622,9 +622,11 @@ renderRepositoryPackageTestsText packageSummary =
         durationWidth = maximum (0 : map (length . renderProfileSeconds) (Map.elems testDurations))
 renderRepositoryPackageFieldName :: String -> String
 renderRepositoryPackageFieldName fieldName =
-  replicate (length ("description" :: String) - length fieldName) ' ' ++ fieldName ++ ":"
+  replicate (repositoryPackageFieldWidth - length fieldName) ' ' ++ fieldName ++ ":"
+repositoryPackageFieldWidth :: Int
+repositoryPackageFieldWidth = length ("dependencies" :: String)
 repositoryPackageValueIndent :: String
-repositoryPackageValueIndent = replicate (length ("description: " :: String)) ' '
+repositoryPackageValueIndent = replicate (repositoryPackageFieldWidth + length (": " :: String)) ' '
 renderRepositoryPackageSummaryJson :: RepositoryPackageSummary -> String
 renderRepositoryPackageSummaryJson packageSummary =
   intercalate
@@ -2658,14 +2660,14 @@ repositorySummaryRenderingTest = do
     "Text rendering has stable fields, indentation, and fallbacks."
     ( unlines
         [ "repository: example.test/owner/demo",
-          "       name: demo",
-          "       type: python",
-          "description: (none)",
+          "        name: demo",
+          "        type: python",
+          " description: (none)",
           "dependencies:",
-          "             alpha",
-          "             demo-two",
-          "      tests: (1.234s) (statements 19/20, 95.0%)",
-          "             (0.125s) Reports \"quoted\" behavior.",
+          "              alpha",
+          "              demo-two",
+          "       tests: (1.234s) (statements 19/20, 95.0%)",
+          "              (0.125s) Reports \"quoted\" behavior.",
           ""
         ]
     )
