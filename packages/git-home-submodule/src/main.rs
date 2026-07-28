@@ -204,17 +204,23 @@ fn initialize_home_repository(home_directory: &Path) -> Result<(), CliFailure> {
                     gitignore_path.display()
                 )));
             }
-            let mut updated = contents.clone();
-            for required_rule in ["!.gitignore", "!.gitmodules"] {
-                if !lines.contains(&required_rule) {
-                    if !updated.ends_with('\n') {
-                        updated.push('\n');
-                    }
-                    updated.push_str(required_rule);
+            let missing_rules: Vec<&str> = ["!.gitignore", "!.gitmodules"]
+                .into_iter()
+                .filter(|required_rule| !lines.contains(required_rule))
+                .collect();
+            if missing_rules.is_empty() {
+                None
+            } else {
+                let mut updated = contents;
+                if !updated.ends_with('\n') {
                     updated.push('\n');
                 }
+                for missing_rule in missing_rules {
+                    updated.push_str(missing_rule);
+                    updated.push('\n');
+                }
+                Some(updated)
             }
-            (updated != contents).then_some(updated)
         }
         Ok(_) => {
             return Err(CliFailure::fatal(format!(
