@@ -465,8 +465,7 @@ repositoryCheckPhaseHint = \case
 type RepositoryPackageTestStatus :: Type
 data RepositoryPackageTestStatus
   = RepositoryTestsNotConfigured
-  | RepositoryTestsNotRun
-  | RepositoryTestsUnavailable
+  | RepositoryTestsUnmeasured
   | RepositoryTestsMeasured CoverageMeasurement Duration (Map.Map String Duration)
   deriving stock (Eq, Show)
 type CoverageMeasurement :: Type
@@ -667,15 +666,13 @@ renderRepositoryPackageTestAggregate :: RepositoryPackageSummary -> String
 renderRepositoryPackageTestAggregate packageSummary =
   case repositoryPackageTestStatus packageSummary of
     RepositoryTestsNotConfigured -> " (not configured)"
-    RepositoryTestsNotRun -> " (not run)"
-    RepositoryTestsUnavailable -> " (unavailable)"
+    RepositoryTestsUnmeasured -> " (unmeasured)"
     RepositoryTestsMeasured coverage totalDuration _ ->
       " (" ++ renderDurationSeconds totalDuration ++ "s) " ++ renderCoverageMeasurementText coverage
 renderRepositoryPackageTestStatus :: RepositoryPackageTestStatus -> String
 renderRepositoryPackageTestStatus = \case
   RepositoryTestsNotConfigured -> "not-configured"
-  RepositoryTestsNotRun -> "not-run"
-  RepositoryTestsUnavailable -> "unavailable"
+  RepositoryTestsUnmeasured -> "unmeasured"
   RepositoryTestsMeasured {} -> "measured"
 renderCoverageMeasurementText :: CoverageMeasurement -> String
 renderCoverageMeasurementText (CoverageMeasurement metric covered total) =
@@ -816,19 +813,15 @@ parseRepositoryCheckOutputPaths expectedCheckNames outputPathsText = do
         _ -> Nothing
 summarizeRepositoryPackageTestStatus :: Maybe FilePath -> IO RepositoryPackageTestStatus
 summarizeRepositoryPackageTestStatus Nothing =
-  pure RepositoryTestsUnavailable
+  pure RepositoryTestsUnmeasured
 summarizeRepositoryPackageTestStatus (Just outputPath) = do
-  outputExists <- doesDirectoryExist outputPath
-  if not outputExists
-    then pure RepositoryTestsNotRun
-    else do
-      maybeCoverageText <- readTextFileIfExists (outputPath </> "coverage-summary.tsv")
-      maybeTimingText <- readTextFileIfExists (outputPath </> "profile-summary.tsv")
-      pure $
-        case (maybeCoverageText >>= parseRepositoryCoverageSummary, maybeTimingText >>= parseRepositoryTimingSummary) of
-          (Just coverage, Just (totalDuration, testDurations)) ->
-            RepositoryTestsMeasured coverage totalDuration testDurations
-          _ -> RepositoryTestsUnavailable
+  maybeCoverageText <- readTextFileIfExists (outputPath </> "coverage-summary.tsv")
+  maybeTimingText <- readTextFileIfExists (outputPath </> "profile-summary.tsv")
+  pure $
+    case (maybeCoverageText >>= parseRepositoryCoverageSummary, maybeTimingText >>= parseRepositoryTimingSummary) of
+      (Just coverage, Just (totalDuration, testDurations)) ->
+        RepositoryTestsMeasured coverage totalDuration testDurations
+      _ -> RepositoryTestsUnmeasured
 parseRepositoryCoverageSummary :: T.Text -> Maybe CoverageMeasurement
 parseRepositoryCoverageSummary coverageText =
   case T.splitOn "\t" (T.strip coverageText) of
@@ -2662,6 +2655,16 @@ repositorySummaryRenderingTest = do
             repositorySummaryPackages = [packageSummary]
           }
   assertEqual
+    "Test status vocabulary distinguishes configuration from available measurements."
+    ["not-configured", "unmeasured", "measured"]
+    ( map
+        renderRepositoryPackageTestStatus
+        [ RepositoryTestsNotConfigured,
+          RepositoryTestsUnmeasured,
+          repositoryPackageTestStatus packageSummary
+        ]
+    )
+  assertEqual
     "Recorded timings are used for test durations."
     (Map.fromList [("Reports \"quoted\" behavior.", Duration 0.125)])
     (repositoryPackageTestDurations packageSummary)
@@ -3023,7 +3026,7 @@ expectedGeneratedPythonPackageSummary =
       repositoryPackageDependencies = [],
       repositoryPackageTestNames =
         ["Prints the sample message from the executable."],
-      repositoryPackageTestStatus = RepositoryTestsUnavailable
+      repositoryPackageTestStatus = RepositoryTestsUnmeasured
     }
 expectedGeneratedHaskellPackageSummary :: RepositoryPackageSummary
 expectedGeneratedHaskellPackageSummary =
@@ -3033,7 +3036,7 @@ expectedGeneratedHaskellPackageSummary =
       repositoryPackageDescription = Just "Demo package",
       repositoryPackageDependencies = [],
       repositoryPackageTestNames = ["Renders the sample message."],
-      repositoryPackageTestStatus = RepositoryTestsUnavailable
+      repositoryPackageTestStatus = RepositoryTestsUnmeasured
     }
 runEndToEndCommandIn :: FilePath -> [String] -> IO (ExitCode, String, String)
 runEndToEndCommandIn workingDirectory arguments =
