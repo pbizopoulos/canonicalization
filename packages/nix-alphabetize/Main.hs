@@ -111,7 +111,9 @@ formatNixFile filePath = do
       putStrLn ("Error parsing " ++ filePath ++ ": " ++ show parseError)
       pure False
     Right expression -> do
-      TIO.writeFile filePath (formattedExpression expression)
+      let formatted = formattedExpression expression
+      contents <- TIO.readFile filePath
+      unless (contents == formatted) (TIO.writeFile filePath formatted)
       pure True
 renderExpressionText :: NExprLoc -> Text
 renderExpressionText =
@@ -432,6 +434,18 @@ hUnitPackageTests =
             contents <- TIO.readFile tmpFile
             assertEqual "parse status" False succeeded
             assertEqual "unchanged contents" malformed contents,
+      TestLabel "Leaves canonical files untouched." $
+        TestCase $
+          withSystemTempFile "canonical.nix" $ \tmpFile tmpHandle -> do
+            hClose tmpHandle
+            let canonical = pack "{\n  a = 1;\n}"
+            TIO.writeFile tmpFile canonical
+            (chmodExit, _chmodStdout, chmodStderr) <- readProcessWithExitCode "chmod" ["a-w", tmpFile] ""
+            assertEqual ("chmod stderr: " ++ chmodStderr) ExitSuccess chmodExit
+            succeeded <- formatNixFile tmpFile
+            contents <- TIO.readFile tmpFile
+            assertEqual "format status" True succeeded
+            assertEqual "unchanged canonical contents" canonical contents,
       TestLabel "Preserves multiline string formatting." $
         makeFormattingTest
           (pack "{ a = ''\n  line1\n  line2\n''; }")
