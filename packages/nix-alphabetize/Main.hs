@@ -436,7 +436,7 @@ hUnitPackageTests =
         makeFormattingTest
           (pack "{ a = ''\n  line1\n  line2\n''; }")
           (pack "{\n  a = ''\n    line1\n    line2\n    '';\n}"),
-      TestLabel "Preserves python template installPhase formatting." $
+      TestLabel "Preserves Python template installPhase formatting." $
         makeFormattingTest
           (pack "{ installPhase = ''\nmkdir -p $out/bin\ncp ./main.py $out/bin/${pname}\n''; }")
           (pack "{\n  installPhase = ''\n    mkdir -p $out/bin\n    cp ./main.py $out/bin/${pname}\n    '';\n}"),

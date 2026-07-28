@@ -255,11 +255,26 @@ fn initialize_home_repository(home_directory: &Path) -> Result<(), CliFailure> {
 }
 fn check_home_gitmodules(home_directory: &Path, fix: bool) -> Result<(), CliFailure> {
     let gitmodules_path = home_directory.join(".gitmodules");
-    if !gitmodules_path.is_file() {
-        return Err(CliFailure::Check(vec![format!(
-            "missing file: {}",
-            gitmodules_path.display()
-        )]));
+    match fs::symlink_metadata(&gitmodules_path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            return Err(CliFailure::Check(vec![format!(
+                "not a regular file: {}",
+                gitmodules_path.display()
+            )]));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(CliFailure::Check(vec![format!(
+                "missing file: {}",
+                gitmodules_path.display()
+            )]));
+        }
+        Err(error) => {
+            return Err(CliFailure::Check(vec![format!(
+                "{}: {error}",
+                gitmodules_path.display()
+            )]));
+        }
     }
     let output = Command::new("git")
         .args(["config", "get", "--file"])
@@ -636,7 +651,7 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn reports_incomplete_unsupported_unsafe_and_mismatched_entries() -> TestResult {
+    fn reports_all_invalid_entry_categories() -> TestResult {
         let home = TemporaryDirectory::new("check-invalid")?;
         fs::write(
             home.path().join(".gitmodules"),
@@ -725,10 +740,20 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn treats_an_empty_file_as_valid_but_requires_gitmodules_to_exist() -> TestResult {
+    fn treats_an_empty_file_as_valid_but_requires_gitmodules_to_be_a_regular_file() -> TestResult {
+        use std::os::unix::fs::symlink;
         let home = TemporaryDirectory::new("check-empty")?;
+        let gitmodules_path = home.path().join(".gitmodules");
         assert!(check_home_gitmodules(home.path(), false).is_err());
-        fs::write(home.path().join(".gitmodules"), "")?;
+        fs::create_dir(&gitmodules_path)?;
+        assert!(check_home_gitmodules(home.path(), false).is_err());
+        fs::remove_dir(&gitmodules_path)?;
+        let symlink_target = home.path().join("gitmodules-target");
+        fs::write(&symlink_target, "")?;
+        symlink(&symlink_target, &gitmodules_path)?;
+        assert!(check_home_gitmodules(home.path(), false).is_err());
+        fs::remove_file(&gitmodules_path)?;
+        fs::write(&gitmodules_path, "")?;
         check_home_gitmodules(home.path(), false)
             .map_err(|failure| format!("empty check failed: {failure:?}"))?;
         Ok(())
