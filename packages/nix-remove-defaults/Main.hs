@@ -95,6 +95,7 @@ import Prelude
     fst,
     isInfinite,
     isNaN,
+    length,
     map,
     mapM,
     maybe,
@@ -429,8 +430,15 @@ expressionLiteral (Fix (Compose (AnnUnit _ exprF))) =
     NConstant (NFloat value) -> Just (LiteralFloat value)
     NStr stringValue -> LiteralString <$> plainString stringValue
     NList values -> LiteralList <$> mapM expressionLiteral values
-    NSet NonRecursive bindings -> LiteralSet . Map.fromList <$> mapM literalBinding bindings
+    NSet NonRecursive bindings -> literalSetFromBindings bindings
     _ -> Nothing
+literalSetFromBindings :: [Binding NExprLoc] -> Maybe Literal
+literalSetFromBindings bindings = do
+  literalBindings <- mapM literalBinding bindings
+  let literalValues = Map.fromList literalBindings
+  if Map.size literalValues == length literalBindings
+    then Just (LiteralSet literalValues)
+    else Nothing
 plainString :: NString NExprLoc -> Maybe Text
 plainString (DoubleQuoted parts) = plainParts parts
 plainString (Indented _ parts) = plainParts parts
@@ -597,25 +605,22 @@ renderOptionKey :: Text -> Text
 renderOptionKey = Text.decodeUtf8 . LBS.toStrict . encode
 formatWithDefaults :: Map OptionPath Literal -> Text -> IO Text
 formatWithDefaults defaults input =
+  withTestExpression input $ \expr -> do
+    let removals = removalsFromDefaults defaults (collectCandidates expr)
+    pure (renderExpression (rewriteModuleExpression removals expr))
+formatTreefmtWithDefaults :: Map OptionPath Literal -> Text -> IO Text
+formatTreefmtWithDefaults defaults input =
+  withTestExpression input $ \expr -> do
+    let removals = removalsFromDefaults defaults (collectTreefmtCandidates expr)
+    pure (renderExpression (rewriteTreefmtEvalModuleArguments removals expr))
+withTestExpression :: Text -> (NExprLoc -> IO a) -> IO a
+withTestExpression input useExpression =
   withSystemTempFile "nix-remove-defaults-test.nix" $ \tmpFile tmpHandle -> do
     hClose tmpHandle
     TIO.writeFile tmpFile input
     parseResult <- parseNixFileLoc (Path tmpFile)
     case parseResult of
-      Right expr -> do
-        let removals = removalsFromDefaults defaults (collectCandidates expr)
-        pure (renderExpression (rewriteModuleExpression removals expr))
-      Left parseError -> assertFailure ("Test fixture failed to parse: " ++ show parseError)
-formatTreefmtWithDefaults :: Map OptionPath Literal -> Text -> IO Text
-formatTreefmtWithDefaults defaults input =
-  withSystemTempFile "nix-remove-defaults-treefmt-test.nix" $ \tmpFile tmpHandle -> do
-    hClose tmpHandle
-    TIO.writeFile tmpFile input
-    parseResult <- parseNixFileLoc (Path tmpFile)
-    case parseResult of
-      Right expr -> do
-        let removals = removalsFromDefaults defaults (collectTreefmtCandidates expr)
-        pure (renderExpression (rewriteTreefmtEvalModuleArguments removals expr))
+      Right expr -> useExpression expr
       Left parseError -> assertFailure ("Test fixture failed to parse: " ++ show parseError)
 makeRemovalTest :: Map OptionPath Literal -> Text -> Text -> Test
 makeRemovalTest defaults input expectedOutput = TestCase $ do
@@ -689,6 +694,10 @@ hUnitPackageTests =
           (Map.singleton (OptionPath ("example" :| ["value"])) (LiteralInteger 1))
           (pack "{ example.value = let x = 1; in x; }")
           (pack "{ example.value = let   x = 1; in x; }"),
+      TestLabel "Rejects duplicate keys in literal attribute sets." $
+        TestCase $
+          withTestExpression (pack "{ enabled = true; enabled = false; }") $
+            assertEqual "duplicate literal keys" Nothing . expressionLiteral,
       TestLabel "Treats a top-level config attribute as the option root." $
         makeRemovalTest
           (Map.singleton (OptionPath ("networking" :| ["useDHCP"])) (LiteralBool True))

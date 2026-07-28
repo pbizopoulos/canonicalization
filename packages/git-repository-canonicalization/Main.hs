@@ -184,14 +184,9 @@ templateSpecs =
       }
   ]
 matchesPythonLaTeXTemplate :: FilePath -> String -> IO Bool
-matchesPythonLaTeXTemplate packageName nixSource
-  | "buildPythonPackage" `isInfixOf` nixSource = do
-      let packageDirectory = "packages" </> packageName
-      hasManuscriptTexFile <- doesFileExist (packageDirectory </> "ms.tex")
-      hasRefsBibFile <- doesFileExist (packageDirectory </> "refs.bib")
-      hasFiguresDirectory <- doesDirectoryExist (packageDirectory </> "figures")
-      pure (hasManuscriptTexFile || hasRefsBibFile || hasFiguresDirectory)
-  | otherwise = pure False
+matchesPythonLaTeXTemplate packageName nixSource = do
+  packageKind <- detectPackageKindForPackage packageName
+  pure (packageKind == PythonLaTeXPackage && "buildPythonPackage" `isInfixOf` nixSource)
 matchesPythonPyPITemplateLike :: String -> FilePath -> String -> IO Bool
 matchesPythonPyPITemplateLike buildFunction _ nixSource =
   pure
@@ -1238,8 +1233,8 @@ checkRepositoryStructure = do
       leafPaths = Set.fromList relativePaths
       packageRootPaths = Set.fromList (mapMaybe packageRootPathFromRepositoryPath relativePaths)
       hostRootPaths = Set.fromList (mapMaybe hostRootPathFromRepositoryPath relativePaths)
-      packageInfos = map (buildPackageInfo leafPaths) (Set.toList packageRootPaths)
-      globalRegularFileRegexes :: [String]
+  packageInfos <- mapM (buildPackageInfo leafPaths) (Set.toList packageRootPaths)
+  let globalRegularFileRegexes :: [String]
       globalRegularFileRegexes =
         [ "^\\.git$",
           "^AGENTS\\.md$",
@@ -1269,19 +1264,19 @@ checkRepositoryStructure = do
       missingPackageDefaultNixIssues =
         [ packageRootDirectory ++ ": missing required file default.nix"
         | packageRootDirectory <- Set.toList packageRootPaths,
-          (packageRootDirectory </> "default.nix") `notElem` relativePaths
+          Set.notMember (packageRootDirectory </> "default.nix") leafPaths
         ]
       missingHostConfigurationIssues =
         [ hostRootDirectory ++ ": missing required file configuration.nix"
         | hostRootDirectory <- Set.toList hostRootPaths,
-          (hostRootDirectory </> "configuration.nix") `notElem` relativePaths
+          Set.notMember (hostRootDirectory </> "configuration.nix") leafPaths
         ]
       missingCabalForMainHaskellIssues =
         [ packageRootDirectory ++ ": missing required file " ++ packageDirectoryName ++ ".cabal for Main.hs package"
         | packageRootDirectory <- Set.toList packageRootPaths,
-          Set.member (packageRootDirectory </> "Main.hs") (Set.fromList relativePaths),
+          Set.member (packageRootDirectory </> "Main.hs") leafPaths,
           let packageDirectoryName = takeBaseName packageRootDirectory,
-          (packageRootDirectory </> packageDirectoryName <.> "cabal") `notElem` relativePaths
+          Set.notMember (packageRootDirectory </> packageDirectoryName <.> "cabal") leafPaths
         ]
       misnamedCabalFileIssues =
         [ cabalFilePath ++ ": cabal file must be named " ++ packageDirectoryName ++ ".cabal"
@@ -1294,13 +1289,13 @@ checkRepositoryStructure = do
         ]
       ambiguousPackageMarkerIssues =
         concatMap ambiguousPackageMarkerIssuesForPackage packageInfos
+      packageNameConventionIssues =
+        [ packageRootPath packageInfo ++ ": " ++ issue
+        | packageInfo <- packageInfos,
+          Just packageKind <- [packageKindFromDetection (packageDetection packageInfo)],
+          Just issue <- [validatePackageNameForKind packageKind (packageRootDirectoryName packageInfo)]
+        ]
       entryPolicyIssues = mapMaybe (validateRepositoryEntry allowedEntryRules) repositoryEntries
-  packageNameConventionIssues <-
-    fmap catMaybes $
-      forM (Set.toList packageRootPaths) $ \packageRootDirectory -> do
-        let packageName = takeBaseName packageRootDirectory
-        packageKind <- detectPackageKindForPackage packageName
-        pure (((packageRootDirectory ++ ": ") ++) <$> validatePackageNameForKind packageKind packageName)
   pure (entryPolicyIssues ++ missingPackageDefaultNixIssues ++ missingHostConfigurationIssues ++ missingCabalForMainHaskellIssues ++ misnamedCabalFileIssues ++ packageNameConventionIssues ++ ambiguousPackageMarkerIssues)
 type RepositoryEntry :: Type
 type RepositoryEntry = (FilePath, Posix.FileStatus)
@@ -1368,16 +1363,19 @@ type PackageDetection :: Type
 data PackageDetection
   = DetectedPackageKind PackageKind
   | AmbiguousPackageMarkers (NonEmpty String)
-buildPackageInfo :: Set.Set FilePath -> FilePath -> PackageInfo
-buildPackageInfo leafPaths packageRootDirectory =
+  deriving stock (Eq, Show)
+buildPackageInfo :: Set.Set FilePath -> FilePath -> IO PackageInfo
+buildPackageInfo leafPaths packageRootDirectory = do
+  maybeDefaultNixSource <- readTextFileIfExists (packageRootDirectory </> "default.nix")
   let packageDirectoryName = takeBaseName packageRootDirectory
       packageRelativeLeafPaths = mapMaybe (stripPrefix (packageRootDirectory ++ "/")) (Set.toList leafPaths)
       markers = detectPackageMarkers packageRelativeLeafPaths
-   in PackageInfo
-        { packageRootPath = packageRootDirectory,
-          packageRootDirectoryName = packageDirectoryName,
-          packageDetection = detectPackageKindFromMarkers markers
-        }
+  pure
+    PackageInfo
+      { packageRootPath = packageRootDirectory,
+        packageRootDirectoryName = packageDirectoryName,
+        packageDetection = detectPackageFromEvidence markers maybeDefaultNixSource
+      }
 detectPackageMarkers :: [FilePath] -> [(String, PackageKind)]
 detectPackageMarkers packageRelativeLeafPaths =
   let hasLeafPath leafPath = leafPath `elem` packageRelativeLeafPaths
@@ -1394,10 +1392,13 @@ detectPackageMarkers packageRelativeLeafPaths =
           ],
         markerExists
       ]
-detectPackageKindFromMarkers :: [(String, PackageKind)] -> PackageDetection
-detectPackageKindFromMarkers markers =
+detectPackageFromEvidence :: [(String, PackageKind)] -> Maybe T.Text -> PackageDetection
+detectPackageFromEvidence markers maybeDefaultNixSource =
   case markers of
-    [] -> DetectedPackageKind BinaryReleasePackage
+    []
+      | maybe False isExternalPythonPackageSource maybeDefaultNixSource ->
+          DetectedPackageKind PythonPyPIPackage
+      | otherwise -> DetectedPackageKind BinaryReleasePackage
     [(_, markerKind)] -> DetectedPackageKind markerKind
     firstMarker : remainingMarkers ->
       AmbiguousPackageMarkers (fst firstMarker :| map fst remainingMarkers)
@@ -2452,6 +2453,7 @@ hUnitPackageTests =
       TestLabel "Ignores non-test Haskell strings and comments during discovery." (TestCase haskellTestDiscoveryFalsePositiveTest),
       TestLabel "Uses Python test docstrings as behavioral specifications." (TestCase pythonTestDiscoveryTest),
       TestLabel "Humanizes conventional test identifiers across frameworks." (TestCase testIdentifierSpecificationTest),
+      TestLabel "Uses default.nix evidence only for markerless package classification." (TestCase packageDetectionTest),
       TestLabel "Parses versioned test result summaries strictly." (TestCase repositoryTestResultParsingTest),
       TestLabel "Ignores formatter-only Cargo inline-table spacing." (TestCase cargoTomlFormattingNormalizationTest),
       TestLabel "Requires allowlisted filesystem entry kinds." (TestCase entryKindStructureTest),
@@ -2543,6 +2545,16 @@ testIdentifierSpecificationTest =
           "rejects_a_non_regular_top_level_value"
         ]
     )
+packageDetectionTest :: IO ()
+packageDetectionTest =
+  assertEqual
+    "External Python source evidence refines markerless packages without hiding conflicting markers."
+    [ DetectedPackageKind PythonPyPIPackage,
+      AmbiguousPackageMarkers ("Main.hs" :| ["Cargo.toml"])
+    ]
+    [ detectPackageFromEvidence [] (Just "{ buildPythonPackage = true; src = fetchPypi {}; }"),
+      detectPackageFromEvidence (detectPackageMarkers ["Main.hs", "Cargo.toml"]) (Just "{ buildPythonPackage = true; src = fetchPypi {}; }")
+    ]
 cargoTomlFormattingNormalizationTest :: IO ()
 cargoTomlFormattingNormalizationTest =
   assertEqual
@@ -3294,61 +3306,53 @@ rustMainSource :: T.Text
 rustMainSource =
   T.unlines
     [ "#![allow(clippy::multiple_crate_versions)]",
-      "use anyhow::{Context, Result};",
+      "use anyhow::{Context as _, Result};",
       "use ignore::WalkBuilder;",
       "use std::fs;",
-      "use std::io::{BufRead, BufReader, Write};",
       "use std::path::Path;",
       "fn main() -> Result<()> {",
-      "    let input_paths: Vec<String> = std::env::args().skip(1).collect();",
-      "    if input_paths.is_empty() {",
-      "        process_root_path(Path::new(\".\"));",
+      "    let mut paths = std::env::args_os().skip(1);",
+      "    if let Some(path) = paths.next() {",
+      "        process_path(Path::new(&path))?;",
+      "        for path in paths {",
+      "            process_path(Path::new(&path))?;",
+      "        }",
       "    } else {",
-      "        for input_path in input_paths {",
-      "            process_root_path(Path::new(&input_path));",
+      "        process_path(Path::new(\".\"))?;",
+      "    }",
+      "    Ok(())",
+      "}",
+      "fn process_path(path: &Path) -> Result<()> {",
+      "    for result in WalkBuilder::new(path).require_git(false).build() {",
+      "        let entry = result.with_context(|| format!(\"Failed to walk path: {}\", path.display()))?;",
+      "        if entry.file_type().is_some_and(|file_type| file_type.is_file()) {",
+      "            process_file(entry.path())?;",
       "        }",
       "    }",
       "    Ok(())",
       "}",
-      "fn process_root_path(root: &Path) {",
-      "    let walker = WalkBuilder::new(root).require_git(false).build();",
-      "    for result in walker {",
-      "        match result {",
-      "            Ok(entry) => {",
-      "                let path = entry.path();",
-      "                if path.is_file() {",
-      "                    if let Err(e) = remove_empty_lines(path) {",
-      "                        let path_display = path.display();",
-      "                        eprintln!(\"Error processing {path_display}: {e}\");",
-      "                    }",
-      "                }",
-      "            }",
-      "            Err(err) => eprintln!(\"Error walking path: {err}\"),",
-      "        }",
-      "    }",
-      "}",
-      "fn remove_empty_lines(path: &Path) -> Result<()> {",
+      "fn process_file(path: &Path) -> Result<()> {",
       "    let path_display = path.display();",
-      "    let data = fs::read(path).with_context(|| format!(\"Failed to read file: {path_display}\"))?;",
-      "    if content_inspector::inspect(&data).is_binary() {",
+      "    let contents = fs::read(path).with_context(|| format!(\"Failed to read file: {path_display}\"))?;",
+      "    if content_inspector::inspect(&contents).is_binary() {",
       "        return Ok(());",
       "    }",
-      "    let output = strip_empty_lines_from_bytes(&data)?;",
-      "    if output != data {",
-      "        fs::write(path, output).with_context(|| format!(\"Failed to write file: {path_display}\"))?;",
+      "    let updated_contents = remove_empty_lines(&contents);",
+      "    if updated_contents != contents {",
+      "        fs::write(path, updated_contents).with_context(|| format!(\"Failed to write file: {path_display}\"))?;",
       "    }",
       "    Ok(())",
       "}",
-      "fn strip_empty_lines_from_bytes(data: &[u8]) -> Result<Vec<u8>> {",
-      "    let reader = BufReader::new(data);",
-      "    let mut output = Vec::new();",
-      "    for line_result in reader.lines() {",
-      "        let line = line_result?;",
-      "        if !line.trim().is_empty() {",
-      "            writeln!(output, \"{line}\")?;",
+      "fn remove_empty_lines(contents: &[u8]) -> Vec<u8> {",
+      "    let mut updated_contents = Vec::with_capacity(contents.len());",
+      "    for line in contents.split_inclusive(|byte| *byte == b'\\n') {",
+      "        let without_newline = line.strip_suffix(b\"\\n\").unwrap_or(line);",
+      "        let line_contents = without_newline.strip_suffix(b\"\\r\").unwrap_or(without_newline);",
+      "        if !core::str::from_utf8(line_contents).is_ok_and(|text| text.trim().is_empty()) {",
+      "            updated_contents.extend_from_slice(line);",
       "        }",
       "    }",
-      "    Ok(output)",
+      "    updated_contents",
       "}",
       "#[cfg(test)]",
       "mod tests {",
@@ -3395,7 +3399,7 @@ rustMainSource =
       "        fs::write(&ignored_path, \"should be ignored\\n\\n\")?;",
       "        let binary_path = root.join(\"binary.bin\");",
       "        fs::write(&binary_path, [0, 15, 255, 0, 1, 2, 3])?;",
-      "        process_root_path(root);",
+      "        process_path(root)?;",
       "        let content_ignored = fs::read_to_string(&ignored_path)?;",
       "        assert_eq!(content_ignored, \"should be ignored\\n\\n\");",
       "        let content_binary = fs::read(&binary_path)?;",
@@ -3420,12 +3424,11 @@ rustMainSource =
       "    }",
       "    #[test]",
       "    fn quickcheck_removing_empty_lines_matches_filtered_sequence() {",
+      "        #[expect(clippy::needless_pass_by_value)]",
       "        fn property(lines: Vec<LogicalLine>) -> TestResult {",
       "            let input = render_lines(&lines);",
-      "            match strip_empty_lines_from_bytes(&input) {",
-      "                Ok(actual) => TestResult::from_bool(actual == expected_non_empty_lines(&lines)),",
-      "                Err(_) => TestResult::error(\"strip_empty_lines_from_bytes returned an error\"),",
-      "            }",
+      "            let actual = remove_empty_lines(&input);",
+      "            TestResult::from_bool(actual == expected_non_empty_lines(&lines))",
       "        }",
       "        QuickCheck::new()",
       "            .tests(100)",

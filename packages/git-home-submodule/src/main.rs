@@ -288,16 +288,17 @@ fn check_home_gitmodules(home_directory: &Path, fix: bool) -> Result<(), CliFail
     let mut path_fixes = Vec::new();
     let mut configured_path_sections = BTreeMap::new();
     let mut canonical_path_sections = BTreeMap::new();
-    for submodule in submodules {
-        let section = submodule.section;
-        let configured_path = submodule.path;
-        let configured_url = submodule.url;
-        if let Some(existing_section) =
-            configured_path_sections.insert(configured_path.clone(), section.clone())
-        {
+    for SubmoduleRecord {
+        section,
+        path: configured_path,
+        url: configured_url,
+    } in submodules
+    {
+        if let Some(existing_section) = configured_path_sections.get(&configured_path) {
             diagnostics.push(format!(                "submodule \"{section}\": path '{configured_path}' is already used by submodule \"{existing_section}\""            ));
             continue;
         }
+        configured_path_sections.insert(configured_path.clone(), section.clone());
         if validate_canonical_repository_path(&configured_path).is_err()
             && (!fix || validate_repository_path_components(&configured_path).is_err())
         {

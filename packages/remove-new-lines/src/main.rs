@@ -4,13 +4,14 @@ use ignore::WalkBuilder;
 use std::fs;
 use std::path::Path;
 fn main() -> Result<()> {
-    let mut paths = std::env::args_os().skip(1).peekable();
-    if paths.peek().is_none() {
-        process_path(Path::new("."))?;
-    } else {
+    let mut paths = std::env::args_os().skip(1);
+    if let Some(path) = paths.next() {
+        process_path(Path::new(&path))?;
         for path in paths {
             process_path(Path::new(&path))?;
         }
+    } else {
+        process_path(Path::new("."))?;
     }
     return Ok(());
 }
