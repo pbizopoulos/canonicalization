@@ -48,16 +48,9 @@ struct SubmoduleRecord {
 }
 fn main() {
     let arguments: Vec<OsString> = env::args_os().skip(1).collect();
-    let home_directory = env::var_os("HOME").map_or_else(
-        || {
-            eprintln!("fatal: HOME is not set");
-            process::exit(128);
-        },
-        PathBuf::from,
-    );
-    process::exit(run_cli(&arguments, &home_directory));
+    process::exit(run_cli(&arguments));
 }
-fn run_cli(arguments: &[OsString], home_directory: &Path) -> i32 {
+fn run_cli(arguments: &[OsString]) -> i32 {
     let result = match arguments {
         [] => {
             eprint!("{MAIN_USAGE}");
@@ -71,14 +64,18 @@ fn run_cli(arguments: &[OsString], home_directory: &Path) -> i32 {
             eprint!("{MAIN_USAGE}");
             return 1;
         }
-        [command] if command == "init" => initialize_home_repository(home_directory),
+        [command] if command == "init" => {
+            home_directory().and_then(|directory| initialize_home_repository(&directory))
+        }
         [command, repository_url] if command == "add" => repository_url.to_str().map_or_else(
             || Err(CliFailure::fatal("repository URL must be valid UTF-8")),
-            |url| add_repository(home_directory, url),
+            |url| home_directory().and_then(|directory| add_repository(&directory, url)),
         ),
-        [command] if command == "check" => check_home_gitmodules(home_directory, false),
+        [command] if command == "check" => {
+            home_directory().and_then(|directory| check_home_gitmodules(&directory, false))
+        }
         [command, fix] if command == "check" && fix == "--fix" => {
-            check_home_gitmodules(home_directory, true)
+            home_directory().and_then(|directory| check_home_gitmodules(&directory, true))
         }
         _ => {
             eprint!("{MAIN_USAGE}");
@@ -100,6 +97,11 @@ fn run_cli(arguments: &[OsString], home_directory: &Path) -> i32 {
         Err(CliFailure::Git(exit_status)) => exit_status.code().unwrap_or(1),
         Err(CliFailure::Usage) => USAGE_EXIT_CODE,
     }
+}
+fn home_directory() -> Result<PathBuf, CliFailure> {
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| CliFailure::fatal("HOME is not set"))
 }
 fn parse_repository_url(repository_url: &str) -> Result<String, RepositoryUrlError> {
     let (hostname, repository_path) =
@@ -526,12 +528,15 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn prints_concise_top_level_help() -> TestResult {
-        if env::var_os("PACKAGE_E2E_EXECUTABLE").is_none() {
+    fn prints_help_without_repository_context() -> TestResult {
+        let Some(executable) = env::var_os("PACKAGE_E2E_EXECUTABLE") else {
             return Ok(());
-        }
+        };
         let home = TemporaryDirectory::new("help")?;
-        let output = run_installed(home.path(), &["-h"])?;
+        let output = Command::new(executable)
+            .arg("-h")
+            .env_remove("HOME")
+            .output()?;
         assert!(output.status.success());
         assert_eq!(String::from_utf8(output.stdout)?, MAIN_HELP);
         assert!(output.stderr.is_empty());
