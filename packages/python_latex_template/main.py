@@ -48,7 +48,11 @@ class Samples:
         if not all(map(math.isfinite, normalized)):
             msg = "samples must be finite"
             raise ValueError(msg)
-        total = math.fsum(normalized)
+        try:
+            total = math.fsum(normalized)
+        except OverflowError as error:
+            msg = "sample total must be finite"
+            raise ValueError(msg) from error
         if not math.isfinite(total):
             msg = "sample total must be finite"
             raise ValueError(msg)
@@ -127,8 +131,8 @@ def main() -> None:
 
 
 def test_samples_rejects_invalid_values() -> None:
-    """Rejects empty and non-finite sample sequences."""
-    for values in ((), (math.nan,), (math.inf,)):
+    """Rejects empty, non-finite, and overflowing sample sequences."""
+    for values in ((), (math.nan,), (math.inf,), (1e308, 1e308)):
         try:
             Samples(values)
         except ValueError:
