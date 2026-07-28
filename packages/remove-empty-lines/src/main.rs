@@ -4,52 +4,54 @@ use ignore::WalkBuilder;
 use std::fs;
 use std::path::Path;
 fn main() -> Result<()> {
-    let mut input_paths = std::env::args_os().skip(1).peekable();
-    if input_paths.peek().is_none() {
-        process_root_path(Path::new("."))?;
+    let mut paths = std::env::args_os().skip(1).peekable();
+    if paths.peek().is_none() {
+        process_path(Path::new("."))?;
     } else {
-        for input_path in input_paths {
-            process_root_path(Path::new(&input_path))?;
+        for path in paths {
+            process_path(Path::new(&path))?;
         }
     }
     return Ok(());
 }
-fn process_root_path(root: &Path) -> Result<()> {
-    for result in WalkBuilder::new(root).require_git(false).build() {
-        let entry = result.with_context(|| format!("Failed to walk path: {}", root.display()))?;
+fn process_path(path: &Path) -> Result<()> {
+    for result in WalkBuilder::new(path).require_git(false).build() {
+        let entry = result.with_context(|| format!("Failed to walk path: {}", path.display()))?;
         if entry
             .file_type()
             .is_some_and(|file_type| return file_type.is_file())
         {
-            remove_empty_lines(entry.path())?;
+            process_file(entry.path())?;
         }
     }
     return Ok(());
 }
-fn remove_empty_lines(path: &Path) -> Result<()> {
+fn process_file(path: &Path) -> Result<()> {
     let path_display = path.display();
-    let data = fs::read(path).with_context(|| format!("Failed to read file: {path_display}"))?;
-    if content_inspector::inspect(&data).is_binary() {
+    let contents =
+        fs::read(path).with_context(|| format!("Failed to read file: {path_display}"))?;
+    if content_inspector::inspect(&contents).is_binary() {
         return Ok(());
     }
-    let output = strip_empty_lines_from_bytes(&data);
-    if output != data {
-        fs::write(path, output).with_context(|| format!("Failed to write file: {path_display}"))?;
+    let updated_contents = without_empty_lines(&contents);
+    if updated_contents != contents {
+        fs::write(path, updated_contents)
+            .with_context(|| format!("Failed to write file: {path_display}"))?;
     }
     return Ok(());
 }
-fn strip_empty_lines_from_bytes(data: &[u8]) -> Vec<u8> {
-    let mut output = Vec::with_capacity(data.len());
-    for line in data.split_inclusive(|byte| return *byte == b'\n') {
+fn without_empty_lines(contents: &[u8]) -> Vec<u8> {
+    let mut updated_contents = Vec::with_capacity(contents.len());
+    for line in contents.split_inclusive(|byte| return *byte == b'\n') {
         let without_newline = line.strip_suffix(b"\n").unwrap_or(line);
-        let contents = without_newline
+        let line_contents = without_newline
             .strip_suffix(b"\r")
             .unwrap_or(without_newline);
-        if !core::str::from_utf8(contents).is_ok_and(|text| return text.trim().is_empty()) {
-            output.extend_from_slice(line);
+        if !core::str::from_utf8(line_contents).is_ok_and(|text| return text.trim().is_empty()) {
+            updated_contents.extend_from_slice(line);
         }
     }
-    return output;
+    return updated_contents;
 }
 #[cfg(test)]
 mod tests {
@@ -87,7 +89,7 @@ mod tests {
         return rendered;
     }
     #[test]
-    fn test_process_root_path_respects_gitignore_and_skips_binary_files() -> Result<()> {
+    fn test_process_path_respects_gitignore_and_skips_binary_files() -> Result<()> {
         use std::os::unix::fs::symlink;
         use tempfile::tempdir;
         let dir = tempdir()?;
@@ -102,7 +104,7 @@ mod tests {
         let external_path = external_dir.path().join("external.txt");
         fs::write(&external_path, "outside\n\n")?;
         symlink(&external_path, root.join("external.txt"))?;
-        process_root_path(root)?;
+        process_path(root)?;
         let content_ignored = fs::read_to_string(&ignored_path)?;
         assert_eq!(content_ignored, "should be ignored\n\n");
         let content_binary = fs::read(&binary_path)?;
@@ -129,29 +131,29 @@ mod tests {
         return Ok(());
     }
     #[test]
-    fn test_run_propagates_missing_root_failures() {
+    fn test_process_path_propagates_missing_path_failures() {
         let missing = env::temp_dir().join("remove-empty-lines-definitely-missing-root");
-        assert!(process_root_path(&missing).is_err());
+        assert!(process_path(&missing).is_err());
     }
     #[test]
     fn test_byte_transform_preserves_non_utf8_data_without_a_decode_error() {
         assert_eq!(
-            strip_empty_lines_from_bytes(&[0xff, b'\n', b' ', b'\r', b'\n']),
+            without_empty_lines(&[0xff, b'\n', b' ', b'\r', b'\n']),
             vec![0xff, b'\n']
         );
     }
     #[test]
     fn test_byte_transform_only_removes_empty_lines() {
         assert_eq!(
-            strip_empty_lines_from_bytes(b"first\r\n \t\r\nlast"),
+            without_empty_lines(b"first\r\n \t\r\nlast"),
             b"first\r\nlast"
         );
     }
     #[test]
-    fn quickcheck_strip_empty_lines_matches_filtered_sequence() {
+    fn quickcheck_without_empty_lines_matches_filtered_sequence() {
         fn property(lines: Vec<LogicalLine>) -> TestResult {
             let input = render_lines(&lines);
-            let actual = strip_empty_lines_from_bytes(&input);
+            let actual = without_empty_lines(&input);
             return TestResult::from_bool(actual == expected_non_empty_lines(&lines));
         }
         QuickCheck::new()

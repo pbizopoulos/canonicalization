@@ -11,7 +11,7 @@ module Main (main, runPackageTests, runPackageTestsWithTimings) where
 import Control.Applicative ((<|>))
 import Control.Exception (IOException, finally, try)
 import Control.Monad (filterM, forM, forM_, guard, when)
-import Data.Char (isAlphaNum, isAsciiLower, isDigit, isLower, isSpace, isUpper, toLower, toUpper)
+import Data.Char (isAlphaNum, isAsciiLower, isControl, isDigit, isLower, isSpace, isUpper, ord, toLower, toUpper)
 import Data.Fix (Fix (Fix))
 import Data.Functor.Compose (Compose (Compose))
 import Data.Kind (Type)
@@ -38,7 +38,7 @@ import Nix.Expr.Types.Annotated (AnnUnit (AnnUnit), NExprLoc, stripAnnotation)
 import Nix.Parser (parseNixFileLoc)
 import Nix.Pretty (prettyNix)
 import Nix.Utils (Path (Path))
-import Numeric (showFFloat)
+import Numeric (showFFloat, showHex)
 import Prettyprinter (defaultLayoutOptions, layoutPretty)
 import Prettyprinter.Render.Text (renderStrict)
 import System.Directory (canonicalizePath, createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, doesPathExist, findExecutable, getCurrentDirectory, getTemporaryDirectory, listDirectory, pathIsSymbolicLink, removeFile, removePathForcibly, withCurrentDirectory)
@@ -295,7 +295,7 @@ runCli commandLineArgs =
     ParsedCommand CheckCommand -> checkRepositoryLocation "."
     ParsedCommand (SummaryCommand jsonOutput) ->
       summarizeRepositoryLocation
-        (if jsonOutput then renderRepositorySummariesJson else renderRepositorySummariesText)
+        (if jsonOutput then renderRepositorySummariesJSON else renderRepositorySummariesText)
         "."
     ParsedCommand (AddCommand packageKindName packageName packageDescription) ->
       runInGitRepositoryRoot "." $
@@ -566,23 +566,23 @@ renderRepositorySummariesText repositorySummaries =
         ++ renderRepositoryPackageSummariesText (repositorySummaryPackages repositorySummary)
     | repositorySummary <- repositorySummaries
     ]
-renderRepositorySummariesJson :: [RepositorySummary] -> String
-renderRepositorySummariesJson repositorySummaries =
+renderRepositorySummariesJSON :: [RepositorySummary] -> String
+renderRepositorySummariesJSON repositorySummaries =
   unlines
     [ "{",
       "  \"repositories\": [",
-      intercalate ",\n" (map renderRepositorySummaryJson repositorySummaries),
+      intercalate ",\n" (map renderRepositorySummaryJSON repositorySummaries),
       "  ]",
       "}"
     ]
-renderRepositorySummaryJson :: RepositorySummary -> String
-renderRepositorySummaryJson repositorySummary =
+renderRepositorySummaryJSON :: RepositorySummary -> String
+renderRepositorySummaryJSON repositorySummary =
   intercalate
     "\n"
     [ "    {",
-      "      \"path\": " ++ renderJsonString (repositorySummaryPath repositorySummary) ++ ",",
+      "      \"path\": " ++ renderJSONString (repositorySummaryPath repositorySummary) ++ ",",
       "      \"packages\": [",
-      intercalate ",\n" (map (indentText 4 . renderRepositoryPackageSummaryJson) (repositorySummaryPackages repositorySummary)),
+      intercalate ",\n" (map (indentText 4 . renderRepositoryPackageSummaryJSON) (repositorySummaryPackages repositorySummary)),
       "      ]",
       "    }"
     ]
@@ -627,38 +627,38 @@ repositoryPackageFieldWidth :: Int
 repositoryPackageFieldWidth = length ("dependencies" :: String)
 repositoryPackageValueIndent :: String
 repositoryPackageValueIndent = replicate (repositoryPackageFieldWidth + length (": " :: String)) ' '
-renderRepositoryPackageSummaryJson :: RepositoryPackageSummary -> String
-renderRepositoryPackageSummaryJson packageSummary =
+renderRepositoryPackageSummaryJSON :: RepositoryPackageSummary -> String
+renderRepositoryPackageSummaryJSON packageSummary =
   intercalate
     "\n"
     ( [ "    {",
-        "      \"name\": " ++ renderJsonString (repositoryPackageName packageSummary) ++ ",",
-        "      \"type\": " ++ renderJsonString (renderPackageKind (repositoryPackageKind packageSummary)) ++ ",",
-        "      \"description\": " ++ maybe "null" renderJsonString (repositoryPackageDescription packageSummary) ++ ",",
-        "      \"dependencies\": [" ++ intercalate ", " (map renderJsonString (repositoryPackageDependencies packageSummary)) ++ "]" ++ if hasTests then "," else ""
+        "      \"name\": " ++ renderJSONString (repositoryPackageName packageSummary) ++ ",",
+        "      \"type\": " ++ renderJSONString (renderPackageKind (repositoryPackageKind packageSummary)) ++ ",",
+        "      \"description\": " ++ maybe "null" renderJSONString (repositoryPackageDescription packageSummary) ++ ",",
+        "      \"dependencies\": [" ++ intercalate ", " (map renderJSONString (repositoryPackageDependencies packageSummary)) ++ "]" ++ if hasTests then "," else ""
       ]
-        ++ renderRepositoryPackageTestsJson packageSummary
+        ++ renderRepositoryPackageTestsJSON packageSummary
         ++ ["    }"]
     )
   where
     hasTests = not (null (repositoryPackageTestNames packageSummary))
-renderRepositoryPackageTestsJson :: RepositoryPackageSummary -> [String]
-renderRepositoryPackageTestsJson packageSummary
+renderRepositoryPackageTestsJSON :: RepositoryPackageSummary -> [String]
+renderRepositoryPackageTestsJSON packageSummary
   | null testNames = []
   | otherwise =
       [ "      \"tests\": {",
-        "        \"coverage\": " ++ renderRepositoryPackageCoverageJson (repositoryPackageCheck packageSummary) ++ ",",
-        "        \"profile\": " ++ renderRepositoryPackageProfileJson (repositoryPackageCheck packageSummary) ++ ",",
-        "        \"cases\": [" ++ intercalate ", " (map (renderRepositoryPackageTestCaseJson testDurations) testNames) ++ "]",
+        "        \"coverage\": " ++ renderRepositoryPackageCoverageJSON (repositoryPackageCheck packageSummary) ++ ",",
+        "        \"profile\": " ++ renderRepositoryPackageProfileJSON (repositoryPackageCheck packageSummary) ++ ",",
+        "        \"cases\": [" ++ intercalate ", " (map (renderRepositoryPackageTestCaseJSON testDurations) testNames) ++ "]",
         "      }"
       ]
   where
     testNames = repositoryPackageTestNames packageSummary
     testDurations = repositoryPackageTestDurations packageSummary
-renderRepositoryPackageTestCaseJson :: Map.Map String Duration -> String -> String
-renderRepositoryPackageTestCaseJson testDurations testName =
+renderRepositoryPackageTestCaseJSON :: Map.Map String Duration -> String -> String
+renderRepositoryPackageTestCaseJSON testDurations testName =
   "{ \"name\": "
-    ++ renderJsonString testName
+    ++ renderJSONString testName
     ++ maybe "" (\seconds -> ", \"durationSeconds\": " ++ renderProfileSeconds seconds) (Map.lookup testName testDurations)
     ++ " }"
 renderRepositoryPackageTestAggregate :: RepositoryPackageSummary -> String
@@ -674,15 +674,15 @@ renderRepositoryPackageCoverageAggregate = \case
   RepositoryCoverageUnavailable -> "(coverage unavailable)"
   RepositoryCoverageMeasured (CoverageMeasurement metric covered total) ->
     "(" ++ renderCoverageMetric metric ++ " " ++ show covered ++ "/" ++ show total ++ ", " ++ renderCoveragePercent covered total ++ "%)"
-renderRepositoryPackageCoverageJson :: Maybe RepositoryPackageCheckSummary -> String
-renderRepositoryPackageCoverageJson = \case
+renderRepositoryPackageCoverageJSON :: Maybe RepositoryPackageCheckSummary -> String
+renderRepositoryPackageCoverageJSON = \case
   Nothing -> "{ \"status\": \"not-configured\" }"
   Just RepositoryPackageCheckNotRun -> "{ \"status\": \"not-run\" }"
   Just RepositoryPackageCheckUnavailable -> "{ \"status\": \"unavailable\" }"
   Just (RepositoryPackageCheckMeasured RepositoryCoverageUnavailable _) -> "{ \"status\": \"unavailable\" }"
   Just (RepositoryPackageCheckMeasured (RepositoryCoverageMeasured (CoverageMeasurement metric covered total)) _) ->
     "{ \"status\": \"measured\", \"metric\": "
-      ++ renderJsonString (renderCoverageMetric metric)
+      ++ renderJSONString (renderCoverageMetric metric)
       ++ ", \"covered\": "
       ++ show covered
       ++ ", \"total\": "
@@ -702,8 +702,8 @@ renderRepositoryPackageProfileAggregate :: RepositoryPackageProfileSummary -> St
 renderRepositoryPackageProfileAggregate = \case
   RepositoryProfileUnavailable -> "(profile unavailable)"
   RepositoryProfileMeasured totalSeconds _ -> "(" ++ renderProfileSeconds totalSeconds ++ "s)"
-renderRepositoryPackageProfileJson :: Maybe RepositoryPackageCheckSummary -> String
-renderRepositoryPackageProfileJson = \case
+renderRepositoryPackageProfileJSON :: Maybe RepositoryPackageCheckSummary -> String
+renderRepositoryPackageProfileJSON = \case
   Nothing -> "{ \"status\": \"not-configured\" }"
   Just RepositoryPackageCheckNotRun -> "{ \"status\": \"not-run\" }"
   Just RepositoryPackageCheckUnavailable -> "{ \"status\": \"unavailable\" }"
@@ -739,7 +739,7 @@ summarizeRepositoryPackage checkOutputPaths repositoryCheckNames packageName = d
         maybeCargoTomlContents <- readTextFileIfExists (packageRoot </> "Cargo.toml")
         pure (maybeCargoTomlContents >>= extractRustPackageDescription)
       _
-        | packageKind `elem` [PythonPackage, PythonLatexPackage, PythonPyPIPackage] -> do
+        | packageKind `elem` [PythonPackage, PythonLaTeXPackage, PythonPyPIPackage] -> do
             maybePyprojectTomlContents <- readTextFileIfExists (packageRoot </> "pyproject.toml")
             let maybePyprojectDescription = maybePyprojectTomlContents >>= extractPythonPackageDescriptionFromPyprojectToml
                 maybeDefaultNixDescription = maybeDefaultNixContents >>= extractDefaultNixPackageDescription
@@ -754,7 +754,7 @@ summarizeRepositoryPackage checkOutputPaths repositoryCheckNames packageName = d
         maybeMainRustSourceText <- readTextFileIfExists (packageRoot </> "src/main.rs")
         pure (maybe [] (discoverRustUnitTestNamesFromSource . T.unpack) maybeMainRustSourceText)
       _
-        | packageKind `elem` [PythonPackage, PythonLatexPackage] -> do
+        | packageKind `elem` [PythonPackage, PythonLaTeXPackage] -> do
             maybeMainPythonSourceText <- readTextFileIfExists (packageRoot </> "main.py")
             pure (maybe [] (discoverPythonUnitTestNamesFromSource . T.unpack) maybeMainPythonSourceText)
       _ -> pure []
@@ -782,9 +782,9 @@ resolveRepositoryCheckOutputPaths resultCheckNames = do
   let nixExpression =
         unlines
           [ "let",
-            "  flake = builtins.getFlake " ++ renderJsonString (localGitFlakeReference repositoryRoot) ++ ";",
+            "  flake = builtins.getFlake " ++ renderNixString (localGitFlakeReference repositoryRoot) ++ ";",
             "  checks = flake.checks.${builtins.currentSystem};",
-            "  checkNames = [ " ++ unwords (map renderJsonString resultCheckNames) ++ " ];",
+            "  checkNames = [ " ++ unwords (map renderNixString resultCheckNames) ++ " ];",
             "in",
             "builtins.concatStringsSep \"\\n\" (map (checkName: \"${checkName}\\t${checks.${checkName}.outPath}\") checkNames)"
           ]
@@ -923,50 +923,65 @@ extractQuotedNixAssignmentValue assignmentPrefix sourceLine = do
   valueWithoutSemicolon <- T.stripSuffix ";" (T.strip quotedValue)
   valueWithoutPrefix <- T.stripPrefix "\"" valueWithoutSemicolon
   T.stripSuffix "\"" valueWithoutPrefix
-renderJsonString :: String -> String
-renderJsonString value =
+renderJSONString :: String -> String
+renderJSONString value =
   "\"" ++ concatMap escapeCharacter value ++ "\""
   where
     escapeCharacter character =
       case character of
+        '\b' -> "\\b"
+        '\f' -> "\\f"
         '\\' -> "\\\\"
         '"' -> "\\\""
         '\n' -> "\\n"
         '\r' -> "\\r"
         '\t' -> "\\t"
-        _ -> [character]
+        _
+          | isControl character ->
+              "\\u" ++ replicate (4 - length hexadecimalCodePoint) '0' ++ hexadecimalCodePoint
+          | otherwise -> [character]
+          where
+            hexadecimalCodePoint = showHex (ord character) ""
+renderNixString :: String -> String
+renderNixString value =
+  "(builtins.fromJSON " ++ escapeInterpolation (renderJSONString (renderJSONString value)) ++ ")"
+  where
+    escapeInterpolation :: String -> String
+    escapeInterpolation ('$' : '{' : remainingCharacters) = '\\' : '$' : '{' : escapeInterpolation remainingCharacters
+    escapeInterpolation (character : remainingCharacters) = character : escapeInterpolation remainingCharacters
+    escapeInterpolation [] = []
 renderPackageKind :: PackageKind -> String
 renderPackageKind packageKind =
   case packageKind of
     HaskellPackage -> "haskell"
     RustPackage -> "rust"
-    HtmlPackage -> "html"
-    PythonLatexPackage -> "python-latex"
+    HTMLPackage -> "html"
+    PythonLaTeXPackage -> "python-latex"
     PythonPackage -> "python"
     PythonPyPIPackage -> "python-pypi"
     CPackage -> "c"
     TerraformPackage -> "terraform"
-    LatexPackage -> "latex"
+    LaTeXPackage -> "latex"
     BinaryReleasePackage -> "binary-release"
 type ScaffoldPackageKind :: Type
 data ScaffoldPackageKind
   = HaskellScaffold
   | RustScaffold
-  | HtmlScaffold
-  | PythonLatexScaffold
+  | HTMLScaffold
+  | PythonLaTeXScaffold
   | PythonScaffold
   | CScaffold
-  | LatexScaffold
+  | LaTeXScaffold
   deriving stock (Eq)
 supportedAddPackageKinds :: [(String, ScaffoldPackageKind)]
 supportedAddPackageKinds =
   [ ("haskell", HaskellScaffold),
     ("rust", RustScaffold),
-    ("html", HtmlScaffold),
+    ("html", HTMLScaffold),
     ("python", PythonScaffold),
-    ("python-latex", PythonLatexScaffold),
+    ("python-latex", PythonLaTeXScaffold),
     ("c", CScaffold),
-    ("latex", LatexScaffold)
+    ("latex", LaTeXScaffold)
   ]
 parseSupportedAddPackageKind :: String -> Maybe ScaffoldPackageKind
 parseSupportedAddPackageKind packageKindName = lookup packageKindName supportedAddPackageKinds
@@ -974,11 +989,11 @@ packageKindForScaffold :: ScaffoldPackageKind -> PackageKind
 packageKindForScaffold = \case
   HaskellScaffold -> HaskellPackage
   RustScaffold -> RustPackage
-  HtmlScaffold -> HtmlPackage
-  PythonLatexScaffold -> PythonLatexPackage
+  HTMLScaffold -> HTMLPackage
+  PythonLaTeXScaffold -> PythonLaTeXPackage
   PythonScaffold -> PythonPackage
   CScaffold -> CPackage
-  LatexScaffold -> LatexPackage
+  LaTeXScaffold -> LaTeXPackage
 validatePackageNameForKind :: PackageKind -> FilePath -> Maybe String
 validatePackageNameForKind packageKind packageName =
   let (conventionName, separator) = packageNameConventionForKind packageKind
@@ -1055,7 +1070,7 @@ repositoryCheckSpecForPackageKind = \case
   HaskellPackage -> Just (spec "-coverage" haskellCoverageCheckBaselineNixSource)
   RustPackage -> Just (spec "-coverage" rustCoverageCheckBaselineNixSource)
   PythonPackage -> Just (spec "_coverage" pythonCoverageCheckBaselineNixSource)
-  PythonLatexPackage -> Just (spec "_coverage" pythonCoverageCheckBaselineNixSource)
+  PythonLaTeXPackage -> Just (spec "_coverage" pythonCoverageCheckBaselineNixSource)
   _ -> Nothing
   where
     spec :: String -> T.Text -> RepositoryCheckSpec
@@ -1076,14 +1091,14 @@ renderScaffoldFiles scaffoldPackageKind packageName packageDescription =
           ScaffoldFile "Cargo.toml" (renderScaffoldCargoToml packageName packageDescription),
           ScaffoldFile "src/main.rs" rustMainSource
         ]
-      HtmlScaffold ->
+      HTMLScaffold ->
         [ ScaffoldFile ".gitignore" htmlGitignoreSource,
           ScaffoldFile "default.nix" (renderNixTemplateDescription defaultHtmlTemplateDescription packageDescription htmlTemplateBaselineNixSource),
           ScaffoldFile "index.html" htmlIndexSource,
           ScaffoldFile "script.js" htmlScriptSource,
           ScaffoldFile "style.css" htmlStyleSource
         ]
-      PythonLatexScaffold ->
+      PythonLaTeXScaffold ->
         [ ScaffoldFile ".gitignore" pythonLatexGitignoreSource,
           ScaffoldFile "default.nix" (renderNixTemplateDescription defaultPythonLatexTemplateDescription packageDescription pythonLatexTemplateBaselineNixSource),
           ScaffoldFile "main.py" pythonLatexMainSource,
@@ -1100,7 +1115,7 @@ renderScaffoldFiles scaffoldPackageKind packageName packageDescription =
           ScaffoldFile "default.nix" (renderNixTemplateDescription defaultCTemplateDescription packageDescription cTemplateBaselineNixSource),
           ScaffoldFile "main.c" cMainSource
         ]
-      LatexScaffold ->
+      LaTeXScaffold ->
         [ ScaffoldFile ".gitignore" latexGitignoreSource,
           ScaffoldFile "default.nix" (renderNixTemplateDescription defaultLatexTemplateDescription packageDescription latexTemplateBaselineNixSource),
           ScaffoldFile "ms.tex" latexMsTexSource,
@@ -1327,13 +1342,13 @@ type PackageKind :: Type
 data PackageKind
   = HaskellPackage
   | RustPackage
-  | HtmlPackage
-  | PythonLatexPackage
+  | HTMLPackage
+  | PythonLaTeXPackage
   | PythonPackage
   | PythonPyPIPackage
   | CPackage
   | TerraformPackage
-  | LatexPackage
+  | LaTeXPackage
   | BinaryReleasePackage
   deriving stock (Eq, Ord, Show)
 type PackageInfo :: Type
@@ -1367,12 +1382,12 @@ detectPackageMarkers packageRelativeLeafPaths =
         | (markerExists, marker) <-
             [ (hasLeafPath "Main.hs", ("Main.hs", HaskellPackage)),
               (hasLeafPath "Cargo.toml", ("Cargo.toml", RustPackage)),
-              (hasLeafPath "index.html", ("index.html", HtmlPackage)),
-              (hasLeafPath "main.py" && hasLeafPath "ms.tex", ("main.py+ms.tex", PythonLatexPackage)),
+              (hasLeafPath "index.html", ("index.html", HTMLPackage)),
+              (hasLeafPath "main.py" && hasLeafPath "ms.tex", ("main.py+ms.tex", PythonLaTeXPackage)),
               (hasLeafPath "main.py" && not (hasLeafPath "ms.tex"), ("main.py", PythonPackage)),
               (hasLeafPath "main.c", ("main.c", CPackage)),
               (hasLeafPath "main.tf", ("main.tf", TerraformPackage)),
-              (hasLeafPath "ms.tex" && not (hasLeafPath "main.py"), ("ms.tex", LatexPackage))
+              (hasLeafPath "ms.tex" && not (hasLeafPath "main.py"), ("ms.tex", LaTeXPackage))
             ],
           markerExists
         ]
@@ -1413,13 +1428,13 @@ allowedRegularFileRegexesForPackageKind packageRootDirectory packageDirectoryNam
    in case maybePackageKind of
         Just HaskellPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/Main\\.hs$", "^" ++ escapedPackageRootDirectory ++ "/" ++ escapedPackageDirectoryName ++ "\\.cabal$"]
         Just RustPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/Cargo\\.toml$", "^" ++ escapedPackageRootDirectory ++ "/Cargo\\.lock$", "^" ++ escapedPackageRootDirectory ++ "/src/main\\.rs$"]
-        Just HtmlPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/index\\.html$", "^" ++ escapedPackageRootDirectory ++ "/script\\.js$", "^" ++ escapedPackageRootDirectory ++ "/style\\.css$"]
-        Just PythonLatexPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/main\\.py$", "^" ++ escapedPackageRootDirectory ++ "/ms\\.tex$", "^" ++ escapedPackageRootDirectory ++ "/ms\\.bib$", "^" ++ escapedPackageRootDirectory ++ "/refs\\.bib$", "^" ++ escapedPackageRootDirectory ++ "/figures(/.*)?$"]
+        Just HTMLPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/index\\.html$", "^" ++ escapedPackageRootDirectory ++ "/script\\.js$", "^" ++ escapedPackageRootDirectory ++ "/style\\.css$"]
+        Just PythonLaTeXPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/main\\.py$", "^" ++ escapedPackageRootDirectory ++ "/ms\\.tex$", "^" ++ escapedPackageRootDirectory ++ "/ms\\.bib$", "^" ++ escapedPackageRootDirectory ++ "/refs\\.bib$", "^" ++ escapedPackageRootDirectory ++ "/figures(/.*)?$"]
         Just PythonPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/main\\.py$"]
         Just PythonPyPIPackage -> basePackagePathRegexes
         Just CPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/main\\.c$"]
         Just TerraformPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/main\\.tf$", "^" ++ escapedPackageRootDirectory ++ "/\\.terraform(/.*)?$", "^" ++ escapedPackageRootDirectory ++ "/\\.terraform\\.lock\\.hcl$"]
-        Just LatexPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/ms\\.tex$", "^" ++ escapedPackageRootDirectory ++ "/ms\\.bib$"]
+        Just LaTeXPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/ms\\.tex$", "^" ++ escapedPackageRootDirectory ++ "/ms\\.bib$"]
         Just BinaryReleasePackage -> basePackagePathRegexes
         Nothing -> basePackagePathRegexes
 escapeRegexLiteral :: String -> String
@@ -1552,7 +1567,7 @@ checkPackageAssociation :: FilePath -> FilePath -> Maybe (FilePath, [PackageKind
 checkPackageAssociation matchedCheckTemplateName checkName =
   case matchedCheckTemplateName of
     "haskell_coverage_check" -> withSuffix "-coverage" [HaskellPackage]
-    "python_coverage_check" -> withSuffix "_coverage" [PythonPackage, PythonLatexPackage]
+    "python_coverage_check" -> withSuffix "_coverage" [PythonPackage, PythonLaTeXPackage]
     "rust_coverage_check" -> withSuffix "-coverage" [RustPackage]
     _ -> Nothing
   where
@@ -1584,13 +1599,13 @@ detectPackageKindForPackage packageName = do
       packageKind
         | hasMarkerFile "Main.hs" = HaskellPackage
         | hasMarkerFile "Cargo.toml" = RustPackage
-        | hasMarkerFile "index.html" = HtmlPackage
-        | hasMarkerFile "main.py" && hasMarkerFile "ms.tex" = PythonLatexPackage
+        | hasMarkerFile "index.html" = HTMLPackage
+        | hasMarkerFile "main.py" && hasMarkerFile "ms.tex" = PythonLaTeXPackage
         | hasMarkerFile "main.py" = PythonPackage
         | isPythonPyPIPackage = PythonPyPIPackage
         | hasMarkerFile "main.c" = CPackage
         | hasMarkerFile "main.tf" = TerraformPackage
-        | hasMarkerFile "ms.tex" = LatexPackage
+        | hasMarkerFile "ms.tex" = LaTeXPackage
         | otherwise = BinaryReleasePackage
   pure packageKind
 readTextFileIfExists :: FilePath -> IO (Maybe T.Text)
@@ -1621,7 +1636,7 @@ checkDefaultNixConventions packageName packageKind = do
           hasPlaceholderVersion = "version = \"0.0.0\";" `isInfixOf` defaultNixSource
           hasVersionAssignment = "version = \"" `isInfixOf` defaultNixSource
           expectsMetaMainProgram =
-            packageKind `elem` [RustPackage, PythonLatexPackage, PythonPackage, CPackage, BinaryReleasePackage]
+            packageKind `elem` [RustPackage, PythonLaTeXPackage, PythonPackage, CPackage, BinaryReleasePackage]
        in pure $
             catMaybes
               [ if packageKind == HaskellPackage && not hasTopLevelMainProgram
@@ -1645,7 +1660,7 @@ checkDefaultNixConventions packageName packageKind = do
               ]
 checkPythonTestConventions :: FilePath -> PackageKind -> IO [String]
 checkPythonTestConventions packageName packageKind =
-  if packageKind `notElem` [PythonPackage, PythonLatexPackage]
+  if packageKind `notElem` [PythonPackage, PythonLaTeXPackage]
     then pure []
     else do
       let mainPythonPath = "packages" </> packageName </> "main.py"
@@ -2697,11 +2712,15 @@ repositorySummaryRenderingTest = do
           "}"
         ]
     )
-    (renderRepositorySummariesJson [repositorySummary])
+    (renderRepositorySummariesJSON [repositorySummary])
   assertEqual
-    "JSON string rendering escapes embedded newlines."
-    "\"line one\\nline two\""
-    (renderJsonString "line one\nline two")
+    "JSON string rendering escapes control characters."
+    "\"line one\\nline two\\u0001\""
+    (renderJSONString "line one\nline two\1")
+  assertEqual
+    "Nix string rendering prevents interpolation and preserves control characters."
+    "(builtins.fromJSON \"\\\"\\${name}\\\\u0001\\\"\")"
+    (renderNixString "${name}\1")
 localPackageDependencyExtractionTest :: IO ()
 localPackageDependencyExtractionTest =
   assertEqual
@@ -2828,7 +2847,7 @@ summaryEndToEndTest =
     assertEqual "JSON summary succeeds for the generated repository." ExitSuccess jsonExit
     assertEqual
       "JSON summary exactly reports generated metadata, checks, and discovered tests."
-      ( renderRepositorySummariesJson
+      ( renderRepositorySummariesJSON
           [RepositorySummary repositoryPath [expectedGeneratedPythonPackageSummary]]
       )
       jsonStdout

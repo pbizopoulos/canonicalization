@@ -4,44 +4,45 @@ use ignore::WalkBuilder;
 use std::fs;
 use std::path::Path;
 fn main() -> Result<()> {
-    let mut input_paths = std::env::args_os().skip(1).peekable();
-    if input_paths.peek().is_none() {
-        process_root_path(Path::new("."))?;
+    let mut paths = std::env::args_os().skip(1).peekable();
+    if paths.peek().is_none() {
+        process_path(Path::new("."))?;
     } else {
-        for input_path in input_paths {
-            process_root_path(Path::new(&input_path))?;
+        for path in paths {
+            process_path(Path::new(&path))?;
         }
     }
     return Ok(());
 }
-fn process_root_path(root: &Path) -> Result<()> {
-    for result in WalkBuilder::new(root).require_git(false).build() {
-        let entry = result.with_context(|| format!("Failed to walk path: {}", root.display()))?;
+fn process_path(path: &Path) -> Result<()> {
+    for result in WalkBuilder::new(path).require_git(false).build() {
+        let entry = result.with_context(|| format!("Failed to walk path: {}", path.display()))?;
         if entry
             .file_type()
             .is_some_and(|file_type| return file_type.is_file())
         {
-            remove_new_lines(entry.path())?;
+            process_file(entry.path())?;
         }
     }
     return Ok(());
 }
-fn remove_new_lines(path: &Path) -> Result<()> {
+fn process_file(path: &Path) -> Result<()> {
     let path_display = path.display();
-    let data = fs::read(path).with_context(|| format!("Failed to read file: {path_display}"))?;
-    if content_inspector::inspect(&data).is_binary() {
+    let mut contents =
+        fs::read(path).with_context(|| format!("Failed to read file: {path_display}"))?;
+    if content_inspector::inspect(&contents).is_binary() {
         return Ok(());
     }
-    let input_length = data.len();
-    let output = strip_new_lines_from_bytes(data);
-    if output.len() != input_length {
-        fs::write(path, output).with_context(|| format!("Failed to write file: {path_display}"))?;
+    let original_length = contents.len();
+    remove_newlines(&mut contents);
+    if contents.len() != original_length {
+        fs::write(path, contents)
+            .with_context(|| format!("Failed to write file: {path_display}"))?;
     }
     return Ok(());
 }
-fn strip_new_lines_from_bytes(mut data: Vec<u8>) -> Vec<u8> {
-    data.retain(|byte| return !matches!(*byte, b'\n' | b'\r'));
-    return data;
+fn remove_newlines(contents: &mut Vec<u8>) {
+    contents.retain(|byte| return !matches!(*byte, b'\n' | b'\r'));
 }
 #[cfg(test)]
 mod tests {
@@ -68,7 +69,7 @@ mod tests {
         }
         return rendered;
     }
-    fn expected_without_new_lines(lines: &[LogicalLine]) -> Vec<u8> {
+    fn expected_without_newlines(lines: &[LogicalLine]) -> Vec<u8> {
         let mut rendered = Vec::new();
         for line in lines {
             rendered.extend_from_slice(line.0.as_bytes());
@@ -76,7 +77,7 @@ mod tests {
         return rendered;
     }
     #[test]
-    fn test_process_root_path_respects_gitignore_and_skips_binary_files() -> Result<()> {
+    fn test_process_path_respects_gitignore_and_skips_binary_files() -> Result<()> {
         use std::os::unix::fs::symlink;
         use tempfile::tempdir;
         let dir = tempdir()?;
@@ -91,7 +92,7 @@ mod tests {
         let external_path = external_dir.path().join("external.txt");
         fs::write(&external_path, "outside\n\n")?;
         symlink(&external_path, root.join("external.txt"))?;
-        process_root_path(root)?;
+        process_path(root)?;
         let content_ignored = fs::read_to_string(&ignored_path)?;
         assert_eq!(content_ignored, "should be ignored\n\n");
         let content_binary = fs::read(&binary_path)?;
@@ -118,23 +119,22 @@ mod tests {
         return Ok(());
     }
     #[test]
-    fn test_run_propagates_missing_root_failures() {
+    fn test_process_path_propagates_missing_path_failures() {
         let missing = env::temp_dir().join("remove-new-lines-definitely-missing-root");
-        assert!(process_root_path(&missing).is_err());
+        assert!(process_path(&missing).is_err());
     }
     #[test]
     fn test_byte_transform_handles_non_utf8_data() {
-        assert_eq!(
-            strip_new_lines_from_bytes(vec![0xff, b'\r', b'\n', 0xfe]),
-            vec![0xff, 0xfe]
-        );
+        let mut contents = vec![0xff, b'\r', b'\n', 0xfe];
+        remove_newlines(&mut contents);
+        assert_eq!(contents, vec![0xff, 0xfe]);
     }
     #[test]
-    fn quickcheck_strip_new_lines_matches_filtered_sequence() {
+    fn quickcheck_remove_newlines_matches_filtered_sequence() {
         fn property(lines: Vec<LogicalLine>) -> TestResult {
-            let input = render_lines(&lines);
-            let actual = strip_new_lines_from_bytes(input);
-            return TestResult::from_bool(actual == expected_without_new_lines(&lines));
+            let mut actual = render_lines(&lines);
+            remove_newlines(&mut actual);
+            return TestResult::from_bool(actual == expected_without_newlines(&lines));
         }
         QuickCheck::new()
             .tests(100)

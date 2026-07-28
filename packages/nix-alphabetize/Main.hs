@@ -100,9 +100,8 @@ import Prelude
   )
 main :: IO ()
 main = do
-  args <- getArgs
-  successes <-
-    mapM formatNixFile args
+  arguments <- getArgs
+  successes <- mapM formatNixFile arguments
   unless (and successes) exitFailure
 formatNixFile :: FilePath -> IO Bool
 formatNixFile filePath = do
@@ -111,8 +110,8 @@ formatNixFile filePath = do
     Left parseError -> do
       putStrLn ("Error parsing " ++ filePath ++ ": " ++ show parseError)
       pure False
-    Right expr -> do
-      TIO.writeFile filePath (formattedExpression expr)
+    Right expression -> do
+      TIO.writeFile filePath (formattedExpression expression)
       pure True
 renderExpressionText :: NExprLoc -> Text
 renderExpressionText =
@@ -121,8 +120,8 @@ isStringExpr :: NExprLoc -> Bool
 isStringExpr (Fix (Compose (AnnUnit _ (NStr _)))) = True
 isStringExpr _ = False
 sortExpression :: NExprLoc -> NExprLoc
-sortExpression (Fix (Compose (AnnUnit exprSpan exprF))) =
-  Fix . Compose . AnnUnit exprSpan $ case exprF of
+sortExpression (Fix (Compose (AnnUnit expressionSpan expressionF))) =
+  Fix . Compose . AnnUnit expressionSpan $ case expressionF of
     NAbs (ParamSet atPattern variadic paramList) body ->
       NAbs (ParamSet atPattern variadic (sortOn fst paramList)) (sortExpression body)
     NAbs params body ->
@@ -133,29 +132,29 @@ sortExpression (Fix (Compose (AnnUnit exprSpan exprF))) =
             if any isStringExpr sortedItems
               then sortedItems
               else sortOn renderExpressionText sortedItems
-    NSet rec bindings ->
-      NSet rec (sortAndCollapseBindings bindings)
+    NSet recursivity bindings ->
+      NSet recursivity (sortAndCollapseBindings bindings)
     NLet bindings body ->
       NLet (sortAndCollapseBindings bindings) (sortExpression body)
     otherExpr -> fmap sortExpression otherExpr
-getBindingName :: Binding r -> Maybe Text
-getBindingName = fmap NE.head . getBindingPath
-getBindingPath :: Binding r -> Maybe (NonEmpty Text)
-getBindingPath (NamedVar bindingKeys _ _) = mapM getBindingKeyName bindingKeys
-getBindingPath _ = Nothing
-getBindingKeyName :: NKeyName r -> Maybe Text
-getBindingKeyName (StaticKey (VarName keyText)) = Just keyText
-getBindingKeyName (DynamicKey (Plain (DoubleQuoted [Plain keyText]))) = Just keyText
-getBindingKeyName _ = Nothing
+bindingName :: Binding r -> Maybe Text
+bindingName = fmap NE.head . bindingPath
+bindingPath :: Binding r -> Maybe (NonEmpty Text)
+bindingPath (NamedVar bindingKeys _ _) = mapM keyNameText bindingKeys
+bindingPath _ = Nothing
+keyNameText :: NKeyName r -> Maybe Text
+keyNameText (StaticKey (VarName keyText)) = Just keyText
+keyNameText (DynamicKey (Plain (DoubleQuoted [Plain keyText]))) = Just keyText
+keyNameText _ = Nothing
 sortAndCollapseBindings :: [Binding NExprLoc] -> [Binding NExprLoc]
 sortAndCollapseBindings =
   concatMap collapseNestedBindings
-    . groupBy ((==) `on` getBindingName)
-    . sortOn getBindingName
+    . groupBy ((==) `on` bindingName)
+    . sortOn bindingName
 collapseNestedBindings :: [Binding NExprLoc] -> [Binding NExprLoc]
 collapseNestedBindings [] = []
 collapseNestedBindings bindings@(firstBinding : _) =
-  case (getBindingName firstBinding, firstBinding) of
+  case (bindingName firstBinding, firstBinding) of
     (Just _, NamedVar (bindingKey :| _) _ bindingPos)
       | bindingsAreStructurallyCompatible bindings ->
           let nestedBindings = concatMap nextLevelBindings bindings
@@ -177,7 +176,7 @@ bindingsAreStructurallyCompatible [] = False
 bindingsAreStructurallyCompatible [binding] = not (null (nextLevelBindings binding))
 bindingsAreStructurallyCompatible bindings =
   all isDottedBinding bindings
-    && maybe False (pathsAreUnambiguous . map NE.toList) (mapM getBindingPath bindings)
+    && maybe False (pathsAreUnambiguous . map NE.toList) (mapM bindingPath bindings)
 isDottedBinding :: Binding r -> Bool
 isDottedBinding (NamedVar (_ :| _ : _) _ _) = True
 isDottedBinding _ = False
@@ -201,8 +200,8 @@ formatText input =
     TIO.writeFile tmpFile input
     parseResult <- parseNixFileLoc (Path tmpFile)
     case parseResult of
-      Right expr -> do
-        pure (formattedExpression expr)
+      Right expression ->
+        pure (formattedExpression expression)
       Left parseError ->
         assertFailure ("Formatting fixture failed to parse: " ++ show parseError)
 formattedExpression :: NExprLoc -> Text

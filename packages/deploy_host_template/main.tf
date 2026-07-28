@@ -12,7 +12,7 @@ variable "hcloud_token" {
   type      = string
   sensitive = true
 }
-variable "nixos_config_name" {
+variable "nixos_configuration_name" {
   type    = string
   default = "template"
 }
@@ -20,7 +20,7 @@ variable "server_name" {
   type    = string
   default = "template"
 }
-variable "output_dir" {
+variable "output_directory" {
   type = string
 }
 variable "hcloud_ssh_key_name" {
@@ -45,11 +45,11 @@ resource "hcloud_server" "default" {
 }
 module "deploy" {
   source                 = "github.com/nix-community/nixos-anywhere//terraform/all-in-one"
-  nixos_system_attr      = ".#nixosConfigurations.${var.nixos_config_name}.config.system.build.toplevel"
-  nixos_partitioner_attr = ".#nixosConfigurations.${var.nixos_config_name}.config.system.build.diskoScript"
+  nixos_system_attr      = ".#nixosConfigurations.${var.nixos_configuration_name}.config.system.build.toplevel"
+  nixos_partitioner_attr = ".#nixosConfigurations.${var.nixos_configuration_name}.config.system.build.diskoScript"
   target_host            = hcloud_server.default.ipv4_address
 }
 resource "local_file" "ipv4_address" {
   content  = hcloud_server.default.ipv4_address
-  filename = "${var.output_dir}/ipv4_address"
+  filename = "${var.output_directory}/ipv4_address"
 }

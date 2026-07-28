@@ -123,7 +123,7 @@ def create_workspace_artifacts(
 
 def main() -> None:
     """Generate the LaTeX build workspace artifacts."""
-    create_workspace_artifacts(Path.cwd().resolve() / "tmp")
+    create_workspace_artifacts(Path.cwd() / "tmp")
 
 
 def test_samples_rejects_invalid_values() -> None:
@@ -147,8 +147,8 @@ def test_latex_escape_handles_special_characters() -> None:
 
 def test_main_creates_latex_workspace_artifacts() -> None:
     """Creates the LaTeX workspace artifacts from the executable."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        working_directory = Path(tmpdir)
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        working_directory = Path(temporary_directory)
         completed = subprocess.run(  # noqa: S603
             [os.environ["PACKAGE_E2E_EXECUTABLE"]],
             cwd=working_directory,
