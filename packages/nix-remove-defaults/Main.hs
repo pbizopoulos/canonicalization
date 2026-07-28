@@ -5,7 +5,7 @@
 {-# LANGUAGE Trustworthy #-}
 {-# OPTIONS_GHC -Wno-all-missed-specialisations -Wno-missed-specialisations -Wno-unsafe #-}
 module Main (main, runPackageTests, runPackageTestsWithTimings) where
-import Control.Applicative (liftA2, (<*>))
+import Control.Applicative ((<*>))
 import Control.Exception (IOException, finally, try)
 import Control.Monad (mapM_, unless, when)
 import Data.Aeson
@@ -189,15 +189,15 @@ main :: IO ()
 main = do
   args <- getArgs
   case args of
-    [] -> do
-      succeeded <- processRepositoryArgument "."
-      unless succeeded exitFailure
-    [repositoryPath] -> do
-      succeeded <- processRepositoryArgument repositoryPath
-      unless succeeded exitFailure
+    [] -> processArgument "."
+    [repositoryPath] -> processArgument repositoryPath
     _ -> do
       putStrLn "Usage: nix-remove-defaults <flake-or-repository-directory>"
       exitFailure
+  where
+    processArgument repositoryPath = do
+      succeeded <- processRepositoryArgument repositoryPath
+      unless succeeded exitFailure
 processRepositoryArgument :: FilePath -> IO Bool
 processRepositoryArgument repositoryPath = do
   repositoryRootResult <- repositoryRootFromArgument repositoryPath
@@ -232,14 +232,19 @@ processParsedRepository repositoryRoot parsedFiles = do
   let nixOSCandidates = uniqueCandidates (concatMap (collectCandidates . snd) parsedFiles)
       treefmtCandidatePaths = uniqueCandidatePaths (concatMap (collectTreefmtCandidates . snd) parsedFiles)
   nixOSDefaultsResult <- resolveNixOSDefaults repositoryRoot nixOSCandidates
-  treefmtDefaultsResult <- resolveTreefmtDefaults repositoryRoot treefmtCandidatePaths
-  case liftA2 (,) nixOSDefaultsResult treefmtDefaultsResult of
+  case nixOSDefaultsResult of
     Left diagnostic -> do
       putStrLn diagnostic
       pure False
-    Right (nixOSDefaults, treefmtDefaults) -> do
-      mapM_ (processParsedRepositoryFile repositoryRoot nixOSDefaults treefmtDefaults) parsedFiles
-      pure True
+    Right nixOSDefaults -> do
+      treefmtDefaultsResult <- resolveTreefmtDefaults repositoryRoot treefmtCandidatePaths
+      case treefmtDefaultsResult of
+        Left diagnostic -> do
+          putStrLn diagnostic
+          pure False
+        Right treefmtDefaults -> do
+          mapM_ (processParsedRepositoryFile repositoryRoot nixOSDefaults treefmtDefaults) parsedFiles
+          pure True
 findFlakeRootFrom :: FilePath -> IO (Maybe FilePath)
 findFlakeRootFrom directoryPath = do
   hasFlake <- doesFileExist (directoryPath </> "flake.nix")
@@ -276,7 +281,8 @@ findNixFiles directoryPath = do
       entries
   pure (concat nestedFiles)
 shouldSkipDirectory :: FilePath -> Bool
-shouldSkipDirectory directoryName = directoryName `List.elem` [".git", ".codex", "result", "tmp", "prm"]
+shouldSkipDirectory directoryName =
+  directoryName `List.elem` [".agents", ".codex", ".git", "prm", "result", "target", "tmp"]
 parseRepositoryFile :: FilePath -> IO (Either String ParsedNixFile)
 parseRepositoryFile filePath = do
   parseResult <- parseNixFileLoc (Path filePath)

@@ -154,8 +154,8 @@ sortAndCollapseBindings =
 collapseNestedBindings :: [Binding NExprLoc] -> [Binding NExprLoc]
 collapseNestedBindings [] = []
 collapseNestedBindings bindings@(firstBinding : _) =
-  case (bindingName firstBinding, firstBinding) of
-    (Just _, NamedVar (bindingKey :| _) _ bindingPos)
+  case firstBinding of
+    NamedVar (bindingKey :| _) _ bindingPos
       | bindingsAreStructurallyCompatible bindings ->
           let nestedBindings = concatMap nextLevelBindings bindings
               sortedNested = sortAndCollapseBindings nestedBindings
@@ -222,7 +222,7 @@ runPackageTestsWith maybeTimingsPath = do
     else exitFailure
 quickCheckFormattingProperties :: Maybe FilePath -> IO Bool
 quickCheckFormattingProperties maybeTimingsPath = do
-  sortedListResult <- timedQuickCheck "Non string lists are sorted." (QC.quickCheckResult (QC.withMaxSuccess 100 prop_nonStringListsAreSorted))
+  sortedListResult <- timedQuickCheck "Non-string lists are sorted." (QC.quickCheckResult (QC.withMaxSuccess 100 prop_nonStringListsAreSorted))
   stringOrderResult <- timedQuickCheck "String lists preserve order." (QC.quickCheckResult (QC.withMaxSuccess 100 prop_stringListsPreserveOrder))
   attrSetResult <- timedQuickCheck "Attribute sets canonicalize by key order." (QC.quickCheckResult (QC.withMaxSuccess 100 prop_attributeSetsCanonicalizeByKeyOrder))
   dottedCollapseResult <- timedQuickCheck "Dotted assignments collapse to canonical nested sets." (QC.quickCheckResult (QC.withMaxSuccess 100 prop_dottedAssignmentsCollapseToCanonicalNestedSets))

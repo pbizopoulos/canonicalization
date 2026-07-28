@@ -127,16 +127,13 @@ fn parse_repository_url(repository_url: &str) -> Result<String, RepositoryUrlErr
         ));
     }
     validate_component("hostname", hostname)?;
-    let mut path_components: Vec<String> = repository_path.split('/').map(str::to_owned).collect();
-    if let Some(repository_name) = path_components.last_mut() {
-        if let Some(name_without_suffix) = repository_name.strip_suffix(".git") {
-            *repository_name = name_without_suffix.to_owned();
-        }
-    }
-    for component in &path_components {
+    let repository_path = repository_path
+        .strip_suffix(".git")
+        .unwrap_or(repository_path);
+    for component in repository_path.split('/') {
         validate_component("repository path component", component)?;
     }
-    Ok(format!("{hostname}/{}", path_components.join("/")))
+    Ok(format!("{hostname}/{repository_path}"))
 }
 fn split_url_path<'a>(
     repository_url: &str,
@@ -374,14 +371,9 @@ fn fix_submodule_path(
     configured_path: &str,
     expected_path: &str,
 ) -> Result<(), CliFailure> {
-    let target = home_directory.join(expected_path);
-    let target_parent = target.parent().ok_or_else(|| {
-        CliFailure::fatal(format!(
-            "cannot determine parent directory for '{}'",
-            target.display()
-        ))
-    })?;
-    fs::create_dir_all(target_parent).map_err(|error| {
+    let mut target_parent = home_directory.join(expected_path);
+    target_parent.set_file_name("");
+    fs::create_dir_all(&target_parent).map_err(|error| {
         CliFailure::fatal(format!(
             "cannot create '{}': {error}",
             target_parent.display()
@@ -480,10 +472,10 @@ mod tests {
                 process::id()
             ));
             fs::create_dir(&path)?;
-            return Ok(Self(path));
+            Ok(Self(path))
         }
         fn path(&self) -> &Path {
-            return &self.0;
+            &self.0
         }
     }
     impl Drop for TemporaryDirectory {
@@ -552,7 +544,7 @@ mod tests {
             parse_repository_url("https://git.example.test/group/nested/demo.git/")?,
             "git.example.test/group/nested/demo"
         );
-        return Ok(());
+        Ok(())
     }
     #[test]
     fn rejects_unsupported_and_unsafe_urls() {
@@ -575,7 +567,7 @@ mod tests {
         assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics[0].contains("exactly one path (found 2)"));
         assert!(parse_raw_submodule_fields(b"submodule.demo.path\0").is_err());
-        return Ok(());
+        Ok(())
     }
     #[test]
     fn rejects_unsafe_canonical_paths_centrally() {
@@ -609,7 +601,7 @@ mod tests {
             fs::read_to_string(home.path().join(".gitignore"))?,
             "*\n!github.com/\n!.gitignore\n!.gitmodules\n"
         );
-        return Ok(());
+        Ok(())
     }
     #[test]
     fn rejects_conflicting_initialization_without_side_effects() -> TestResult {
@@ -619,7 +611,7 @@ mod tests {
             .expect_err("conflicting initialization must fail");
         assert!(matches!(failure, CliFailure::Fatal(_)));
         assert!(!home.path().join(".git").exists());
-        return Ok(());
+        Ok(())
     }
     #[test]
     fn rejects_a_non_regular_gitignore_without_side_effects() -> TestResult {
@@ -629,7 +621,7 @@ mod tests {
             .expect_err("a non-regular .gitignore must fail");
         assert!(matches!(failure, CliFailure::Fatal(_)));
         assert!(!home.path().join(".git").exists());
-        return Ok(());
+        Ok(())
     }
     #[test]
     fn checks_matching_submodule_urls_and_paths() -> TestResult {
@@ -640,7 +632,7 @@ mod tests {
         )?;
         check_home_gitmodules(home.path(), false)
             .map_err(|failure| format!("check failed: {failure:?}"))?;
-        return Ok(());
+        Ok(())
     }
     #[test]
     fn reports_incomplete_unsupported_unsafe_and_mismatched_entries() -> TestResult {
@@ -667,7 +659,7 @@ mod tests {
                 "missing diagnostic: {expected}"
             );
         }
-        return Ok(());
+        Ok(())
     }
     #[test]
     fn validates_every_entry_before_fixing_paths() -> TestResult {
@@ -738,7 +730,7 @@ mod tests {
         fs::write(home.path().join(".gitmodules"), "")?;
         check_home_gitmodules(home.path(), false)
             .map_err(|failure| format!("empty check failed: {failure:?}"))?;
-        return Ok(());
+        Ok(())
     }
     #[test]
     fn fixes_and_checks_a_mismatched_path_through_the_installed_cli() -> TestResult {
@@ -789,6 +781,6 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&check_output.stderr)
         );
-        return Ok(());
+        Ok(())
     }
 }

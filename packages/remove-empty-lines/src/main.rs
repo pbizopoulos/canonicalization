@@ -33,14 +33,14 @@ fn process_file(path: &Path) -> Result<()> {
     if content_inspector::inspect(&contents).is_binary() {
         return Ok(());
     }
-    let updated_contents = without_empty_lines(&contents);
+    let updated_contents = remove_empty_lines(&contents);
     if updated_contents != contents {
         fs::write(path, updated_contents)
             .with_context(|| format!("Failed to write file: {path_display}"))?;
     }
     return Ok(());
 }
-fn without_empty_lines(contents: &[u8]) -> Vec<u8> {
+fn remove_empty_lines(contents: &[u8]) -> Vec<u8> {
     let mut updated_contents = Vec::with_capacity(contents.len());
     for line in contents.split_inclusive(|byte| return *byte == b'\n') {
         let without_newline = line.strip_suffix(b"\n").unwrap_or(line);
@@ -59,6 +59,7 @@ mod tests {
     use quickcheck::{Arbitrary, Gen, QuickCheck, TestResult};
     use std::env;
     use std::process::Command;
+    use tempfile::tempdir;
     #[derive(Clone, Debug)]
     struct LogicalLine(String);
     impl Arbitrary for LogicalLine {
@@ -89,9 +90,8 @@ mod tests {
         return rendered;
     }
     #[test]
-    fn test_process_path_respects_gitignore_and_skips_binary_files() -> Result<()> {
+    fn respects_gitignore_and_skips_binary_files() -> Result<()> {
         use std::os::unix::fs::symlink;
-        use tempfile::tempdir;
         let dir = tempdir()?;
         let external_dir = tempdir()?;
         let root = dir.path();
@@ -113,11 +113,10 @@ mod tests {
         return Ok(());
     }
     #[test]
-    fn test_main_processes_current_directory_when_no_args() -> Result<()> {
+    fn processes_current_directory_when_no_arguments() -> Result<()> {
         let Some(executable) = env::var_os("PACKAGE_E2E_EXECUTABLE") else {
             return Ok(());
         };
-        use tempfile::tempdir;
         let dir = tempdir()?;
         let root = dir.path();
         let file_path = root.join("test.txt");
@@ -131,29 +130,30 @@ mod tests {
         return Ok(());
     }
     #[test]
-    fn test_process_path_propagates_missing_path_failures() {
+    fn propagates_missing_path_failures() {
         let missing = env::temp_dir().join("remove-empty-lines-definitely-missing-root");
         assert!(process_path(&missing).is_err());
     }
     #[test]
-    fn test_byte_transform_preserves_non_utf8_data_without_a_decode_error() {
+    fn preserves_non_utf8_data_when_removing_empty_lines() {
         assert_eq!(
-            without_empty_lines(&[0xff, b'\n', b' ', b'\r', b'\n']),
+            remove_empty_lines(&[0xff, b'\n', b' ', b'\r', b'\n']),
             vec![0xff, b'\n']
         );
     }
     #[test]
-    fn test_byte_transform_only_removes_empty_lines() {
+    fn removes_only_empty_lines() {
         assert_eq!(
-            without_empty_lines(b"first\r\n \t\r\nlast"),
+            remove_empty_lines(b"first\r\n \t\r\nlast"),
             b"first\r\nlast"
         );
     }
     #[test]
-    fn quickcheck_without_empty_lines_matches_filtered_sequence() {
+    fn quickcheck_removing_empty_lines_matches_filtered_sequence() {
+        #[expect(clippy::needless_pass_by_value)]
         fn property(lines: Vec<LogicalLine>) -> TestResult {
             let input = render_lines(&lines);
-            let actual = without_empty_lines(&input);
+            let actual = remove_empty_lines(&input);
             return TestResult::from_bool(actual == expected_non_empty_lines(&lines));
         }
         QuickCheck::new()

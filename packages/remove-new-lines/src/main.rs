@@ -50,6 +50,7 @@ mod tests {
     use quickcheck::{Arbitrary, Gen, QuickCheck, TestResult};
     use std::env;
     use std::process::Command;
+    use tempfile::tempdir;
     #[derive(Clone, Debug)]
     struct LogicalLine(String);
     impl Arbitrary for LogicalLine {
@@ -77,9 +78,8 @@ mod tests {
         return rendered;
     }
     #[test]
-    fn test_process_path_respects_gitignore_and_skips_binary_files() -> Result<()> {
+    fn respects_gitignore_and_skips_binary_files() -> Result<()> {
         use std::os::unix::fs::symlink;
-        use tempfile::tempdir;
         let dir = tempdir()?;
         let external_dir = tempdir()?;
         let root = dir.path();
@@ -101,11 +101,10 @@ mod tests {
         return Ok(());
     }
     #[test]
-    fn test_main_processes_current_directory_when_no_args() -> Result<()> {
+    fn processes_current_directory_when_no_arguments() -> Result<()> {
         let Some(executable) = env::var_os("PACKAGE_E2E_EXECUTABLE") else {
             return Ok(());
         };
-        use tempfile::tempdir;
         let dir = tempdir()?;
         let root = dir.path();
         let file_path = root.join("test.txt");
@@ -119,18 +118,19 @@ mod tests {
         return Ok(());
     }
     #[test]
-    fn test_process_path_propagates_missing_path_failures() {
+    fn propagates_missing_path_failures() {
         let missing = env::temp_dir().join("remove-new-lines-definitely-missing-root");
         assert!(process_path(&missing).is_err());
     }
     #[test]
-    fn test_byte_transform_handles_non_utf8_data() {
+    fn preserves_non_utf8_data_when_removing_newlines() {
         let mut contents = vec![0xff, b'\r', b'\n', 0xfe];
         remove_newlines(&mut contents);
         assert_eq!(contents, vec![0xff, 0xfe]);
     }
     #[test]
-    fn quickcheck_remove_newlines_matches_filtered_sequence() {
+    fn quickcheck_removing_newlines_matches_filtered_sequence() {
+        #[expect(clippy::needless_pass_by_value)]
         fn property(lines: Vec<LogicalLine>) -> TestResult {
             let mut actual = render_lines(&lines);
             remove_newlines(&mut actual);

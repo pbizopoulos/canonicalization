@@ -113,9 +113,9 @@ templateSpecs =
       },
     TemplateSpec
       { templateName = "python_latex_template",
-        templateMatches = matchesPythonLatexTemplate,
+        templateMatches = matchesPythonLaTeXTemplate,
         templateAllowedDifferenceKeys = Set.fromList ["meta", "propagatedBuildInputs", "pythonDeps", "version"],
-        templateBaselineSource = pythonLatexTemplateBaselineNixSource
+        templateBaselineSource = pythonLaTeXTemplateBaselineNixSource
       },
     TemplateSpec
       { templateName = "python_pypi_application_template",
@@ -183,8 +183,8 @@ templateSpecs =
         templateBaselineSource = uncommentTemplateBaselineNixSource
       }
   ]
-matchesPythonLatexTemplate :: FilePath -> String -> IO Bool
-matchesPythonLatexTemplate packageName nixSource
+matchesPythonLaTeXTemplate :: FilePath -> String -> IO Bool
+matchesPythonLaTeXTemplate packageName nixSource
   | "buildPythonPackage" `isInfixOf` nixSource = do
       let packageDirectory = "packages" </> packageName
       hasManuscriptTexFile <- doesFileExist (packageDirectory </> "ms.tex")
@@ -196,8 +196,7 @@ matchesPythonPyPITemplateLike :: String -> FilePath -> String -> IO Bool
 matchesPythonPyPITemplateLike buildFunction _ nixSource =
   pure
     ( buildFunction `isInfixOf` nixSource
-        && not ("src = ./.;" `isInfixOf` nixSource)
-        && ("fetchPypi" `isInfixOf` nixSource || "fetchurl" `isInfixOf` nixSource)
+        && isExternalPythonPackageSource (T.pack nixSource)
     )
 matchesPythonPyPIApplicationTemplate :: FilePath -> String -> IO Bool
 matchesPythonPyPIApplicationTemplate = matchesPythonPyPITemplateLike "buildPythonApplication"
@@ -353,7 +352,7 @@ mainHelpText =
       "Use git -C <location> to select a repository.",
       "",
       "add <package-type> <package-name> [<description>...]",
-      "    Add a package and its coverage/profiling check, then stage the files.",
+      "    Add a package and its check, then stage the files.",
       "",
       "check",
       "    Check that the repository follows the canonical conventions.",
@@ -369,7 +368,7 @@ usageTextForCommand = \case
     unlines
       [ "usage: git repository-canonicalization add <package-type> <package-name> [<description>...]",
         "",
-        "Add a package and its combined coverage/profiling check.",
+        "Add a package and its check.",
         "Generated files are staged with git add.",
         ""
       ]
@@ -484,16 +483,12 @@ repositoryCheckPhaseHint = \case
   RequiredRootFilesPhase -> "add flake.nix and run 'nix flake update' to create or update flake.lock."
   DirectoryStructurePhase -> "fix directory and required-file layout under packages/, hosts/, checks/, and repository root."
   FileCompliancePhase -> "align package files with the expected internal templates and language-specific policy checks."
-type RepositoryPackageCheckSummary :: Type
-data RepositoryPackageCheckSummary
-  = RepositoryPackageCheckNotRun
-  | RepositoryPackageCheckUnavailable
-  | RepositoryPackageCheckMeasured RepositoryPackageCoverageSummary RepositoryPackageProfileSummary
-  deriving stock (Eq, Show)
-type RepositoryPackageCoverageSummary :: Type
-data RepositoryPackageCoverageSummary
-  = RepositoryCoverageUnavailable
-  | RepositoryCoverageMeasured CoverageMeasurement
+type RepositoryPackageTestStatus :: Type
+data RepositoryPackageTestStatus
+  = RepositoryTestsNotConfigured
+  | RepositoryTestsNotRun
+  | RepositoryTestsUnavailable
+  | RepositoryTestsMeasured CoverageMeasurement Duration (Map.Map String Duration)
   deriving stock (Eq, Show)
 type CoverageMeasurement :: Type
 data CoverageMeasurement = CoverageMeasurement CoverageMetric Integer Integer
@@ -507,11 +502,6 @@ data CoverageMetric
 type Duration :: Type
 newtype Duration = Duration Double
   deriving stock (Eq, Ord, Show)
-type RepositoryPackageProfileSummary :: Type
-data RepositoryPackageProfileSummary
-  = RepositoryProfileUnavailable
-  | RepositoryProfileMeasured Duration (Map.Map String Duration)
-  deriving stock (Eq, Show)
 type RepositoryComplianceSuccess :: Type
 data RepositoryComplianceSuccess = RepositoryComplianceSuccess
   { repositoryCompliancePackageNames :: [FilePath],
@@ -525,7 +515,7 @@ data RepositoryPackageSummary = RepositoryPackageSummary
     repositoryPackageDescription :: Maybe String,
     repositoryPackageDependencies :: [String],
     repositoryPackageTestNames :: [String],
-    repositoryPackageCheck :: Maybe RepositoryPackageCheckSummary
+    repositoryPackageTestStatus :: RepositoryPackageTestStatus
   }
   deriving stock (Eq, Show)
 type RepositorySummary :: Type
@@ -551,9 +541,9 @@ summarizeRepositoryAt repositoryPath repositoryRoot =
         exitFailure
       Right (RepositoryComplianceSuccess packageNames checkNames) -> do
         let repositoryCheckNames = Set.fromList checkNames
-            resultCheckNames = filter (\checkName -> any (`isSuffixOf` checkName) ["-coverage", "_coverage"]) checkNames
+            testCheckNames = filter (\checkName -> any (`isSuffixOf` checkName) ["-coverage", "_coverage"]) checkNames
         repositoryReadme <- fmap T.unpack <$> readTextFileIfExists "README"
-        checkOutputPaths <- resolveRepositoryCheckOutputPaths resultCheckNames
+        checkOutputPaths <- resolveRepositoryCheckOutputPaths testCheckNames
         packageSummaries <- forM packageNames (summarizeRepositoryPackage checkOutputPaths repositoryCheckNames)
         pure
           RepositorySummary
@@ -605,7 +595,7 @@ renderRepositorySummaryJSON repositorySummary =
     "\n"
     [ "    {",
       "      \"path\": " ++ renderJSONString (repositorySummaryPath repositorySummary) ++ ",",
-      "      \"README\": " ++ maybe "null" renderJSONString (repositorySummaryReadme repositorySummary) ++ ",",
+      "      \"readme\": " ++ maybe "null" renderJSONString (repositorySummaryReadme repositorySummary) ++ ",",
       "      \"packages\": [",
       intercalate ",\n" (map (indentText 4 . renderRepositoryPackageSummaryJSON) (repositorySummaryPackages repositorySummary)),
       "      ]",
@@ -644,7 +634,7 @@ renderRepositoryPackageTestsText packageSummary =
         : [repositoryPackageValueIndent ++ renderRepositoryPackageTestText testDurations durationWidth testName | testName <- testNames]
       where
         testDurations = repositoryPackageTestDurations packageSummary
-        durationWidth = maximum (0 : map (length . renderProfileSeconds) (Map.elems testDurations))
+        durationWidth = maximum (0 : map (length . renderDurationSeconds) (Map.elems testDurations))
 renderRepositoryPackageFieldName :: String -> String
 renderRepositoryPackageFieldName fieldName =
   replicate (repositoryPackageFieldWidth - length fieldName) ' ' ++ fieldName ++ ":"
@@ -672,49 +662,56 @@ renderRepositoryPackageTestsJSON packageSummary
   | null testNames = []
   | otherwise =
       [ "      \"tests\": {",
-        "        \"coverage\": " ++ renderRepositoryPackageCoverageJSON (repositoryPackageCheck packageSummary) ++ ",",
-        "        \"profile\": " ++ renderRepositoryPackageProfileJSON (repositoryPackageCheck packageSummary) ++ ",",
-        "        \"cases\": [" ++ intercalate ", " (map (renderRepositoryPackageTestCaseJSON testDurations) testNames) ++ "]",
-        "      }"
+        "        \"status\": " ++ renderJSONString (renderRepositoryPackageTestStatus (repositoryPackageTestStatus packageSummary)) ++ ","
       ]
+        ++ renderRepositoryPackageTestMeasurementsJSON (repositoryPackageTestStatus packageSummary)
+        ++ [ "        \"cases\": [" ++ intercalate ", " (map (renderRepositoryPackageTestCaseJSON testDurations) testNames) ++ "]",
+             "      }"
+           ]
   where
     testNames = repositoryPackageTestNames packageSummary
     testDurations = repositoryPackageTestDurations packageSummary
+renderRepositoryPackageTestMeasurementsJSON :: RepositoryPackageTestStatus -> [String]
+renderRepositoryPackageTestMeasurementsJSON = \case
+  RepositoryTestsMeasured coverage totalDuration _ ->
+    [ "        \"coverage\": " ++ renderCoverageMeasurementJSON coverage ++ ",",
+      "        \"durationSeconds\": " ++ renderDurationSeconds totalDuration ++ ","
+    ]
+  _ -> []
 renderRepositoryPackageTestCaseJSON :: Map.Map String Duration -> String -> String
 renderRepositoryPackageTestCaseJSON testDurations testName =
   "{ \"name\": "
     ++ renderJSONString testName
-    ++ maybe "" (\seconds -> ", \"durationSeconds\": " ++ renderProfileSeconds seconds) (Map.lookup testName testDurations)
+    ++ maybe "" (\seconds -> ", \"durationSeconds\": " ++ renderDurationSeconds seconds) (Map.lookup testName testDurations)
     ++ " }"
 renderRepositoryPackageTestAggregate :: RepositoryPackageSummary -> String
 renderRepositoryPackageTestAggregate packageSummary =
-  case repositoryPackageCheck packageSummary of
-    Nothing -> ""
-    Just RepositoryPackageCheckNotRun -> " (not run)"
-    Just RepositoryPackageCheckUnavailable -> " (unavailable)"
-    Just (RepositoryPackageCheckMeasured coverage profile) ->
-      " " ++ renderRepositoryPackageProfileAggregate profile ++ " " ++ renderRepositoryPackageCoverageAggregate coverage
-renderRepositoryPackageCoverageAggregate :: RepositoryPackageCoverageSummary -> String
-renderRepositoryPackageCoverageAggregate = \case
-  RepositoryCoverageUnavailable -> "(coverage unavailable)"
-  RepositoryCoverageMeasured (CoverageMeasurement metric covered total) ->
-    "(" ++ renderCoverageMetric metric ++ " " ++ show covered ++ "/" ++ show total ++ ", " ++ renderCoveragePercent covered total ++ "%)"
-renderRepositoryPackageCoverageJSON :: Maybe RepositoryPackageCheckSummary -> String
-renderRepositoryPackageCoverageJSON = \case
-  Nothing -> "{ \"status\": \"not-configured\" }"
-  Just RepositoryPackageCheckNotRun -> "{ \"status\": \"not-run\" }"
-  Just RepositoryPackageCheckUnavailable -> "{ \"status\": \"unavailable\" }"
-  Just (RepositoryPackageCheckMeasured RepositoryCoverageUnavailable _) -> "{ \"status\": \"unavailable\" }"
-  Just (RepositoryPackageCheckMeasured (RepositoryCoverageMeasured (CoverageMeasurement metric covered total)) _) ->
-    "{ \"status\": \"measured\", \"metric\": "
-      ++ renderJSONString (renderCoverageMetric metric)
-      ++ ", \"covered\": "
-      ++ show covered
-      ++ ", \"total\": "
-      ++ show total
-      ++ ", \"percent\": "
-      ++ renderCoveragePercent covered total
-      ++ " }"
+  case repositoryPackageTestStatus packageSummary of
+    RepositoryTestsNotConfigured -> " (not configured)"
+    RepositoryTestsNotRun -> " (not run)"
+    RepositoryTestsUnavailable -> " (unavailable)"
+    RepositoryTestsMeasured coverage totalDuration _ ->
+      " (" ++ renderDurationSeconds totalDuration ++ "s) " ++ renderCoverageMeasurementText coverage
+renderRepositoryPackageTestStatus :: RepositoryPackageTestStatus -> String
+renderRepositoryPackageTestStatus = \case
+  RepositoryTestsNotConfigured -> "not-configured"
+  RepositoryTestsNotRun -> "not-run"
+  RepositoryTestsUnavailable -> "unavailable"
+  RepositoryTestsMeasured {} -> "measured"
+renderCoverageMeasurementText :: CoverageMeasurement -> String
+renderCoverageMeasurementText (CoverageMeasurement metric covered total) =
+  "(" ++ renderCoverageMetric metric ++ " " ++ show covered ++ "/" ++ show total ++ ", " ++ renderCoveragePercent covered total ++ "%)"
+renderCoverageMeasurementJSON :: CoverageMeasurement -> String
+renderCoverageMeasurementJSON (CoverageMeasurement metric covered total) =
+  "{ \"metric\": "
+    ++ renderJSONString (renderCoverageMetric metric)
+    ++ ", \"covered\": "
+    ++ show covered
+    ++ ", \"total\": "
+    ++ show total
+    ++ ", \"percent\": "
+    ++ renderCoveragePercent covered total
+    ++ " }"
 renderCoverageMetric :: CoverageMetric -> String
 renderCoverageMetric = \case
   ExpressionCoverage -> "expressions"
@@ -723,32 +720,20 @@ renderCoverageMetric = \case
 renderCoveragePercent :: Integer -> Integer -> String
 renderCoveragePercent covered total =
   showFFloat (Just 1) (100 * fromIntegral covered / fromIntegral total :: Double) ""
-renderRepositoryPackageProfileAggregate :: RepositoryPackageProfileSummary -> String
-renderRepositoryPackageProfileAggregate = \case
-  RepositoryProfileUnavailable -> "(profile unavailable)"
-  RepositoryProfileMeasured totalSeconds _ -> "(" ++ renderProfileSeconds totalSeconds ++ "s)"
-renderRepositoryPackageProfileJSON :: Maybe RepositoryPackageCheckSummary -> String
-renderRepositoryPackageProfileJSON = \case
-  Nothing -> "{ \"status\": \"not-configured\" }"
-  Just RepositoryPackageCheckNotRun -> "{ \"status\": \"not-run\" }"
-  Just RepositoryPackageCheckUnavailable -> "{ \"status\": \"unavailable\" }"
-  Just (RepositoryPackageCheckMeasured _ RepositoryProfileUnavailable) -> "{ \"status\": \"unavailable\" }"
-  Just (RepositoryPackageCheckMeasured _ (RepositoryProfileMeasured totalSeconds _)) ->
-    "{ \"status\": \"measured\", \"totalSeconds\": " ++ renderProfileSeconds totalSeconds ++ " }"
 renderRepositoryPackageTestText :: Map.Map String Duration -> Int -> String -> String
 renderRepositoryPackageTestText testDurations durationWidth testName =
   case Map.lookup testName testDurations of
     Just seconds ->
-      let renderedSeconds = renderProfileSeconds seconds
+      let renderedSeconds = renderDurationSeconds seconds
        in "(" ++ replicate (durationWidth - length renderedSeconds) ' ' ++ renderedSeconds ++ "s) " ++ testName
     Nothing -> testName
 repositoryPackageTestDurations :: RepositoryPackageSummary -> Map.Map String Duration
 repositoryPackageTestDurations packageSummary =
-  case repositoryPackageCheck packageSummary of
-    Just (RepositoryPackageCheckMeasured _ (RepositoryProfileMeasured _ profileTestDurations)) -> profileTestDurations
+  case repositoryPackageTestStatus packageSummary of
+    RepositoryTestsMeasured _ _ testDurations -> testDurations
     _ -> Map.empty
-renderProfileSeconds :: Duration -> String
-renderProfileSeconds (Duration seconds) = showFFloat (Just 3) seconds ""
+renderDurationSeconds :: Duration -> String
+renderDurationSeconds (Duration seconds) = showFFloat (Just 3) seconds ""
 summarizeRepositoryPackage :: Maybe (Map.Map FilePath FilePath) -> Set.Set FilePath -> FilePath -> IO RepositoryPackageSummary
 summarizeRepositoryPackage checkOutputPaths repositoryCheckNames packageName = do
   packageKind <- detectPackageKindForPackage packageName
@@ -789,8 +774,13 @@ summarizeRepositoryPackage checkOutputPaths repositoryCheckNames packageName = d
             if checkName `Set.member` repositoryCheckNames
               then Just checkName
               else Nothing
-  repositoryPackageCheckValue <-
-    traverse (summarizeRepositoryPackageCheck checkOutputPaths) configuredRepositoryCheckName
+      checkOutputPath =
+        configuredRepositoryCheckName
+          >>= \checkName -> checkOutputPaths >>= Map.lookup checkName
+  repositoryPackageTestStatusValue <-
+    case configuredRepositoryCheckName of
+      Nothing -> pure RepositoryTestsNotConfigured
+      Just _ -> summarizeRepositoryPackageTestStatus checkOutputPath
   pure
     RepositoryPackageSummary
       { repositoryPackageName = packageName,
@@ -798,7 +788,7 @@ summarizeRepositoryPackage checkOutputPaths repositoryCheckNames packageName = d
         repositoryPackageDescription = repositoryPackageDescriptionValue,
         repositoryPackageDependencies = repositoryPackageDependenciesValue,
         repositoryPackageTestNames = repositoryPackageTestNamesValue,
-        repositoryPackageCheck = repositoryPackageCheckValue
+        repositoryPackageTestStatus = repositoryPackageTestStatusValue
       }
 resolveRepositoryCheckOutputPaths :: [FilePath] -> IO (Maybe (Map.Map FilePath FilePath))
 resolveRepositoryCheckOutputPaths [] = pure (Just Map.empty)
@@ -833,29 +823,21 @@ parseRepositoryCheckOutputPaths expectedCheckNames outputPathsText = do
       case T.splitOn "\t" outputPathLine of
         [checkName, outputPath] | not (T.null checkName) && not (T.null outputPath) -> Just (T.unpack checkName, T.unpack outputPath)
         _ -> Nothing
-summarizeRepositoryPackageCheck :: Maybe (Map.Map FilePath FilePath) -> FilePath -> IO RepositoryPackageCheckSummary
-summarizeRepositoryPackageCheck Nothing _ =
-  pure RepositoryPackageCheckUnavailable
-summarizeRepositoryPackageCheck (Just checkOutputPaths) checkName =
-  case Map.lookup checkName checkOutputPaths of
-    Nothing -> pure RepositoryPackageCheckUnavailable
-    Just outputPath -> do
-      outputExists <- doesDirectoryExist outputPath
-      if not outputExists
-        then pure RepositoryPackageCheckNotRun
-        else do
-          maybeCoverageText <- readTextFileIfExists (outputPath </> "coverage-summary.tsv")
-          maybeProfileText <- readTextFileIfExists (outputPath </> "profile-summary.tsv")
-          let coverageSummary =
-                maybe
-                  RepositoryCoverageUnavailable
-                  RepositoryCoverageMeasured
-                  (maybeCoverageText >>= parseRepositoryCoverageSummary)
-              profileSummary =
-                fromMaybe
-                  RepositoryProfileUnavailable
-                  (maybeProfileText >>= parseRepositoryProfileSummary)
-          pure (RepositoryPackageCheckMeasured coverageSummary profileSummary)
+summarizeRepositoryPackageTestStatus :: Maybe FilePath -> IO RepositoryPackageTestStatus
+summarizeRepositoryPackageTestStatus Nothing =
+  pure RepositoryTestsUnavailable
+summarizeRepositoryPackageTestStatus (Just outputPath) = do
+  outputExists <- doesDirectoryExist outputPath
+  if not outputExists
+    then pure RepositoryTestsNotRun
+    else do
+      maybeCoverageText <- readTextFileIfExists (outputPath </> "coverage-summary.tsv")
+      maybeTimingText <- readTextFileIfExists (outputPath </> "profile-summary.tsv")
+      pure $
+        case (maybeCoverageText >>= parseRepositoryCoverageSummary, maybeTimingText >>= parseRepositoryTimingSummary) of
+          (Just coverage, Just (totalDuration, testDurations)) ->
+            RepositoryTestsMeasured coverage totalDuration testDurations
+          _ -> RepositoryTestsUnavailable
 parseRepositoryCoverageSummary :: T.Text -> Maybe CoverageMeasurement
 parseRepositoryCoverageSummary coverageText =
   case T.splitOn "\t" (T.strip coverageText) of
@@ -873,15 +855,15 @@ parseRepositoryCoverageSummary coverageText =
         then Just (CoverageMeasurement metric covered total)
         else Nothing
     _ -> Nothing
-parseRepositoryProfileSummary :: T.Text -> Maybe RepositoryPackageProfileSummary
-parseRepositoryProfileSummary profileText =
-  case T.lines profileText of
+parseRepositoryTimingSummary :: T.Text -> Maybe (Duration, Map.Map String Duration)
+parseRepositoryTimingSummary timingText =
+  case T.lines timingText of
     headerLine : testLines -> do
       totalSeconds <- case T.splitOn "\t" headerLine of
         ["profile-v1", "total-seconds", secondsText] -> readDuration secondsText
         _ -> Nothing
       testDurations <- parseRepositoryTestTimingLines testLines
-      Just (RepositoryProfileMeasured totalSeconds testDurations)
+      Just (totalSeconds, testDurations)
     [] -> Nothing
 parseRepositoryTestTimingLines :: [T.Text] -> Maybe (Map.Map String Duration)
 parseRepositoryTestTimingLines testLines = do
@@ -1124,9 +1106,9 @@ renderScaffoldFiles scaffoldPackageKind packageName packageDescription =
           ScaffoldFile "style.css" htmlStyleSource
         ]
       PythonLaTeXScaffold ->
-        [ ScaffoldFile ".gitignore" pythonLatexGitignoreSource,
-          ScaffoldFile "default.nix" (renderNixTemplateDescription defaultPythonLatexTemplateDescription packageDescription pythonLatexTemplateBaselineNixSource),
-          ScaffoldFile "main.py" pythonLatexMainSource,
+        [ ScaffoldFile ".gitignore" pythonLaTeXGitignoreSource,
+          ScaffoldFile "default.nix" (renderNixTemplateDescription defaultPythonLaTeXTemplateDescription packageDescription pythonLaTeXTemplateBaselineNixSource),
+          ScaffoldFile "main.py" pythonLaTeXMainSource,
           ScaffoldFile "ms.tex" latexMsTexSource,
           ScaffoldFile "ms.bib" latexMsBibSource
         ]
@@ -1142,7 +1124,7 @@ renderScaffoldFiles scaffoldPackageKind packageName packageDescription =
         ]
       LaTeXScaffold ->
         [ ScaffoldFile ".gitignore" latexGitignoreSource,
-          ScaffoldFile "default.nix" (renderNixTemplateDescription defaultLatexTemplateDescription packageDescription latexTemplateBaselineNixSource),
+          ScaffoldFile "default.nix" (renderNixTemplateDescription defaultLaTeXTemplateDescription packageDescription latexTemplateBaselineNixSource),
           ScaffoldFile "ms.tex" latexMsTexSource,
           ScaffoldFile "ms.bib" latexMsBibSource
         ]
@@ -1159,12 +1141,12 @@ defaultRustScaffoldDescription :: String
 defaultRustScaffoldDescription = "Generated Rust package."
 defaultHtmlTemplateDescription :: String
 defaultHtmlTemplateDescription = "An HTML, CSS, and JavaScript template package."
-defaultPythonLatexTemplateDescription :: String
-defaultPythonLatexTemplateDescription = "A Python and LaTeX template package."
+defaultPythonLaTeXTemplateDescription :: String
+defaultPythonLaTeXTemplateDescription = "A Python and LaTeX template package."
 defaultCTemplateDescription :: String
 defaultCTemplateDescription = "A C template package."
-defaultLatexTemplateDescription :: String
-defaultLatexTemplateDescription = "A LaTeX template package."
+defaultLaTeXTemplateDescription :: String
+defaultLaTeXTemplateDescription = "A LaTeX template package."
 scaffoldDescription :: String -> Maybe String -> String
 scaffoldDescription defaultDescription = maybe defaultDescription (unwords . words)
 escapeNixDoubleQuotedString :: String -> String
@@ -1386,7 +1368,6 @@ type PackageDetection :: Type
 data PackageDetection
   = DetectedPackageKind PackageKind
   | AmbiguousPackageMarkers (NonEmpty String)
-  | UnrecognizedPackageMarkers
 buildPackageInfo :: Set.Set FilePath -> FilePath -> PackageInfo
 buildPackageInfo leafPaths packageRootDirectory =
   let packageDirectoryName = takeBaseName packageRootDirectory
@@ -1400,32 +1381,23 @@ buildPackageInfo leafPaths packageRootDirectory =
 detectPackageMarkers :: [FilePath] -> [(String, PackageKind)]
 detectPackageMarkers packageRelativeLeafPaths =
   let hasLeafPath leafPath = leafPath `elem` packageRelativeLeafPaths
-      hasLeafPathWithPrefix pathPrefix = any (isPrefixOf pathPrefix) packageRelativeLeafPaths
-      projectMarkers :: [(String, PackageKind)]
-      projectMarkers =
-        [ marker
-        | (markerExists, marker) <-
-            [ (hasLeafPath "Main.hs", ("Main.hs", HaskellPackage)),
-              (hasLeafPath "Cargo.toml", ("Cargo.toml", RustPackage)),
-              (hasLeafPath "index.html", ("index.html", HTMLPackage)),
-              (hasLeafPath "main.py" && hasLeafPath "ms.tex", ("main.py+ms.tex", PythonLaTeXPackage)),
-              (hasLeafPath "main.py" && not (hasLeafPath "ms.tex"), ("main.py", PythonPackage)),
-              (hasLeafPath "main.c", ("main.c", CPackage)),
-              (hasLeafPath "main.tf", ("main.tf", TerraformPackage)),
-              (hasLeafPath "ms.tex" && not (hasLeafPath "main.py"), ("ms.tex", LaTeXPackage))
-            ],
-          markerExists
-        ]
-      binaryLayoutMarker :: [(String, PackageKind)]
-      binaryLayoutMarker =
-        [ ("binary-layout", BinaryReleasePackage)
-        | null projectMarkers && not (hasLeafPathWithPrefix "Cargo.toml")
-        ]
-   in projectMarkers ++ binaryLayoutMarker
+   in [ marker
+      | (markerExists, marker) <-
+          [ (hasLeafPath "Main.hs", ("Main.hs", HaskellPackage)),
+            (hasLeafPath "Cargo.toml", ("Cargo.toml", RustPackage)),
+            (hasLeafPath "index.html", ("index.html", HTMLPackage)),
+            (hasLeafPath "main.py" && hasLeafPath "ms.tex", ("main.py+ms.tex", PythonLaTeXPackage)),
+            (hasLeafPath "main.py" && not (hasLeafPath "ms.tex"), ("main.py", PythonPackage)),
+            (hasLeafPath "main.c", ("main.c", CPackage)),
+            (hasLeafPath "main.tf", ("main.tf", TerraformPackage)),
+            (hasLeafPath "ms.tex" && not (hasLeafPath "main.py"), ("ms.tex", LaTeXPackage))
+          ],
+        markerExists
+      ]
 detectPackageKindFromMarkers :: [(String, PackageKind)] -> PackageDetection
 detectPackageKindFromMarkers markers =
   case markers of
-    [] -> UnrecognizedPackageMarkers
+    [] -> DetectedPackageKind BinaryReleasePackage
     [(_, markerKind)] -> DetectedPackageKind markerKind
     firstMarker : remainingMarkers ->
       AmbiguousPackageMarkers (fst firstMarker :| map fst remainingMarkers)
@@ -1433,7 +1405,6 @@ packageKindFromDetection :: PackageDetection -> Maybe PackageKind
 packageKindFromDetection = \case
   DetectedPackageKind packageKind -> Just packageKind
   AmbiguousPackageMarkers _ -> Nothing
-  UnrecognizedPackageMarkers -> Nothing
 ambiguousPackageMarkerIssuesForPackage :: PackageInfo -> [String]
 ambiguousPackageMarkerIssuesForPackage packageInfo =
   case packageDetection packageInfo of
@@ -1443,7 +1414,6 @@ ambiguousPackageMarkerIssuesForPackage packageInfo =
           ++ intercalate ", " (NE.toList matchedPackageMarkers)
       ]
     DetectedPackageKind _ -> []
-    UnrecognizedPackageMarkers -> []
 allowedRegularFileRegexesForPackageKind :: FilePath -> FilePath -> Maybe PackageKind -> [String]
 allowedRegularFileRegexesForPackageKind packageRootDirectory packageDirectoryName maybePackageKind =
   let escapedPackageRootDirectory = escapeRegexLiteral packageRootDirectory
@@ -1603,36 +1573,24 @@ checkPackageAssociation matchedCheckTemplateName checkName =
 detectPackageKindForPackage :: FilePath -> IO PackageKind
 detectPackageKindForPackage packageName = do
   let packageRootDirectory = "packages" </> packageName
-      packageFileExists relativePath = doesFileExist (packageRootDirectory </> relativePath)
-  packageMarkerFiles <-
-    Set.fromList
-      <$> filterM
-        packageFileExists
-        ["Main.hs", "Cargo.toml", "index.html", "main.py", "ms.tex", "main.c", "main.tf"]
+  packageDirectoryExists <- doesDirectoryExist packageRootDirectory
+  packageFiles <-
+    if packageDirectoryExists
+      then listDirectory packageRootDirectory >>= filterM (doesFileExist . (packageRootDirectory </>))
+      else pure []
   maybePackageDefaultNixSource <- readTextFileIfExists (packageRootDirectory </> "default.nix")
-  let hasMarkerFile = (`Set.member` packageMarkerFiles)
-      isPythonPyPIPackage =
-        maybe
-          False
-          ( \packageDefaultNixSource ->
-              let packageDefaultNixSourceString = T.unpack packageDefaultNixSource
-               in ("buildPythonPackage" `isInfixOf` packageDefaultNixSourceString || "buildPythonApplication" `isInfixOf` packageDefaultNixSourceString)
-                    && not ("src = ./.;" `isInfixOf` packageDefaultNixSourceString)
-                    && ("fetchPypi" `isInfixOf` packageDefaultNixSourceString || "fetchurl" `isInfixOf` packageDefaultNixSourceString)
-          )
-          maybePackageDefaultNixSource
-      packageKind
-        | hasMarkerFile "Main.hs" = HaskellPackage
-        | hasMarkerFile "Cargo.toml" = RustPackage
-        | hasMarkerFile "index.html" = HTMLPackage
-        | hasMarkerFile "main.py" && hasMarkerFile "ms.tex" = PythonLaTeXPackage
-        | hasMarkerFile "main.py" = PythonPackage
-        | isPythonPyPIPackage = PythonPyPIPackage
-        | hasMarkerFile "main.c" = CPackage
-        | hasMarkerFile "main.tf" = TerraformPackage
-        | hasMarkerFile "ms.tex" = LaTeXPackage
-        | otherwise = BinaryReleasePackage
-  pure packageKind
+  pure $
+    case detectPackageMarkers packageFiles of
+      (_, packageKind) : _ -> packageKind
+      []
+        | maybe False isExternalPythonPackageSource maybePackageDefaultNixSource -> PythonPyPIPackage
+        | otherwise -> BinaryReleasePackage
+isExternalPythonPackageSource :: T.Text -> Bool
+isExternalPythonPackageSource packageDefaultNixSource =
+  let source = T.unpack packageDefaultNixSource
+   in ("buildPythonPackage" `isInfixOf` source || "buildPythonApplication" `isInfixOf` source)
+        && not ("src = ./.;" `isInfixOf` source)
+        && ("fetchPypi" `isInfixOf` source || "fetchurl" `isInfixOf` source)
 readTextFileIfExists :: FilePath -> IO (Maybe T.Text)
 readTextFileIfExists filePath = do
   pathExists <- doesPathExist filePath
@@ -1767,7 +1725,7 @@ breakOnString delimiter = go []
     go reversedPrefix [] = (reverse reversedPrefix, [])
 testSpecificationFromIdentifier :: String -> String
 testSpecificationFromIdentifier identifier =
-  case wordsFromTestIdentifier (stripTestFrameworkPrefixes identifier) of
+  case renderTestWords (wordsFromTestIdentifier (stripTestFrameworkPrefixes identifier)) of
     [] -> identifier
     (firstCharacter : firstWordRest) : remainingWords ->
       let sentence = unwords ((toUpper firstCharacter : firstWordRest) : remainingWords)
@@ -1775,6 +1733,22 @@ testSpecificationFromIdentifier identifier =
             punctuation : _ | punctuation `elem` (".!?" :: String) -> sentence
             _ -> sentence ++ "."
     _ -> identifier
+renderTestWords :: [String] -> [String]
+renderTestWords = \case
+  "non" : word : remainingWords -> ("non-" ++ renderTestWord word) : renderTestWords remainingWords
+  "top" : "level" : remainingWords -> "top-level" : renderTestWords remainingWords
+  word : remainingWords -> renderTestWord word : renderTestWords remainingWords
+  [] -> []
+renderTestWord :: String -> String
+renderTestWord = \case
+  "cli" -> "CLI"
+  "e2e" -> "end-to-end"
+  "gitignore" -> ".gitignore"
+  "gitmodules" -> ".gitmodules"
+  "url" -> "URL"
+  "urls" -> "URLs"
+  "utf8" -> "UTF-8"
+  word -> word
 stripTestFrameworkPrefixes :: String -> String
 stripTestFrameworkPrefixes identifier =
   maybe
@@ -2478,7 +2452,7 @@ hUnitPackageTests =
       TestLabel "Ignores non-test Haskell strings and comments during discovery." (TestCase haskellTestDiscoveryFalsePositiveTest),
       TestLabel "Uses Python test docstrings as behavioral specifications." (TestCase pythonTestDiscoveryTest),
       TestLabel "Humanizes conventional test identifiers across frameworks." (TestCase testIdentifierSpecificationTest),
-      TestLabel "Parses versioned coverage summaries strictly." (TestCase repositoryCoverageParsingTest),
+      TestLabel "Parses versioned test result summaries strictly." (TestCase repositoryTestResultParsingTest),
       TestLabel "Ignores formatter-only Cargo inline-table spacing." (TestCase cargoTomlFormattingNormalizationTest),
       TestLabel "Requires allowlisted filesystem entry kinds." (TestCase entryKindStructureTest),
       TestLabel "Treats parameter directories as opaque user data." (TestCase parameterDirectoryStructureTest),
@@ -2559,12 +2533,14 @@ testIdentifierSpecificationTest :: IO ()
 testIdentifierSpecificationTest =
   assertEqual
     "Framework prefixes, snake case, and camel case do not leak into specifications."
-    ["Canonicalization is idempotent.", "Strip empty lines matches filtered sequence.", "Attribute sets canonicalize by key order."]
+    ["Canonicalization is idempotent.", "Removing empty lines matches filtered sequence.", "Attribute sets canonicalize by key order.", "Parses URLs with CLI and preserves UTF-8.", "Rejects a non-regular top-level value."]
     ( map
         testSpecificationFromIdentifier
         [ "test_property_canonicalization_is_idempotent",
-          "quickcheck_strip_empty_lines_matches_filtered_sequence",
-          "prop_attributeSetsCanonicalizeByKeyOrder"
+          "quickcheck_removing_empty_lines_matches_filtered_sequence",
+          "prop_attributeSetsCanonicalizeByKeyOrder",
+          "test_parses_urls_with_cli_and_preserves_utf8",
+          "rejects_a_non_regular_top_level_value"
         ]
     )
 cargoTomlFormattingNormalizationTest :: IO ()
@@ -2602,8 +2578,8 @@ parameterDirectoryStructureTest =
       writeFile (parameterDirectory </> "arbitrary/nested/user.data") ""
     issues <- withCurrentDirectory temporaryRepository checkRepositoryStructure
     assertEqual "Parameter directory contents do not participate in repository structure policy." [] issues
-repositoryCoverageParsingTest :: IO ()
-repositoryCoverageParsingTest = do
+repositoryTestResultParsingTest :: IO ()
+repositoryTestResultParsingTest = do
   assertEqual
     "Local flake evaluation uses Git filtering so ignored repository files are excluded."
     "git+file:///tmp/example-repository"
@@ -2632,16 +2608,16 @@ repositoryCoverageParsingTest = do
     Nothing
     (parseRepositoryCheckOutputPaths ["demo-coverage", "sample_coverage"] "demo-coverage\t/nix/store/demo")
   assertEqual
-    "A valid profile artifact preserves total and per-test durations."
-    (Just (RepositoryProfileMeasured (Duration 1.25) (Map.fromList [("Reports behavior.", Duration 0.125)])))
-    (parseRepositoryProfileSummary "profile-v1\ttotal-seconds\t1.25\ntest\t0.125\tReports behavior.\n")
+    "A valid timing artifact preserves total and per-test durations."
+    (Just (Duration 1.25, Map.fromList [("Reports behavior.", Duration 0.125)]))
+    (parseRepositoryTimingSummary "profile-v1\ttotal-seconds\t1.25\ntest\t0.125\tReports behavior.\n")
   forM_
     [ "profile-v1\ttotal-seconds\tNaN\ntest\t0.125\tReports behavior.\n",
       "profile-v1\ttotal-seconds\tInfinity\ntest\t0.125\tReports behavior.\n",
       "profile-v1\ttotal-seconds\t1.0\ntest\tNaN\tReports behavior.\n",
       "profile-v1\ttotal-seconds\t1.0\ntest\tInfinity\tReports behavior.\n"
     ]
-    (assertEqual "Non-finite summary timings are rejected." Nothing . parseRepositoryProfileSummary)
+    (assertEqual "Non-finite summary timings are rejected." Nothing . parseRepositoryTimingSummary)
 nixTemplateParameterDifferenceTest :: IO ()
 nixTemplateParameterDifferenceTest = do
   actualParseResult <- parseNixExprFromText "{ pkgs ? import <nixpkgs> {} }: let python = pkgs.python3; in { pname = baseNameOf ./.; }"
@@ -2680,12 +2656,11 @@ repositorySummaryRenderingTest = do
             repositoryPackageDescription = Nothing,
             repositoryPackageDependencies = ["alpha", "demo-two"],
             repositoryPackageTestNames = ["Reports \"quoted\" behavior."],
-            repositoryPackageCheck =
-              Just
-                ( RepositoryPackageCheckMeasured
-                    (RepositoryCoverageMeasured (CoverageMeasurement StatementCoverage 19 20))
-                    (RepositoryProfileMeasured (Duration 1.234) (Map.fromList [("Reports \"quoted\" behavior.", Duration 0.125)]))
-                )
+            repositoryPackageTestStatus =
+              RepositoryTestsMeasured
+                (CoverageMeasurement StatementCoverage 19 20)
+                (Duration 1.234)
+                (Map.fromList [("Reports \"quoted\" behavior.", Duration 0.125)])
           }
       repositorySummary =
         RepositorySummary
@@ -2694,7 +2669,7 @@ repositorySummaryRenderingTest = do
             repositorySummaryPackages = [packageSummary]
           }
   assertEqual
-    "Profile timings are used for test durations."
+    "Recorded timings are used for test durations."
     (Map.fromList [("Reports \"quoted\" behavior.", Duration 0.125)])
     (repositoryPackageTestDurations packageSummary)
   assertEqual
@@ -2724,7 +2699,7 @@ repositorySummaryRenderingTest = do
           "  \"repositories\": [",
           "    {",
           "      \"path\": \"example.test/owner/demo\",",
-          "      \"README\": \"Demo repository.\\n\\nIts intent is visible.\",",
+          "      \"readme\": \"Demo repository.\\n\\nIts intent is visible.\",",
           "      \"packages\": [",
           "        {",
           "          \"name\": \"demo\",",
@@ -2732,8 +2707,9 @@ repositorySummaryRenderingTest = do
           "          \"description\": null,",
           "          \"dependencies\": [\"alpha\", \"demo-two\"],",
           "          \"tests\": {",
-          "            \"coverage\": { \"status\": \"measured\", \"metric\": \"statements\", \"covered\": 19, \"total\": 20, \"percent\": 95.0 },",
-          "            \"profile\": { \"status\": \"measured\", \"totalSeconds\": 1.234 },",
+          "            \"status\": \"measured\",",
+          "            \"coverage\": { \"metric\": \"statements\", \"covered\": 19, \"total\": 20, \"percent\": 95.0 },",
+          "            \"durationSeconds\": 1.234,",
           "            \"cases\": [{ \"name\": \"Reports \\\"quoted\\\" behavior.\", \"durationSeconds\": 0.125 }]",
           "          }",
           "        }",
@@ -3009,7 +2985,7 @@ expectedGeneratedPythonPackageSummary =
       repositoryPackageDependencies = [],
       repositoryPackageTestNames =
         ["Prints the sample message from the executable."],
-      repositoryPackageCheck = Just RepositoryPackageCheckUnavailable
+      repositoryPackageTestStatus = RepositoryTestsUnavailable
     }
 expectedGeneratedHaskellPackageSummary :: RepositoryPackageSummary
 expectedGeneratedHaskellPackageSummary =
@@ -3019,7 +2995,7 @@ expectedGeneratedHaskellPackageSummary =
       repositoryPackageDescription = Just "Demo package",
       repositoryPackageDependencies = [],
       repositoryPackageTestNames = ["Renders the sample message."],
-      repositoryPackageCheck = Just RepositoryPackageCheckUnavailable
+      repositoryPackageTestStatus = RepositoryTestsUnavailable
     }
 runEndToEndCommandIn :: FilePath -> [String] -> IO (ExitCode, String, String)
 runEndToEndCommandIn workingDirectory arguments =
@@ -3055,8 +3031,8 @@ pythonGitignoreSource =
       "coverage/",
       "tmp/"
     ]
-pythonLatexGitignoreSource :: T.Text
-pythonLatexGitignoreSource = T.unlines ["tmp/"]
+pythonLaTeXGitignoreSource :: T.Text
+pythonLaTeXGitignoreSource = T.unlines ["tmp/"]
 rustGitignoreSource :: T.Text
 rustGitignoreSource =
   T.unlines
@@ -3117,8 +3093,8 @@ pythonMainSource =
       "if __name__ == \"__main__\":",
       "    main()"
     ]
-pythonLatexMainSource :: T.Text
-pythonLatexMainSource =
+pythonLaTeXMainSource :: T.Text
+pythonLaTeXMainSource =
   T.unlines
     [ "#!/usr/bin/env python3",
       "# ruff: noqa: S101",
@@ -3409,7 +3385,7 @@ rustMainSource =
       "        rendered",
       "    }",
       "    #[test]",
-      "    fn test_process_root_path_respects_gitignore_and_skips_binary_files() -> Result<()> {",
+      "    fn respects_gitignore_and_skips_binary_files() -> Result<()> {",
       "        use tempfile::tempdir;",
       "        let dir = tempdir()?;",
       "        let root = dir.path();",
@@ -3427,7 +3403,7 @@ rustMainSource =
       "        Ok(())",
       "    }",
       "    #[test]",
-      "    fn test_main_processes_current_directory_when_no_args() -> Result<()> {",
+      "    fn processes_current_directory_when_no_arguments() -> Result<()> {",
       "        use tempfile::tempdir;",
       "        let dir = tempdir()?;",
       "        let root = dir.path();",
@@ -3443,7 +3419,7 @@ rustMainSource =
       "        Ok(())",
       "    }",
       "    #[test]",
-      "    fn quickcheck_strip_empty_lines_matches_filtered_sequence() {",
+      "    fn quickcheck_removing_empty_lines_matches_filtered_sequence() {",
       "        fn property(lines: Vec<LogicalLine>) -> TestResult {",
       "            let input = render_lines(&lines);",
       "            match strip_empty_lines_from_bytes(&input) {",
@@ -3979,8 +3955,8 @@ binaryReleaseTemplateBaselineNixSource =
       "  version = \"0.9.23\";",
       "}"
     ]
-pythonLatexTemplateBaselineNixSource :: T.Text
-pythonLatexTemplateBaselineNixSource =
+pythonLaTeXTemplateBaselineNixSource :: T.Text
+pythonLaTeXTemplateBaselineNixSource =
   T.unlines
     [ "{",
       "  pkgs ? import <nixpkgs> { },",
