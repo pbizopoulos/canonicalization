@@ -3,8 +3,9 @@ use std::env;
 use std::ffi::OsString;
 use std::fmt;
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{self, Command, ExitStatus, Stdio};
+use std::process::{self, Command, ExitStatus};
 const MAIN_USAGE: &str = "usage: git home-submodule init\n   or: git home-submodule add <repository>\n   or: git home-submodule check [--fix]\n";
 const MAIN_HELP: &str = "usage: git home-submodule init\n   or: git home-submodule add <repository>\n   or: git home-submodule check [--fix]\n\nManage repositories as canonical submodules of the home directory.\n\ninit\n    For a new home repository, equivalent to:\n        git init ~\n        printf '*\\n!.gitignore\\n!.gitmodules\\n' > ~/.gitignore\n    A compatible existing .gitignore is preserved and completed.\n\nadd <repository>\n    Add an HTTPS or SSH repository at its canonical path, equivalent to:\n        git -C ~ submodule add --force <repository> <host>/<repository-path>\n\ncheck [--fix]\n    Check .gitmodules paths; with --fix, move and update mismatches.\n";
 const ADD_USAGE: &str = "usage: git home-submodule add <repository>\n";
@@ -293,15 +294,16 @@ fn check_home_gitmodules(home_directory: &Path, fix: bool) -> Result<(), CliFail
             "--regexp",
             "^submodule\\..*",
         ])
-        .stderr(Stdio::inherit())
         .output()
         .map_err(|error| {
             CliFailure::Check(vec![format!("failed to execute git config: {error}")])
         })?;
-    let exit_code = output.status.code().unwrap_or(1);
-    if !(output.status.success()
-        || exit_code == 1 && output.stdout.is_empty() && output.stderr.is_empty())
-    {
+    let empty_configuration =
+        output.status.code() == Some(1) && output.stdout.is_empty() && output.stderr.is_empty();
+    std::io::stderr()
+        .write_all(&output.stderr)
+        .map_err(|error| CliFailure::fatal(format!("failed to write git diagnostic: {error}")))?;
+    if !output.status.success() && !empty_configuration {
         return Err(CliFailure::Git(output.status));
     }
     let raw_submodules = parse_raw_submodule_fields(&output.stdout)
