@@ -76,14 +76,14 @@ defaultAllowedNixDifferenceKeys =
 type TemplateSpec :: Type
 data TemplateSpec = TemplateSpec
   { templateName :: FilePath,
-    templateMatches :: FilePath -> String -> IO Bool,
+    templateMatches :: PackageKind -> String -> Bool,
     templateAllowedDifferenceKeys :: Set.Set T.Text,
     templateBaselineSource :: T.Text
   }
 type CheckTemplateSpec :: Type
 data CheckTemplateSpec = CheckTemplateSpec
   { checkTemplateName :: FilePath,
-    checkTemplateMatches :: FilePath -> String -> IO Bool,
+    checkTemplateMatches :: Map.Map FilePath PackageKind -> FilePath -> String -> Bool,
     checkTemplateBaselineSource :: T.Text,
     checkTemplateComparisonMode :: CheckTemplateComparisonMode
   }
@@ -95,19 +95,19 @@ templateSpecs :: [TemplateSpec]
 templateSpecs =
   [ TemplateSpec
       { templateName = "haskell_package_baseline",
-        templateMatches = \_ nixSource -> pure ("haskellPackages.mkDerivation" `isInfixOf` nixSource),
+        templateMatches = \_ nixSource -> "haskellPackages.mkDerivation" `isInfixOf` nixSource,
         templateAllowedDifferenceKeys = Set.insert "passthru" defaultAllowedNixDifferenceKeys,
         templateBaselineSource = haskellTemplateBaselineNixSource
       },
     TemplateSpec
       { templateName = "rust_package_baseline",
-        templateMatches = \_ nixSource -> pure ("rustPlatform.buildRustPackage" `isInfixOf` nixSource),
+        templateMatches = \_ nixSource -> "rustPlatform.buildRustPackage" `isInfixOf` nixSource,
         templateAllowedDifferenceKeys = Set.insert "passthru" defaultAllowedNixDifferenceKeys,
         templateBaselineSource = rustTemplateBaselineNixSource
       },
     TemplateSpec
       { templateName = "html_template",
-        templateMatches = \_ nixSource -> pure ("writeShellApplication" `isInfixOf` nixSource && "http-server" `isInfixOf` nixSource),
+        templateMatches = \_ nixSource -> "writeShellApplication" `isInfixOf` nixSource && "http-server" `isInfixOf` nixSource,
         templateAllowedDifferenceKeys = Set.insert "text" defaultAllowedNixDifferenceKeys,
         templateBaselineSource = htmlTemplateBaselineNixSource
       },
@@ -137,80 +137,65 @@ templateSpecs =
       },
     TemplateSpec
       { templateName = "python_template",
-        templateMatches = \_ nixSource -> pure ("buildPythonPackage" `isInfixOf` nixSource),
+        templateMatches = \_ nixSource -> "buildPythonPackage" `isInfixOf` nixSource,
         templateAllowedDifferenceKeys = Set.fromList ["meta", "propagatedBuildInputs", "python", "shellHook", "version"],
         templateBaselineSource = pythonTemplateBaselineNixSource
       },
     TemplateSpec
       { templateName = "deploy_host_template",
         templateMatches = \_ nixSource ->
-          pure
-            ( "writeShellApplication" `isInfixOf` nixSource
-                && ("opentofu" `isInfixOf` nixSource || "agenix-shell" `isInfixOf` nixSource)
-            ),
+          "writeShellApplication" `isInfixOf` nixSource
+            && ("opentofu" `isInfixOf` nixSource || "agenix-shell" `isInfixOf` nixSource),
         templateAllowedDifferenceKeys = Set.insert "meta.description" defaultAllowedNixDifferenceKeys,
         templateBaselineSource = deployHostTemplateBaselineNixSource
       },
     TemplateSpec
       { templateName = "latex_template",
         templateMatches = \_ nixSource ->
-          pure
-            ( "stdenv.mkDerivation" `isInfixOf` nixSource
-                && "latexmk -pdf ms.tex" `isInfixOf` nixSource
-            ),
+          "stdenv.mkDerivation" `isInfixOf` nixSource
+            && "latexmk -pdf ms.tex" `isInfixOf` nixSource,
         templateAllowedDifferenceKeys = defaultAllowedNixDifferenceKeys,
         templateBaselineSource = latexTemplateBaselineNixSource
       },
     TemplateSpec
       { templateName = "c_template",
         templateMatches = \_ nixSource ->
-          pure
-            ( "stdenv.mkDerivation" `isInfixOf` nixSource
-                && "cc -o ${pname} main.c -std=c89" `isInfixOf` nixSource
-            ),
+          "stdenv.mkDerivation" `isInfixOf` nixSource
+            && "cc -o ${pname} main.c -std=c89" `isInfixOf` nixSource,
         templateAllowedDifferenceKeys = Set.union defaultAllowedNixDifferenceKeys (Set.fromList ["buildPhase", "checkPhase"]),
         templateBaselineSource = cTemplateBaselineNixSource
       },
     TemplateSpec
       { templateName = "uncomment_template",
         templateMatches = \_ nixSource ->
-          pure
-            ( "stdenv.mkDerivation" `isInfixOf` nixSource
-                && "autoPatchelfHook" `isInfixOf` nixSource
-                && "Goldziher" `isInfixOf` nixSource
-            ),
+          "stdenv.mkDerivation" `isInfixOf` nixSource
+            && "autoPatchelfHook" `isInfixOf` nixSource
+            && "Goldziher" `isInfixOf` nixSource,
         templateAllowedDifferenceKeys = Set.union defaultAllowedNixDifferenceKeys (Set.fromList ["pname", "src"]),
         templateBaselineSource = uncommentTemplateBaselineNixSource
       }
   ]
-matchesPythonLaTeXTemplate :: FilePath -> String -> IO Bool
-matchesPythonLaTeXTemplate packageName nixSource = do
-  packageKind <- detectPackageKindForPackage packageName
-  pure (packageKind == PythonLaTeXPackage && "buildPythonPackage" `isInfixOf` nixSource)
-matchesPythonPyPITemplateLike :: String -> FilePath -> String -> IO Bool
+matchesPythonLaTeXTemplate :: PackageKind -> String -> Bool
+matchesPythonLaTeXTemplate packageKind nixSource =
+  packageKind == PythonLaTeXPackage && "buildPythonPackage" `isInfixOf` nixSource
+matchesPythonPyPITemplateLike :: String -> PackageKind -> String -> Bool
 matchesPythonPyPITemplateLike buildFunction _ nixSource =
-  pure
-    ( buildFunction `isInfixOf` nixSource
-        && isExternalPythonPackageSource (T.pack nixSource)
-    )
-matchesPythonPyPIApplicationTemplate :: FilePath -> String -> IO Bool
+  buildFunction `isInfixOf` nixSource
+    && isExternalPythonPackageSource (T.pack nixSource)
+matchesPythonPyPIApplicationTemplate :: PackageKind -> String -> Bool
 matchesPythonPyPIApplicationTemplate = matchesPythonPyPITemplateLike "buildPythonApplication"
-matchesPythonPyPITemplate :: FilePath -> String -> IO Bool
+matchesPythonPyPITemplate :: PackageKind -> String -> Bool
 matchesPythonPyPITemplate = matchesPythonPyPITemplateLike "buildPythonPackage"
-matchesBinaryReleaseTemplate :: FilePath -> String -> IO Bool
+matchesBinaryReleaseTemplate :: PackageKind -> String -> Bool
 matchesBinaryReleaseTemplate _ nixSource =
-  pure
-    ( "stdenv.mkDerivation" `isInfixOf` nixSource
-        && "src = pkgs.fetchurl" `isInfixOf` nixSource
-        && "sourceRoot = \".\";" `isInfixOf` nixSource
-        && "install -Dm755 ${pname}-v${version}-x86_64-unknown-linux-musl/${pname}" `isInfixOf` nixSource
-    )
-matchesCheckNameSuffixAndSourceContains :: String -> [String] -> FilePath -> String -> IO Bool
-matchesCheckNameSuffixAndSourceContains suffix requiredNeedles checkName nixSource =
-  pure
-    ( suffix `isSuffixOf` checkName
-        && all (`isInfixOf` nixSource) requiredNeedles
-    )
+  "stdenv.mkDerivation" `isInfixOf` nixSource
+    && "src = pkgs.fetchurl" `isInfixOf` nixSource
+    && "sourceRoot = \".\";" `isInfixOf` nixSource
+    && "install -Dm755 ${pname}-v${version}-x86_64-unknown-linux-musl/${pname}" `isInfixOf` nixSource
+matchesCheckNameSuffixAndSourceContains :: String -> [String] -> Map.Map FilePath PackageKind -> FilePath -> String -> Bool
+matchesCheckNameSuffixAndSourceContains suffix requiredNeedles _ checkName nixSource =
+  suffix `isSuffixOf` checkName
+    && all (`isInfixOf` nixSource) requiredNeedles
 checkTemplateSpecs :: [CheckTemplateSpec]
 checkTemplateSpecs =
   [ CheckTemplateSpec
@@ -245,22 +230,21 @@ checkTemplateSpecs =
       },
     CheckTemplateSpec
       { checkTemplateName = "host_default_check",
-        checkTemplateMatches = \checkName _ -> pure (checkName == "host_default"),
+        checkTemplateMatches = \_ checkName _ -> checkName == "host_default",
         checkTemplateBaselineSource = hostDefaultCheckBaselineNixSource,
         checkTemplateComparisonMode = ExactCheckTemplate
       }
   ]
-matchesHaskellCoverageCheck :: FilePath -> String -> IO Bool
+matchesHaskellCoverageCheck :: Map.Map FilePath PackageKind -> FilePath -> String -> Bool
 matchesHaskellCoverageCheck = matchesCheckNameSuffixAndSourceContains "-coverage" ["ghcWithPackages", "-fhpc"]
-matchesPythonCoverageCheck :: FilePath -> String -> IO Bool
+matchesPythonCoverageCheck :: Map.Map FilePath PackageKind -> FilePath -> String -> Bool
 matchesPythonCoverageCheck = matchesCheckNameSuffixAndSourceContains "_coverage" ["--cov=\"$src\""]
-matchesRustCoverageCheck :: FilePath -> String -> IO Bool
+matchesRustCoverageCheck :: Map.Map FilePath PackageKind -> FilePath -> String -> Bool
 matchesRustCoverageCheck = matchesCheckNameSuffixAndSourceContains "-coverage" ["cargo llvm-cov"]
-matchesCPackageVmCheck :: FilePath -> String -> IO Bool
-matchesCPackageVmCheck checkName nixSource = do
-  packageKind <- detectPackageKindForPackage checkName
-  pure (isCPackageVmCheckShape packageKind nixSource)
-matchesDefaultVmWithDiskoCheck :: FilePath -> String -> IO Bool
+matchesCPackageVmCheck :: Map.Map FilePath PackageKind -> FilePath -> String -> Bool
+matchesCPackageVmCheck packageKinds checkName nixSource =
+  maybe False (`isCPackageVmCheckShape` nixSource) (Map.lookup checkName packageKinds)
+matchesDefaultVmWithDiskoCheck :: Map.Map FilePath PackageKind -> FilePath -> String -> Bool
 matchesDefaultVmWithDiskoCheck = matchesCheckNameSuffixAndSourceContains "VmWithDisko" ["pkgs.runCommand", "config.system.build.vmWithDisko"]
 isCPackageVmCheckShape :: PackageKind -> String -> Bool
 isCPackageVmCheckShape packageKind nixSource =
@@ -441,19 +425,19 @@ collectRepositoryCompliance = do
       pure (Left (RepositoryComplianceFailure RequiredRootFilesPhase (firstIssue :| remainingIssues)))
 collectRepositoryContentCompliance :: IO (Either RepositoryComplianceFailure RepositoryComplianceSuccess)
 collectRepositoryContentCompliance = do
-  repositoryStructureIssues <- checkRepositoryStructure
+  (packages, repositoryStructureIssues) <- inspectRepositoryStructure
   case repositoryStructureIssues of
     [] -> do
-      packageNames <- listSubdirectoryNames "packages"
-      packageComplianceIssues <- concat <$> forM packageNames checkPackage
+      packageComplianceIssues <- concat <$> forM packages (uncurry checkPackage)
       checkNames <- listSubdirectoryNames "checks"
-      checkComplianceIssues <- concat <$> forM checkNames checkTemplateWith
+      let packageKinds = Map.fromList packages
+      checkComplianceIssues <- concat <$> forM checkNames (checkTemplateWith packageKinds)
       case packageComplianceIssues ++ checkComplianceIssues of
         [] ->
           pure
             ( Right
                 RepositoryComplianceSuccess
-                  { repositoryCompliancePackageNames = packageNames,
+                  { repositoryCompliancePackages = packages,
                     repositoryComplianceCheckNames = checkNames
                   }
             )
@@ -499,7 +483,7 @@ newtype Duration = Duration Double
   deriving stock (Eq, Ord, Show)
 type RepositoryComplianceSuccess :: Type
 data RepositoryComplianceSuccess = RepositoryComplianceSuccess
-  { repositoryCompliancePackageNames :: [FilePath],
+  { repositoryCompliancePackages :: [(FilePath, PackageKind)],
     repositoryComplianceCheckNames :: [FilePath]
   }
   deriving stock (Eq, Show)
@@ -534,12 +518,12 @@ summarizeRepositoryAt repositoryPath repositoryRoot =
         hPutStrLn stderr ("error: repository: " ++ repositoryPath)
         reportCheckRepositoryFailure repositoryComplianceFailure
         exitFailure
-      Right (RepositoryComplianceSuccess packageNames checkNames) -> do
+      Right (RepositoryComplianceSuccess packages checkNames) -> do
         let repositoryCheckNames = Set.fromList checkNames
             testCheckNames = filter (\checkName -> any (`isSuffixOf` checkName) ["-coverage", "_coverage"]) checkNames
         repositoryReadme <- fmap T.unpack <$> readTextFileIfExists "README"
         checkOutputPaths <- resolveRepositoryCheckOutputPaths testCheckNames
-        packageSummaries <- forM packageNames (summarizeRepositoryPackage checkOutputPaths repositoryCheckNames)
+        packageSummaries <- forM packages (uncurry (summarizeRepositoryPackage checkOutputPaths repositoryCheckNames))
         pure
           RepositorySummary
             { repositorySummaryPath = repositoryPath,
@@ -725,13 +709,25 @@ renderRepositoryPackageTestText testDurations durationWidth testName =
 repositoryPackageTestDurations :: RepositoryPackageSummary -> Map.Map String Duration
 repositoryPackageTestDurations packageSummary =
   case repositoryPackageTestStatus packageSummary of
-    RepositoryTestsMeasured _ _ testDurations -> testDurations
+    RepositoryTestsMeasured _ _ recordedDurations ->
+      let durationsByNormalizedName =
+            Map.fromListWith
+              (++)
+              [ (normalizeTestSpecification testName, [duration])
+              | (testName, duration) <- Map.toList recordedDurations
+              ]
+       in Map.fromList
+            [ (testName, duration)
+            | testName <- repositoryPackageTestNames packageSummary,
+              Just [duration] <- [Map.lookup (normalizeTestSpecification testName) durationsByNormalizedName]
+            ]
     _ -> Map.empty
+normalizeTestSpecification :: String -> String
+normalizeTestSpecification = map toLower . filter isAlphaNum
 renderDurationSeconds :: Duration -> String
 renderDurationSeconds (Duration seconds) = showFFloat (Just 3) seconds ""
-summarizeRepositoryPackage :: Maybe (Map.Map FilePath FilePath) -> Set.Set FilePath -> FilePath -> IO RepositoryPackageSummary
-summarizeRepositoryPackage checkOutputPaths repositoryCheckNames packageName = do
-  packageKind <- detectPackageKindForPackage packageName
+summarizeRepositoryPackage :: Maybe (Map.Map FilePath FilePath) -> Set.Set FilePath -> FilePath -> PackageKind -> IO RepositoryPackageSummary
+summarizeRepositoryPackage checkOutputPaths repositoryCheckNames packageName packageKind = do
   let packageRoot = "packages" </> packageName
   maybeDefaultNixContents <- readTextFileIfExists (packageRoot </> "default.nix")
   let repositoryPackageDependenciesValue = maybe [] extractLocalPackageDependencies maybeDefaultNixContents
@@ -1227,7 +1223,9 @@ renderScaffoldHaskellCabal packageName packageDescription =
     | sourceLine <- T.lines haskellCabalBaseline
     ]
 checkRepositoryStructure :: IO [String]
-checkRepositoryStructure = do
+checkRepositoryStructure = snd <$> inspectRepositoryStructure
+inspectRepositoryStructure :: IO ([(FilePath, PackageKind)], [String])
+inspectRepositoryStructure = do
   repositoryEntries <- collectRepositoryEntries "."
   let relativePaths = sort (map fst repositoryEntries)
       leafPaths = Set.fromList relativePaths
@@ -1295,8 +1293,13 @@ checkRepositoryStructure = do
           Just packageKind <- [packageKindFromDetection (packageDetection packageInfo)],
           Just issue <- [validatePackageNameForKind packageKind (packageRootDirectoryName packageInfo)]
         ]
+      detectedPackages =
+        [ (packageRootDirectoryName packageInfo, packageKind)
+        | packageInfo <- packageInfos,
+          Just packageKind <- [packageKindFromDetection (packageDetection packageInfo)]
+        ]
       entryPolicyIssues = mapMaybe (validateRepositoryEntry allowedEntryRules) repositoryEntries
-  pure (entryPolicyIssues ++ missingPackageDefaultNixIssues ++ missingHostConfigurationIssues ++ missingCabalForMainHaskellIssues ++ misnamedCabalFileIssues ++ packageNameConventionIssues ++ ambiguousPackageMarkerIssues)
+  pure (detectedPackages, entryPolicyIssues ++ missingPackageDefaultNixIssues ++ missingHostConfigurationIssues ++ missingCabalForMainHaskellIssues ++ misnamedCabalFileIssues ++ packageNameConventionIssues ++ ambiguousPackageMarkerIssues)
 type RepositoryEntry :: Type
 type RepositoryEntry = (FilePath, Posix.FileStatus)
 type EntryRule :: Type
@@ -1484,17 +1487,15 @@ listSubdirectoryNames parentDirectory = do
               if isSymbolicLink then pure False else doesDirectoryExist childPath
           )
           childNames
-checkPackage :: FilePath -> IO [String]
-checkPackage packageName = do
+checkPackage :: FilePath -> PackageKind -> IO [String]
+checkPackage packageName packageKind = do
   let packageDefaultNixPath = "packages" </> packageName </> "default.nix"
-  packageKind <- detectPackageKindForPackage packageName
   maybePackageDefaultNixSource <- readTextFileIfExists packageDefaultNixPath
   templateIssues <-
     case maybePackageDefaultNixSource of
       Nothing -> pure []
-      Just packageDefaultNixSource -> do
-        inferredTemplateSpec <- inferTemplateSpec packageName (T.unpack packageDefaultNixSource)
-        case inferredTemplateSpec of
+      Just packageDefaultNixSource ->
+        case inferTemplateSpec packageKind (T.unpack packageDefaultNixSource) of
           Nothing ->
             pure ["packages/" ++ packageName ++ "/default.nix: could not infer corresponding template"]
           Just templateSpec -> do
@@ -1509,7 +1510,7 @@ checkPackage packageName = do
                     "python_pypi_template" -> pythonPyPITemplateBaselineNixSource
                     "python_pypi_application_template" -> pythonPyPIApplicationTemplateBaselineNixSource
                     _ -> templateBaselineSource templateSpec
-            comparePackageDefaultNixWithTemplate packageName packageDefaultNixPath ("packages" </> matchedTemplateName </> "default.nix") allowedNixDifferenceKeysForPackage templateSource
+            comparePackageDefaultNixWithTemplate packageKind packageDefaultNixPath ("packages" </> matchedTemplateName </> "default.nix") allowedNixDifferenceKeysForPackage templateSource
   cargoTomlIssues <- checkCargoToml packageName
   cabalFileIssues <- checkCabalFile packageName
   defaultNixConventionIssues <- checkDefaultNixConventions packageName packageKind
@@ -1525,40 +1526,36 @@ checkPackage packageName = do
         ++ haskellTestConventionIssues
         ++ rustTestConventionIssues
     )
-checkTemplateWith :: FilePath -> IO [String]
-checkTemplateWith checkName = do
+checkTemplateWith :: Map.Map FilePath PackageKind -> FilePath -> IO [String]
+checkTemplateWith packageKinds checkName = do
   let checkTemplatePath = "checks" </> checkName </> "default.nix"
   maybeCheckTemplateText <- readTextFileIfExists checkTemplatePath
   case maybeCheckTemplateText of
     Nothing -> pure []
-    Just checkTemplateText -> do
-      inferredCheckTemplateSpec <- inferCheckTemplateSpec checkName (T.unpack checkTemplateText)
-      case inferredCheckTemplateSpec of
+    Just checkTemplateText ->
+      case inferCheckTemplateSpec packageKinds checkName (T.unpack checkTemplateText) of
         Nothing ->
           pure
             [ "checks/" ++ checkName ++ "/default.nix: could not infer corresponding check template"
             ]
         Just checkTemplateSpec -> do
-          packageAssociationIssues <- validateCheckPackageAssociation checkName checkTemplatePath (checkTemplateName checkTemplateSpec)
-          templateIssues <- validateCheckTemplate checkName checkTemplatePath checkTemplateSpec
+          let packageAssociationIssues = validateCheckPackageAssociation packageKinds checkName checkTemplatePath (checkTemplateName checkTemplateSpec)
+          templateIssues <- validateCheckTemplate packageKinds checkName checkTemplatePath checkTemplateSpec
           pure (packageAssociationIssues ++ templateIssues)
-validateCheckPackageAssociation :: FilePath -> FilePath -> FilePath -> IO [String]
-validateCheckPackageAssociation checkName checkTemplatePath matchedCheckTemplateName =
+validateCheckPackageAssociation :: Map.Map FilePath PackageKind -> FilePath -> FilePath -> FilePath -> [String]
+validateCheckPackageAssociation packageKinds checkName checkTemplatePath matchedCheckTemplateName =
   case checkPackageAssociation matchedCheckTemplateName checkName of
-    Nothing -> pure []
-    Just (packageName, expectedPackageKinds) -> do
-      packageDirectoryExists <- doesDirectoryExist ("packages" </> packageName)
-      actualPackageKind <- detectPackageKindForPackage packageName
-      pure
-        [ checkTemplatePath
-            ++ ": "
-            ++ matchedCheckTemplateName
-            ++ " requires corresponding "
-            ++ intercalate " or " (map renderPackageKind expectedPackageKinds)
-            ++ " package packages/"
-            ++ packageName
-        | not packageDirectoryExists || actualPackageKind `notElem` expectedPackageKinds
-        ]
+    Nothing -> []
+    Just (packageName, expectedPackageKinds) ->
+      [ checkTemplatePath
+          ++ ": "
+          ++ matchedCheckTemplateName
+          ++ " requires corresponding "
+          ++ intercalate " or " (map renderPackageKind expectedPackageKinds)
+          ++ " package packages/"
+          ++ packageName
+      | maybe True (`notElem` expectedPackageKinds) (Map.lookup packageName packageKinds)
+      ]
 checkPackageAssociation :: FilePath -> FilePath -> Maybe (FilePath, [PackageKind])
 checkPackageAssociation matchedCheckTemplateName checkName =
   case matchedCheckTemplateName of
@@ -1571,21 +1568,6 @@ checkPackageAssociation matchedCheckTemplateName checkName =
     withSuffix checkNameSuffix expectedPackageKinds =
       (\packageName -> (T.unpack packageName, expectedPackageKinds))
         <$> T.stripSuffix (T.pack checkNameSuffix) (T.pack checkName)
-detectPackageKindForPackage :: FilePath -> IO PackageKind
-detectPackageKindForPackage packageName = do
-  let packageRootDirectory = "packages" </> packageName
-  packageDirectoryExists <- doesDirectoryExist packageRootDirectory
-  packageFiles <-
-    if packageDirectoryExists
-      then listDirectory packageRootDirectory >>= filterM (doesFileExist . (packageRootDirectory </>))
-      else pure []
-  maybePackageDefaultNixSource <- readTextFileIfExists (packageRootDirectory </> "default.nix")
-  pure $
-    case detectPackageMarkers packageFiles of
-      (_, packageKind) : _ -> packageKind
-      []
-        | maybe False isExternalPythonPackageSource maybePackageDefaultNixSource -> PythonPyPIPackage
-        | otherwise -> BinaryReleasePackage
 isExternalPythonPackageSource :: T.Text -> Bool
 isExternalPythonPackageSource packageDefaultNixSource =
   let source = T.unpack packageDefaultNixSource
@@ -2122,9 +2104,8 @@ lookupCabalField cabalField cabalContents =
 stripCabalQuotedValue :: T.Text -> T.Text
 stripCabalQuotedValue quotedValue =
   fromMaybe quotedValue (T.stripPrefix "\"" quotedValue >>= T.stripSuffix "\"")
-comparePackageDefaultNixWithTemplate :: FilePath -> FilePath -> FilePath -> Set.Set T.Text -> T.Text -> IO [String]
-comparePackageDefaultNixWithTemplate packageName subjectNixPath templateBaselineNixPath allowedNixDifferenceKeys templateBaselineSourceText = do
-  packageKind <- detectPackageKindForPackage packageName
+comparePackageDefaultNixWithTemplate :: PackageKind -> FilePath -> FilePath -> Set.Set T.Text -> T.Text -> IO [String]
+comparePackageDefaultNixWithTemplate packageKind subjectNixPath templateBaselineNixPath allowedNixDifferenceKeys templateBaselineSourceText = do
   let ignoredTopLevelFunctionParams = optionalTemplateFunctionParams packageKind templateBaselineNixPath
   compareNixFileWithTemplate ignoredTopLevelFunctionParams subjectNixPath templateBaselineNixPath allowedNixDifferenceKeys templateBaselineSourceText
 optionalTemplateFunctionParams :: PackageKind -> FilePath -> Set.Set T.Text
@@ -2158,22 +2139,21 @@ compareCheckTemplateWithBaseline checkTemplatePath templateBaselineText = do
                 ++ ": differs from embedded check template\n"
                 ++ intercalate "\n" mismatchDetails
             ]
-validateCheckTemplate :: FilePath -> FilePath -> CheckTemplateSpec -> IO [String]
-validateCheckTemplate checkName checkTemplatePath checkTemplateSpec =
+validateCheckTemplate :: Map.Map FilePath PackageKind -> FilePath -> FilePath -> CheckTemplateSpec -> IO [String]
+validateCheckTemplate packageKinds checkName checkTemplatePath checkTemplateSpec =
   case checkTemplateComparisonMode checkTemplateSpec of
     ExactCheckTemplate ->
       compareCheckTemplateWithBaseline checkTemplatePath (checkTemplateBaselineSource checkTemplateSpec)
     StructuralCPackageVm ->
-      validateCPackageVmCheck checkName checkTemplatePath
-validateCPackageVmCheck :: FilePath -> FilePath -> IO [String]
-validateCPackageVmCheck checkName checkTemplatePath = do
+      validateCPackageVmCheck packageKinds checkName checkTemplatePath
+validateCPackageVmCheck :: Map.Map FilePath PackageKind -> FilePath -> FilePath -> IO [String]
+validateCPackageVmCheck packageKinds checkName checkTemplatePath = do
   maybeCheckTemplateText <- readTextFileIfExists checkTemplatePath
   case maybeCheckTemplateText of
     Nothing -> pure []
-    Just checkTemplateText -> do
-      packageKind <- detectPackageKindForPackage checkName
-      pure (validateCPackageVmCheckSource packageKind checkName checkTemplatePath (T.unpack checkTemplateText))
-validateCPackageVmCheckSource :: PackageKind -> FilePath -> FilePath -> String -> [String]
+    Just checkTemplateText ->
+      pure (validateCPackageVmCheckSource (Map.lookup checkName packageKinds) checkName checkTemplatePath (T.unpack checkTemplateText))
+validateCPackageVmCheckSource :: Maybe PackageKind -> FilePath -> FilePath -> String -> [String]
 validateCPackageVmCheckSource packageKind checkName checkTemplatePath checkTemplateSource =
   let hasCanonicalNameBinding =
         "name = builtins.baseNameOf ./.;" `isInfixOf` checkTemplateSource
@@ -2185,7 +2165,7 @@ validateCPackageVmCheckSource packageKind checkName checkTemplatePath checkTempl
         "inputs.self.packages.${pkgs.stdenv.system}.${name}" `isInfixOf` checkTemplateSource
           || ("inputs.self.packages.${pkgs.stdenv.system}." ++ checkName) `isInfixOf` checkTemplateSource
    in catMaybes
-        [ if packageKind == CPackage
+        [ if packageKind == Just CPackage
             then Nothing
             else Just (checkTemplatePath ++ ": generic C VM checks require a same-name C package under packages/"),
           if hasRunNixOSTest
@@ -2233,12 +2213,12 @@ parseNixExprFromText nixSource = do
 parseNixExprFromFile :: FilePath -> IO (Either String NExprLoc)
 parseNixExprFromFile nixFilePath =
   either (Left . show) Right <$> parseNixFileLoc (Path nixFilePath)
-inferTemplateSpec :: FilePath -> String -> IO (Maybe TemplateSpec)
-inferTemplateSpec packageName nixSource =
-  listToMaybe <$> filterM (\templateSpec -> templateMatches templateSpec packageName nixSource) templateSpecs
-inferCheckTemplateSpec :: FilePath -> String -> IO (Maybe CheckTemplateSpec)
-inferCheckTemplateSpec checkName nixSource =
-  listToMaybe <$> filterM (\checkTemplateSpec -> checkTemplateMatches checkTemplateSpec checkName nixSource) checkTemplateSpecs
+inferTemplateSpec :: PackageKind -> String -> Maybe TemplateSpec
+inferTemplateSpec packageKind nixSource =
+  find (\templateSpec -> templateMatches templateSpec packageKind nixSource) templateSpecs
+inferCheckTemplateSpec :: Map.Map FilePath PackageKind -> FilePath -> String -> Maybe CheckTemplateSpec
+inferCheckTemplateSpec packageKinds checkName nixSource =
+  find (\checkTemplateSpec -> checkTemplateMatches checkTemplateSpec packageKinds checkName nixSource) checkTemplateSpecs
 normalizeNixExpr :: Set.Set T.Text -> Set.Set T.Text -> NExprLoc -> NExprLoc
 normalizeNixExpr ignoredTopLevelFunctionParams allowedNixDifferenceKeys (Fix (Compose (AnnUnit nixExprSpan expressionFunctor))) =
   let rebuiltExpressionFunctor = case expressionFunctor of
@@ -2459,6 +2439,7 @@ hUnitPackageTests =
       TestLabel "Requires allowlisted filesystem entry kinds." (TestCase entryKindStructureTest),
       TestLabel "Treats parameter directories as opaque user data." (TestCase parameterDirectoryStructureTest),
       TestLabel "Renders stable text and JSON repository summaries." (TestCase repositorySummaryRenderingTest),
+      TestLabel "Reconciles recorded timing vocabulary with canonical test names." (TestCase testDurationReconciliationTest),
       TestLabel "Extracts local package dependencies." (TestCase localPackageDependencyExtractionTest),
       TestLabel "Reports concise Nix template parameter differences." (TestCase nixTemplateParameterDifferenceTest),
       TestLabel "Accepts python_template without inputs or shellHook." (TestCase pythonTemplateOptionalInputsAndShellHookTest),
@@ -2740,6 +2721,44 @@ repositorySummaryRenderingTest = do
     "Nix string rendering prevents interpolation and preserves control characters."
     "(builtins.fromJSON \"\\\"\\${name}\\\\u0001\\\"\")"
     (renderNixString "${name}\1")
+testDurationReconciliationTest :: IO ()
+testDurationReconciliationTest =
+  let canonicalTestNames :: [String]
+      canonicalTestNames =
+        [ "Parses URLs.",
+          "Preserves non-UTF-8 data.",
+          "Reads .gitignore.",
+          "Reports behavior."
+        ]
+      packageSummary =
+        RepositoryPackageSummary
+          { repositoryPackageName = "demo",
+            repositoryPackageKind = RustPackage,
+            repositoryPackageDescription = Nothing,
+            repositoryPackageDependencies = [],
+            repositoryPackageTestNames = canonicalTestNames,
+            repositoryPackageTestStatus =
+              RepositoryTestsMeasured
+                (CoverageMeasurement LineCoverage 1 1)
+                (Duration 1)
+                ( Map.fromList
+                    [ ("Parses urls.", Duration 0.1),
+                      ("Preserves non utf8 data.", Duration 0.2),
+                      ("Reads gitignore.", Duration 0.3),
+                      ("Reports behavior", Duration 0.4),
+                      ("Reports-behavior.", Duration 0.5)
+                    ]
+                )
+          }
+   in assertEqual
+        "Unique normalized names retain canonical spelling while ambiguous recordings are omitted."
+        ( Map.fromList
+            [ ("Parses URLs.", Duration 0.1),
+              ("Preserves non-UTF-8 data.", Duration 0.2),
+              ("Reads .gitignore.", Duration 0.3)
+            ]
+        )
+        (repositoryPackageTestDurations packageSummary)
 localPackageDependencyExtractionTest :: IO ()
 localPackageDependencyExtractionTest =
   assertEqual
