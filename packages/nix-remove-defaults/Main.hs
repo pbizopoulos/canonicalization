@@ -61,7 +61,7 @@ import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileE
 import System.Environment (getArgs, lookupEnv, setEnv)
 import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitFailure)
 import System.FilePath (normalise, pathSeparator, takeDirectory, takeExtension, (</>))
-import System.IO (hClose)
+import System.IO (hClose, hPutStrLn, stderr)
 import System.IO.Temp (withSystemTempDirectory, withSystemTempFile)
 import System.Process (readProcessWithExitCode)
 import Test.HUnit
@@ -193,7 +193,7 @@ main = do
     [] -> processArgument "."
     [repositoryPath] -> processArgument repositoryPath
     _ -> do
-      putStrLn "Usage: nix-remove-defaults <flake-or-repository-directory>"
+      hPutStrLn stderr "usage: nix-remove-defaults <flake-or-repository-directory>"
       exitFailure
   where
     processArgument repositoryPath = do
@@ -205,7 +205,7 @@ processRepositoryArgument repositoryPath = do
   case repositoryRootResult of
     Right repositoryRoot -> processRepository repositoryRoot
     Left errorMessage -> do
-      putStrLn errorMessage
+      hPutStrLn stderr ("error: " ++ errorMessage)
       pure False
 repositoryRootFromArgument :: FilePath -> IO (Either String FilePath)
 repositoryRootFromArgument repositoryPath = do
@@ -216,8 +216,8 @@ repositoryRootFromArgument repositoryPath = do
       repositoryRoot <- findFlakeRootFrom absolutePath
       case repositoryRoot of
         Just rootPath -> pure (Right rootPath)
-        Nothing -> pure (Left ("Cannot find flake.nix in " ++ repositoryPath ++ " or its parents"))
-    else pure (Left ("No such flake/repository directory: " ++ repositoryPath))
+        Nothing -> pure (Left ("cannot find flake.nix in " ++ repositoryPath ++ " or its parents"))
+    else pure (Left ("no such flake/repository directory: " ++ repositoryPath))
 processRepository :: FilePath -> IO Bool
 processRepository repositoryRoot = do
   nixFiles <- findNixFiles repositoryRoot
@@ -226,7 +226,7 @@ processRepository repositoryRoot = do
   if null parseErrors
     then processParsedRepository repositoryRoot parsedFiles
     else do
-      mapM_ putStrLn parseErrors
+      mapM_ (hPutStrLn stderr) parseErrors
       pure False
 processParsedRepository :: FilePath -> [ParsedNixFile] -> IO Bool
 processParsedRepository repositoryRoot parsedFiles = do
@@ -235,13 +235,13 @@ processParsedRepository repositoryRoot parsedFiles = do
   nixOSDefaultsResult <- resolveNixOSDefaults repositoryRoot nixOSCandidates
   case nixOSDefaultsResult of
     Left diagnostic -> do
-      putStrLn diagnostic
+      hPutStrLn stderr ("error: " ++ diagnostic)
       pure False
     Right nixOSDefaults -> do
       treefmtDefaultsResult <- resolveTreefmtDefaults repositoryRoot treefmtCandidatePaths
       case treefmtDefaultsResult of
         Left diagnostic -> do
-          putStrLn diagnostic
+          hPutStrLn stderr ("error: " ++ diagnostic)
           pure False
         Right treefmtDefaults -> do
           mapM_ (processParsedRepositoryFile repositoryRoot nixOSDefaults treefmtDefaults) parsedFiles
@@ -288,7 +288,7 @@ parseRepositoryFile :: FilePath -> IO (Either String ParsedNixFile)
 parseRepositoryFile filePath = do
   parseResult <- parseNixFileLoc (Path filePath)
   pure $ case parseResult of
-    Left parseError -> Left ("Error parsing " ++ filePath ++ ": " ++ show parseError)
+    Left parseError -> Left ("error: " ++ filePath ++ ": " ++ show parseError)
     Right expr -> Right (filePath, expr)
 processParsedRepositoryFile :: FilePath -> Maybe (FilePath, Map NixOSCandidate [FilePath]) -> Map OptionPath Literal -> ParsedNixFile -> IO ()
 processParsedRepositoryFile repositoryRoot nixOSDefaults treefmtDefaults (filePath, expr) = do
@@ -801,5 +801,29 @@ hUnitPackageTests =
                 assertEqual "installed command stdout" "" commandStdout
                 assertEqual "installed command stderr" "" commandStderr
                 moduleContents <- TIO.readFile modulePath
-                assertEqual "empty module remains unchanged" (pack "{ }") moduleContents
+                assertEqual "empty module remains unchanged" (pack "{ }") moduleContents,
+      TestLabel "The installed executable reports failures on stderr." $
+        TestCase $
+          withSystemTempDirectory "nix-remove-defaults-errors" $ \temporaryDirectory -> do
+            maybeExecutable <- lookupEnv "PACKAGE_E2E_EXECUTABLE"
+            case maybeExecutable of
+              Nothing -> pure ()
+              Just executable -> do
+                (usageExit, usageStdout, usageStderr) <-
+                  readProcessWithExitCode executable [temporaryDirectory, temporaryDirectory] ""
+                assertEqual "usage failure exit" (ExitFailure 1) usageExit
+                assertEqual "usage failure stdout" "" usageStdout
+                assertEqual
+                  "usage failure stderr"
+                  "usage: nix-remove-defaults <flake-or-repository-directory>\n"
+                  usageStderr
+                let missingDirectory = temporaryDirectory </> "missing"
+                (missingExit, missingStdout, missingStderr) <-
+                  readProcessWithExitCode executable [missingDirectory] ""
+                assertEqual "missing directory exit" (ExitFailure 1) missingExit
+                assertEqual "missing directory stdout" "" missingStdout
+                assertEqual
+                  "missing directory stderr"
+                  ("error: no such flake/repository directory: " ++ missingDirectory ++ "\n")
+                  missingStderr
     ]

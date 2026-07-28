@@ -44,13 +44,14 @@ import Prettyprinter
   )
 import Prettyprinter.Render.Text (renderStrict)
 import System.Environment (getArgs, lookupEnv)
-import System.Exit (ExitCode (ExitSuccess), exitFailure)
-import System.IO (hClose)
+import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitFailure)
+import System.IO (hClose, hPutStrLn, stderr)
 import System.IO.Temp (withSystemTempDirectory, withSystemTempFile)
 import System.Process (readProcessWithExitCode)
 import Test.HUnit
   ( Counts (errors, failures),
     Test (TestCase, TestLabel, TestList),
+    assertBool,
     assertEqual,
     assertFailure,
     runTestTT,
@@ -108,7 +109,7 @@ formatNixFile filePath = do
   parseResult <- parseNixFileLoc (Path filePath)
   case parseResult of
     Left parseError -> do
-      putStrLn ("Error parsing " ++ filePath ++ ": " ++ show parseError)
+      hPutStrLn stderr ("error: " ++ filePath ++ ": " ++ show parseError)
       pure False
     Right expression -> do
       let formatted = formattedExpression expression
@@ -454,7 +455,7 @@ hUnitPackageTests =
         makeFormattingTest
           (pack "{ installPhase = ''\nmkdir -p $out/bin\ncp ./main.py $out/bin/${pname}\n''; }")
           (pack "{\n  installPhase = ''\n    mkdir -p $out/bin\n    cp ./main.py $out/bin/${pname}\n    '';\n}"),
-      TestLabel "The installed executable formats multiple files." $
+      TestLabel "The installed executable formats multiple files and reports failures on stderr." $
         TestCase $
           withSystemTempDirectory "nix-alphabetize-e2e" $ \temporaryDirectory -> do
             maybeExecutable <- lookupEnv "PACKAGE_E2E_EXECUTABLE"
@@ -480,4 +481,16 @@ hUnitPackageTests =
                   "installed command list output"
                   (pack "[\n  1\n  2\n  3\n]")
                   listContents
+                let malformedPath = temporaryDirectory ++ "/malformed.nix"
+                    malformed = pack "{ invalid = ; }"
+                TIO.writeFile malformedPath malformed
+                (failureExit, failureStdout, failureStderr) <-
+                  readProcessWithExitCode executable [malformedPath] ""
+                assertEqual "installed failure exit" (ExitFailure 1) failureExit
+                assertEqual "installed failure stdout" "" failureStdout
+                assertBool
+                  "installed failure stderr prefix"
+                  (("error: " ++ malformedPath ++ ": ") `isPrefixOf` failureStderr)
+                malformedContents <- TIO.readFile malformedPath
+                assertEqual "installed failure preserves malformed file" malformed malformedContents
     ]
