@@ -99,9 +99,14 @@ fn run_cli(arguments: &[OsString]) -> i32 {
     }
 }
 fn home_directory() -> Result<PathBuf, CliFailure> {
-    env::var_os("HOME")
+    let directory = env::var_os("HOME")
         .map(PathBuf::from)
-        .ok_or_else(|| CliFailure::fatal("HOME is not set"))
+        .ok_or_else(|| CliFailure::fatal("HOME is not set"))?;
+    if directory.is_absolute() {
+        Ok(directory)
+    } else {
+        Err(CliFailure::fatal("HOME must be an absolute path"))
+    }
 }
 fn parse_repository_url(repository_url: &str) -> Result<String, RepositoryUrlError> {
     let (hostname, repository_path) =
@@ -533,7 +538,7 @@ mod tests {
             return Ok(());
         };
         let home = TemporaryDirectory::new("help")?;
-        let output = Command::new(executable)
+        let output = Command::new(&executable)
             .arg("-h")
             .env_remove("HOME")
             .output()?;
@@ -546,6 +551,29 @@ mod tests {
                 .code(),
             Some(USAGE_EXIT_CODE)
         );
+        Ok(())
+    }
+    #[test]
+    fn rejects_non_absolute_home_directories_before_repository_actions() -> TestResult {
+        let Some(executable) = env::var_os("PACKAGE_E2E_EXECUTABLE") else {
+            return Ok(());
+        };
+        let working_directory = TemporaryDirectory::new("invalid-home")?;
+        for home_directory in ["", "relative/home"] {
+            let output = Command::new(&executable)
+                .arg("init")
+                .env("HOME", home_directory)
+                .current_dir(working_directory.path())
+                .output()?;
+            assert_eq!(output.status.code(), Some(128));
+            assert!(output.stdout.is_empty());
+            assert_eq!(
+                String::from_utf8(output.stderr)?,
+                "fatal: HOME must be an absolute path\n"
+            );
+            assert!(!working_directory.path().join(".git").exists());
+            assert!(!working_directory.path().join(".gitignore").exists());
+        }
         Ok(())
     }
     #[test]

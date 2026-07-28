@@ -2849,6 +2849,13 @@ allPackageKindsEndToEndTest =
         assertEqual ("Scaffolding " ++ packageKindName ++ " leaves stderr empty.") "" addStderr
         markerExists <- doesFileExist (temporaryRepository </> "packages" </> packageName </> markerFile)
         assertBool ("Scaffolding " ++ packageKindName ++ " creates its marker file.") markerExists
+        when (packageKindName == "rust") $ do
+          generatedRustSource <- TIO.readFile (temporaryRepository </> "packages" </> packageName </> "src/main.rs")
+          assertBool
+            "Generated Rust executable tests isolate their working directory in a child process."
+            ( "Command::new(executable).current_dir(root).output()?" `T.isInfixOf` generatedRustSource
+                && not ("env::set_current_dir" `T.isInfixOf` generatedRustSource)
+            )
         forM_ maybeCheckName $ \checkName -> do
           checkExists <- doesFileExist (temporaryRepository </> "checks" </> checkName </> "default.nix")
           assertBool ("Scaffolding " ++ packageKindName ++ " creates its combined check.") checkExists
@@ -3378,6 +3385,8 @@ rustMainSource =
       "    use super::*;",
       "    use quickcheck::{Arbitrary, Gen, QuickCheck, TestResult};",
       "    use std::env;",
+      "    use std::process::Command;",
+      "    use tempfile::tempdir;",
       "    #[derive(Clone, Debug)]",
       "    struct LogicalLine(String);",
       "    impl Arbitrary for LogicalLine {",
@@ -3409,7 +3418,6 @@ rustMainSource =
       "    }",
       "    #[test]",
       "    fn respects_gitignore_and_skips_binary_files() -> Result<()> {",
-      "        use tempfile::tempdir;",
       "        let dir = tempdir()?;",
       "        let root = dir.path();",
       "        let gitignore_path = root.join(\".gitignore\");",
@@ -3427,16 +3435,17 @@ rustMainSource =
       "    }",
       "    #[test]",
       "    fn processes_current_directory_when_no_arguments() -> Result<()> {",
-      "        use tempfile::tempdir;",
+      "        let Some(executable) = env::var_os(\"PACKAGE_E2E_EXECUTABLE\") else {",
+      "            return Ok(());",
+      "        };",
       "        let dir = tempdir()?;",
       "        let root = dir.path();",
       "        let file_path = root.join(\"test.txt\");",
       "        fs::write(&file_path, \"line1\\n\\nline2\\n   \\nline3\\n\")?;",
-      "        let previous_dir = env::current_dir()?;",
-      "        env::set_current_dir(root)?;",
-      "        let result = main();",
-      "        env::set_current_dir(previous_dir)?;",
-      "        result?;",
+      "        let output = Command::new(executable).current_dir(root).output()?;",
+      "        assert!(output.status.success());",
+      "        assert!(output.stdout.is_empty());",
+      "        assert!(output.stderr.is_empty());",
       "        let content = fs::read_to_string(&file_path)?;",
       "        assert_eq!(content, \"line1\\nline2\\nline3\\n\");",
       "        Ok(())",
