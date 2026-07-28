@@ -141,6 +141,9 @@ let
         };
         remove-empty-lines = {
           command = inputs.self.packages.${pkgs.stdenv.system}.remove-empty-lines;
+          excludes = [
+            "README"
+          ];
           includes = [
             "*"
           ];

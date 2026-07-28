@@ -277,7 +277,7 @@ isCPackageVmCheckShape packageKind nixSource =
 type Command :: Type
 data Command
   = CheckCommand
-  | SummaryCommand Bool
+  | StatusCommand Bool
   | AddCommand String FilePath (Maybe String)
 type CommandParseResult :: Type
 data CommandParseResult
@@ -293,7 +293,7 @@ runCli commandLineArgs =
     InvalidCommand exitCode maybeCommand ->
       hPutStr stderr (usageTextForCommand maybeCommand) >> exitWith exitCode
     ParsedCommand CheckCommand -> checkRepositoryLocation "."
-    ParsedCommand (SummaryCommand jsonOutput) ->
+    ParsedCommand (StatusCommand jsonOutput) ->
       summarizeRepositoryLocation
         (if jsonOutput then renderRepositorySummariesJSON else renderRepositorySummariesText)
         "."
@@ -316,13 +316,14 @@ stageGeneratedPathsOrExit = \case
 parseCommand :: [String] -> CommandParseResult
 parseCommand commandLineArgs =
   case commandLineArgs of
-    [] -> InvalidCommand (ExitFailure 1) Nothing
+    [] -> ParsedCommand (StatusCommand False)
     [argument] | argument `elem` ["-h", "--help"] -> MainHelp
     [_, argument] | argument `elem` ["-h", "--help"] -> InvalidCommand (ExitFailure 1) Nothing
     ["check"] -> ParsedCommand CheckCommand
     "check" : _ -> InvalidCommand usageExitCode (Just "check")
-    ["summary"] -> ParsedCommand (SummaryCommand False)
-    ["summary", "--json"] -> ParsedCommand (SummaryCommand True)
+    ["--json"] -> ParsedCommand (StatusCommand True)
+    ["status"] -> ParsedCommand (StatusCommand False)
+    ["status", "--json"] -> ParsedCommand (StatusCommand True)
     _ ->
       case parseAddPackageArgs commandLineArgs of
         Just (packageKindName, packageName, packageDescription) ->
@@ -337,16 +338,16 @@ usageExitCode = ExitFailure 129
 mainUsageText :: String
 mainUsageText =
   unlines
-    [ "usage: git repository-canonicalization add <package-type> <package-name> [<description>...]",
-      "   or: git repository-canonicalization check",
-      "   or: git repository-canonicalization summary [--json]"
+    [ "usage: git repository-canonicalization [status] [--json]",
+      "   or: git repository-canonicalization add <package-type> <package-name> [<description>...]",
+      "   or: git repository-canonicalization check"
     ]
 mainHelpText :: String
 mainHelpText =
   unlines
-    [ "usage: git repository-canonicalization add <package-type> <package-name> [<description>...]",
+    [ "usage: git repository-canonicalization [status] [--json]",
+      "   or: git repository-canonicalization add <package-type> <package-name> [<description>...]",
       "   or: git repository-canonicalization check",
-      "   or: git repository-canonicalization summary [--json]",
       "",
       "Manage packages and checks in the nearest Git repository.",
       "Use git -C <location> to select a repository.",
@@ -357,8 +358,9 @@ mainHelpText =
       "check",
       "    Check that the repository follows the canonical conventions.",
       "",
-      "summary [--json]",
-      "    Summarize packages and checks; with --json, output JSON.",
+      "status [--json]",
+      "    Show repository intent, packages, and checks; with --json, output JSON.",
+      "    This is the default command.",
       ""
     ]
 usageTextForCommand :: Maybe String -> String
@@ -371,13 +373,13 @@ usageTextForCommand = \case
         "Generated files are staged with git add.",
         ""
       ]
-  Just "summary" ->
+  Just "status" ->
     unlines
-      [ "usage: git repository-canonicalization summary [--json]",
+      [ "usage: git repository-canonicalization status [--json]",
         "",
-        "Summarize the nearest Git repository. Use 'git -C <location>' to select it.",
+        "Show the status of the nearest Git repository. Use 'git -C <location>' to select it.",
         "",
-        "    --json                output the repository summary as JSON",
+        "    --json                output the repository status as JSON",
         ""
       ]
   Just "check" ->
@@ -529,6 +531,7 @@ data RepositoryPackageSummary = RepositoryPackageSummary
 type RepositorySummary :: Type
 data RepositorySummary = RepositorySummary
   { repositorySummaryPath :: FilePath,
+    repositorySummaryReadme :: Maybe String,
     repositorySummaryPackages :: [RepositoryPackageSummary]
   }
   deriving stock (Eq, Show)
@@ -549,23 +552,44 @@ summarizeRepositoryAt repositoryPath repositoryRoot =
       Right (RepositoryComplianceSuccess packageNames checkNames) -> do
         let repositoryCheckNames = Set.fromList checkNames
             resultCheckNames = filter (\checkName -> any (`isSuffixOf` checkName) ["-coverage", "_coverage"]) checkNames
+        repositoryReadme <- fmap T.unpack <$> readTextFileIfExists "README"
         checkOutputPaths <- resolveRepositoryCheckOutputPaths resultCheckNames
         packageSummaries <- forM packageNames (summarizeRepositoryPackage checkOutputPaths repositoryCheckNames)
         pure
           RepositorySummary
             { repositorySummaryPath = repositoryPath,
+              repositorySummaryReadme = repositoryReadme,
               repositorySummaryPackages = packageSummaries
             }
 renderRepositorySummariesText :: [RepositorySummary] -> String
 renderRepositorySummariesText repositorySummaries =
   intercalate
     "\n"
-    [ "repository: "
+    [ renderRepositoryStatusFieldName "repository"
+        ++ " "
         ++ repositorySummaryPath repositorySummary
         ++ "\n"
+        ++ renderRepositoryReadmeText (repositorySummaryReadme repositorySummary)
+        ++ "\n\n"
         ++ renderRepositoryPackageSummariesText (repositorySummaryPackages repositorySummary)
     | repositorySummary <- repositorySummaries
     ]
+renderRepositoryReadmeText :: Maybe String -> String
+renderRepositoryReadmeText maybeReadme =
+  case lines (fromMaybe "(none)" maybeReadme) of
+    [] -> renderRepositoryStatusFieldName "README"
+    firstLine : remainingLines ->
+      renderRepositoryStatusFieldName "README"
+        ++ " "
+        ++ firstLine
+        ++ concatMap ("\n" ++) [repositoryStatusValueIndent ++ readmeLine | readmeLine <- remainingLines]
+renderRepositoryStatusFieldName :: String -> String
+renderRepositoryStatusFieldName fieldName =
+  replicate (repositoryStatusFieldWidth - length fieldName) ' ' ++ fieldName ++ ":"
+repositoryStatusFieldWidth :: Int
+repositoryStatusFieldWidth = length ("repository" :: String)
+repositoryStatusValueIndent :: String
+repositoryStatusValueIndent = replicate (repositoryStatusFieldWidth + length (": " :: String)) ' '
 renderRepositorySummariesJSON :: [RepositorySummary] -> String
 renderRepositorySummariesJSON repositorySummaries =
   unlines
@@ -581,6 +605,7 @@ renderRepositorySummaryJSON repositorySummary =
     "\n"
     [ "    {",
       "      \"path\": " ++ renderJSONString (repositorySummaryPath repositorySummary) ++ ",",
+      "      \"README\": " ++ maybe "null" renderJSONString (repositorySummaryReadme repositorySummary) ++ ",",
       "      \"packages\": [",
       intercalate ",\n" (map (indentText 4 . renderRepositoryPackageSummaryJSON) (repositorySummaryPackages repositorySummary)),
       "      ]",
@@ -2462,12 +2487,12 @@ hUnitPackageTests =
       TestLabel "Reports concise Nix template parameter differences." (TestCase nixTemplateParameterDifferenceTest),
       TestLabel "Accepts python_template without inputs or shellHook." (TestCase pythonTemplateOptionalInputsAndShellHookTest),
       TestLabel "Documents help and invokes it consistently." (TestCase commandLineHelpEndToEndTest),
-      TestLabel "Rejects missing and unknown commands with usage on stderr." (TestCase invalidCommandEndToEndTest),
+      TestLabel "Rejects unknown commands with usage on stderr." (TestCase invalidCommandEndToEndTest),
       TestLabel "Scaffolds a package and its check from a nested directory." (TestCase addPackageEndToEndTest),
       TestLabel "Scaffolds and checks every supported package kind." (TestCase allPackageKindsEndToEndTest),
       TestLabel "Rejects package creation when its path already exists." (TestCase existingPackageCollisionEndToEndTest),
-      TestLabel "Reports generated package behavior in text and JSON summaries." (TestCase summaryEndToEndTest),
-      TestLabel "Reports conventional tests for generated Haskell packages." (TestCase haskellSummaryEndToEndTest),
+      TestLabel "Reports generated package behavior in text and JSON status output." (TestCase statusEndToEndTest),
+      TestLabel "Reports conventional tests for generated Haskell packages." (TestCase haskellStatusEndToEndTest),
       TestLabel "Rejects unlabeled HUnit cases in generated Haskell packages." (TestCase unlabeledHaskellPackageCheckEndToEndTest),
       TestLabel "Reports the phase and file when a package check fails." (TestCase corruptedPackageCheckEndToEndTest),
       TestLabel "Rejects unknown package options without creating partial output." (TestCase unknownAddOptionEndToEndTest),
@@ -2665,6 +2690,7 @@ repositorySummaryRenderingTest = do
       repositorySummary =
         RepositorySummary
           { repositorySummaryPath = "example.test/owner/demo",
+            repositorySummaryReadme = Just "Demo repository.\n\nIts intent is visible.",
             repositorySummaryPackages = [packageSummary]
           }
   assertEqual
@@ -2675,6 +2701,10 @@ repositorySummaryRenderingTest = do
     "Text rendering has stable fields, indentation, and fallbacks."
     ( unlines
         [ "repository: example.test/owner/demo",
+          "    README: Demo repository.",
+          "            ",
+          "            Its intent is visible.",
+          "",
           "        name: demo",
           "        type: python",
           " description: (none)",
@@ -2694,6 +2724,7 @@ repositorySummaryRenderingTest = do
           "  \"repositories\": [",
           "    {",
           "      \"path\": \"example.test/owner/demo\",",
+          "      \"README\": \"Demo repository.\\n\\nIts intent is visible.\",",
           "      \"packages\": [",
           "        {",
           "          \"name\": \"demo\",",
@@ -2746,7 +2777,7 @@ commandLineHelpEndToEndTest =
       ( mainUsageText `isPrefixOf` helpStdout
           && "\nadd <package-type>" `isInfixOf` helpStdout
           && "\ncheck\n" `isInfixOf` helpStdout
-          && "\nsummary [--json]\n" `isInfixOf` helpStdout
+          && "\nstatus [--json]\n" `isInfixOf` helpStdout
       )
     assertEqual "The top-level help command leaves stderr empty." "" helpStderr
     (commandHelpExit, commandHelpStdout, commandHelpStderr) <- runEndToEndCommandIn temporaryDirectory ["check", "--help"]
@@ -2756,14 +2787,14 @@ commandLineHelpEndToEndTest =
 invalidCommandEndToEndTest :: IO ()
 invalidCommandEndToEndTest =
   withTemporaryPackageRepository "invalid-command" $ \temporaryDirectory -> do
-    (missingCommandExit, missingCommandStdout, missingCommandStderr) <- runEndToEndCommandIn temporaryDirectory []
-    assertEqual "An omitted command exits unsuccessfully." (ExitFailure 1) missingCommandExit
-    assertEqual "An omitted command leaves stdout empty." "" missingCommandStdout
-    assertEqual "An omitted command prints the main usage to stderr." mainUsageText missingCommandStderr
     (invalidCommandExit, invalidCommandStdout, invalidCommandStderr) <- runEndToEndCommandIn temporaryDirectory ["unknown-command"]
     assertEqual "An invalid command uses Git's usage exit status." usageExitCode invalidCommandExit
     assertEqual "An invalid command leaves stdout empty." "" invalidCommandStdout
     assertEqual "An invalid command prints the main usage to stderr." mainUsageText invalidCommandStderr
+    (summaryExit, summaryStdout, summaryStderr) <- runEndToEndCommandIn temporaryDirectory ["summary"]
+    assertEqual "The retired summary command uses Git's usage exit status." usageExitCode summaryExit
+    assertEqual "The retired summary command leaves stdout empty." "" summaryStdout
+    assertEqual "The retired summary command prints the main usage to stderr." mainUsageText summaryStderr
 addPackageEndToEndTest :: IO ()
 addPackageEndToEndTest =
   withTemporaryPackageRepository "add-package-end-to-end" $ \temporaryRepository -> do
@@ -2830,41 +2861,52 @@ existingPackageCollisionEndToEndTest =
     assertBool
       "The collision reports the package path."
       ("path already exists: packages/demo" `isInfixOf` addStderr)
-summaryEndToEndTest :: IO ()
-summaryEndToEndTest =
-  withGeneratedPythonPackageRepository "summary-end-to-end" $ \temporaryRepository -> do
+statusEndToEndTest :: IO ()
+statusEndToEndTest =
+  withGeneratedPythonPackageRepository "status-end-to-end" $ \temporaryRepository -> do
+    let repositoryReadme :: String
+        repositoryReadme = "Demo repository README.\n"
+    TIO.writeFile (temporaryRepository </> "README") (T.pack repositoryReadme)
     repositoryPath <- canonicalizePath temporaryRepository
-    (summaryExit, summaryStdout, summaryStderr) <- runEndToEndCommandIn temporaryRepository ["summary"]
-    assertEqual "Text summary succeeds for the generated repository." ExitSuccess summaryExit
+    (statusExit, statusStdout, statusStderr) <- runEndToEndCommandIn temporaryRepository ["status"]
+    assertEqual "Text status succeeds for the generated repository." ExitSuccess statusExit
     assertEqual
-      "Text summary exactly reports generated metadata, checks, and discovered tests."
+      "Text status exactly reports generated metadata, checks, and discovered tests."
       ( renderRepositorySummariesText
-          [RepositorySummary repositoryPath [expectedGeneratedPythonPackageSummary]]
+          [RepositorySummary repositoryPath (Just repositoryReadme) [expectedGeneratedPythonPackageSummary]]
       )
-      summaryStdout
-    assertEqual "A successful text summary leaves stderr empty." "" summaryStderr
-    (jsonExit, jsonStdout, jsonStderr) <- runEndToEndCommandIn temporaryRepository ["summary", "--json"]
-    assertEqual "JSON summary succeeds for the generated repository." ExitSuccess jsonExit
+      statusStdout
+    assertEqual "A successful text status leaves stderr empty." "" statusStderr
+    (defaultExit, defaultStdout, defaultStderr) <- runEndToEndCommandIn temporaryRepository []
+    assertEqual "The default command succeeds for the generated repository." ExitSuccess defaultExit
+    assertEqual "The default command produces text status." statusStdout defaultStdout
+    assertEqual "The successful default command leaves stderr empty." "" defaultStderr
+    (jsonExit, jsonStdout, jsonStderr) <- runEndToEndCommandIn temporaryRepository ["status", "--json"]
+    assertEqual "JSON status succeeds for the generated repository." ExitSuccess jsonExit
     assertEqual
-      "JSON summary exactly reports generated metadata, checks, and discovered tests."
+      "JSON status exactly reports generated metadata, checks, and discovered tests."
       ( renderRepositorySummariesJSON
-          [RepositorySummary repositoryPath [expectedGeneratedPythonPackageSummary]]
+          [RepositorySummary repositoryPath (Just repositoryReadme) [expectedGeneratedPythonPackageSummary]]
       )
       jsonStdout
-    assertEqual "A successful JSON summary leaves stderr empty." "" jsonStderr
-haskellSummaryEndToEndTest :: IO ()
-haskellSummaryEndToEndTest =
-  withGeneratedHaskellPackageRepository "haskell-summary-end-to-end" $ \temporaryRepository -> do
+    assertEqual "A successful JSON status leaves stderr empty." "" jsonStderr
+    (defaultJSONExit, defaultJSONStdout, defaultJSONStderr) <- runEndToEndCommandIn temporaryRepository ["--json"]
+    assertEqual "The default JSON command succeeds for the generated repository." ExitSuccess defaultJSONExit
+    assertEqual "The default JSON command produces JSON status." jsonStdout defaultJSONStdout
+    assertEqual "The successful default JSON command leaves stderr empty." "" defaultJSONStderr
+haskellStatusEndToEndTest :: IO ()
+haskellStatusEndToEndTest =
+  withGeneratedHaskellPackageRepository "haskell-status-end-to-end" $ \temporaryRepository -> do
     repositoryPath <- canonicalizePath temporaryRepository
-    (summaryExit, summaryStdout, summaryStderr) <- runEndToEndCommandIn temporaryRepository ["summary"]
-    assertEqual "A generated Haskell package summary succeeds." ExitSuccess summaryExit
+    (statusExit, statusStdout, statusStderr) <- runEndToEndCommandIn temporaryRepository ["status"]
+    assertEqual "A generated Haskell package status succeeds." ExitSuccess statusExit
     assertEqual
-      "The summary reports its conventional HUnit label."
+      "The status reports its conventional HUnit label."
       ( renderRepositorySummariesText
-          [RepositorySummary repositoryPath [expectedGeneratedHaskellPackageSummary]]
+          [RepositorySummary repositoryPath Nothing [expectedGeneratedHaskellPackageSummary]]
       )
-      summaryStdout
-    assertEqual "A successful Haskell summary leaves stderr empty." "" summaryStderr
+      statusStdout
+    assertEqual "A successful Haskell status leaves stderr empty." "" statusStderr
 unlabeledHaskellPackageCheckEndToEndTest :: IO ()
 unlabeledHaskellPackageCheckEndToEndTest =
   withGeneratedHaskellPackageRepository "unlabeled-haskell-check-end-to-end" $ \temporaryRepository -> do
