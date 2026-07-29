@@ -29,9 +29,7 @@ python.pkgs.buildPythonPackage rec {
   nativeBuildInputs = [
     pkgs.texliveFull
   ];
-  passthru = {
-    inherit python;
-  };
+  passthru.python = python;
   pname = baseNameOf ./.;
   propagatedBuildInputs = pythonDeps;
   pyproject = false;

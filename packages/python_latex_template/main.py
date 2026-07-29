@@ -9,12 +9,11 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import matplotlib as mpl
 
 mpl.use("Agg")
-from typing import TYPE_CHECKING
-
 import matplotlib.pyplot as plt
 
 if TYPE_CHECKING:

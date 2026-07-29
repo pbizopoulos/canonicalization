@@ -6,7 +6,7 @@
 }:
 let
   opensshAuthorizedKeyFiles = [
-    ./../../prm/developer.pub
+    ../../prm/developer.pub
   ];
 in
 {
