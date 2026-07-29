@@ -12,10 +12,10 @@ python.pkgs.buildPythonPackage rec {
     license = pkgs.lib.licenses.mit;
   };
   pname = baseNameOf ./.;
-  propagatedBuildInputs = with python.pkgs; [
-    gprof2dot
-    pytest
-    six
+  propagatedBuildInputs = [
+    python.pkgs.gprof2dot
+    python.pkgs.pytest
+    python.pkgs.six
   ];
   pythonImportsCheck = [
     pname

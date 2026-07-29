@@ -178,14 +178,12 @@ fn add_repository(home_directory: &Path, repository_url: &str) -> Result<(), Cli
         }
         Err(RepositoryUrlError::Validation(message)) => return Err(CliFailure::fatal(message)),
     };
-    let mut command = Command::new("git");
-    command
+    let status = Command::new("git")
         .arg("-C")
         .arg(home_directory)
         .args(["submodule", "add", "--force"])
         .arg(repository_url)
-        .arg(canonical_path);
-    let status = command
+        .arg(canonical_path)
         .status()
         .map_err(|error| CliFailure::fatal(format!("failed to execute git: {error}")))?;
     if !status.success() {
@@ -319,20 +317,20 @@ fn check_home_gitmodules(home_directory: &Path, fix: bool) -> Result<(), CliFail
     } in submodules
     {
         if let Some(existing_section) = configured_path_sections.get(&configured_path) {
-            diagnostics.push(format!(                "submodule \"{section}\": path '{configured_path}' is already used by submodule \"{existing_section}\""            ));
+            diagnostics.push(format!("submodule \"{section}\": path '{configured_path}' is already used by submodule \"{existing_section}\""));
             continue;
         }
         configured_path_sections.insert(configured_path.clone(), section.clone());
         if validate_canonical_repository_path(&configured_path).is_err()
             && (!fix || validate_repository_path_components(&configured_path).is_err())
         {
-            diagnostics.push(format!(                "submodule \"{section}\": invalid path '{configured_path}'; expected <host>/<repository-path> with valid components"            ));
+            diagnostics.push(format!("submodule \"{section}\": invalid path '{configured_path}'; expected <host>/<repository-path> with valid components"));
             continue;
         }
         match parse_repository_url(&configured_url) {
             Ok(expected_path) => {
                 if let Some(existing_section) = canonical_path_sections.get(&expected_path) {
-                    diagnostics.push(format!(                        "submodule \"{section}\": URL resolves to canonical path '{expected_path}', already used by submodule \"{existing_section}\""                    ));
+                    diagnostics.push(format!("submodule \"{section}\": URL resolves to canonical path '{expected_path}', already used by submodule \"{existing_section}\""));
                     continue;
                 }
                 canonical_path_sections.insert(expected_path.clone(), section.clone());
@@ -340,7 +338,7 @@ fn check_home_gitmodules(home_directory: &Path, fix: bool) -> Result<(), CliFail
                     if fix {
                         path_fixes.push((section, configured_path, expected_path));
                     } else {
-                        diagnostics.push(format!(                            "submodule \"{section}\": path '{configured_path}' does not match URL '{configured_url}'; expected '{expected_path}'"                        ));
+                        diagnostics.push(format!("submodule \"{section}\": path '{configured_path}' does not match URL '{configured_url}'; expected '{expected_path}'"));
                     }
                 }
             }
@@ -349,7 +347,7 @@ fn check_home_gitmodules(home_directory: &Path, fix: bool) -> Result<(), CliFail
     }
     for (section, _, expected_path) in &path_fixes {
         if let Some(existing_section) = configured_path_sections.get(expected_path) {
-            diagnostics.push(format!(                "submodule \"{section}\": canonical path '{expected_path}' is currently used by submodule \"{existing_section}\""            ));
+            diagnostics.push(format!("submodule \"{section}\": canonical path '{expected_path}' is currently used by submodule \"{existing_section}\""));
         }
     }
     if !diagnostics.is_empty() {
@@ -397,7 +395,7 @@ fn fix_submodule_path(
     expected_path: &str,
 ) -> Result<(), CliFailure> {
     let mut target_parent = home_directory.join(expected_path);
-    target_parent.set_file_name("");
+    target_parent.pop();
     fs::create_dir_all(&target_parent).map_err(|error| {
         CliFailure::fatal(format!(
             "cannot create '{}': {error}",
@@ -462,7 +460,7 @@ fn parse_raw_submodule_fields(
     Ok(submodules)
 }
 fn validate_canonical_repository_path(path: &str) -> Result<(), RepositoryUrlError> {
-    if path.split('/').count() < 2 {
+    if !path.contains('/') {
         return Err(RepositoryUrlError::Validation(
             "repository path must include a host and repository path".to_owned(),
         ));
@@ -612,7 +610,7 @@ mod tests {
     }
     #[test]
     fn separates_raw_submodule_parsing_from_cardinality_validation() -> TestResult {
-        let raw = parse_raw_submodule_fields(            b"submodule.demo.path\nhost/owner/demo\0submodule.demo.path\nhost/owner/other\0submodule.demo.url\nhttps://host/owner/demo.git\0",        )?;
+        let raw = parse_raw_submodule_fields(b"submodule.demo.path\nhost/owner/demo\0submodule.demo.path\nhost/owner/other\0submodule.demo.url\nhttps://host/owner/demo.git\0")?;
         let (records, diagnostics) = validate_submodule_records(raw);
         assert!(records.is_empty());
         assert_eq!(diagnostics.len(), 1);

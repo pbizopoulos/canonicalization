@@ -53,7 +53,7 @@ pkgs.runCommand checkName
     cargo llvm-cov report --json --summary-only --output-path "$out/report.json"
     covered="$(jq -r '.data[0].totals.lines.covered' "$out/report.json")"
     total="$(jq -r '.data[0].totals.lines.count' "$out/report.json")"
-    test "$covered" != null -a "$total" != null
+    test "$covered" != null && test "$total" != null
     printf 'coverage-v1\tlines\t%s\t%s\n' "$covered" "$total" > "$out/coverage-summary.tsv"
     python - "$out/junit.xml" "$workspace/total-seconds" "$out/profile-summary.tsv" <<'PY'
     import pathlib

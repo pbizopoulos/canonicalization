@@ -24,7 +24,7 @@ pkgs.haskellPackages.mkDerivation rec {
   passthru.haskellExecutableDepends = executableHaskellDepends;
   pname = baseNameOf ./.;
   postInstall = ''
-    wrapProgram $out/bin/${pname} --run "rm -f tmp/${pname}.tix" --set-default HPCTIXFILE tmp/${pname}.tix
+    wrapProgram "$out/bin/${pname}" --run "rm -f tmp/${pname}.tix" --set-default HPCTIXFILE tmp/${pname}.tix
     ${ghcForTests}/bin/ghc -i. -e 'Main.runPackageTests' Main.hs
   '';
   src = ./.;

@@ -6,7 +6,7 @@ pkgs.stdenv.mkDerivation rec {
     latexmk -pdf ms.tex
   '';
   installPhase = ''
-    install -Dm644 ms.pdf $out/ms.pdf
+    install -Dm644 ms.pdf "$out/ms.pdf"
   '';
   meta.description = "A LaTeX template package.";
   nativeBuildInputs = [

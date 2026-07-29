@@ -29,7 +29,7 @@ pkgs.haskellPackages.mkDerivation rec {
   passthru.haskellExecutableDepends = executableHaskellDepends;
   pname = baseNameOf ./.;
   postInstall = ''
-    wrapProgram $out/bin/${pname} --prefix PATH : ${
+    wrapProgram "$out/bin/${pname}" --prefix PATH : ${
       pkgs.lib.makeBinPath [
         pkgs.nix
       ]

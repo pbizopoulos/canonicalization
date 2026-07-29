@@ -7,11 +7,11 @@ let
 in
 python.pkgs.buildPythonPackage rec {
   installPhase = ''
-    install -Dm644 main.py $out/${python.sitePackages}/${pname}.py
-    install -Dm755 main.py $out/bin/${pname}
+    install -Dm644 main.py "$out/${python.sitePackages}/${pname}.py"
+    install -Dm755 main.py "$out/bin/${pname}"
     if [ -d prm ]; then
-      cp -r prm/ $out/${python.sitePackages}/
-      cp -r prm/ $out/bin/
+      cp -R prm/ "$out/${python.sitePackages}/"
+      cp -R prm/ "$out/bin/"
     fi
   '';
   meta = {

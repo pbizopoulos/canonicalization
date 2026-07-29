@@ -1,10 +1,11 @@
 #![allow(clippy::multiple_crate_versions)]
 use anyhow::{Context as _, Result};
 use ignore::WalkBuilder;
+use std::env;
 use std::fs;
 use std::path::Path;
 fn main() -> Result<()> {
-    let mut paths = std::env::args_os().skip(1);
+    let mut paths = env::args_os().skip(1);
     if let Some(path) = paths.next() {
         process_path(Path::new(&path))?;
         for path in paths {
@@ -49,7 +50,6 @@ fn remove_newlines(contents: &mut Vec<u8>) {
 mod tests {
     use super::*;
     use quickcheck::{Arbitrary, Gen, QuickCheck, TestResult};
-    use std::env;
     use std::process::Command;
     use tempfile::tempdir;
     #[derive(Clone, Debug)]

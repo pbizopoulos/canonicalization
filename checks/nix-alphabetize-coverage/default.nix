@@ -57,6 +57,6 @@ pkgs.runCommand checkName
     hpc report "$workspace/coverage/${packageName}.tix" --hpcdir="$workspace/hpc" | tee "$out/report.txt"
     coverageCounts="$(sed -n 's/.*expressions used (\([0-9][0-9]*\)\/\([0-9][0-9]*\)).*/\1 \2/p' "$out/report.txt")"
     read -r covered total <<< "$coverageCounts"
-    test -n "$covered" -a -n "$total"
+    test -n "$covered" && test -n "$total"
     printf 'coverage-v1\texpressions\t%s\t%s\n' "$covered" "$total" > "$out/coverage-summary.tsv"
   ''

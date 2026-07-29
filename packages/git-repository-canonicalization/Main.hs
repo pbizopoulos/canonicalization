@@ -711,7 +711,7 @@ repositoryPackageTestDurations packageSummary =
             Map.fromListWith
               (++)
               [ (normalizeTestSpecification testName, [duration])
-              | (testName, duration) <- Map.toList recordedDurations
+              | (testName, duration) <- Map.toAscList recordedDurations
               ]
        in Map.fromList
             [ (testName, duration)
@@ -803,7 +803,7 @@ parseRepositoryCheckOutputPaths :: [FilePath] -> T.Text -> Maybe (Map.Map FilePa
 parseRepositoryCheckOutputPaths expectedCheckNames outputPathsText = do
   entries <- mapM parseEntry (T.lines outputPathsText)
   let outputPaths = Map.fromList entries
-  if Set.fromList (Map.keys outputPaths) == Set.fromList expectedCheckNames && Map.size outputPaths == length expectedCheckNames
+  if Map.keysSet outputPaths == Set.fromList expectedCheckNames && Map.size outputPaths == length expectedCheckNames
     then Just outputPaths
     else Nothing
   where
@@ -898,7 +898,7 @@ extractDefaultNixPackageDescription defaultNixContents =
           | otherwise -> go insideMetaBlock remainingLines
 extractLocalPackageDependencies :: T.Text -> [String]
 extractLocalPackageDependencies defaultNixContents =
-  sort . Set.toList . Set.fromList $
+  Set.toAscList . Set.fromList $
     [ T.unpack dependencyName
     | dependencyReference <- drop 1 (T.splitOn localPackagePrefix defaultNixContents),
       let dependencyName = T.takeWhile isInputNameCharacter dependencyReference,
@@ -1158,11 +1158,11 @@ renderPythonTemplateNixSource packageDescription =
       "in",
       "python.pkgs.buildPythonPackage rec {",
       "  installPhase = ''",
-      "    install -Dm644 main.py $out/${python.sitePackages}/${pname}.py",
-      "    install -Dm755 main.py $out/bin/${pname}",
+      "    install -Dm644 main.py \"$out/${python.sitePackages}/${pname}.py\"",
+      "    install -Dm755 main.py \"$out/bin/${pname}\"",
       "    if [ -d prm ]; then",
-      "      cp -r prm/ $out/${python.sitePackages}/",
-      "      cp -r prm/ $out/bin/",
+      "      cp -R prm/ \"$out/${python.sitePackages}/\"",
+      "      cp -R prm/ \"$out/bin/\"",
       "    fi",
       "  '';",
       "  meta = {",
@@ -1224,7 +1224,7 @@ inspectRepositoryStructure = do
       leafPaths = Set.fromList relativePaths
       packageRootPaths = Set.fromList (mapMaybe packageRootPathFromRepositoryPath relativePaths)
       hostRootPaths = Set.fromList (mapMaybe hostRootPathFromRepositoryPath relativePaths)
-  packageInfos <- mapM (buildPackageInfo leafPaths) (Set.toList packageRootPaths)
+  packageInfos <- mapM (buildPackageInfo leafPaths) (Set.toAscList packageRootPaths)
   let globalRegularFileRegexes :: [String]
       globalRegularFileRegexes =
         [ "^\\.git$",
@@ -1254,17 +1254,17 @@ inspectRepositoryStructure = do
           ++ map DirectoryRule opaqueDirectoryRegexes
       missingPackageDefaultNixIssues =
         [ packageRootDirectory ++ ": missing required file default.nix"
-        | packageRootDirectory <- Set.toList packageRootPaths,
+        | packageRootDirectory <- Set.toAscList packageRootPaths,
           Set.notMember (packageRootDirectory </> "default.nix") leafPaths
         ]
       missingHostConfigurationIssues =
         [ hostRootDirectory ++ ": missing required file configuration.nix"
-        | hostRootDirectory <- Set.toList hostRootPaths,
+        | hostRootDirectory <- Set.toAscList hostRootPaths,
           Set.notMember (hostRootDirectory </> "configuration.nix") leafPaths
         ]
       missingCabalForMainHaskellIssues =
         [ packageRootDirectory ++ ": missing required file " ++ packageDirectoryName ++ ".cabal for Main.hs package"
-        | packageRootDirectory <- Set.toList packageRootPaths,
+        | packageRootDirectory <- Set.toAscList packageRootPaths,
           Set.member (packageRootDirectory </> "Main.hs") leafPaths,
           let packageDirectoryName = takeBaseName packageRootDirectory,
           Set.notMember (packageRootDirectory </> packageDirectoryName <.> "cabal") leafPaths
@@ -1364,7 +1364,7 @@ buildPackageInfo :: Set.Set FilePath -> FilePath -> IO PackageInfo
 buildPackageInfo leafPaths packageRootDirectory = do
   maybeDefaultNixSource <- readTextFileIfExists (packageRootDirectory </> "default.nix")
   let packageDirectoryName = takeBaseName packageRootDirectory
-      packageRelativeLeafPaths = mapMaybe (stripPrefix (packageRootDirectory ++ "/")) (Set.toList leafPaths)
+      packageRelativeLeafPaths = mapMaybe (stripPrefix (packageRootDirectory ++ "/")) (Set.toAscList leafPaths)
       markers = detectPackageMarkers packageRelativeLeafPaths
   pure
     PackageInfo
@@ -2296,7 +2296,7 @@ formatBindingMapDifferences keyLabel packageBindingMap templateBindingMap =
   let missingBindingKeys = Map.keys (Map.difference templateBindingMap packageBindingMap)
       unexpectedBindingKeys = Map.keys (Map.difference packageBindingMap templateBindingMap)
       changedBindings =
-        Map.toList
+        Map.toAscList
           ( Map.filter
               (uncurry (/=))
               (Map.intersectionWith (,) templateBindingMap packageBindingMap)
@@ -3391,10 +3391,11 @@ rustMainSource =
     [ "#![allow(clippy::multiple_crate_versions)]",
       "use anyhow::{Context as _, Result};",
       "use ignore::WalkBuilder;",
+      "use std::env;",
       "use std::fs;",
       "use std::path::Path;",
       "fn main() -> Result<()> {",
-      "    let mut paths = std::env::args_os().skip(1);",
+      "    let mut paths = env::args_os().skip(1);",
       "    if let Some(path) = paths.next() {",
       "        process_path(Path::new(&path))?;",
       "        for path in paths {",
@@ -3441,7 +3442,6 @@ rustMainSource =
       "mod tests {",
       "    use super::*;",
       "    use quickcheck::{Arbitrary, Gen, QuickCheck, TestResult};",
-      "    use std::env;",
       "    use std::process::Command;",
       "    use tempfile::tempdir;",
       "    #[derive(Clone, Debug)]",
@@ -3718,7 +3718,7 @@ haskellTemplateBaselineNixSource =
       "  mainProgram = pname;",
       "  pname = baseNameOf ./.;",
       "  postInstall = ''",
-      "    wrapProgram $out/bin/${pname} --run \"rm -f tmp/${pname}.tix\" --set-default HPCTIXFILE tmp/${pname}.tix",
+      "    wrapProgram \"$out/bin/${pname}\" --run \"rm -f tmp/${pname}.tix\" --set-default HPCTIXFILE tmp/${pname}.tix",
       "    ${ghcForTests}/bin/ghc -i. -e 'Main.runPackageTests' Main.hs",
       "  '';",
       "  src = ./.;",
@@ -3905,7 +3905,7 @@ cTemplateBaselineNixSource =
       "  '';",
       "  doCheck = pkgs.stdenv.isLinux;",
       "  installPhase = ''",
-      "    install -Dm755 ${pname} $out/bin/${pname}",
+      "    install -Dm755 ${pname} \"$out/bin/${pname}\"",
       "  '';",
       "  meta = {",
       "    description = \"A C template package.\";",
@@ -3933,7 +3933,7 @@ latexTemplateBaselineNixSource =
       "    latexmk -pdf ms.tex",
       "  '';",
       "  installPhase = ''",
-      "    install -Dm644 ms.pdf $out/ms.pdf",
+      "    install -Dm644 ms.pdf \"$out/ms.pdf\"",
       "  '';",
       "  meta.description = \"A LaTeX template package.\";",
       "  nativeBuildInputs = [",
@@ -3978,7 +3978,7 @@ deployHostTemplateBaselineNixSource =
       "    # shellcheck disable=SC2086,SC2163,SC2154",
       "    export $secrets",
       "    workdir=$(mktemp -d)",
-      "    cp -r ${../..}/. \"$workdir/\"",
+      "    cp -R ${../..}/. \"$workdir/\"",
       "    chmod -R u+w \"$workdir\"",
       "    rm -rf \"$workdir/packages/${name}/.terraform\" \"$workdir/packages/${name}/.terraform.lock.hcl\"",
       "    tofu -chdir=\"$workdir/packages/${name}\" init -reconfigure",
@@ -4064,7 +4064,7 @@ binaryReleaseTemplateBaselineNixSource =
       "  '';",
       "  installPhase = ''",
       "    runHook preInstall",
-      "    install -Dm755 ${pname}-v${version}-x86_64-unknown-linux-musl/${pname} $out/bin/${pname}",
+      "    install -Dm755 ${pname}-v${version}-x86_64-unknown-linux-musl/${pname} \"$out/bin/${pname}\"",
       "    runHook postInstall",
       "  '';",
       "  meta.mainProgram = pname;",
@@ -4103,7 +4103,7 @@ pythonLaTeXTemplateBaselineNixSource =
       "    install -Dm755 main.py \"$out/bin/${pname}\"",
       "    install -Dm644 main.py ms.tex ms.bib -t \"$datadir\"",
       "    install -Dm644 tmp/ms.pdf \"$out/ms.pdf\"",
-      "    install -Dm644 main.py $out/${python.sitePackages}/${pname}.py",
+      "    install -Dm644 main.py \"$out/${python.sitePackages}/${pname}.py\"",
       "  '';",
       "  meta = {",
       "    description = \"A Python and LaTeX template package.\";",
@@ -4181,7 +4181,7 @@ haskellCoverageCheckBaselineNixSource =
       "    hpc report \"$workspace/coverage/${packageName}.tix\" --hpcdir=\"$workspace/hpc\" | tee \"$out/report.txt\"",
       "    coverageCounts=\"$(sed -n 's/.*expressions used (\\([0-9][0-9]*\\)\\/\\([0-9][0-9]*\\)).*/\\1 \\2/p' \"$out/report.txt\")\"",
       "    read -r covered total <<< \"$coverageCounts\"",
-      "    test -n \"$covered\" -a -n \"$total\"",
+      "    test -n \"$covered\" && test -n \"$total\"",
       "    printf 'coverage-v1\\texpressions\\t%s\\t%s\\n' \"$covered\" \"$total\" > \"$out/coverage-summary.tsv\"",
       "  ''"
     ]
@@ -4309,7 +4309,7 @@ rustCoverageCheckBaselineNixSource =
       "    cargo llvm-cov report --json --summary-only --output-path \"$out/report.json\"",
       "    covered=\"$(jq -r '.data[0].totals.lines.covered' \"$out/report.json\")\"",
       "    total=\"$(jq -r '.data[0].totals.lines.count' \"$out/report.json\")\"",
-      "    test \"$covered\" != null -a \"$total\" != null",
+      "    test \"$covered\" != null && test \"$total\" != null",
       "    printf 'coverage-v1\\tlines\\t%s\\t%s\\n' \"$covered\" \"$total\" > \"$out/coverage-summary.tsv\"",
       "    python - \"$out/junit.xml\" \"$workspace/total-seconds\" \"$out/profile-summary.tsv\" <<'PY'",
       "    import pathlib",
@@ -4381,11 +4381,15 @@ defaultVmWithDiskoCheckBaselineNixSource =
       "let",
       "  host = pkgs.lib.removeSuffix \"VmWithDisko\" (builtins.baseNameOf ./.);",
       "in",
-      "pkgs.runCommand (builtins.baseNameOf ./.) {",
-      "  buildInputs = [",
-      "    inputs.self.nixosConfigurations.${host}.config.system.build.vmWithDisko",
-      "  ];",
-      "} \"touch $out\""
+      "pkgs.runCommand (builtins.baseNameOf ./.)",
+      "  {",
+      "    buildInputs = [",
+      "      inputs.self.nixosConfigurations.${host}.config.system.build.vmWithDisko",
+      "    ];",
+      "  }",
+      "  ''",
+      "    touch \"$out\"",
+      "  ''"
     ]
 uncommentTemplateBaselineNixSource :: T.Text
 uncommentTemplateBaselineNixSource =
@@ -4404,7 +4408,7 @@ uncommentTemplateBaselineNixSource =
       "  '';",
       "  installPhase = ''",
       "    runHook preInstall",
-      "    install -Dm755 ${pname} $out/bin/${pname}",
+      "    install -Dm755 ${pname} \"$out/bin/${pname}\"",
       "    runHook postInstall",
       "  '';",
       "  meta = {",

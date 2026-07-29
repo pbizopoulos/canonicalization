@@ -27,7 +27,7 @@ pkgs.writeShellApplication rec {
     # shellcheck disable=SC2086,SC2163,SC2154
     export $secrets
     workdir=$(mktemp -d)
-    cp -r ${../..}/. "$workdir/"
+    cp -R ${../..}/. "$workdir/"
     chmod -R u+w "$workdir"
     rm -rf "$workdir/packages/${name}/.terraform" "$workdir/packages/${name}/.terraform.lock.hcl"
     tofu -chdir="$workdir/packages/${name}" init -reconfigure

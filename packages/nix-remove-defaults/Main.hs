@@ -315,9 +315,9 @@ removalsFromDefaults defaults candidates =
       Map.lookup optionPath defaults == Just literalValue
     ]
 uniqueCandidates :: [NixOSCandidate] -> [NixOSCandidate]
-uniqueCandidates = Set.toList . Set.fromList
+uniqueCandidates = Set.toAscList . Set.fromList
 uniqueCandidatePaths :: [NixOSCandidate] -> [OptionPath]
-uniqueCandidatePaths = Set.toList . Set.fromList . map fst
+uniqueCandidatePaths = Set.toAscList . Set.fromList . map fst
 collectCandidates :: NExprLoc -> [(OptionPath, Literal)]
 collectCandidates = collectModuleExpression []
 collectTreefmtCandidates :: NExprLoc -> [(OptionPath, Literal)]
