@@ -3,7 +3,7 @@
   ...
 }:
 let
-  checkName = builtins.baseNameOf ./.;
+  checkName = baseNameOf ./.;
   packageDrv = import (../.. + "/packages/${packageName}/default.nix") {
     inherit pkgs;
   };

@@ -265,8 +265,8 @@ data CommandParseResult
 main :: IO ()
 main = getArgs >>= runCli
 runCli :: [String] -> IO ()
-runCli commandLineArgs =
-  case parseCommand commandLineArgs of
+runCli commandLineArguments =
+  case parseCommand commandLineArguments of
     MainHelp -> printMainHelpAndExit
     InvalidCommand exitCode maybeCommand ->
       hPutStr stderr (usageTextForCommand maybeCommand) >> exitWith exitCode
@@ -292,8 +292,8 @@ stageGeneratedPathsOrExit = \case
     exitFailure
   Right generatedPaths -> delegateToGit (["add", "--"] ++ generatedPaths)
 parseCommand :: [String] -> CommandParseResult
-parseCommand commandLineArgs =
-  case commandLineArgs of
+parseCommand commandLineArguments =
+  case commandLineArguments of
     [] -> ParsedCommand (StatusCommand False)
     [argument] | argument `elem` ["-h", "--help"] -> MainHelp
     [_, argument] | argument `elem` ["-h", "--help"] -> InvalidCommand (ExitFailure 1) Nothing
@@ -303,10 +303,10 @@ parseCommand commandLineArgs =
     ["status"] -> ParsedCommand (StatusCommand False)
     ["status", "--json"] -> ParsedCommand (StatusCommand True)
     _ ->
-      case parseAddPackageArgs commandLineArgs of
+      case parseAddPackageArguments commandLineArguments of
         Just (packageKindName, packageName, packageDescription) ->
           ParsedCommand (AddCommand packageKindName packageName packageDescription)
-        Nothing -> InvalidCommand usageExitCode (listToMaybe commandLineArgs)
+        Nothing -> InvalidCommand usageExitCode (listToMaybe commandLineArguments)
 printMainHelpAndExit :: IO a
 printMainHelpAndExit = do
   putStr mainHelpText
@@ -368,12 +368,12 @@ usageTextForCommand = \case
         ""
       ]
   _ -> mainUsageText
-parseAddPackageArgs :: [String] -> Maybe (String, FilePath, Maybe String)
-parseAddPackageArgs ("add" : packageKindName : packageName : remainingArguments) = do
+parseAddPackageArguments :: [String] -> Maybe (String, FilePath, Maybe String)
+parseAddPackageArguments ("add" : packageKindName : packageName : remainingArguments) = do
   guard (not (any ("--" `isPrefixOf`) remainingArguments))
   let packageDescription = unwords . NE.toList <$> NE.nonEmpty remainingArguments
   pure (packageKindName, packageName, packageDescription)
-parseAddPackageArgs _ = Nothing
+parseAddPackageArguments _ = Nothing
 runInGitRepositoryRoot :: FilePath -> IO a -> IO a
 runInGitRepositoryRoot repositoryDirectory action = do
   canonicalRepositoryRoot <- discoverGitRepositoryRoot repositoryDirectory
@@ -2148,9 +2148,7 @@ validateCPackageVmCheck packageKinds checkName checkTemplatePath = do
       pure (validateCPackageVmCheckSource (Map.lookup checkName packageKinds) checkName checkTemplatePath (T.unpack checkTemplateText))
 validateCPackageVmCheckSource :: Maybe PackageKind -> FilePath -> FilePath -> String -> [String]
 validateCPackageVmCheckSource packageKind checkName checkTemplatePath checkTemplateSource =
-  let hasCanonicalNameBinding =
-        "name = builtins.baseNameOf ./.;" `isInfixOf` checkTemplateSource
-          || "name = baseNameOf ./.;" `isInfixOf` checkTemplateSource
+  let hasCanonicalNameBinding = "name = baseNameOf ./.;" `isInfixOf` checkTemplateSource
       hasRunNixOSTest = "pkgs.testers.runNixOSTest" `isInfixOf` checkTemplateSource
       hasMachineNode = "nodes.machine" `isInfixOf` checkTemplateSource
       hasTestScript = "testScript = ''" `isInfixOf` checkTemplateSource
@@ -3130,8 +3128,8 @@ pythonMainSource =
       "        or completed.stdout != f\"{SAMPLE_MESSAGE}\\n\"",
       "        or completed.stderr",
       "    ):",
-      "        msg = \"executable output should match the sample message\"",
-      "        raise AssertionError(msg)",
+      "        message = \"executable output should match the sample message\"",
+      "        raise AssertionError(message)",
       "",
       "",
       "if __name__ == \"__main__\":",
@@ -3185,19 +3183,19 @@ pythonLaTeXMainSource =
       "        \"\"\"Freeze values after validating every summary operation.\"\"\"",
       "        normalized = tuple(values)",
       "        if not normalized:",
-      "            msg = \"samples must not be empty\"",
-      "            raise ValueError(msg)",
+      "            message = \"samples must not be empty\"",
+      "            raise ValueError(message)",
       "        if not all(map(math.isfinite, normalized)):",
-      "            msg = \"samples must be finite\"",
-      "            raise ValueError(msg)",
+      "            message = \"samples must be finite\"",
+      "            raise ValueError(message)",
       "        try:",
       "            total = math.fsum(normalized)",
       "        except OverflowError as error:",
-      "            msg = \"sample total must be finite\"",
-      "            raise ValueError(msg) from error",
+      "            message = \"sample total must be finite\"",
+      "            raise ValueError(message) from error",
       "        if not math.isfinite(total):",
-      "            msg = \"sample total must be finite\"",
-      "            raise ValueError(msg)",
+      "            message = \"sample total must be finite\"",
+      "            raise ValueError(message)",
       "        object.__setattr__(self, \"values\", normalized)",
       "",
       "    def summary(self) -> tuple[tuple[str, float], ...]:",
@@ -3279,16 +3277,16 @@ pythonLaTeXMainSource =
       "            Samples(values)",
       "        except ValueError:",
       "            continue",
-      "        msg = \"invalid samples must be rejected\"",
-      "        raise AssertionError(msg)",
+      "        message = \"invalid samples must be rejected\"",
+      "        raise AssertionError(message)",
       "",
       "",
       "def test_latex_escape_handles_special_characters() -> None:",
       "    \"\"\"Escapes LaTeX-special characters in generated text.\"\"\"",
       "    escaped = latex_escape(r\"value_#1 & 50%\")",
       "    if escaped != r\"value\\_\\#1 \\& 50\\%\":",
-      "        msg = \"LaTeX-special characters should be escaped\"",
-      "        raise AssertionError(msg)",
+      "        message = \"LaTeX-special characters should be escaped\"",
+      "        raise AssertionError(message)",
       "",
       "",
       "def test_main_creates_latex_workspace_artifacts() -> None:",
@@ -3303,8 +3301,8 @@ pythonLaTeXMainSource =
       "            text=True,",
       "        )",
       "        if completed.returncode != 0 or completed.stdout or completed.stderr:",
-      "            msg = \"the executable should succeed without console output\"",
-      "            raise AssertionError(msg)",
+      "            message = \"the executable should succeed without console output\"",
+      "            raise AssertionError(message)",
       "        workspace = working_directory / \"tmp\"",
       "        figure_path = workspace / \"figure.png\"",
       "        table_path = workspace / \"table.tex\"",
@@ -3313,8 +3311,8 @@ pythonLaTeXMainSource =
       "            or figure_path.stat().st_size == 0",
       "            or not table_path.is_file()",
       "        ):",
-      "            msg = \"workspace artifacts should be complete\"",
-      "            raise AssertionError(msg)",
+      "            message = \"workspace artifacts should be complete\"",
+      "            raise AssertionError(message)",
       "        table = table_path.read_text(encoding=\"utf-8\")",
       "        expected_fragments = (",
       "            \"\\\\begin{tabular}{lr}\",",
@@ -3327,8 +3325,8 @@ pythonLaTeXMainSource =
       "            \"\\\\end{tabular}\",",
       "        )",
       "        if not all(fragment in table for fragment in expected_fragments):",
-      "            msg = \"generated table should contain the expected summary\"",
-      "            raise AssertionError(msg)",
+      "            message = \"generated table should contain the expected summary\"",
+      "            raise AssertionError(message)",
       "",
       "",
       "if __name__ == \"__main__\":",
@@ -3475,8 +3473,8 @@ rustMainSource =
       "    }",
       "    #[test]",
       "    fn respects_gitignore_and_skips_binary_files() -> Result<()> {",
-      "        let dir = tempdir()?;",
-      "        let root = dir.path();",
+      "        let directory = tempdir()?;",
+      "        let root = directory.path();",
       "        let gitignore_path = root.join(\".gitignore\");",
       "        fs::write(&gitignore_path, \"ignored.txt\\n\")?;",
       "        let ignored_path = root.join(\"ignored.txt\");",
@@ -3495,8 +3493,8 @@ rustMainSource =
       "        let Some(executable) = env::var_os(\"PACKAGE_E2E_EXECUTABLE\") else {",
       "            return Ok(());",
       "        };",
-      "        let dir = tempdir()?;",
-      "        let root = dir.path();",
+      "        let directory = tempdir()?;",
+      "        let root = directory.path();",
       "        let file_path = root.join(\"test.txt\");",
       "        fs::write(&file_path, \"line1\\n\\nline2\\n   \\nline3\\n\")?;",
       "        let output = Command::new(executable).current_dir(root).output()?;",
@@ -4127,7 +4125,7 @@ haskellCoverageCheckBaselineNixSource =
       "  ...",
       "}:",
       "let",
-      "  checkName = builtins.baseNameOf ./.;",
+      "  checkName = baseNameOf ./.;",
       "  packageDrv = import (../.. + \"/packages/${packageName}/default.nix\") {",
       "    inherit pkgs;",
       "  };",
@@ -4194,7 +4192,7 @@ pythonCoverageCheckBaselineNixSource =
       "  ...",
       "}:",
       "let",
-      "  checkName = builtins.baseNameOf ./.;",
+      "  checkName = baseNameOf ./.;",
       "  packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${packageName};",
       "  packageName = pkgs.lib.removeSuffix \"_coverage\" checkName;",
       "  profilingDrv = pkgs.callPackage (",
@@ -4261,7 +4259,7 @@ rustCoverageCheckBaselineNixSource =
       "}:",
       "let",
       "  inherit (packageDrv) cargoDeps;",
-      "  checkName = builtins.baseNameOf ./.;",
+      "  checkName = baseNameOf ./.;",
       "  packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${packageName};",
       "  packageName = pkgs.lib.removeSuffix \"-coverage\" checkName;",
       "in",
@@ -4336,7 +4334,7 @@ cTemplateCheckBaselineNixSource =
       "  ...",
       "}:",
       "let",
-      "  name = builtins.baseNameOf ./.;",
+      "  name = baseNameOf ./.;",
       "  packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${name};",
       "in",
       "pkgs.testers.runNixOSTest {",
@@ -4379,9 +4377,9 @@ defaultVmWithDiskoCheckBaselineNixSource =
       "  ...",
       "}:",
       "let",
-      "  host = pkgs.lib.removeSuffix \"VmWithDisko\" (builtins.baseNameOf ./.);",
+      "  host = pkgs.lib.removeSuffix \"VmWithDisko\" (baseNameOf ./.);",
       "in",
-      "pkgs.runCommand (builtins.baseNameOf ./.)",
+      "pkgs.runCommand (baseNameOf ./.)",
       "  {",
       "    buildInputs = [",
       "      inputs.self.nixosConfigurations.${host}.config.system.build.vmWithDisko",

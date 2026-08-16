@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026- Paschalis Bizopoulos
 """Provide a minimal executable Python package."""
 
 from __future__ import annotations
@@ -27,8 +28,8 @@ def test_main_prints_sample_message() -> None:
         or completed.stdout != f"{SAMPLE_MESSAGE}\n"
         or completed.stderr
     ):
-        msg = "executable output should match the sample message"
-        raise AssertionError(msg)
+        message = "executable output should match the sample message"
+        raise AssertionError(message)
 
 
 if __name__ == "__main__":

@@ -198,10 +198,10 @@ makeFormattingTest input expectedOutput = TestCase $ do
   assertEqual "formatted output" expectedOutput actualOutput
 formatText :: Text -> IO Text
 formatText input =
-  withSystemTempFile "test.nix" $ \tmpFile tmpHandle -> do
-    hClose tmpHandle
-    TIO.writeFile tmpFile input
-    parseResult <- parseNixFileLoc (Path tmpFile)
+  withSystemTempFile "test.nix" $ \temporaryFile temporaryHandle -> do
+    hClose temporaryHandle
+    TIO.writeFile temporaryFile input
+    parseResult <- parseNixFileLoc (Path temporaryFile)
     case parseResult of
       Right expression ->
         pure (formattedExpression expression)
@@ -427,24 +427,24 @@ hUnitPackageTests =
           (pack "{\n  a.b = 1;\n  a.b.c = 2;\n}"),
       TestLabel "Reports parse failure without rewriting the file." $
         TestCase $
-          withSystemTempFile "malformed.nix" $ \tmpFile tmpHandle -> do
-            hClose tmpHandle
+          withSystemTempFile "malformed.nix" $ \temporaryFile temporaryHandle -> do
+            hClose temporaryHandle
             let malformed = pack "{ invalid = ; }"
-            TIO.writeFile tmpFile malformed
-            succeeded <- formatNixFile tmpFile
-            contents <- TIO.readFile tmpFile
+            TIO.writeFile temporaryFile malformed
+            succeeded <- formatNixFile temporaryFile
+            contents <- TIO.readFile temporaryFile
             assertEqual "parse status" False succeeded
             assertEqual "unchanged contents" malformed contents,
       TestLabel "Leaves canonical files untouched." $
         TestCase $
-          withSystemTempFile "canonical.nix" $ \tmpFile tmpHandle -> do
-            hClose tmpHandle
+          withSystemTempFile "canonical.nix" $ \temporaryFile temporaryHandle -> do
+            hClose temporaryHandle
             let canonical = pack "{\n  a = 1;\n}"
-            TIO.writeFile tmpFile canonical
-            (chmodExit, _chmodStdout, chmodStderr) <- readProcessWithExitCode "chmod" ["a-w", tmpFile] ""
+            TIO.writeFile temporaryFile canonical
+            (chmodExit, _chmodStdout, chmodStderr) <- readProcessWithExitCode "chmod" ["a-w", temporaryFile] ""
             assertEqual ("chmod stderr: " ++ chmodStderr) ExitSuccess chmodExit
-            succeeded <- formatNixFile tmpFile
-            contents <- TIO.readFile tmpFile
+            succeeded <- formatNixFile temporaryFile
+            contents <- TIO.readFile temporaryFile
             assertEqual "format status" True succeeded
             assertEqual "unchanged canonical contents" canonical contents,
       TestLabel "Preserves multiline string formatting." $

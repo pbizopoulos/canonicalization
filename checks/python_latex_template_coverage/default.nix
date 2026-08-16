@@ -4,7 +4,7 @@
   ...
 }:
 let
-  checkName = builtins.baseNameOf ./.;
+  checkName = baseNameOf ./.;
   packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${packageName};
   packageName = pkgs.lib.removeSuffix "_coverage" checkName;
   profilingDrv = pkgs.callPackage (

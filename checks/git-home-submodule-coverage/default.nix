@@ -5,7 +5,7 @@
 }:
 let
   inherit (packageDrv) cargoDeps;
-  checkName = builtins.baseNameOf ./.;
+  checkName = baseNameOf ./.;
   packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${packageName};
   packageName = pkgs.lib.removeSuffix "-coverage" checkName;
 in

@@ -15,7 +15,7 @@ let
         pkgs.stdenv.cc
       ]
     }:$PATH"
-    find packages -name Cargo.toml -execdir cargo clippy --fix --allow-dirty --allow-staged --all-targets --all-features -- -D warnings -D clippy::all -D clippy::pedantic -D clippy::nursery -D clippy::cargo -D clippy::restriction -A clippy::needless_return \;
+    find packages -name Cargo.toml -execdir cargo clippy --fix --allow-dirty --allow-staged --all-targets --all-features -- -D warnings -D clippy::all -D clippy::pedantic -D clippy::nursery -D clippy::cargo -D clippy::restriction -A clippy::implicit_return \;
   '';
   formatter = treefmtEval.config.build.wrapper;
   git-repository-canonicalization-script = pkgs.writeShellScriptBin "git-repository-canonicalization-check" ''

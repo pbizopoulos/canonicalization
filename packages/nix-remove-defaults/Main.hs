@@ -188,8 +188,8 @@ type ParsedNixFile :: Type
 type ParsedNixFile = (FilePath, NExprLoc)
 main :: IO ()
 main = do
-  args <- getArgs
-  case args of
+  arguments <- getArgs
+  case arguments of
     [] -> processArgument "."
     [repositoryPath] -> processArgument repositoryPath
     _ -> do
@@ -460,10 +460,10 @@ setBecameEmpty
 setBecameEmpty _ _ = False
 flakeSourcePathForRepository :: FilePath -> IO (Either String FilePath)
 flakeSourcePathForRepository repositoryRoot =
-  readJsonFromNix ["eval", "--impure", "--json", "--expr", flakeSourcePathExpression repositoryRoot]
+  readJSONFromNix ["eval", "--impure", "--json", "--expr", flakeSourcePathExpression repositoryRoot]
 nixOSConfigurationsForRepository :: FilePath -> IO (Either String [String])
 nixOSConfigurationsForRepository repositoryRoot =
-  readJsonFromNix ["eval", "--impure", "--json", "--expr", nixOSConfigurationsExpression repositoryRoot]
+  readJSONFromNix ["eval", "--impure", "--json", "--expr", nixOSConfigurationsExpression repositoryRoot]
 resolveNixOSDefinitionFiles :: FilePath -> [String] -> [NixOSCandidate] -> IO (Either String (Map NixOSCandidate [FilePath]))
 resolveNixOSDefinitionFiles repositoryRoot nixOSConfigurations candidates = do
   definitionFilesResult <- readNixOSDefinitionFilesFromNix ["eval", "--impure", "--json", "--expr", nixOSDefaultDefinitionFilesExpression repositoryRoot nixOSConfigurations candidates]
@@ -573,22 +573,22 @@ nixString :: String -> String
 nixString = unpack . renderOptionKey . pack
 readNixOSDefinitionFilesFromNix :: [String] -> IO (Either String [(NixOSCandidate, [FilePath])])
 readNixOSDefinitionFilesFromNix arguments =
-  fmap (map nixOSDefinitionEntry) <$> readJsonFromNix arguments
+  fmap (map nixOSDefinitionEntry) <$> readJSONFromNix arguments
   where
     nixOSDefinitionEntry :: NixOSDefinitionRecord -> (NixOSCandidate, [FilePath])
     nixOSDefinitionEntry (NixOSDefinitionRecord optionPath literalValue sourceFiles) =
       ((optionPath, literalValue), sourceFiles)
 readTreefmtDefaultsFromNix :: [String] -> IO (Either String [(OptionPath, Literal)])
 readTreefmtDefaultsFromNix arguments =
-  fmap (map treefmtDefaultEntry) <$> readJsonFromNix arguments
+  fmap (map treefmtDefaultEntry) <$> readJSONFromNix arguments
   where
     treefmtDefaultEntry :: TreefmtDefaultRecord -> (OptionPath, Literal)
     treefmtDefaultEntry (TreefmtDefaultRecord optionPath defaultValue) =
       (optionPath, defaultValue)
-readJsonFromNix :: (FromJSON value) => [String] -> IO (Either String value)
-readJsonFromNix = readJsonFromNixWith tryReadNixProcess
-readJsonFromNixWith :: (FromJSON value) => ([String] -> IO (Either IOException (ExitCode, String, String))) -> [String] -> IO (Either String value)
-readJsonFromNixWith runNix arguments = do
+readJSONFromNix :: (FromJSON value) => [String] -> IO (Either String value)
+readJSONFromNix = readJSONFromNixWith tryReadNixProcess
+readJSONFromNixWith :: (FromJSON value) => ([String] -> IO (Either IOException (ExitCode, String, String))) -> [String] -> IO (Either String value)
+readJSONFromNixWith runNix arguments = do
   processResult <- runNix arguments
   case processResult of
     Left processError -> pure (Left ("cannot execute nix: " ++ show processError))
@@ -615,10 +615,10 @@ formatTreefmtWithDefaults defaults input =
     pure (renderExpression (rewriteTreefmtEvalModuleArguments removals expr))
 withTestExpression :: Text -> (NExprLoc -> IO a) -> IO a
 withTestExpression input useExpression =
-  withSystemTempFile "nix-remove-defaults-test.nix" $ \tmpFile tmpHandle -> do
-    hClose tmpHandle
-    TIO.writeFile tmpFile input
-    parseResult <- parseNixFileLoc (Path tmpFile)
+  withSystemTempFile "nix-remove-defaults-test.nix" $ \temporaryFile temporaryHandle -> do
+    hClose temporaryHandle
+    TIO.writeFile temporaryFile input
+    parseResult <- parseNixFileLoc (Path temporaryFile)
     case parseResult of
       Right expr -> useExpression expr
       Left parseError -> assertFailure ("Test fixture failed to parse: " ++ show parseError)
@@ -766,7 +766,7 @@ hUnitPackageTests =
       TestLabel "Propagates the underlying Nix evaluation diagnostic." $
         TestCase $ do
           result <-
-            readJsonFromNixWith
+            readJSONFromNixWith
               (\_ -> pure (Right (ExitFailure 1, "", "underlying evaluation failure\n")))
               []
           assertEqual

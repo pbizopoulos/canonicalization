@@ -14,19 +14,19 @@ fn main() -> Result<()> {
     } else {
         process_path(Path::new("."))?;
     }
-    return Ok(());
+    Ok(())
 }
 fn process_path(path: &Path) -> Result<()> {
     for result in WalkBuilder::new(path).require_git(false).build() {
         let entry = result.with_context(|| format!("Failed to walk path: {}", path.display()))?;
         if entry
             .file_type()
-            .is_some_and(|file_type| return file_type.is_file())
+            .is_some_and(|file_type| file_type.is_file())
         {
             process_file(entry.path())?;
         }
     }
-    return Ok(());
+    Ok(())
 }
 fn process_file(path: &Path) -> Result<()> {
     let path_display = path.display();
@@ -40,20 +40,20 @@ fn process_file(path: &Path) -> Result<()> {
         fs::write(path, updated_contents)
             .with_context(|| format!("Failed to write file: {path_display}"))?;
     }
-    return Ok(());
+    Ok(())
 }
 fn remove_empty_lines(contents: &[u8]) -> Vec<u8> {
     let mut updated_contents = Vec::with_capacity(contents.len());
-    for line in contents.split_inclusive(|byte| return *byte == b'\n') {
+    for line in contents.split_inclusive(|byte| *byte == b'\n') {
         let without_newline = line.strip_suffix(b"\n").unwrap_or(line);
         let line_contents = without_newline
             .strip_suffix(b"\r")
             .unwrap_or(without_newline);
-        if !core::str::from_utf8(line_contents).is_ok_and(|text| return text.trim().is_empty()) {
+        if !core::str::from_utf8(line_contents).is_ok_and(|text| text.trim().is_empty()) {
             updated_contents.extend_from_slice(line);
         }
     }
-    return updated_contents;
+    updated_contents
 }
 #[cfg(test)]
 mod tests {
@@ -67,9 +67,9 @@ mod tests {
         fn arbitrary(g: &mut Gen) -> Self {
             let line = String::arbitrary(g)
                 .chars()
-                .filter(|character| return *character != '\n' && *character != '\r')
+                .filter(|character| *character != '\n' && *character != '\r')
                 .collect();
-            return Self(line);
+            Self(line)
         }
     }
     fn render_lines(lines: &[LogicalLine]) -> Vec<u8> {
@@ -78,7 +78,7 @@ mod tests {
             rendered.extend_from_slice(line.0.as_bytes());
             rendered.push(b'\n');
         }
-        return rendered;
+        rendered
     }
     fn expected_non_empty_lines(lines: &[LogicalLine]) -> Vec<u8> {
         let mut rendered = Vec::new();
@@ -88,21 +88,21 @@ mod tests {
                 rendered.push(b'\n');
             }
         }
-        return rendered;
+        rendered
     }
     #[test]
     fn respects_gitignore_and_skips_binary_files() -> Result<()> {
         use std::os::unix::fs::symlink;
-        let dir = tempdir()?;
-        let external_dir = tempdir()?;
-        let root = dir.path();
+        let directory = tempdir()?;
+        let external_directory = tempdir()?;
+        let root = directory.path();
         let gitignore_path = root.join(".gitignore");
         fs::write(&gitignore_path, "ignored.txt\n")?;
         let ignored_path = root.join("ignored.txt");
         fs::write(&ignored_path, "should be ignored\n\n")?;
         let binary_path = root.join("binary.bin");
         fs::write(&binary_path, [0, 15, 255, 0, 1, 2, 3])?;
-        let external_path = external_dir.path().join("external.txt");
+        let external_path = external_directory.path().join("external.txt");
         fs::write(&external_path, "outside\n\n")?;
         symlink(&external_path, root.join("external.txt"))?;
         process_path(root)?;
@@ -111,15 +111,15 @@ mod tests {
         let content_binary = fs::read(&binary_path)?;
         assert_eq!(content_binary, vec![0, 15, 255, 0, 1, 2, 3]);
         assert_eq!(fs::read_to_string(external_path)?, "outside\n\n");
-        return Ok(());
+        Ok(())
     }
     #[test]
     fn processes_current_directory_when_no_arguments() -> Result<()> {
         let Some(executable) = env::var_os("PACKAGE_E2E_EXECUTABLE") else {
             return Ok(());
         };
-        let dir = tempdir()?;
-        let root = dir.path();
+        let directory = tempdir()?;
+        let root = directory.path();
         let file_path = root.join("test.txt");
         fs::write(&file_path, "line1\n\nline2\n   \nline3\n")?;
         let output = Command::new(executable).current_dir(root).output()?;
@@ -128,7 +128,7 @@ mod tests {
         assert!(output.stderr.is_empty());
         let content = fs::read_to_string(&file_path)?;
         assert_eq!(content, "line1\nline2\nline3\n");
-        return Ok(());
+        Ok(())
     }
     #[test]
     fn propagates_missing_path_failures() {
@@ -155,7 +155,7 @@ mod tests {
         fn property(lines: Vec<LogicalLine>) -> TestResult {
             let input = render_lines(&lines);
             let actual = remove_empty_lines(&input);
-            return TestResult::from_bool(actual == expected_non_empty_lines(&lines));
+            TestResult::from_bool(actual == expected_non_empty_lines(&lines))
         }
         QuickCheck::new()
             .tests(100)

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026- Paschalis Bizopoulos
 """Generate Python-produced artifacts for a LaTeX build."""
 
 from __future__ import annotations
@@ -42,19 +43,19 @@ class Samples:
         """Freeze values after validating every summary operation."""
         normalized = tuple(values)
         if not normalized:
-            msg = "samples must not be empty"
-            raise ValueError(msg)
+            message = "samples must not be empty"
+            raise ValueError(message)
         if not all(map(math.isfinite, normalized)):
-            msg = "samples must be finite"
-            raise ValueError(msg)
+            message = "samples must be finite"
+            raise ValueError(message)
         try:
             total = math.fsum(normalized)
         except OverflowError as error:
-            msg = "sample total must be finite"
-            raise ValueError(msg) from error
+            message = "sample total must be finite"
+            raise ValueError(message) from error
         if not math.isfinite(total):
-            msg = "sample total must be finite"
-            raise ValueError(msg)
+            message = "sample total must be finite"
+            raise ValueError(message)
         object.__setattr__(self, "values", normalized)
 
     def summary(self) -> tuple[tuple[str, float], ...]:
@@ -136,16 +137,16 @@ def test_samples_rejects_invalid_values() -> None:
             Samples(values)
         except ValueError:
             continue
-        msg = "invalid samples must be rejected"
-        raise AssertionError(msg)
+        message = "invalid samples must be rejected"
+        raise AssertionError(message)
 
 
 def test_latex_escape_handles_special_characters() -> None:
     """Escapes LaTeX-special characters in generated text."""
     escaped = latex_escape(r"value_#1 & 50%")
     if escaped != r"value\_\#1 \& 50\%":
-        msg = "LaTeX-special characters should be escaped"
-        raise AssertionError(msg)
+        message = "LaTeX-special characters should be escaped"
+        raise AssertionError(message)
 
 
 def test_main_creates_latex_workspace_artifacts() -> None:
@@ -160,8 +161,8 @@ def test_main_creates_latex_workspace_artifacts() -> None:
             text=True,
         )
         if completed.returncode != 0 or completed.stdout or completed.stderr:
-            msg = "the executable should succeed without console output"
-            raise AssertionError(msg)
+            message = "the executable should succeed without console output"
+            raise AssertionError(message)
         workspace = working_directory / "tmp"
         figure_path = workspace / "figure.png"
         table_path = workspace / "table.tex"
@@ -170,8 +171,8 @@ def test_main_creates_latex_workspace_artifacts() -> None:
             or figure_path.stat().st_size == 0
             or not table_path.is_file()
         ):
-            msg = "workspace artifacts should be complete"
-            raise AssertionError(msg)
+            message = "workspace artifacts should be complete"
+            raise AssertionError(message)
         table = table_path.read_text(encoding="utf-8")
         expected_fragments = (
             "\\begin{tabular}{lr}",
@@ -184,8 +185,8 @@ def test_main_creates_latex_workspace_artifacts() -> None:
             "\\end{tabular}",
         )
         if not all(fragment in table for fragment in expected_fragments):
-            msg = "generated table should contain the expected summary"
-            raise AssertionError(msg)
+            message = "generated table should contain the expected summary"
+            raise AssertionError(message)
 
 
 if __name__ == "__main__":
