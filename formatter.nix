@@ -21,7 +21,7 @@ let
   git-repository-canonicalization-script = pkgs.writeShellScriptBin "git-repository-canonicalization-check" ''
     ${
       inputs.self.packages.${pkgs.stdenv.system}."git-repository-canonicalization"
-    }/bin/git-repository-canonicalization check
+    }/bin/git-repository-canonicalization check --fix
   '';
   treefmtEval = inputs.treefmt-nix.lib.evalModule pkgs {
     programs = {
