@@ -255,6 +255,7 @@ isCPackageVmCheckShape packageKind nixSource =
 type Command :: Type
 data Command
   = CheckCommand
+  | CheckFixCommand
   | StatusCommand
   | AddCommand String FilePath (Maybe String)
   | RemoveCommand FilePath
@@ -272,6 +273,7 @@ runCli commandLineArguments =
     InvalidCommand exitCode maybeCommand ->
       hPutStr stderr (usageTextForCommand maybeCommand) >> exitWith exitCode
     ParsedCommand CheckCommand -> checkRepositoryLocation "."
+    ParsedCommand CheckFixCommand -> fixAndCheckRepositoryLocation "."
     ParsedCommand StatusCommand ->
       summarizeRepositoryLocation renderRepositorySummariesJSON "."
     ParsedCommand (AddCommand packageKindName packageName packageDescription) ->
@@ -303,6 +305,7 @@ parseCommand commandLineArguments =
     [argument] | argument `elem` ["-h", "--help"] -> MainHelp
     [_, argument] | argument `elem` ["-h", "--help"] -> InvalidCommand (ExitFailure 1) Nothing
     ["check"] -> ParsedCommand CheckCommand
+    ["check", "--fix"] -> ParsedCommand CheckFixCommand
     "check" : _ -> InvalidCommand usageExitCode (Just "check")
     ["status"] -> ParsedCommand StatusCommand
     ["rm", packageName] -> ParsedCommand (RemoveCommand packageName)
@@ -324,7 +327,7 @@ mainUsageText =
     [ "usage: git repository-canonicalization status",
       "   or: git repository-canonicalization add <package-type> <package-name> [<description>...]",
       "   or: git repository-canonicalization rm <package-name>",
-      "   or: git repository-canonicalization check"
+      "   or: git repository-canonicalization check [--fix]"
     ]
 mainHelpText :: String
 mainHelpText =
@@ -332,7 +335,7 @@ mainHelpText =
     [ "usage: git repository-canonicalization status",
       "   or: git repository-canonicalization add <package-type> <package-name> [<description>...]",
       "   or: git repository-canonicalization rm <package-name>",
-      "   or: git repository-canonicalization check",
+      "   or: git repository-canonicalization check [--fix]",
       "",
       "Manage packages and checks in the nearest Git repository.",
       "Use git -C <location> to select a repository.",
@@ -345,6 +348,7 @@ mainHelpText =
       "",
       "check",
       "    Check that the repository follows the canonical conventions.",
+      "    Use --fix to regenerate the root .gitignore before checking.",
       "",
       "status",
       "    Show repository intent, packages, and checks as JSON.",
@@ -377,9 +381,10 @@ usageTextForCommand = \case
       ]
   Just "check" ->
     unlines
-      [ "usage: git repository-canonicalization check",
+      [ "usage: git repository-canonicalization check [--fix]",
         "",
         "Check the nearest Git repository. Use 'git -C <location>' to select it.",
+        "With --fix, regenerate the root .gitignore before checking.",
         ""
       ]
   _ -> mainUsageText
@@ -418,6 +423,13 @@ checkRepositoryLocation location = do
         reportCheckRepositoryFailure repositoryComplianceFailure
         exitFailure
       Right _ -> pure ()
+fixAndCheckRepositoryLocation :: FilePath -> IO ()
+fixAndCheckRepositoryLocation location = do
+  repositoryRoot <- discoverGitRepositoryRoot location
+  withCurrentDirectory repositoryRoot $ do
+    rootGitignoreSource <- renderRootGitignoreFromCurrentRepository
+    TIO.writeFile ".gitignore" rootGitignoreSource
+  checkRepositoryLocation repositoryRoot
 requiredRepositoryRootFiles :: [FilePath]
 requiredRepositoryRootFiles = [".gitignore", "flake.nix", "flake.lock"]
 checkRequiredRepositoryRootFiles :: IO [String]
@@ -2838,6 +2850,7 @@ commandLineHelpEndToEndTest =
       ( mainUsageText `isPrefixOf` helpStdout
           && "\nadd <package-type>" `isInfixOf` helpStdout
           && "\ncheck\n" `isInfixOf` helpStdout
+          && "check [--fix]" `isInfixOf` helpStdout
           && "\nrm <package-name>" `isInfixOf` helpStdout
           && "\nstatus\n" `isInfixOf` helpStdout
       )
@@ -2942,6 +2955,12 @@ rootGitignoreDriftEndToEndTest =
     assertBool
       "The check identifies the root whitelist mismatch."
       (".gitignore: does not match the canonical root whitelist" `isInfixOf` checkStderr)
+    (fixExit, fixStdout, fixStderr) <- runEndToEndCommandIn temporaryRepository ["check", "--fix"]
+    assertEqual "Fixing a changed root whitelist succeeds." ExitSuccess fixExit
+    assertEqual "A successful fix leaves stdout empty." "" fixStdout
+    assertEqual "A successful fix leaves stderr empty." "" fixStderr
+    repairedRootGitignore <- TIO.readFile (temporaryRepository </> ".gitignore")
+    assertBool "The repaired root whitelist removes the drift." (not ("# drift" `T.isInfixOf` repairedRootGitignore))
 allPackageKindsEndToEndTest :: IO ()
 allPackageKindsEndToEndTest =
   withEmptyCanonicalRepository "all-package-kinds-end-to-end" $ \temporaryRepository -> do
