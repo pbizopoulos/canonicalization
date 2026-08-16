@@ -255,7 +255,7 @@ isCPackageVmCheckShape packageKind nixSource =
 type Command :: Type
 data Command
   = CheckCommand
-  | StatusCommand Bool
+  | StatusCommand
   | AddCommand String FilePath (Maybe String)
 type CommandParseResult :: Type
 data CommandParseResult
@@ -271,10 +271,8 @@ runCli commandLineArguments =
     InvalidCommand exitCode maybeCommand ->
       hPutStr stderr (usageTextForCommand maybeCommand) >> exitWith exitCode
     ParsedCommand CheckCommand -> checkRepositoryLocation "."
-    ParsedCommand (StatusCommand jsonOutput) ->
-      summarizeRepositoryLocation
-        (if jsonOutput then renderRepositorySummariesJSON else renderRepositorySummariesText)
-        "."
+    ParsedCommand StatusCommand ->
+      summarizeRepositoryLocation renderRepositorySummariesJSON "."
     ParsedCommand (AddCommand packageKindName packageName packageDescription) ->
       runInGitRepositoryRoot "." $
         case parseSupportedAddPackageKind packageKindName of
@@ -294,14 +292,12 @@ stageGeneratedPathsOrExit = \case
 parseCommand :: [String] -> CommandParseResult
 parseCommand commandLineArguments =
   case commandLineArguments of
-    [] -> ParsedCommand (StatusCommand False)
+    [] -> ParsedCommand StatusCommand
     [argument] | argument `elem` ["-h", "--help"] -> MainHelp
     [_, argument] | argument `elem` ["-h", "--help"] -> InvalidCommand (ExitFailure 1) Nothing
     ["check"] -> ParsedCommand CheckCommand
     "check" : _ -> InvalidCommand usageExitCode (Just "check")
-    ["--json"] -> ParsedCommand (StatusCommand True)
-    ["status"] -> ParsedCommand (StatusCommand False)
-    ["status", "--json"] -> ParsedCommand (StatusCommand True)
+    ["status"] -> ParsedCommand StatusCommand
     _ ->
       case parseAddPackageArguments commandLineArguments of
         Just (packageKindName, packageName, packageDescription) ->
@@ -316,14 +312,14 @@ usageExitCode = ExitFailure 129
 mainUsageText :: String
 mainUsageText =
   unlines
-    [ "usage: git repository-canonicalization [status] [--json]",
+    [ "usage: git repository-canonicalization [status]",
       "   or: git repository-canonicalization add <package-type> <package-name> [<description>...]",
       "   or: git repository-canonicalization check"
     ]
 mainHelpText :: String
 mainHelpText =
   unlines
-    [ "usage: git repository-canonicalization [status] [--json]",
+    [ "usage: git repository-canonicalization [status]",
       "   or: git repository-canonicalization add <package-type> <package-name> [<description>...]",
       "   or: git repository-canonicalization check",
       "",
@@ -336,8 +332,8 @@ mainHelpText =
       "check",
       "    Check that the repository follows the canonical conventions.",
       "",
-      "status [--json]",
-      "    Show repository intent, packages, and checks; with --json, output JSON.",
+      "status",
+      "    Show repository intent, packages, and checks as JSON.",
       "    This is the default command.",
       ""
     ]
@@ -353,11 +349,9 @@ usageTextForCommand = \case
       ]
   Just "status" ->
     unlines
-      [ "usage: git repository-canonicalization status [--json]",
+      [ "usage: git repository-canonicalization status",
         "",
-        "Show the status of the nearest Git repository. Use 'git -C <location>' to select it.",
-        "",
-        "    --json                output the repository status as JSON",
+        "Show the status of the nearest Git repository as JSON. Use 'git -C <location>' to select it.",
         ""
       ]
   Just "check" ->
@@ -529,35 +523,6 @@ summarizeRepositoryAt repositoryPath repositoryRoot =
               repositorySummaryReadme = repositoryReadme,
               repositorySummaryPackages = packageSummaries
             }
-renderRepositorySummariesText :: [RepositorySummary] -> String
-renderRepositorySummariesText repositorySummaries =
-  intercalate
-    "\n"
-    [ renderRepositoryStatusFieldName "repository"
-        ++ " "
-        ++ repositorySummaryPath repositorySummary
-        ++ "\n"
-        ++ renderRepositoryReadmeText (repositorySummaryReadme repositorySummary)
-        ++ "\n\n"
-        ++ renderRepositoryPackageSummariesText (repositorySummaryPackages repositorySummary)
-    | repositorySummary <- repositorySummaries
-    ]
-renderRepositoryReadmeText :: Maybe String -> String
-renderRepositoryReadmeText maybeReadme =
-  case lines (fromMaybe "(none)" maybeReadme) of
-    [] -> renderRepositoryStatusFieldName "README"
-    firstLine : remainingLines ->
-      renderRepositoryStatusFieldName "README"
-        ++ " "
-        ++ firstLine
-        ++ concatMap ("\n" ++) [repositoryStatusValueIndent ++ readmeLine | readmeLine <- remainingLines]
-renderRepositoryStatusFieldName :: String -> String
-renderRepositoryStatusFieldName fieldName =
-  replicate (repositoryStatusFieldWidth - length fieldName) ' ' ++ fieldName ++ ":"
-repositoryStatusFieldWidth :: Int
-repositoryStatusFieldWidth = length ("repository" :: String)
-repositoryStatusValueIndent :: String
-repositoryStatusValueIndent = replicate (repositoryStatusFieldWidth + length (": " :: String)) ' '
 renderRepositorySummariesJSON :: [RepositorySummary] -> String
 renderRepositorySummariesJSON repositorySummaries =
   unlines
@@ -581,45 +546,6 @@ renderRepositorySummaryJSON repositorySummary =
     ]
 indentText :: Int -> String -> String
 indentText indentation = intercalate "\n" . map (replicate indentation ' ' ++) . lines
-renderRepositoryPackageSummariesText :: [RepositoryPackageSummary] -> String
-renderRepositoryPackageSummariesText packageSummaries =
-  intercalate
-    "\n"
-    [ unlines
-        ( [ renderRepositoryPackageFieldName "name" ++ " " ++ repositoryPackageName packageSummary,
-            renderRepositoryPackageFieldName "type" ++ " " ++ renderPackageKind (repositoryPackageKind packageSummary),
-            renderRepositoryPackageFieldName "description" ++ " " ++ fromMaybe "(none)" (repositoryPackageDescription packageSummary)
-          ]
-            ++ renderRepositoryPackageDependenciesText packageSummary
-            ++ renderRepositoryPackageTestsText packageSummary
-        )
-    | packageSummary <- packageSummaries
-    ]
-    ++ if null packageSummaries then "" else "\n"
-renderRepositoryPackageDependenciesText :: RepositoryPackageSummary -> [String]
-renderRepositoryPackageDependenciesText packageSummary =
-  case repositoryPackageDependencies packageSummary of
-    [] -> [renderRepositoryPackageFieldName "dependencies" ++ " (none)"]
-    dependencyNames ->
-      renderRepositoryPackageFieldName "dependencies"
-        : [repositoryPackageValueIndent ++ dependencyName | dependencyName <- dependencyNames]
-renderRepositoryPackageTestsText :: RepositoryPackageSummary -> [String]
-renderRepositoryPackageTestsText packageSummary =
-  case repositoryPackageTestNames packageSummary of
-    [] -> []
-    testNames ->
-      (renderRepositoryPackageFieldName "tests" ++ renderRepositoryPackageTestAggregate packageSummary)
-        : [repositoryPackageValueIndent ++ renderRepositoryPackageTestText testDurations durationWidth testName | testName <- testNames]
-      where
-        testDurations = repositoryPackageTestDurations packageSummary
-        durationWidth = maximum (0 : map (length . renderDurationSeconds) (Map.elems testDurations))
-renderRepositoryPackageFieldName :: String -> String
-renderRepositoryPackageFieldName fieldName =
-  replicate (repositoryPackageFieldWidth - length fieldName) ' ' ++ fieldName ++ ":"
-repositoryPackageFieldWidth :: Int
-repositoryPackageFieldWidth = length ("dependencies" :: String)
-repositoryPackageValueIndent :: String
-repositoryPackageValueIndent = replicate (repositoryPackageFieldWidth + length (": " :: String)) ' '
 renderRepositoryPackageSummaryJSON :: RepositoryPackageSummary -> String
 renderRepositoryPackageSummaryJSON packageSummary =
   intercalate
@@ -662,21 +588,11 @@ renderRepositoryPackageTestCaseJSON testDurations testName =
     ++ renderJSONString testName
     ++ maybe "" (\seconds -> ", \"durationSeconds\": " ++ renderDurationSeconds seconds) (Map.lookup testName testDurations)
     ++ " }"
-renderRepositoryPackageTestAggregate :: RepositoryPackageSummary -> String
-renderRepositoryPackageTestAggregate packageSummary =
-  case repositoryPackageTestStatus packageSummary of
-    RepositoryTestsNotConfigured -> " (not configured)"
-    RepositoryTestsUnmeasured -> " (unmeasured)"
-    RepositoryTestsMeasured coverage totalDuration _ ->
-      " (" ++ renderDurationSeconds totalDuration ++ "s) " ++ renderCoverageMeasurementText coverage
 renderRepositoryPackageTestStatus :: RepositoryPackageTestStatus -> String
 renderRepositoryPackageTestStatus = \case
   RepositoryTestsNotConfigured -> "not-configured"
   RepositoryTestsUnmeasured -> "unmeasured"
   RepositoryTestsMeasured {} -> "measured"
-renderCoverageMeasurementText :: CoverageMeasurement -> String
-renderCoverageMeasurementText (CoverageMeasurement metric covered total) =
-  "(" ++ renderCoverageMetric metric ++ " " ++ show covered ++ "/" ++ show total ++ ", " ++ renderCoveragePercent covered total ++ "%)"
 renderCoverageMeasurementJSON :: CoverageMeasurement -> String
 renderCoverageMeasurementJSON (CoverageMeasurement metric covered total) =
   "{ \"metric\": "
@@ -696,13 +612,6 @@ renderCoverageMetric = \case
 renderCoveragePercent :: Integer -> Integer -> String
 renderCoveragePercent covered total =
   showFFloat (Just 1) (100 * fromIntegral covered / fromIntegral total :: Double) ""
-renderRepositoryPackageTestText :: Map.Map String Duration -> Int -> String -> String
-renderRepositoryPackageTestText testDurations durationWidth testName =
-  case Map.lookup testName testDurations of
-    Just seconds ->
-      let renderedSeconds = renderDurationSeconds seconds
-       in "(" ++ replicate (durationWidth - length renderedSeconds) ' ' ++ renderedSeconds ++ "s) " ++ testName
-    Nothing -> testName
 repositoryPackageTestDurations :: RepositoryPackageSummary -> Map.Map String Duration
 repositoryPackageTestDurations packageSummary =
   case repositoryPackageTestStatus packageSummary of
@@ -2667,26 +2576,6 @@ repositorySummaryRenderingTest = do
     (Map.fromList [("Reports \"quoted\" behavior.", Duration 0.125)])
     (repositoryPackageTestDurations packageSummary)
   assertEqual
-    "Text rendering has stable fields, indentation, and fallbacks."
-    ( unlines
-        [ "repository: example.test/owner/demo",
-          "    README: Demo repository.",
-          "            ",
-          "            Its intent is visible.",
-          "",
-          "        name: demo",
-          "        type: python",
-          " description: (none)",
-          "dependencies:",
-          "              alpha",
-          "              demo-two",
-          "       tests: (1.234s) (statements 19/20, 95.0%)",
-          "              (0.125s) Reports \"quoted\" behavior.",
-          ""
-        ]
-    )
-    (renderRepositorySummariesText [repositorySummary])
-  assertEqual
     "JSON rendering preserves the schema and escapes strings."
     ( unlines
         [ "{",
@@ -2785,7 +2674,7 @@ commandLineHelpEndToEndTest =
       ( mainUsageText `isPrefixOf` helpStdout
           && "\nadd <package-type>" `isInfixOf` helpStdout
           && "\ncheck\n" `isInfixOf` helpStdout
-          && "\nstatus [--json]\n" `isInfixOf` helpStdout
+          && "\nstatus\n" `isInfixOf` helpStdout
       )
     assertEqual "The top-level help command leaves stderr empty." "" helpStderr
     (commandHelpExit, commandHelpStdout, commandHelpStderr) <- runEndToEndCommandIn temporaryDirectory ["check", "--help"]
@@ -2884,31 +2773,18 @@ statusEndToEndTest =
     TIO.writeFile (temporaryRepository </> "README") (T.pack repositoryReadme)
     repositoryPath <- canonicalizePath temporaryRepository
     (statusExit, statusStdout, statusStderr) <- runEndToEndCommandIn temporaryRepository ["status"]
-    assertEqual "Text status succeeds for the generated repository." ExitSuccess statusExit
-    assertEqual
-      "Text status exactly reports generated metadata, checks, and discovered tests."
-      ( renderRepositorySummariesText
-          [RepositorySummary repositoryPath (Just repositoryReadme) [expectedGeneratedPythonPackageSummary]]
-      )
-      statusStdout
-    assertEqual "A successful text status leaves stderr empty." "" statusStderr
-    (defaultExit, defaultStdout, defaultStderr) <- runEndToEndCommandIn temporaryRepository []
-    assertEqual "The default command succeeds for the generated repository." ExitSuccess defaultExit
-    assertEqual "The default command produces text status." statusStdout defaultStdout
-    assertEqual "The successful default command leaves stderr empty." "" defaultStderr
-    (jsonExit, jsonStdout, jsonStderr) <- runEndToEndCommandIn temporaryRepository ["status", "--json"]
-    assertEqual "JSON status succeeds for the generated repository." ExitSuccess jsonExit
+    assertEqual "JSON status succeeds for the generated repository." ExitSuccess statusExit
     assertEqual
       "JSON status exactly reports generated metadata, checks, and discovered tests."
       ( renderRepositorySummariesJSON
           [RepositorySummary repositoryPath (Just repositoryReadme) [expectedGeneratedPythonPackageSummary]]
       )
-      jsonStdout
-    assertEqual "A successful JSON status leaves stderr empty." "" jsonStderr
-    (defaultJSONExit, defaultJSONStdout, defaultJSONStderr) <- runEndToEndCommandIn temporaryRepository ["--json"]
-    assertEqual "The default JSON command succeeds for the generated repository." ExitSuccess defaultJSONExit
-    assertEqual "The default JSON command produces JSON status." jsonStdout defaultJSONStdout
-    assertEqual "The successful default JSON command leaves stderr empty." "" defaultJSONStderr
+      statusStdout
+    assertEqual "A successful JSON status leaves stderr empty." "" statusStderr
+    (defaultExit, defaultStdout, defaultStderr) <- runEndToEndCommandIn temporaryRepository []
+    assertEqual "The default command succeeds for the generated repository." ExitSuccess defaultExit
+    assertEqual "The default command produces JSON status." statusStdout defaultStdout
+    assertEqual "The successful default command leaves stderr empty." "" defaultStderr
 haskellStatusEndToEndTest :: IO ()
 haskellStatusEndToEndTest =
   withGeneratedHaskellPackageRepository "haskell-status-end-to-end" $ \temporaryRepository -> do
@@ -2917,7 +2793,7 @@ haskellStatusEndToEndTest =
     assertEqual "A generated Haskell package status succeeds." ExitSuccess statusExit
     assertEqual
       "The status reports its conventional HUnit label."
-      ( renderRepositorySummariesText
+      ( renderRepositorySummariesJSON
           [RepositorySummary repositoryPath Nothing [expectedGeneratedHaskellPackageSummary]]
       )
       statusStdout
