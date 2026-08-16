@@ -2,9 +2,11 @@ Canonicalization
 
 A Nix flake that selects and enforces consistent forms for NixOS systems, home Git layouts, and repositories while making intent and expected behavior easy to inspect.
 
+Home and repository root `.gitignore` whitelists constrain their Git-visible directory structures; arbitrary other paths may exist but are ignored.
+
 OS: NixOS with a temporary root filesystem and explicitly preserved state.
 Home: `git home-submodule` puts Git submodules at unique, Go-style `~/host/repository-path` locations.
 Repository: follows a restricted subset of the numtide/blueprint Nix flake layout. `git repository-canonicalization status` displays the README and package test names.
 README: explains the repository's intent.
 Test names: describe the expected behavior.
-Code: implements the expected behavior. `nix fmt` runs conventional formatters and strict linters; `nix flake check` verifies the canonical structure and runs builds and tests.
+Code: implements the expected behavior. `nix fmt` regenerates the repository whitelist and runs conventional formatters and strict linters; `nix flake check` verifies the canonical structure and runs builds and tests.

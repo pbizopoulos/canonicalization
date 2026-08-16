@@ -1256,11 +1256,8 @@ inspectRepositoryStructure = do
   packageInfos <- mapM (buildPackageInfo leafPaths) (Set.toAscList packageRootPaths)
   let globalRegularFileRegexes :: [String]
       globalRegularFileRegexes =
-        [ "^\\.git$",
-          "^AGENTS\\.md$",
-          "^\\.github/workflows/workflow\\.yml$",
+        [ "^\\.github/workflows/workflow\\.yml$",
           "^\\.gitignore$",
-          "^CITATION\\.bib$",
           "^LICENSE$",
           "^README$",
           "^checks/[^/]+/default\\.nix$",
@@ -1355,14 +1352,9 @@ renderFileStatus status
   | otherwise = "special file"
 opaqueDirectoryRegexes :: [String]
 opaqueDirectoryRegexes =
-  [ "^\\.agents$",
-    "^\\.codex$",
-    "^\\.git$",
-    "^prm$",
-    "^tmp$",
-    "^checks/[^/]+/(result|tmp)$",
+  [ "^prm$",
     "^hosts/[^/]+/prm$",
-    "^packages/[^/]+/(prm|result|target|tmp)$"
+    "^packages/[^/]+/prm$"
   ]
 type PackageKind :: Type
 data PackageKind
@@ -1465,24 +1457,44 @@ escapeRegexLiteral = concatMap escapeCharacter
       | otherwise = [character]
 collectRepositoryEntries :: FilePath -> IO [RepositoryEntry]
 collectRepositoryEntries rootPath = do
-  repositoryEntries <- collectUnfilteredRepositoryEntries rootPath
-  filterGitIgnoredRepositoryEntries (filter ((/= ".git") . fst) repositoryEntries)
-collectUnfilteredRepositoryEntries :: FilePath -> IO [RepositoryEntry]
-collectUnfilteredRepositoryEntries rootPath = do
+  trackedDirectories <- collectTrackedRepositoryDirectories
+  repositoryEntries <- collectUnfilteredRepositoryEntries trackedDirectories rootPath
+  filterGitIgnoredRepositoryEntries repositoryEntries
+collectTrackedRepositoryDirectories :: IO (Set.Set FilePath)
+collectTrackedRepositoryDirectories = do
+  (gitLsFilesExit, trackedPathsOutput, gitLsFilesStderr) <- readProcessWithExitCode "git" ["ls-files", "-z"] ""
+  case gitLsFilesExit of
+    ExitSuccess -> pure (Set.fromList (concatMap parentDirectoryPaths (splitNullTerminated trackedPathsOutput)))
+    _ -> ioError (userError ("git ls-files failed: " ++ T.unpack (T.strip (T.pack gitLsFilesStderr))))
+  where
+    parentDirectoryPaths path =
+      case takeDirectory path of
+        "." -> []
+        parentDirectory -> parentDirectory : parentDirectoryPaths parentDirectory
+collectUnfilteredRepositoryEntries :: Set.Set FilePath -> FilePath -> IO [RepositoryEntry]
+collectUnfilteredRepositoryEntries trackedDirectories rootPath = do
   childNames <- listDirectory rootPath
   let childPaths = sort [rootPath </> childName | childName <- childNames]
-  concat <$> mapM collectUnfilteredRepositoryEntry childPaths
-collectUnfilteredRepositoryEntry :: FilePath -> IO [RepositoryEntry]
-collectUnfilteredRepositoryEntry path = do
+  concat <$> mapM (collectUnfilteredRepositoryEntry trackedDirectories) childPaths
+collectUnfilteredRepositoryEntry :: Set.Set FilePath -> FilePath -> IO [RepositoryEntry]
+collectUnfilteredRepositoryEntry trackedDirectories path = do
   status <- Posix.getSymbolicLinkStatus path
   let relativePath = toRelativePath path
+      collectDirectoryDescendants = do
+        descendants <- collectUnfilteredRepositoryEntries trackedDirectories path
+        pure (if null descendants then [(relativePath, status)] else descendants)
   case () of
     _
       | not (Posix.isDirectory status) -> pure [(relativePath, status)]
+      | relativePath == ".git" -> pure []
       | isOpaqueDirectory relativePath -> pure [(relativePath, status)]
+      | Set.notMember relativePath trackedDirectories -> do
+          visibleEntries <- filterGitIgnoredRepositoryEntries [(relativePath, status)]
+          case visibleEntries of
+            [] -> pure []
+            _ -> collectDirectoryDescendants
       | otherwise -> do
-          descendants <- collectUnfilteredRepositoryEntries path
-          pure (if null descendants then [(relativePath, status)] else descendants)
+          collectDirectoryDescendants
 filterGitIgnoredRepositoryEntries :: [RepositoryEntry] -> IO [RepositoryEntry]
 filterGitIgnoredRepositoryEntries [] = pure []
 filterGitIgnoredRepositoryEntries repositoryEntries = do
@@ -2592,27 +2604,26 @@ entryKindStructureTest =
     initializeGitRepositoryFixture temporaryRepository
     writeFile (temporaryRepository </> "README") ""
     createFileLink "README" (temporaryRepository </> "LICENSE")
-    createDirectoryIfMissing False (temporaryRepository </> "CITATION.bib")
     issues <- withCurrentDirectory temporaryRepository checkRepositoryStructure
-    forM_
-      [ "LICENSE: expected regular file, found symbolic link",
-        "CITATION.bib: expected regular file, found directory"
-      ]
-      (\expectedIssue -> assertBool "entry-kind diagnostic" (expectedIssue `elem` issues))
+    assertBool
+      "entry-kind diagnostic"
+      ("LICENSE: expected regular file, found symbolic link" `elem` issues)
 gitIgnoredRepositoryEntryTest :: IO ()
 gitIgnoredRepositoryEntryTest =
   withTemporaryPackageRepository "git-ignored-repository-entry" $ \temporaryRepository -> do
     initializeGitRepositoryFixture temporaryRepository
     TIO.writeFile
       (temporaryRepository </> ".gitignore")
-      (T.unlines ["result", "ignored/", "LICENSE"])
+      (T.unlines ["result", "ignored/", "tracked-artifact/", "LICENSE"])
     writeFile (temporaryRepository </> "README") ""
     createFileLink "README" (temporaryRepository </> "LICENSE")
     createFileLink "README" (temporaryRepository </> "result")
     createDirectoryIfMissing True (temporaryRepository </> "ignored")
     writeFile (temporaryRepository </> "ignored/artifact") ""
+    createDirectoryIfMissing True (temporaryRepository </> "tracked-artifact")
+    writeFile (temporaryRepository </> "tracked-artifact/unexpected.txt") ""
     writeFile (temporaryRepository </> "unexpected.txt") ""
-    runGitFixtureCommand ["-C", temporaryRepository, "add", "-f", "--", ".gitignore", "README", "LICENSE"]
+    runGitFixtureCommand ["-C", temporaryRepository, "add", "-f", "--", ".gitignore", "README", "LICENSE", "tracked-artifact/unexpected.txt"]
     issues <- withCurrentDirectory temporaryRepository checkRepositoryStructure
     assertBool
       "A tracked path remains subject to entry-kind validation even when an ignore rule matches it."
@@ -2620,6 +2631,9 @@ gitIgnoredRepositoryEntryTest =
     assertBool
       "A visible untracked path remains subject to repository structure policy."
       ("unexpected.txt: is not allowed" `elem` issues)
+    assertBool
+      "A tracked descendant remains subject to repository structure policy when its directory is ignored."
+      ("tracked-artifact/unexpected.txt: is not allowed" `elem` issues)
     assertBool
       "Ignored untracked files, directories, and symlinks do not participate in repository structure policy."
       (not (any (\issue -> "result" `isPrefixOf` issue || "ignored" `isPrefixOf` issue) issues))
