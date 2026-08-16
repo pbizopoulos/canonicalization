@@ -19,7 +19,7 @@ import Data.List (find, intercalate, isInfixOf, isPrefixOf, isSuffixOf, mapAccum
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, fromMaybe, listToMaybe, mapMaybe, maybeToList)
+import Data.Maybe (catMaybes, fromMaybe, isNothing, listToMaybe, mapMaybe, maybeToList)
 import Data.Ord (comparing)
 import Data.Set qualified as Set
 import Data.Text qualified as T
@@ -1067,9 +1067,8 @@ renderRootGitignoreFromCurrentRepository :: IO T.Text
 renderRootGitignoreFromCurrentRepository = renderRootGitignoreFromCurrentRepositoryWith []
 renderRootGitignoreFromCurrentRepositoryWith :: [FilePath] -> IO T.Text
 renderRootGitignoreFromCurrentRepositoryWith projectedPaths = do
-  repositoryEntries <- collectRepositoryEntries "."
-  let existingWhitelistPaths = concatMap whitelistPathsForRepositoryEntry repositoryEntries
-  pure (renderRootGitignore (existingWhitelistPaths ++ concatMap whitelistPathsForExactFile projectedPaths))
+  repositoryEntries <- collectStructurallyAllowedRepositoryEntriesWith projectedPaths
+  pure (renderRootGitignore (concatMap whitelistPathsForRepositoryEntry repositoryEntries))
 renderRootGitignore :: [FilePath] -> T.Text
 renderRootGitignore whitelistPaths =
   T.unlines ("*" : map (T.pack . ("!/" ++)) (Set.toAscList (Set.fromList (".gitignore" : whitelistPaths))))
@@ -1254,30 +1253,7 @@ inspectRepositoryStructure = do
       packageRootPaths = Set.fromList (mapMaybe packageRootPathFromRepositoryPath relativePaths)
       hostRootPaths = Set.fromList (mapMaybe hostRootPathFromRepositoryPath relativePaths)
   packageInfos <- mapM (buildPackageInfo leafPaths) (Set.toAscList packageRootPaths)
-  let globalRegularFileRegexes :: [String]
-      globalRegularFileRegexes =
-        [ "^\\.github/workflows/workflow\\.yml$",
-          "^\\.gitignore$",
-          "^LICENSE$",
-          "^README$",
-          "^checks/[^/]+/default\\.nix$",
-          "^flake\\.lock$",
-          "^flake\\.nix$",
-          "^formatter\\.nix$",
-          "^hosts/[^/]+/configuration\\.nix$",
-          "^hosts/[^/]+/hardware-configuration\\.nix$",
-          "^secrets/secrets\\.age$",
-          "^secrets/secrets\\.env\\.example$",
-          "^secrets/secrets\\.nix$"
-        ]
-      packageRegularFileRegexes =
-        concat
-          [ allowedRegularFileRegexesForPackageKind (packageRootPath packageInfo) (packageRootDirectoryName packageInfo) (packageKindFromDetection (packageDetection packageInfo))
-          | packageInfo <- packageInfos
-          ]
-      allowedEntryRules =
-        map RegularFileRule (globalRegularFileRegexes ++ packageRegularFileRegexes)
-          ++ map DirectoryRule opaqueDirectoryRegexes
+  let allowedEntryRules = repositoryEntryRules packageInfos
       missingPackageDefaultNixIssues =
         [ packageRootDirectory ++ ": missing required file default.nix"
         | packageRootDirectory <- Set.toAscList packageRootPaths,
@@ -1325,6 +1301,38 @@ type EntryRule :: Type
 data EntryRule
   = RegularFileRule String
   | DirectoryRule String
+globalRegularFileRegexes :: [String]
+globalRegularFileRegexes =
+  map exactPathRegex globalExactRegularFilePaths
+    ++ [ "^checks/[^/]+/default\\.nix$",
+         "^hosts/[^/]+/configuration\\.nix$",
+         "^hosts/[^/]+/hardware-configuration\\.nix$"
+       ]
+globalExactRegularFilePaths :: [FilePath]
+globalExactRegularFilePaths =
+  [ ".github/workflows/workflow.yml",
+    ".gitignore",
+    "LICENSE",
+    "README",
+    "flake.lock",
+    "flake.nix",
+    "formatter.nix",
+    "secrets/secrets.age",
+    "secrets/secrets.env.example",
+    "secrets/secrets.nix"
+  ]
+exactPathRegex :: FilePath -> String
+exactPathRegex path = "^" ++ escapeRegexLiteral path ++ "$"
+repositoryEntryRules :: [PackageInfo] -> [EntryRule]
+repositoryEntryRules packageInfos =
+  map RegularFileRule (globalRegularFileRegexes ++ packageRegularFileRegexes)
+    ++ map DirectoryRule opaqueDirectoryRegexes
+  where
+    packageRegularFileRegexes =
+      concat
+        [ allowedRegularFileRegexesForPackageKind (packageRootPath packageInfo) (packageRootDirectoryName packageInfo) (packageKindFromDetection (packageDetection packageInfo))
+        | packageInfo <- packageInfos
+        ]
 validateRepositoryEntry :: [EntryRule] -> RepositoryEntry -> Maybe String
 validateRepositoryEntry rules (path, status) =
   case filter ((path =~) . entryRuleRegex) rules of
@@ -1433,22 +1441,122 @@ ambiguousPackageMarkerIssuesForPackage packageInfo =
     DetectedPackageKind _ -> []
 allowedRegularFileRegexesForPackageKind :: FilePath -> FilePath -> Maybe PackageKind -> [String]
 allowedRegularFileRegexesForPackageKind packageRootDirectory packageDirectoryName maybePackageKind =
-  let escapedPackageRootDirectory = escapeRegexLiteral packageRootDirectory
-      escapedPackageDirectoryName = escapeRegexLiteral packageDirectoryName
-      basePackagePathRegexes = ["^" ++ escapedPackageRootDirectory ++ "/default\\.nix$"]
-      withBasePackagePathRegexes additionalPathRegexes = basePackagePathRegexes ++ additionalPathRegexes
-   in case maybePackageKind of
-        Just HaskellPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/Main\\.hs$", "^" ++ escapedPackageRootDirectory ++ "/" ++ escapedPackageDirectoryName ++ "\\.cabal$"]
-        Just RustPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/Cargo\\.toml$", "^" ++ escapedPackageRootDirectory ++ "/Cargo\\.lock$", "^" ++ escapedPackageRootDirectory ++ "/src/main\\.rs$"]
-        Just HTMLPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/index\\.html$", "^" ++ escapedPackageRootDirectory ++ "/script\\.js$", "^" ++ escapedPackageRootDirectory ++ "/style\\.css$"]
-        Just PythonLaTeXPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/main\\.py$", "^" ++ escapedPackageRootDirectory ++ "/ms\\.tex$", "^" ++ escapedPackageRootDirectory ++ "/ms\\.bib$", "^" ++ escapedPackageRootDirectory ++ "/refs\\.bib$", "^" ++ escapedPackageRootDirectory ++ "/figures(/.*)?$"]
-        Just PythonPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/main\\.py$"]
-        Just PythonPyPIPackage -> basePackagePathRegexes
-        Just CPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/main\\.c$"]
-        Just TerraformPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/main\\.tf$", "^" ++ escapedPackageRootDirectory ++ "/\\.terraform(/.*)?$", "^" ++ escapedPackageRootDirectory ++ "/\\.terraform\\.lock\\.hcl$"]
-        Just LaTeXPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/ms\\.tex$", "^" ++ escapedPackageRootDirectory ++ "/ms\\.bib$"]
-        Just BinaryReleasePackage -> basePackagePathRegexes
-        Nothing -> basePackagePathRegexes
+  map exactPathRegex (allowedRegularFilePathsForPackageKind packageRootDirectory packageDirectoryName maybePackageKind)
+    ++ case maybePackageKind of
+      Just PythonLaTeXPackage -> ["^" ++ escapeRegexLiteral (packageRootDirectory </> "figures") ++ "(/.*)?$"]
+      Just TerraformPackage -> ["^" ++ escapeRegexLiteral (packageRootDirectory </> ".terraform") ++ "(/.*)?$"]
+      _ -> []
+allowedRegularFilePathsForPackageKind :: FilePath -> FilePath -> Maybe PackageKind -> [FilePath]
+allowedRegularFilePathsForPackageKind packageRootDirectory packageDirectoryName maybePackageKind =
+  let packagePath relativePath = packageRootDirectory </> relativePath
+      basePaths = [packagePath "default.nix"]
+   in basePaths
+        ++ case maybePackageKind of
+          Just HaskellPackage -> [packagePath "Main.hs", packagePath (packageDirectoryName <.> "cabal")]
+          Just RustPackage -> map packagePath ["Cargo.toml", "Cargo.lock", "src/main.rs"]
+          Just HTMLPackage -> map packagePath ["index.html", "script.js", "style.css"]
+          Just PythonLaTeXPackage -> map packagePath ["main.py", "ms.tex", "ms.bib", "refs.bib"]
+          Just PythonPackage -> [packagePath "main.py"]
+          Just PythonPyPIPackage -> []
+          Just CPackage -> [packagePath "main.c"]
+          Just TerraformPackage -> map packagePath ["main.tf", ".terraform.lock.hcl"]
+          Just LaTeXPackage -> map packagePath ["ms.tex", "ms.bib"]
+          Just BinaryReleasePackage -> []
+          Nothing -> []
+collectStructurallyAllowedRepositoryEntriesWith :: [FilePath] -> IO [RepositoryEntry]
+collectStructurallyAllowedRepositoryEntriesWith projectedPaths = do
+  packageInfos <- discoverPackageInfosFromFilesystem
+  checkNames <- listFilesystemSubdirectoryNames "checks"
+  hostNames <- listFilesystemSubdirectoryNames "hosts"
+  let checkPaths = ["checks" </> checkName </> "default.nix" | checkName <- checkNames]
+      hostPaths =
+        concat
+          [ ["hosts" </> hostName </> "configuration.nix", "hosts" </> hostName </> "hardware-configuration.nix"]
+          | hostName <- hostNames
+          ]
+      packagePaths = concatMap allowedExistingPackageFilePaths packageInfos
+      opaquePaths =
+        "prm"
+          : ["hosts" </> hostName </> "prm" | hostName <- hostNames]
+          ++ [packageRootPath packageInfo </> "prm" | packageInfo <- packageInfos]
+      traversedTreePaths = concatMap allowedTraversedPackageTreePaths packageInfos
+      allowedEntryRules = repositoryEntryRules packageInfos
+  regularAndOpaqueEntries <- collectExistingRepositoryEntries (globalExactRegularFilePaths ++ checkPaths ++ hostPaths ++ packagePaths ++ opaquePaths)
+  traversedTreeEntries <- concat <$> mapM collectTreeLeafRepositoryEntries traversedTreePaths
+  projectedEntries <- collectExistingRepositoryEntries projectedPaths
+  pure
+    [ repositoryEntry
+    | repositoryEntry <- regularAndOpaqueEntries ++ traversedTreeEntries ++ projectedEntries,
+      isNothing (validateRepositoryEntry allowedEntryRules repositoryEntry)
+    ]
+discoverPackageInfosFromFilesystem :: IO [PackageInfo]
+discoverPackageInfosFromFilesystem = do
+  packageNames <- listFilesystemSubdirectoryNames "packages"
+  forM packageNames $ \packageName -> do
+    let packageRootDirectory = "packages" </> packageName
+        markerPaths =
+          [ packageRootDirectory </> markerPath
+          | markerPath <- ["Main.hs", "Cargo.toml", "index.html", "main.py", "main.c", "main.tf", "ms.tex"]
+          ]
+    markerEntries <- collectExistingRepositoryEntries markerPaths
+    buildPackageInfo (Set.fromList (map fst markerEntries)) packageRootDirectory
+allowedExistingPackageFilePaths :: PackageInfo -> [FilePath]
+allowedExistingPackageFilePaths packageInfo =
+  allowedRegularFilePathsForPackageKind (packageRootPath packageInfo) (packageRootDirectoryName packageInfo) (packageKindFromDetection (packageDetection packageInfo))
+allowedTraversedPackageTreePaths :: PackageInfo -> [FilePath]
+allowedTraversedPackageTreePaths packageInfo =
+  case packageKindFromDetection (packageDetection packageInfo) of
+    Just PythonLaTeXPackage -> [packageRootPath packageInfo </> "figures"]
+    Just TerraformPackage -> [packageRootPath packageInfo </> ".terraform"]
+    _ -> []
+collectExistingRepositoryEntries :: [FilePath] -> IO [RepositoryEntry]
+collectExistingRepositoryEntries paths = catMaybes <$> mapM collectExistingRepositoryEntry paths
+collectExistingRepositoryEntry :: FilePath -> IO (Maybe RepositoryEntry)
+collectExistingRepositoryEntry path = do
+  parentDirectoriesAreRegular <- pathParentDirectoriesAreRegular path
+  if not parentDirectoriesAreRegular
+    then pure Nothing
+    else do
+      statusResult <- try (Posix.getSymbolicLinkStatus path)
+      pure $
+        case statusResult of
+          Left (_ :: IOException) -> Nothing
+          Right status -> Just (path, status)
+pathParentDirectoriesAreRegular :: FilePath -> IO Bool
+pathParentDirectoriesAreRegular path = go (takeDirectory path)
+  where
+    go "." = pure True
+    go parentDirectory = do
+      statusResult <- try (Posix.getSymbolicLinkStatus parentDirectory)
+      case statusResult of
+        Left (_ :: IOException) -> pure False
+        Right status ->
+          if Posix.isDirectory status
+            then go (takeDirectory parentDirectory)
+            else pure False
+collectTreeLeafRepositoryEntries :: FilePath -> IO [RepositoryEntry]
+collectTreeLeafRepositoryEntries path =
+  collectExistingRepositoryEntry path >>= \case
+    Nothing -> pure []
+    Just repositoryEntry@(_, status)
+      | not (Posix.isDirectory status) -> pure [repositoryEntry]
+      | otherwise -> do
+          childNames <- sort <$> listDirectory path
+          childEntries <- concat <$> mapM (collectTreeLeafRepositoryEntries . (path </>)) childNames
+          pure (if null childEntries then [repositoryEntry] else childEntries)
+listFilesystemSubdirectoryNames :: FilePath -> IO [FilePath]
+listFilesystemSubdirectoryNames parentDirectory = do
+  collectExistingRepositoryEntry parentDirectory >>= \case
+    Just (_, parentStatus) | Posix.isDirectory parentStatus -> do
+      childNames <- sort <$> listDirectory parentDirectory
+      filterM
+        ( \childName ->
+            collectExistingRepositoryEntry (parentDirectory </> childName) >>= \case
+              Just (_, status) -> pure (Posix.isDirectory status)
+              Nothing -> pure False
+        )
+        childNames
+    _ -> pure []
 escapeRegexLiteral :: String -> String
 escapeRegexLiteral = concatMap escapeCharacter
   where
@@ -1485,8 +1593,8 @@ collectUnfilteredRepositoryEntry trackedDirectories path = do
         pure (if null descendants then [(relativePath, status)] else descendants)
   case () of
     _
-      | not (Posix.isDirectory status) -> pure [(relativePath, status)]
       | relativePath == ".git" -> pure []
+      | not (Posix.isDirectory status) -> pure [(relativePath, status)]
       | isOpaqueDirectory relativePath -> pure [(relativePath, status)]
       | Set.notMember relativePath trackedDirectories -> do
           visibleEntries <- filterGitIgnoredRepositoryEntries [(relativePath, status)]
@@ -2502,6 +2610,8 @@ hUnitPackageTests =
       TestLabel "Removes a clean package, its check, and whitelist entries." (TestCase removePackageEndToEndTest),
       TestLabel "Refuses to remove packages containing local changes." (TestCase unsafeRemovePackageEndToEndTest),
       TestLabel "Rejects root whitelist drift." (TestCase rootGitignoreDriftEndToEndTest),
+      TestLabel "Repairs the root whitelist from repository structure policy." (TestCase rootGitignoreStructurePolicyEndToEndTest),
+      TestLabel "Repairs root whitelist drift in repositories that use a Gitfile." (TestCase gitFileRootGitignoreFixEndToEndTest),
       TestLabel "Scaffolds and checks every supported package kind." (TestCase allPackageKindsEndToEndTest),
       TestLabel "Rejects package creation when its path already exists." (TestCase existingPackageCollisionEndToEndTest),
       TestLabel "Reports generated package behavior in text and JSON status output." (TestCase statusEndToEndTest),
@@ -2975,6 +3085,47 @@ rootGitignoreDriftEndToEndTest =
     assertEqual "A successful fix leaves stderr empty." "" fixStderr
     repairedRootGitignore <- TIO.readFile (temporaryRepository </> ".gitignore")
     assertBool "The repaired root whitelist removes the drift." (not ("# drift" `T.isInfixOf` repairedRootGitignore))
+rootGitignoreStructurePolicyEndToEndTest :: IO ()
+rootGitignoreStructurePolicyEndToEndTest =
+  withGeneratedPythonPackageRepository "root-gitignore-structure-policy-end-to-end" $ \temporaryRepository -> do
+    TIO.writeFile (temporaryRepository </> ".gitignore") ""
+    TIO.writeFile (temporaryRepository </> "formatter.nix") "{}\n"
+    createFileLink "flake.nix" (temporaryRepository </> "README")
+    createFileLink "flake.nix" (temporaryRepository </> "result")
+    (fixExit, fixStdout, fixStderr) <- runEndToEndCommandIn temporaryRepository ["check", "--fix"]
+    assertEqual "Fixing an empty root whitelist from structure policy succeeds." ExitSuccess fixExit
+    assertEqual "A successful structure-policy fix leaves stdout empty." "" fixStdout
+    assertEqual "A successful structure-policy fix leaves stderr empty." "" fixStderr
+    repairedRootGitignore <- TIO.readFile (temporaryRepository </> ".gitignore")
+    assertBool "A valid untracked root file is whitelisted." ("!/formatter.nix\n" `T.isInfixOf` repairedRootGitignore)
+    assertBool "An unrelated build result is not whitelisted." (not ("!/result\n" `T.isInfixOf` repairedRootGitignore))
+    assertBool "A wrong-kind entry at an allowed path is not whitelisted." (not ("!/README\n" `T.isInfixOf` repairedRootGitignore))
+    forM_ ["result", "README"] $ \ignoredPath -> do
+      (ignoreExit, _ignoreStdout, ignoreStderr) <- readProcessWithExitCode "git" ["-C", temporaryRepository, "check-ignore", "--quiet", "--", ignoredPath] ""
+      assertEqual (ignoredPath ++ " is ignored after repair: " ++ ignoreStderr) ExitSuccess ignoreExit
+gitFileRootGitignoreFixEndToEndTest :: IO ()
+gitFileRootGitignoreFixEndToEndTest =
+  withGeneratedPythonPackageRepository "gitfile-root-gitignore-fix-end-to-end" $ \temporaryRepository -> do
+    let separateGitDirectory = temporaryRepository ++ "-git-directory"
+        removeSeparateGitDirectory = do
+          separateGitDirectoryExists <- doesPathExist separateGitDirectory
+          when separateGitDirectoryExists (removePathForcibly separateGitDirectory)
+        testGitFileRepository = do
+          runGitFixtureCommand ["init", "--quiet", "--separate-git-dir=" ++ separateGitDirectory, temporaryRepository]
+          gitMetadataIsFile <- doesFileExist (temporaryRepository </> ".git")
+          assertBool "The fixture uses a root .git Gitfile." gitMetadataIsFile
+          TIO.writeFile (temporaryRepository </> ".gitignore") ""
+          (fixExit, fixStdout, fixStderr) <- runEndToEndCommandIn temporaryRepository ["check", "--fix"]
+          assertEqual "Fixing an empty root whitelist in a Gitfile repository succeeds." ExitSuccess fixExit
+          assertEqual "A successful Gitfile fix leaves stdout empty." "" fixStdout
+          assertEqual "A successful Gitfile fix leaves stderr empty." "" fixStderr
+          repairedRootGitignore <- TIO.readFile (temporaryRepository </> ".gitignore")
+          assertBool "The repaired root whitelist excludes Git metadata." (not ("!/.git\n" `T.isInfixOf` repairedRootGitignore))
+          (checkExit, checkStdout, checkStderr) <- runEndToEndCommandIn temporaryRepository ["check"]
+          assertEqual "The repaired Gitfile repository passes a subsequent check." ExitSuccess checkExit
+          assertEqual "A successful Gitfile repository check leaves stdout empty." "" checkStdout
+          assertEqual "A successful Gitfile repository check leaves stderr empty." "" checkStderr
+    testGitFileRepository `finally` removeSeparateGitDirectory
 allPackageKindsEndToEndTest :: IO ()
 allPackageKindsEndToEndTest =
   withEmptyCanonicalRepository "all-package-kinds-end-to-end" $ \temporaryRepository -> do
@@ -3029,6 +3180,10 @@ statusEndToEndTest =
     let repositoryReadme :: String
         repositoryReadme = "Demo repository README.\n"
     TIO.writeFile (temporaryRepository </> "README") (T.pack repositoryReadme)
+    (fixExit, fixStdout, fixStderr) <- runEndToEndCommandIn temporaryRepository ["check", "--fix"]
+    assertEqual "Fixing the whitelist discovers the valid untracked README." ExitSuccess fixExit
+    assertEqual "A successful README whitelist fix leaves stdout empty." "" fixStdout
+    assertEqual "A successful README whitelist fix leaves stderr empty." "" fixStderr
     repositoryPath <- canonicalizePath temporaryRepository
     (statusExit, statusStdout, statusStderr) <- runEndToEndCommandIn temporaryRepository ["status"]
     assertEqual "JSON status succeeds for the generated repository." ExitSuccess statusExit
