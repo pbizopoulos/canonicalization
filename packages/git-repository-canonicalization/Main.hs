@@ -447,7 +447,7 @@ collectRepositoryContentCompliance = do
       checkNames <- listSubdirectoryNames "checks"
       let packageKinds = Map.fromList packages
       checkComplianceIssues <- concat <$> forM checkNames (checkTemplateWith packageKinds)
-      rootGitignoreIssues <- checkRootGitignore packages checkNames
+      rootGitignoreIssues <- checkRootGitignore
       case packageComplianceIssues ++ checkComplianceIssues ++ rootGitignoreIssues of
         [] ->
           pure
@@ -461,11 +461,10 @@ collectRepositoryContentCompliance = do
           pure (Left (RepositoryComplianceFailure FileCompliancePhase (firstIssue :| remainingIssues)))
     firstIssue : remainingIssues ->
       pure (Left (RepositoryComplianceFailure DirectoryStructurePhase (firstIssue :| remainingIssues)))
-checkRootGitignore :: [(FilePath, PackageKind)] -> [FilePath] -> IO [String]
-checkRootGitignore packages checkNames = do
-  hostNames <- listSubdirectoryNames "hosts"
+checkRootGitignore :: IO [String]
+checkRootGitignore = do
   actualSource <- TIO.readFile ".gitignore"
-  let expectedSource = renderRootGitignore packages checkNames hostNames
+  expectedSource <- renderRootGitignoreFromCurrentRepository
   pure [".gitignore: does not match the canonical root whitelist" | actualSource /= expectedSource]
 reportCheckRepositoryFailure :: RepositoryComplianceFailure -> IO ()
 reportCheckRepositoryFailure (RepositoryComplianceFailure checkPhase checkPhaseIssues) = do
@@ -972,8 +971,7 @@ addPackageToCurrentRepository scaffoldPackageKind packageName packageDescription
           createScaffoldFiles (packageScaffoldFiles ++ checkScaffoldFiles) >>= \case
             Left scaffoldError -> pure (Left scaffoldError)
             Right scaffoldPaths -> do
-              let projectedCheckNames = maybeToList (repositoryCheckNameForPackage packageKind packageName)
-              rootGitignoreSource <- renderRootGitignoreFromCurrentRepositoryWith [(packageName, packageKind)] projectedCheckNames
+              rootGitignoreSource <- renderRootGitignoreFromCurrentRepositoryWith scaffoldPaths
               TIO.writeFile ".gitignore" rootGitignoreSource
               pure (Right (".gitignore" : scaffoldPaths))
   where
@@ -1054,67 +1052,42 @@ renderScaffoldFiles scaffoldPackageKind packageName packageDescription =
         { scaffoldFilePath = "packages" </> packageName </> scaffoldFilePath scaffoldFile
         }
 renderRootGitignoreFromCurrentRepository :: IO T.Text
-renderRootGitignoreFromCurrentRepository = renderRootGitignoreFromCurrentRepositoryWith [] []
-renderRootGitignoreFromCurrentRepositoryWith :: [(FilePath, PackageKind)] -> [FilePath] -> IO T.Text
-renderRootGitignoreFromCurrentRepositoryWith projectedPackages projectedCheckNames = do
-  (packages, _) <- inspectRepositoryStructure
-  checkNames <- listSubdirectoryNames "checks"
-  hostNames <- listSubdirectoryNames "hosts"
-  let allPackages = Map.toAscList (Map.fromList (packages ++ projectedPackages))
-      allCheckNames = Set.toAscList (Set.fromList (checkNames ++ projectedCheckNames))
-  pure (renderRootGitignore allPackages allCheckNames hostNames)
-renderRootGitignore :: [(FilePath, PackageKind)] -> [FilePath] -> [FilePath] -> T.Text
-renderRootGitignore packages checkNames hostNames =
-  T.unlines
-    ( [ "*",
-        "!/.gitignore",
-        "!/AGENTS.md",
-        "!/CITATION.bib",
-        "!/LICENSE",
-        "!/README",
-        "!/flake.lock",
-        "!/flake.nix",
-        "!/formatter.nix",
-        "!/.github/",
-        "!/.github/workflows/",
-        "!/.github/workflows/workflow.yml",
-        "!/prm/",
-        "!/prm/**",
-        "!/secrets/",
-        "!/secrets/secrets.age",
-        "!/secrets/secrets.env.example",
-        "!/secrets/secrets.nix",
-        "!/checks/"
-      ]
-        ++ concatMap renderCheckGitignoreEntries (sort checkNames)
-        ++ ["!/hosts/"]
-        ++ concatMap renderHostGitignoreEntries (sort hostNames)
-        ++ ["!/packages/"]
-        ++ concatMap (uncurry renderPackageGitignoreEntries) (sortOn fst packages)
-    )
-renderCheckGitignoreEntries :: FilePath -> [T.Text]
-renderCheckGitignoreEntries checkName =
-  map T.pack ["!/checks/" ++ checkName ++ "/", "!/checks/" ++ checkName ++ "/default.nix"]
-renderHostGitignoreEntries :: FilePath -> [T.Text]
-renderHostGitignoreEntries hostName =
-  let hostRoot = "!/hosts/" ++ hostName
-   in map T.pack [hostRoot ++ "/", hostRoot ++ "/configuration.nix", hostRoot ++ "/hardware-configuration.nix", hostRoot ++ "/prm/", hostRoot ++ "/prm/**"]
-renderPackageGitignoreEntries :: FilePath -> PackageKind -> [T.Text]
-renderPackageGitignoreEntries packageName packageKind =
-  let packageRoot = "!/packages/" ++ packageName
-      sourcePaths =
-        case packageKind of
-          HaskellPackage -> ["default.nix", "Main.hs", packageName <.> "cabal"]
-          RustPackage -> ["default.nix", "Cargo.toml", "Cargo.lock", "src/", "src/main.rs"]
-          HTMLPackage -> ["default.nix", "index.html", "script.js", "style.css"]
-          PythonLaTeXPackage -> ["default.nix", "main.py", "ms.tex", "ms.bib", "refs.bib", "figures/", "figures/**"]
-          PythonPackage -> ["default.nix", "main.py"]
-          PythonPyPIPackage -> ["default.nix"]
-          CPackage -> ["default.nix", "main.c"]
-          TerraformPackage -> ["default.nix", "main.tf"]
-          LaTeXPackage -> ["default.nix", "ms.tex", "ms.bib"]
-          BinaryReleasePackage -> ["default.nix"]
-   in map T.pack ([packageRoot ++ "/"] ++ map ((packageRoot ++ "/") ++) sourcePaths ++ [packageRoot ++ "/prm/", packageRoot ++ "/prm/**"])
+renderRootGitignoreFromCurrentRepository = renderRootGitignoreFromCurrentRepositoryWith []
+renderRootGitignoreFromCurrentRepositoryWith :: [FilePath] -> IO T.Text
+renderRootGitignoreFromCurrentRepositoryWith projectedPaths = do
+  repositoryEntries <- collectRepositoryEntries "."
+  let existingWhitelistPaths = concatMap whitelistPathsForRepositoryEntry repositoryEntries
+  pure (renderRootGitignore (existingWhitelistPaths ++ concatMap whitelistPathsForExactFile projectedPaths))
+renderRootGitignore :: [FilePath] -> T.Text
+renderRootGitignore whitelistPaths =
+  T.unlines ("*" : map (T.pack . ("!/" ++)) (Set.toAscList (Set.fromList (".gitignore" : whitelistPaths))))
+whitelistPathsForRepositoryEntry :: RepositoryEntry -> [FilePath]
+whitelistPathsForRepositoryEntry (repositoryPath, status) =
+  case trackableTreeRoot repositoryPath of
+    Just treeRoot -> whitelistPathsForTree treeRoot
+    Nothing
+      | Posix.isDirectory status -> []
+      | otherwise -> whitelistPathsForExactFile repositoryPath
+whitelistPathsForExactFile :: FilePath -> [FilePath]
+whitelistPathsForExactFile filePath = parentDirectoryWhitelistPaths filePath ++ [filePath]
+whitelistPathsForTree :: FilePath -> [FilePath]
+whitelistPathsForTree treeRoot = parentDirectoryWhitelistPaths treeRoot ++ [treeRoot ++ "/", treeRoot ++ "/**"]
+parentDirectoryWhitelistPaths :: FilePath -> [FilePath]
+parentDirectoryWhitelistPaths path =
+  reverse (go (takeDirectory path))
+  where
+    go "." = []
+    go parentDirectory = (parentDirectory ++ "/") : go (takeDirectory parentDirectory)
+trackableTreeRoot :: FilePath -> Maybe FilePath
+trackableTreeRoot repositoryPath =
+  case splitDirectories repositoryPath of
+    "prm" : _ -> Just "prm"
+    ["hosts", hostName, "prm"] -> Just ("hosts" </> hostName </> "prm")
+    "hosts" : hostName : "prm" : _ -> Just ("hosts" </> hostName </> "prm")
+    ["packages", packageName, "prm"] -> Just ("packages" </> packageName </> "prm")
+    "packages" : packageName : "prm" : _ -> Just ("packages" </> packageName </> "prm")
+    "packages" : packageName : "figures" : _ -> Just ("packages" </> packageName </> "figures")
+    _ -> Nothing
 removePackageFromCurrentRepository :: FilePath -> IO (Either String ())
 removePackageFromCurrentRepository packageName = do
   let packagePath = "packages" </> packageName
@@ -2492,6 +2465,7 @@ hUnitPackageTests =
       TestLabel "Ignores formatter-only Cargo inline-table spacing." (TestCase cargoTomlFormattingNormalizationTest),
       TestLabel "Requires allowlisted filesystem entry kinds." (TestCase entryKindStructureTest),
       TestLabel "Uses standard Git ignore semantics for repository entries." (TestCase gitIgnoredRepositoryEntryTest),
+      TestLabel "Renders only supplied repository whitelist paths." (TestCase minimalRootGitignoreRenderingTest),
       TestLabel "Treats parameter directories as opaque user data." (TestCase parameterDirectoryStructureTest),
       TestLabel "Renders stable text and JSON repository summaries." (TestCase repositorySummaryRenderingTest),
       TestLabel "Reconciles recorded timing vocabulary with canonical test names." (TestCase testDurationReconciliationTest),
@@ -2637,6 +2611,12 @@ gitIgnoredRepositoryEntryTest =
     assertBool
       "Ignored untracked files, directories, and symlinks do not participate in repository structure policy."
       (not (any (\issue -> "result" `isPrefixOf` issue || "ignored" `isPrefixOf` issue) issues))
+minimalRootGitignoreRenderingTest :: IO ()
+minimalRootGitignoreRenderingTest =
+  assertEqual
+    "Whitelist rendering does not invent optional repository paths."
+    (T.unlines ["*", "!/.gitignore", "!/flake.nix", "!/prm/", "!/prm/**"])
+    (renderRootGitignore (whitelistPathsForExactFile "flake.nix" ++ whitelistPathsForTree "prm"))
 parameterDirectoryStructureTest :: IO ()
 parameterDirectoryStructureTest =
   withTemporaryPackageRepository "parameter-directory-structure" $ \temporaryRepository -> do
@@ -2910,6 +2890,9 @@ addPackageEndToEndTest =
       ( "!/packages/demo/main.py" `T.isInfixOf` rootGitignoreSource
           && "!/checks/demo_coverage/default.nix" `T.isInfixOf` rootGitignoreSource
       )
+    assertBool
+      "The root whitelist omits optional paths that are absent."
+      (not ("secrets" `T.isInfixOf` rootGitignoreSource) && not ("formatter.nix" `T.isInfixOf` rootGitignoreSource))
 removePackageEndToEndTest :: IO ()
 removePackageEndToEndTest =
   withGeneratedPythonPackageRepository "remove-package-end-to-end" $ \temporaryRepository -> do
