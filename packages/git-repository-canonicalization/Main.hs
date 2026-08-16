@@ -257,6 +257,7 @@ data Command
   = CheckCommand
   | StatusCommand
   | AddCommand String FilePath (Maybe String)
+  | RemoveCommand FilePath
 type CommandParseResult :: Type
 data CommandParseResult
   = ParsedCommand Command
@@ -283,6 +284,12 @@ runCli commandLineArguments =
           Just scaffoldPackageKind -> do
             addResult <- addPackageToCurrentRepository scaffoldPackageKind packageName packageDescription
             stageGeneratedPathsOrExit addResult
+    ParsedCommand (RemoveCommand packageName) ->
+      runInGitRepositoryRoot "." $ do
+        removeResult <- removePackageFromCurrentRepository packageName
+        case removeResult of
+          Left removeError -> hPutStrLn stderr ("error: " ++ removeError) >> exitFailure
+          Right () -> exitSuccess
 stageGeneratedPathsOrExit :: Either String [FilePath] -> IO a
 stageGeneratedPathsOrExit = \case
   Left addError -> do
@@ -292,12 +299,14 @@ stageGeneratedPathsOrExit = \case
 parseCommand :: [String] -> CommandParseResult
 parseCommand commandLineArguments =
   case commandLineArguments of
-    [] -> ParsedCommand StatusCommand
+    [] -> InvalidCommand usageExitCode Nothing
     [argument] | argument `elem` ["-h", "--help"] -> MainHelp
     [_, argument] | argument `elem` ["-h", "--help"] -> InvalidCommand (ExitFailure 1) Nothing
     ["check"] -> ParsedCommand CheckCommand
     "check" : _ -> InvalidCommand usageExitCode (Just "check")
     ["status"] -> ParsedCommand StatusCommand
+    ["rm", packageName] -> ParsedCommand (RemoveCommand packageName)
+    "rm" : _ -> InvalidCommand usageExitCode (Just "rm")
     _ ->
       case parseAddPackageArguments commandLineArguments of
         Just (packageKindName, packageName, packageDescription) ->
@@ -312,15 +321,17 @@ usageExitCode = ExitFailure 129
 mainUsageText :: String
 mainUsageText =
   unlines
-    [ "usage: git repository-canonicalization [status]",
+    [ "usage: git repository-canonicalization status",
       "   or: git repository-canonicalization add <package-type> <package-name> [<description>...]",
+      "   or: git repository-canonicalization rm <package-name>",
       "   or: git repository-canonicalization check"
     ]
 mainHelpText :: String
 mainHelpText =
   unlines
-    [ "usage: git repository-canonicalization [status]",
+    [ "usage: git repository-canonicalization status",
       "   or: git repository-canonicalization add <package-type> <package-name> [<description>...]",
+      "   or: git repository-canonicalization rm <package-name>",
       "   or: git repository-canonicalization check",
       "",
       "Manage packages and checks in the nearest Git repository.",
@@ -329,12 +340,14 @@ mainHelpText =
       "add <package-type> <package-name> [<description>...]",
       "    Add a package and its check, then stage the files.",
       "",
+      "rm <package-name>",
+      "    Remove a clean package and its check, then stage the changes.",
+      "",
       "check",
       "    Check that the repository follows the canonical conventions.",
       "",
       "status",
       "    Show repository intent, packages, and checks as JSON.",
-      "    This is the default command.",
       ""
     ]
 usageTextForCommand :: Maybe String -> String
@@ -352,6 +365,14 @@ usageTextForCommand = \case
       [ "usage: git repository-canonicalization status",
         "",
         "Show the status of the nearest Git repository as JSON. Use 'git -C <location>' to select it.",
+        ""
+      ]
+  Just "rm" ->
+    unlines
+      [ "usage: git repository-canonicalization rm <package-name>",
+        "",
+        "Remove a clean package and its check.",
+        "Generated changes are staged with git add.",
         ""
       ]
   Just "check" ->
@@ -398,7 +419,7 @@ checkRepositoryLocation location = do
         exitFailure
       Right _ -> pure ()
 requiredRepositoryRootFiles :: [FilePath]
-requiredRepositoryRootFiles = ["flake.nix", "flake.lock"]
+requiredRepositoryRootFiles = [".gitignore", "flake.nix", "flake.lock"]
 checkRequiredRepositoryRootFiles :: IO [String]
 checkRequiredRepositoryRootFiles = do
   missingFiles <- filterM (fmap not . doesFileExist) requiredRepositoryRootFiles
@@ -426,7 +447,8 @@ collectRepositoryContentCompliance = do
       checkNames <- listSubdirectoryNames "checks"
       let packageKinds = Map.fromList packages
       checkComplianceIssues <- concat <$> forM checkNames (checkTemplateWith packageKinds)
-      case packageComplianceIssues ++ checkComplianceIssues of
+      rootGitignoreIssues <- checkRootGitignore packages checkNames
+      case packageComplianceIssues ++ checkComplianceIssues ++ rootGitignoreIssues of
         [] ->
           pure
             ( Right
@@ -439,6 +461,12 @@ collectRepositoryContentCompliance = do
           pure (Left (RepositoryComplianceFailure FileCompliancePhase (firstIssue :| remainingIssues)))
     firstIssue : remainingIssues ->
       pure (Left (RepositoryComplianceFailure DirectoryStructurePhase (firstIssue :| remainingIssues)))
+checkRootGitignore :: [(FilePath, PackageKind)] -> [FilePath] -> IO [String]
+checkRootGitignore packages checkNames = do
+  hostNames <- listSubdirectoryNames "hosts"
+  actualSource <- TIO.readFile ".gitignore"
+  let expectedSource = renderRootGitignore packages checkNames hostNames
+  pure [".gitignore: does not match the canonical root whitelist" | actualSource /= expectedSource]
 reportCheckRepositoryFailure :: RepositoryComplianceFailure -> IO ()
 reportCheckRepositoryFailure (RepositoryComplianceFailure checkPhase checkPhaseIssues) = do
   let checkPhaseName = renderRepositoryCheckPhase checkPhase
@@ -941,7 +969,13 @@ addPackageToCurrentRepository scaffoldPackageKind packageName packageDescription
         else do
           let packageScaffoldFiles = renderScaffoldFiles scaffoldPackageKind packageName packageDescription
               checkScaffoldFiles = maybeToList (renderRepositoryCheckScaffoldFile packageName <$> repositoryCheckSpecForPackageKind packageKind)
-          createScaffoldFiles (packageScaffoldFiles ++ checkScaffoldFiles)
+          createScaffoldFiles (packageScaffoldFiles ++ checkScaffoldFiles) >>= \case
+            Left scaffoldError -> pure (Left scaffoldError)
+            Right scaffoldPaths -> do
+              let projectedCheckNames = maybeToList (repositoryCheckNameForPackage packageKind packageName)
+              rootGitignoreSource <- renderRootGitignoreFromCurrentRepositoryWith [(packageName, packageKind)] projectedCheckNames
+              TIO.writeFile ".gitignore" rootGitignoreSource
+              pure (Right (".gitignore" : scaffoldPaths))
   where
     packageKind = packageKindForScaffold scaffoldPackageKind
 createScaffoldFiles :: [ScaffoldFile] -> IO (Either String [FilePath])
@@ -980,44 +1014,37 @@ renderScaffoldFiles scaffoldPackageKind packageName packageDescription =
   map prefixPackagePath $
     case scaffoldPackageKind of
       HaskellScaffold ->
-        [ ScaffoldFile ".gitignore" haskellGitignoreSource,
-          ScaffoldFile "default.nix" haskellTemplateBaselineNixSource,
+        [ ScaffoldFile "default.nix" haskellTemplateBaselineNixSource,
           ScaffoldFile "Main.hs" haskellMainSource,
           ScaffoldFile (packageName <.> "cabal") (renderScaffoldHaskellCabal packageName packageDescription)
         ]
       RustScaffold ->
-        [ ScaffoldFile ".gitignore" rustGitignoreSource,
-          ScaffoldFile "default.nix" rustTemplateBaselineNixSource,
+        [ ScaffoldFile "default.nix" rustTemplateBaselineNixSource,
           ScaffoldFile "Cargo.toml" (renderScaffoldCargoToml packageName packageDescription),
           ScaffoldFile "src/main.rs" rustMainSource
         ]
       HTMLScaffold ->
-        [ ScaffoldFile ".gitignore" htmlGitignoreSource,
-          ScaffoldFile "default.nix" (renderNixTemplateDescription defaultHtmlTemplateDescription packageDescription htmlTemplateBaselineNixSource),
+        [ ScaffoldFile "default.nix" (renderNixTemplateDescription defaultHtmlTemplateDescription packageDescription htmlTemplateBaselineNixSource),
           ScaffoldFile "index.html" htmlIndexSource,
           ScaffoldFile "script.js" htmlScriptSource,
           ScaffoldFile "style.css" htmlStyleSource
         ]
       PythonLaTeXScaffold ->
-        [ ScaffoldFile ".gitignore" pythonLaTeXGitignoreSource,
-          ScaffoldFile "default.nix" (renderNixTemplateDescription defaultPythonLaTeXTemplateDescription packageDescription pythonLaTeXTemplateBaselineNixSource),
+        [ ScaffoldFile "default.nix" (renderNixTemplateDescription defaultPythonLaTeXTemplateDescription packageDescription pythonLaTeXTemplateBaselineNixSource),
           ScaffoldFile "main.py" pythonLaTeXMainSource,
           ScaffoldFile "ms.tex" pythonLaTeXMsTexSource,
           ScaffoldFile "ms.bib" pythonLaTeXMsBibSource
         ]
       PythonScaffold ->
-        [ ScaffoldFile ".gitignore" pythonGitignoreSource,
-          ScaffoldFile "default.nix" (renderPythonTemplateNixSource (scaffoldDescription defaultPythonTemplateDescription packageDescription)),
+        [ ScaffoldFile "default.nix" (renderPythonTemplateNixSource (scaffoldDescription defaultPythonTemplateDescription packageDescription)),
           ScaffoldFile "main.py" pythonMainSource
         ]
       CScaffold ->
-        [ ScaffoldFile ".gitignore" cGitignoreSource,
-          ScaffoldFile "default.nix" (renderNixTemplateDescription defaultCTemplateDescription packageDescription cTemplateBaselineNixSource),
+        [ ScaffoldFile "default.nix" (renderNixTemplateDescription defaultCTemplateDescription packageDescription cTemplateBaselineNixSource),
           ScaffoldFile "main.c" cMainSource
         ]
       LaTeXScaffold ->
-        [ ScaffoldFile ".gitignore" latexGitignoreSource,
-          ScaffoldFile "default.nix" (renderNixTemplateDescription defaultLaTeXTemplateDescription packageDescription latexTemplateBaselineNixSource),
+        [ ScaffoldFile "default.nix" (renderNixTemplateDescription defaultLaTeXTemplateDescription packageDescription latexTemplateBaselineNixSource),
           ScaffoldFile "ms.tex" latexMsTexSource,
           ScaffoldFile "ms.bib" latexMsBibSource
         ]
@@ -1026,6 +1053,114 @@ renderScaffoldFiles scaffoldPackageKind packageName packageDescription =
       scaffoldFile
         { scaffoldFilePath = "packages" </> packageName </> scaffoldFilePath scaffoldFile
         }
+renderRootGitignoreFromCurrentRepository :: IO T.Text
+renderRootGitignoreFromCurrentRepository = renderRootGitignoreFromCurrentRepositoryWith [] []
+renderRootGitignoreFromCurrentRepositoryWith :: [(FilePath, PackageKind)] -> [FilePath] -> IO T.Text
+renderRootGitignoreFromCurrentRepositoryWith projectedPackages projectedCheckNames = do
+  (packages, _) <- inspectRepositoryStructure
+  checkNames <- listSubdirectoryNames "checks"
+  hostNames <- listSubdirectoryNames "hosts"
+  let allPackages = Map.toAscList (Map.fromList (packages ++ projectedPackages))
+      allCheckNames = Set.toAscList (Set.fromList (checkNames ++ projectedCheckNames))
+  pure (renderRootGitignore allPackages allCheckNames hostNames)
+renderRootGitignore :: [(FilePath, PackageKind)] -> [FilePath] -> [FilePath] -> T.Text
+renderRootGitignore packages checkNames hostNames =
+  T.unlines
+    ( [ "*",
+        "!/.gitignore",
+        "!/AGENTS.md",
+        "!/CITATION.bib",
+        "!/LICENSE",
+        "!/README",
+        "!/flake.lock",
+        "!/flake.nix",
+        "!/formatter.nix",
+        "!/.github/",
+        "!/.github/workflows/",
+        "!/.github/workflows/workflow.yml",
+        "!/prm/",
+        "!/prm/**",
+        "!/secrets/",
+        "!/secrets/secrets.age",
+        "!/secrets/secrets.env.example",
+        "!/secrets/secrets.nix",
+        "!/checks/"
+      ]
+        ++ concatMap renderCheckGitignoreEntries (sort checkNames)
+        ++ ["!/hosts/"]
+        ++ concatMap renderHostGitignoreEntries (sort hostNames)
+        ++ ["!/packages/"]
+        ++ concatMap (uncurry renderPackageGitignoreEntries) (sortOn fst packages)
+    )
+renderCheckGitignoreEntries :: FilePath -> [T.Text]
+renderCheckGitignoreEntries checkName =
+  map T.pack ["!/checks/" ++ checkName ++ "/", "!/checks/" ++ checkName ++ "/default.nix"]
+renderHostGitignoreEntries :: FilePath -> [T.Text]
+renderHostGitignoreEntries hostName =
+  let hostRoot = "!/hosts/" ++ hostName
+   in map T.pack [hostRoot ++ "/", hostRoot ++ "/configuration.nix", hostRoot ++ "/hardware-configuration.nix", hostRoot ++ "/prm/", hostRoot ++ "/prm/**"]
+renderPackageGitignoreEntries :: FilePath -> PackageKind -> [T.Text]
+renderPackageGitignoreEntries packageName packageKind =
+  let packageRoot = "!/packages/" ++ packageName
+      sourcePaths =
+        case packageKind of
+          HaskellPackage -> ["default.nix", "Main.hs", packageName <.> "cabal"]
+          RustPackage -> ["default.nix", "Cargo.toml", "Cargo.lock", "src/", "src/main.rs"]
+          HTMLPackage -> ["default.nix", "index.html", "script.js", "style.css"]
+          PythonLaTeXPackage -> ["default.nix", "main.py", "ms.tex", "ms.bib", "refs.bib", "figures/", "figures/**"]
+          PythonPackage -> ["default.nix", "main.py"]
+          PythonPyPIPackage -> ["default.nix"]
+          CPackage -> ["default.nix", "main.c"]
+          TerraformPackage -> ["default.nix", "main.tf"]
+          LaTeXPackage -> ["default.nix", "ms.tex", "ms.bib"]
+          BinaryReleasePackage -> ["default.nix"]
+   in map T.pack ([packageRoot ++ "/"] ++ map ((packageRoot ++ "/") ++) sourcePaths ++ [packageRoot ++ "/prm/", packageRoot ++ "/prm/**"])
+removePackageFromCurrentRepository :: FilePath -> IO (Either String ())
+removePackageFromCurrentRepository packageName = do
+  let packagePath = "packages" </> packageName
+      packageNameIsSafe = splitDirectories packageName == [packageName] && packageName `notElem` ["", ".", ".."]
+  packageExists <- doesDirectoryExist packagePath
+  if not packageNameIsSafe
+    then pure (Left ("invalid package name: " ++ packageName))
+    else
+      if not packageExists
+        then pure (Left ("package does not exist: " ++ packagePath))
+        else do
+          (packages, structureIssues) <- inspectRepositoryStructure
+          case lookup packageName packages of
+            Nothing ->
+              pure
+                ( Left
+                    ( "cannot determine package type for "
+                        ++ packagePath
+                        ++ if null structureIssues then "" else ": " ++ intercalate "; " structureIssues
+                    )
+                )
+            Just packageKind -> do
+              let maybeCheckPath = ("checks" </>) <$> repositoryCheckNameForPackage packageKind packageName
+              existingCheckPaths <- filterM doesPathExist (maybeToList maybeCheckPath)
+              let removalPaths = packagePath : existingCheckPaths
+              (statusExit, statusStdout, statusStderr) <-
+                readProcessWithExitCode
+                  "git"
+                  (["status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching", "--"] ++ removalPaths)
+                  ""
+              if statusExit /= ExitSuccess
+                then pure (Left ("could not inspect package state: " ++ T.unpack (T.strip (T.pack statusStderr))))
+                else
+                  if not (null statusStdout)
+                    then pure (Left ("package or check is not clean:\n" ++ statusStdout))
+                    else do
+                      (removeExit, _removeStdout, removeStderr) <- readProcessWithExitCode "git" (["rm", "-r", "--"] ++ removalPaths) ""
+                      if removeExit /= ExitSuccess
+                        then pure (Left ("git rm failed: " ++ T.unpack (T.strip (T.pack removeStderr))))
+                        else do
+                          rootGitignoreSource <- renderRootGitignoreFromCurrentRepository
+                          TIO.writeFile ".gitignore" rootGitignoreSource
+                          (addExit, _addStdout, addStderr) <- readProcessWithExitCode "git" ["add", "--", ".gitignore"] ""
+                          if addExit == ExitSuccess
+                            then pure (Right ())
+                            else pure (Left ("could not stage .gitignore: " ++ T.unpack (T.strip (T.pack addStderr))))
 defaultPythonTemplateDescription :: String
 defaultPythonTemplateDescription = "A Python template package."
 defaultHaskellScaffoldDescription :: String
@@ -1239,7 +1374,6 @@ opaqueDirectoryRegexes =
     "^\\.codex$",
     "^\\.git$",
     "^prm$",
-    "^result$",
     "^tmp$",
     "^checks/[^/]+/(result|tmp)$",
     "^hosts/[^/]+/prm$",
@@ -1324,7 +1458,7 @@ allowedRegularFileRegexesForPackageKind :: FilePath -> FilePath -> Maybe Package
 allowedRegularFileRegexesForPackageKind packageRootDirectory packageDirectoryName maybePackageKind =
   let escapedPackageRootDirectory = escapeRegexLiteral packageRootDirectory
       escapedPackageDirectoryName = escapeRegexLiteral packageDirectoryName
-      basePackagePathRegexes = ["^" ++ escapedPackageRootDirectory ++ "/default\\.nix$", "^" ++ escapedPackageRootDirectory ++ "/\\.gitignore$"]
+      basePackagePathRegexes = ["^" ++ escapedPackageRootDirectory ++ "/default\\.nix$"]
       withBasePackagePathRegexes additionalPathRegexes = basePackagePathRegexes ++ additionalPathRegexes
    in case maybePackageKind of
         Just HaskellPackage -> withBasePackagePathRegexes ["^" ++ escapedPackageRootDirectory ++ "/Main\\.hs$", "^" ++ escapedPackageRootDirectory ++ "/" ++ escapedPackageDirectoryName ++ "\\.cabal$"]
@@ -1346,11 +1480,15 @@ escapeRegexLiteral = concatMap escapeCharacter
       | otherwise = [character]
 collectRepositoryEntries :: FilePath -> IO [RepositoryEntry]
 collectRepositoryEntries rootPath = do
+  repositoryEntries <- collectUnfilteredRepositoryEntries rootPath
+  filterGitIgnoredRepositoryEntries (filter ((/= ".git") . fst) repositoryEntries)
+collectUnfilteredRepositoryEntries :: FilePath -> IO [RepositoryEntry]
+collectUnfilteredRepositoryEntries rootPath = do
   childNames <- listDirectory rootPath
   let childPaths = sort [rootPath </> childName | childName <- childNames]
-  concat <$> mapM collectRepositoryEntry childPaths
-collectRepositoryEntry :: FilePath -> IO [RepositoryEntry]
-collectRepositoryEntry path = do
+  concat <$> mapM collectUnfilteredRepositoryEntry childPaths
+collectUnfilteredRepositoryEntry :: FilePath -> IO [RepositoryEntry]
+collectUnfilteredRepositoryEntry path = do
   status <- Posix.getSymbolicLinkStatus path
   let relativePath = toRelativePath path
   case () of
@@ -1358,8 +1496,26 @@ collectRepositoryEntry path = do
       | not (Posix.isDirectory status) -> pure [(relativePath, status)]
       | isOpaqueDirectory relativePath -> pure [(relativePath, status)]
       | otherwise -> do
-          descendants <- collectRepositoryEntries path
+          descendants <- collectUnfilteredRepositoryEntries path
           pure (if null descendants then [(relativePath, status)] else descendants)
+filterGitIgnoredRepositoryEntries :: [RepositoryEntry] -> IO [RepositoryEntry]
+filterGitIgnoredRepositoryEntries [] = pure []
+filterGitIgnoredRepositoryEntries repositoryEntries = do
+  let gitCheckIgnoreInput = concatMap ((++ "\0") . fst) repositoryEntries
+  (checkIgnoreExit, ignoredPathsOutput, checkIgnoreStderr) <-
+    readProcessWithExitCode "git" ["check-ignore", "--stdin", "-z"] gitCheckIgnoreInput
+  case checkIgnoreExit of
+    ExitSuccess -> do
+      let ignoredPaths = Set.fromList (splitNullTerminated ignoredPathsOutput)
+      pure (filter ((`Set.notMember` ignoredPaths) . fst) repositoryEntries)
+    ExitFailure 1 -> pure repositoryEntries
+    _ -> ioError (userError ("git check-ignore failed: " ++ T.unpack (T.strip (T.pack checkIgnoreStderr))))
+splitNullTerminated :: String -> [String]
+splitNullTerminated = filter (not . null) . foldr splitCharacter [[]]
+  where
+    splitCharacter '\0' accumulatedParts = [] : accumulatedParts
+    splitCharacter character (currentPart : remainingParts) = (character : currentPart) : remainingParts
+    splitCharacter _ [] = []
 toRelativePath :: FilePath -> FilePath
 toRelativePath = makeRelative "."
 isOpaqueDirectory :: FilePath -> Bool
@@ -1376,19 +1532,17 @@ hostRootPathFromRepositoryPath repositoryPath =
     _ -> Nothing
 listSubdirectoryNames :: FilePath -> IO [FilePath]
 listSubdirectoryNames parentDirectory = do
-  parentDirectoryExists <- doesDirectoryExist parentDirectory
-  if not parentDirectoryExists
-    then pure []
-    else do
-      childNames <- listDirectory parentDirectory
-      sort
-        <$> filterM
-          ( \childName -> do
-              let childPath = parentDirectory </> childName
-              isSymbolicLink <- pathIsSymbolicLink childPath
-              if isSymbolicLink then pure False else doesDirectoryExist childPath
-          )
-          childNames
+  repositoryEntries <- collectRepositoryEntries "."
+  pure
+    ( Set.toAscList
+        ( Set.fromList
+            [ childName
+            | (repositoryPath, _) <- repositoryEntries,
+              parent : childName : _ <- [splitDirectories repositoryPath],
+              parent == parentDirectory
+            ]
+        )
+    )
 checkPackage :: FilePath -> PackageKind -> IO [String]
 checkPackage packageName packageKind = do
   let packageDefaultNixPath = "packages" </> packageName </> "default.nix"
@@ -2337,6 +2491,7 @@ hUnitPackageTests =
       TestLabel "Parses versioned test result summaries strictly." (TestCase repositoryTestResultParsingTest),
       TestLabel "Ignores formatter-only Cargo inline-table spacing." (TestCase cargoTomlFormattingNormalizationTest),
       TestLabel "Requires allowlisted filesystem entry kinds." (TestCase entryKindStructureTest),
+      TestLabel "Uses standard Git ignore semantics for repository entries." (TestCase gitIgnoredRepositoryEntryTest),
       TestLabel "Treats parameter directories as opaque user data." (TestCase parameterDirectoryStructureTest),
       TestLabel "Renders stable text and JSON repository summaries." (TestCase repositorySummaryRenderingTest),
       TestLabel "Reconciles recorded timing vocabulary with canonical test names." (TestCase testDurationReconciliationTest),
@@ -2346,6 +2501,9 @@ hUnitPackageTests =
       TestLabel "Documents help and invokes it consistently." (TestCase commandLineHelpEndToEndTest),
       TestLabel "Rejects unknown commands with usage on stderr." (TestCase invalidCommandEndToEndTest),
       TestLabel "Scaffolds a package and its check from a nested directory." (TestCase addPackageEndToEndTest),
+      TestLabel "Removes a clean package, its check, and whitelist entries." (TestCase removePackageEndToEndTest),
+      TestLabel "Refuses to remove packages containing local changes." (TestCase unsafeRemovePackageEndToEndTest),
+      TestLabel "Rejects root whitelist drift." (TestCase rootGitignoreDriftEndToEndTest),
       TestLabel "Scaffolds and checks every supported package kind." (TestCase allPackageKindsEndToEndTest),
       TestLabel "Rejects package creation when its path already exists." (TestCase existingPackageCollisionEndToEndTest),
       TestLabel "Reports generated package behavior in text and JSON status output." (TestCase statusEndToEndTest),
@@ -2445,6 +2603,7 @@ cargoTomlFormattingNormalizationTest =
 entryKindStructureTest :: IO ()
 entryKindStructureTest =
   withTemporaryPackageRepository "symbolic-link-structure" $ \temporaryRepository -> do
+    initializeGitRepositoryFixture temporaryRepository
     writeFile (temporaryRepository </> "README") ""
     createFileLink "README" (temporaryRepository </> "LICENSE")
     createDirectoryIfMissing False (temporaryRepository </> "CITATION.bib")
@@ -2454,9 +2613,34 @@ entryKindStructureTest =
         "CITATION.bib: expected regular file, found directory"
       ]
       (\expectedIssue -> assertBool "entry-kind diagnostic" (expectedIssue `elem` issues))
+gitIgnoredRepositoryEntryTest :: IO ()
+gitIgnoredRepositoryEntryTest =
+  withTemporaryPackageRepository "git-ignored-repository-entry" $ \temporaryRepository -> do
+    initializeGitRepositoryFixture temporaryRepository
+    TIO.writeFile
+      (temporaryRepository </> ".gitignore")
+      (T.unlines ["result", "ignored/", "LICENSE"])
+    writeFile (temporaryRepository </> "README") ""
+    createFileLink "README" (temporaryRepository </> "LICENSE")
+    createFileLink "README" (temporaryRepository </> "result")
+    createDirectoryIfMissing True (temporaryRepository </> "ignored")
+    writeFile (temporaryRepository </> "ignored/artifact") ""
+    writeFile (temporaryRepository </> "unexpected.txt") ""
+    runGitFixtureCommand ["-C", temporaryRepository, "add", "-f", "--", ".gitignore", "README", "LICENSE"]
+    issues <- withCurrentDirectory temporaryRepository checkRepositoryStructure
+    assertBool
+      "A tracked path remains subject to entry-kind validation even when an ignore rule matches it."
+      ("LICENSE: expected regular file, found symbolic link" `elem` issues)
+    assertBool
+      "A visible untracked path remains subject to repository structure policy."
+      ("unexpected.txt: is not allowed" `elem` issues)
+    assertBool
+      "Ignored untracked files, directories, and symlinks do not participate in repository structure policy."
+      (not (any (\issue -> "result" `isPrefixOf` issue || "ignored" `isPrefixOf` issue) issues))
 parameterDirectoryStructureTest :: IO ()
 parameterDirectoryStructureTest =
   withTemporaryPackageRepository "parameter-directory-structure" $ \temporaryRepository -> do
+    initializeGitRepositoryFixture temporaryRepository
     let parameterDirectories =
           [ temporaryRepository </> "prm",
             temporaryRepository </> "hosts/demo/prm",
@@ -2674,6 +2858,7 @@ commandLineHelpEndToEndTest =
       ( mainUsageText `isPrefixOf` helpStdout
           && "\nadd <package-type>" `isInfixOf` helpStdout
           && "\ncheck\n" `isInfixOf` helpStdout
+          && "\nrm <package-name>" `isInfixOf` helpStdout
           && "\nstatus\n" `isInfixOf` helpStdout
       )
     assertEqual "The top-level help command leaves stderr empty." "" helpStderr
@@ -2711,12 +2896,69 @@ addPackageEndToEndTest =
       and
         <$> mapM
           doesFileExist
-          [ temporaryRepository </> "packages/demo/.gitignore",
+          [ temporaryRepository </> ".gitignore",
             temporaryRepository </> "packages/demo/default.nix",
             temporaryRepository </> "packages/demo/main.py",
             temporaryRepository </> "checks/demo_coverage/default.nix"
           ]
     assertBool "The installed CLI creates the package and its check on disk." generatedFilesExist
+    localGitignoreExists <- doesFileExist (temporaryRepository </> "packages/demo/.gitignore")
+    assertBool "The package has no local .gitignore." (not localGitignoreExists)
+    rootGitignoreSource <- TIO.readFile (temporaryRepository </> ".gitignore")
+    assertBool
+      "The root whitelist includes the package and its check."
+      ( "!/packages/demo/main.py" `T.isInfixOf` rootGitignoreSource
+          && "!/checks/demo_coverage/default.nix" `T.isInfixOf` rootGitignoreSource
+      )
+removePackageEndToEndTest :: IO ()
+removePackageEndToEndTest =
+  withGeneratedPythonPackageRepository "remove-package-end-to-end" $ \temporaryRepository -> do
+    (removeExit, removeStdout, removeStderr) <- runEndToEndCommandIn temporaryRepository ["rm", "demo"]
+    assertEqual "Removing a clean package succeeds." ExitSuccess removeExit
+    assertEqual "A successful removal leaves stdout empty." "" removeStdout
+    assertEqual "A successful removal leaves stderr empty." "" removeStderr
+    packageExists <- doesPathExist (temporaryRepository </> "packages/demo")
+    checkExists <- doesPathExist (temporaryRepository </> "checks/demo_coverage")
+    assertBool "The package is removed from disk." (not packageExists)
+    assertBool "The conventional check is removed from disk." (not checkExists)
+    rootGitignoreSource <- TIO.readFile (temporaryRepository </> ".gitignore")
+    assertBool "The removed package and check leave no whitelist entries." (not ("demo" `T.isInfixOf` rootGitignoreSource))
+    (checkExit, checkStdout, checkStderr) <- runEndToEndCommandIn temporaryRepository ["check"]
+    assertEqual "The repository remains canonical after removal." ExitSuccess checkExit
+    assertEqual "The successful post-removal check leaves stdout empty." "" checkStdout
+    assertEqual "The successful post-removal check leaves stderr empty." "" checkStderr
+unsafeRemovePackageEndToEndTest :: IO ()
+unsafeRemovePackageEndToEndTest = do
+  assertUnsafeRemove "modified-remove-package" $ \temporaryRepository ->
+    TIO.appendFile (temporaryRepository </> "packages/demo/main.py") "\n# local change\n"
+  assertUnsafeRemove "staged-remove-package" $ \temporaryRepository -> do
+    TIO.appendFile (temporaryRepository </> "packages/demo/main.py") "\n# staged change\n"
+    runGitFixtureCommand ["-C", temporaryRepository, "add", "--", "packages/demo/main.py"]
+  assertUnsafeRemove "untracked-remove-package" $ \temporaryRepository -> do
+    createDirectoryIfMissing True (temporaryRepository </> "packages/demo/prm")
+    TIO.writeFile (temporaryRepository </> "packages/demo/prm/local") "local"
+  assertUnsafeRemove "ignored-remove-package" $ \temporaryRepository ->
+    TIO.writeFile (temporaryRepository </> "packages/demo/cache.bin") "ignored"
+assertUnsafeRemove :: String -> (FilePath -> IO ()) -> IO ()
+assertUnsafeRemove fixtureName preparePackage =
+  withGeneratedPythonPackageRepository fixtureName $ \temporaryRepository -> do
+    preparePackage temporaryRepository
+    (removeExit, removeStdout, removeStderr) <- runEndToEndCommandIn temporaryRepository ["rm", "demo"]
+    assertEqual "Removing an unsafe package fails." (ExitFailure 1) removeExit
+    assertEqual "A refused removal leaves stdout empty." "" removeStdout
+    assertBool "The refusal explains that the target is not clean." ("package or check is not clean" `isInfixOf` removeStderr)
+    packageExists <- doesDirectoryExist (temporaryRepository </> "packages/demo")
+    assertBool "A refused removal leaves the package intact." packageExists
+rootGitignoreDriftEndToEndTest :: IO ()
+rootGitignoreDriftEndToEndTest =
+  withGeneratedPythonPackageRepository "root-gitignore-drift-end-to-end" $ \temporaryRepository -> do
+    TIO.appendFile (temporaryRepository </> ".gitignore") "# drift\n"
+    (checkExit, checkStdout, checkStderr) <- runEndToEndCommandIn temporaryRepository ["check"]
+    assertEqual "A changed root whitelist fails the repository check." (ExitFailure 1) checkExit
+    assertEqual "A whitelist failure leaves stdout empty." "" checkStdout
+    assertBool
+      "The check identifies the root whitelist mismatch."
+      (".gitignore: does not match the canonical root whitelist" `isInfixOf` checkStderr)
 allPackageKindsEndToEndTest :: IO ()
 allPackageKindsEndToEndTest =
   withEmptyCanonicalRepository "all-package-kinds-end-to-end" $ \temporaryRepository -> do
@@ -2781,10 +3023,10 @@ statusEndToEndTest =
       )
       statusStdout
     assertEqual "A successful JSON status leaves stderr empty." "" statusStderr
-    (defaultExit, defaultStdout, defaultStderr) <- runEndToEndCommandIn temporaryRepository []
-    assertEqual "The default command succeeds for the generated repository." ExitSuccess defaultExit
-    assertEqual "The default command produces JSON status." statusStdout defaultStdout
-    assertEqual "The successful default command leaves stderr empty." "" defaultStderr
+    (emptyExit, emptyStdout, emptyStderr) <- runEndToEndCommandIn temporaryRepository []
+    assertEqual "An omitted subcommand uses Git's usage exit status." usageExitCode emptyExit
+    assertEqual "An omitted subcommand leaves stdout empty." "" emptyStdout
+    assertEqual "An omitted subcommand prints the main usage to stderr." mainUsageText emptyStderr
 haskellStatusEndToEndTest :: IO ()
 haskellStatusEndToEndTest =
   withGeneratedHaskellPackageRepository "haskell-status-end-to-end" $ \temporaryRepository -> do
@@ -2937,41 +3179,6 @@ withTemporaryPackageRepository tempDirName action = do
   removeFile temporaryPath
   createDirectoryIfMissing True temporaryPath
   action temporaryPath `finally` removePathForcibly temporaryPath
-pythonGitignoreSource :: T.Text
-pythonGitignoreSource =
-  T.unlines
-    [ "__pycache__/",
-      ".mypy_cache/",
-      ".ruff_cache/",
-      "coverage/",
-      "tmp/"
-    ]
-pythonLaTeXGitignoreSource :: T.Text
-pythonLaTeXGitignoreSource = T.unlines ["tmp/"]
-rustGitignoreSource :: T.Text
-rustGitignoreSource =
-  T.unlines
-    [ "coverage/",
-      "target/"
-    ]
-haskellGitignoreSource :: T.Text
-haskellGitignoreSource =
-  T.unlines
-    [ "coverage/",
-      ".direnv/",
-      "tmp/"
-    ]
-htmlGitignoreSource :: T.Text
-htmlGitignoreSource = T.unlines [".direnv/"]
-cGitignoreSource :: T.Text
-cGitignoreSource = T.unlines ["*.o"]
-latexGitignoreSource :: T.Text
-latexGitignoreSource =
-  T.unlines
-    [ "*.aux",
-      "*.log",
-      "*.pdf"
-    ]
 pythonMainSource :: T.Text
 pythonMainSource =
   T.unlines
