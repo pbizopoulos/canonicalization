@@ -265,14 +265,18 @@ data Command
 type CommandParseResult :: Type
 data CommandParseResult
   = ParsedCommand Command
-  | MainHelp
+  | Help (Maybe String)
+  | Version
+  | Completion String
   | InvalidCommand ExitCode (Maybe String)
 main :: IO ()
 main = getArgs >>= runCli
 runCli :: [String] -> IO ()
 runCli commandLineArguments =
   case parseCommand commandLineArguments of
-    MainHelp -> printMainHelpAndExit
+    Help maybeCommand -> printHelpAndExit maybeCommand
+    Version -> putStrLn "git canonicalization 0.0.0" >> exitSuccess
+    Completion shell -> printCompletionAndExit shell
     InvalidCommand exitCode maybeCommand ->
       hPutStr stderr (usageTextForCommand maybeCommand) >> exitWith exitCode
     ParsedCommand CheckCommand -> withDetectedRepositoryProfile $ \repositoryRoot -> \case
@@ -316,13 +320,19 @@ parseCommand :: [String] -> CommandParseResult
 parseCommand commandLineArguments =
   case commandLineArguments of
     [] -> InvalidCommand usageExitCode Nothing
-    [argument] | argument `elem` ["-h", "--help"] -> MainHelp
-    [_, argument] | argument `elem` ["-h", "--help"] -> InvalidCommand (ExitFailure 1) Nothing
+    [argument] | argument `elem` ["-h", "--help"] -> Help Nothing
+    ["help"] -> Help Nothing
+    ["help", command] | command `elem` commandNames -> Help (Just command)
+    [command, argument] | command `elem` commandNames && argument `elem` ["-h", "--help"] -> Help (Just command)
+    [argument] | argument `elem` ["-v", "--version"] -> Version
+    ["completion", shell] | shell `elem` ["bash", "zsh", "fish"] -> Completion shell
+    "completion" : _ -> InvalidCommand usageExitCode (Just "completion")
     ["check"] -> ParsedCommand CheckCommand
     ["check", "--fix"] -> ParsedCommand CheckFixCommand
     "check" : _ -> InvalidCommand usageExitCode (Just "check")
     ["status"] -> ParsedCommand StatusCommand
-    ["add", repositoryUrl] -> ParsedCommand (AddRepositoryCommand repositoryUrl)
+    ["add", repositoryUrl] | hasSupportedRepositoryUrlPrefix repositoryUrl -> ParsedCommand (AddRepositoryCommand repositoryUrl)
+    ["add", _] -> InvalidCommand usageExitCode (Just "add")
     ["remove", packageName] -> ParsedCommand (RemovePackageCommand packageName)
     "remove" : _ -> InvalidCommand usageExitCode (Just "remove")
     _ ->
@@ -330,9 +340,12 @@ parseCommand commandLineArguments =
         Just (packageKindName, packageName, packageDescription) ->
           ParsedCommand (AddPackageCommand packageKindName packageName packageDescription)
         Nothing -> InvalidCommand usageExitCode (listToMaybe commandLineArguments)
-printMainHelpAndExit :: IO a
-printMainHelpAndExit = do
-  putStr mainHelpText
+  where
+    commandNames :: [String]
+    commandNames = ["add", "remove", "check", "status", "completion"]
+printHelpAndExit :: Maybe String -> IO a
+printHelpAndExit maybeCommand = do
+  putStr (maybe mainHelpText (usageTextForCommand . Just) maybeCommand)
   exitSuccess
 usageExitCode :: ExitCode
 usageExitCode = ExitFailure 129
@@ -343,7 +356,9 @@ mainUsageText =
       "   or: git canonicalization add <url>",
       "   or: git canonicalization add <package-type> <package-name> [<description>...]",
       "   or: git canonicalization remove <package-name>",
-      "   or: git canonicalization check [--fix]"
+      "   or: git canonicalization check [--fix]",
+      "   or: git canonicalization completion <bash|zsh|fish>",
+      "   or: git canonicalization --version"
     ]
 mainHelpText :: String
 mainHelpText =
@@ -352,6 +367,7 @@ mainHelpText =
       "",
       "Manage canonical home and Nix flake repositories.",
       "Use git -C <location> to select a repository.",
+      "Repository URLs are always added to the home profile at $HOME.",
       "",
       "add <url>",
       "    Add a repository resource to the home profile at $HOME.",
@@ -364,10 +380,13 @@ mainHelpText =
       "",
       "check",
       "    Check that the repository follows the canonical conventions.",
-      "    Use --fix to regenerate the root .gitignore before checking.",
+      "    Use --fix to repair managed files and canonical home submodule paths before checking.",
       "",
       "status",
       "    Show the detected profile and managed resources as JSON.",
+      "",
+      "completion <bash|zsh|fish>",
+      "    Print a shell completion script.",
       ""
     ]
 usageTextForCommand :: Maybe String -> String
@@ -377,8 +396,10 @@ usageTextForCommand = \case
       [ "usage: git canonicalization add <url>",
         "   or: git canonicalization add <package-type> <package-name> [<description>...]",
         "",
-        "Add a package and its check.",
-        "Generated files are staged with git add.",
+        "Add a repository URL to the home profile, or add a package and its check to a flake profile.",
+        "Supported package types: " ++ intercalate ", " (map fst supportedAddPackageKinds) ++ ".",
+        "Package descriptions beginning with '-' must follow an explicit -- separator.",
+        "Generated files are staged with Git.",
         ""
       ]
   Just "status" ->
@@ -393,7 +414,7 @@ usageTextForCommand = \case
       [ "usage: git canonicalization remove <package-name>",
         "",
         "Remove a clean package and its check.",
-        "Generated changes are staged with git add.",
+        "Package removals and the updated root .gitignore are staged with Git.",
         ""
       ]
   Just "check" ->
@@ -401,16 +422,61 @@ usageTextForCommand = \case
       [ "usage: git canonicalization check [--fix]",
         "",
         "Check the nearest Git repository. Use 'git -C <location>' to select it.",
-        "With --fix, regenerate the root .gitignore before checking.",
+        "With --fix, repair the root .gitignore and canonical home submodule paths before checking.",
+        ""
+      ]
+  Just "completion" ->
+    unlines
+      [ "usage: git canonicalization completion <bash|zsh|fish>",
+        "",
+        "Print a shell completion script to stdout.",
         ""
       ]
   _ -> mainUsageText
 parseAddPackageArguments :: [String] -> Maybe (String, FilePath, Maybe String)
 parseAddPackageArguments ("add" : packageKindName : packageName : remainingArguments) = do
-  guard (not (any ("--" `isPrefixOf`) remainingArguments))
-  let packageDescription = unwords . NE.toList <$> NE.nonEmpty remainingArguments
+  descriptionArguments <- case remainingArguments of
+    "--" : arguments -> Just arguments
+    arguments -> guard (not (any ("-" `isPrefixOf`) arguments)) >> Just arguments
+  let packageDescription = unwords . NE.toList <$> NE.nonEmpty descriptionArguments
   pure (packageKindName, packageName, packageDescription)
 parseAddPackageArguments _ = Nothing
+hasSupportedRepositoryUrlPrefix :: String -> Bool
+hasSupportedRepositoryUrlPrefix repositoryUrl =
+  any (`isPrefixOf` repositoryUrl) ["https://", "ssh://git@", "git+ssh://git@", "git@"]
+printCompletionAndExit :: String -> IO a
+printCompletionAndExit shell = do
+  putStr $ case shell of
+    "bash" -> bashCompletion
+    "zsh" -> zshCompletion
+    "fish" -> fishCompletion
+    _ -> ""
+  exitSuccess
+bashCompletion :: String
+bashCompletion =
+  unlines
+    [ "_git_canonicalization() {",
+      "  local cur prev",
+      "  COMPREPLY=()",
+      "  cur=${COMP_WORDS[COMP_CWORD]}",
+      "  prev=${COMP_WORDS[COMP_CWORD-1]}",
+      "  if [[ $COMP_CWORD -eq 1 ]]; then COMPREPLY=( $(compgen -W 'add remove check status completion' -- \"$cur\") ); fi",
+      "  if [[ $prev == completion ]]; then COMPREPLY=( $(compgen -W 'bash zsh fish' -- \"$cur\") ); fi",
+      "}",
+      "complete -F _git_canonicalization git-canonicalization"
+    ]
+zshCompletion :: String
+zshCompletion =
+  unlines
+    [ "#compdef git-canonicalization",
+      "_arguments '1:command:(add remove check status completion)' '2:argument:(bash zsh fish)'"
+    ]
+fishCompletion :: String
+fishCompletion =
+  unlines
+    [ "complete -c git-canonicalization -f -n '__fish_use_subcommand' -a 'add remove check status completion'",
+      "complete -c git-canonicalization -f -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'"
+    ]
 type RepositoryProfile :: Type
 data RepositoryProfile = HomeProfile | FlakeProfile deriving stock (Eq, Show)
 withDetectedRepositoryProfile :: (FilePath -> RepositoryProfile -> IO a) -> IO a
@@ -1044,12 +1110,29 @@ resolveRepositoryCheckOutputPaths resultCheckNames = do
             "in",
             "builtins.concatStringsSep \"\\n\" (map (checkName: \"${checkName}\\t${checks.${checkName}.outPath}\") checkNames)"
           ]
-  commandResult <- try (readProcessWithExitCode "nix" ["eval", "--raw", "--impure", "--expr", nixExpression] "")
-  pure $
-    case commandResult of
-      Right (ExitSuccess, outputPathsText, _) -> parseRepositoryCheckOutputPaths resultCheckNames (T.pack outputPathsText)
-      Right _ -> Nothing
-      Left (_ :: IOException) -> Nothing
+  commandResult <-
+    try
+      ( readProcessWithExitCode
+          "nix"
+          ["eval", "--extra-experimental-features", "nix-command flakes", "--raw", "--impure", "--expr", nixExpression]
+          ""
+      )
+  case commandResult of
+    Right (ExitSuccess, outputPathsText, _) ->
+      case parseRepositoryCheckOutputPaths resultCheckNames (T.pack outputPathsText) of
+        Just outputPaths -> pure (Just outputPaths)
+        Nothing -> hPutStrLn stderr "warning: Nix returned malformed check output paths; test measurements are unavailable" >> pure Nothing
+    Right (_, _, nixStderr) -> do
+      hPutStrLn stderr ("warning: could not evaluate Nix check output paths; test measurements are unavailable" ++ renderDiagnosticSuffix nixStderr)
+      pure Nothing
+    Left (nixException :: IOException) -> do
+      hPutStrLn stderr ("warning: could not evaluate Nix check output paths; test measurements are unavailable: " ++ show nixException)
+      pure Nothing
+  where
+    renderDiagnosticSuffix diagnostic =
+      case unwords (words diagnostic) of
+        "" -> ""
+        message -> ": " ++ message
 localGitFlakeReference :: FilePath -> String
 localGitFlakeReference repositoryRoot = "git+file://" ++ repositoryRoot
 parseRepositoryCheckOutputPaths :: [FilePath] -> T.Text -> Maybe (Map.Map FilePath FilePath)
@@ -2910,6 +2993,7 @@ hUnitPackageTests =
       TestLabel "Reports concise Nix template parameter differences." (TestCase nixTemplateParameterDifferenceTest),
       TestLabel "Accepts python_template without inputs or shellHook." (TestCase pythonTemplateOptionalInputsAndShellHookTest),
       TestLabel "Documents help and invokes it consistently." (TestCase commandLineHelpEndToEndTest),
+      TestLabel "Disambiguates repository URLs and package additions." (TestCase addCommandParsingTest),
       TestLabel "Rejects unknown commands with usage on stderr." (TestCase invalidCommandEndToEndTest),
       TestLabel "Parses and validates canonical home repository resources." (TestCase homeRepositoryParsingTest),
       TestLabel "Detects, checks, and summarizes an empty home profile." (TestCase homeProfileEndToEndTest),
@@ -3285,9 +3369,31 @@ commandLineHelpEndToEndTest =
       )
     assertEqual "The top-level help command leaves stderr empty." "" helpStderr
     (commandHelpExit, commandHelpStdout, commandHelpStderr) <- runEndToEndCommandIn temporaryDirectory ["check", "--help"]
-    assertEqual "A command-specific help request exits unsuccessfully." (ExitFailure 1) commandHelpExit
-    assertEqual "A command-specific help request leaves stdout empty." "" commandHelpStdout
-    assertEqual "A command-specific help request prints the main usage to stderr." mainUsageText commandHelpStderr
+    assertEqual "A command-specific help request succeeds." ExitSuccess commandHelpExit
+    assertEqual "A command-specific help request prints specific help to stdout." (usageTextForCommand (Just "check")) commandHelpStdout
+    assertEqual "A command-specific help request leaves stderr empty." "" commandHelpStderr
+    (versionExit, versionStdout, versionStderr) <- runEndToEndCommandIn temporaryDirectory ["--version"]
+    assertEqual "The version request succeeds." ExitSuccess versionExit
+    assertEqual "The version request identifies the command and version." "git canonicalization 0.0.0\n" versionStdout
+    assertEqual "The version request leaves stderr empty." "" versionStderr
+    (completionExit, completionStdout, completionStderr) <- runEndToEndCommandIn temporaryDirectory ["completion", "bash"]
+    assertEqual "Bash completion generation succeeds." ExitSuccess completionExit
+    assertBool "Bash completion targets the standalone executable." ("complete -F _git_canonicalization git-canonicalization" `isInfixOf` completionStdout)
+    assertEqual "Completion generation leaves stderr empty." "" completionStderr
+addCommandParsingTest :: IO ()
+addCommandParsingTest = do
+  assertBool "A supported URL prefix selects home repository addition." $
+    case parseCommand ["add", "https://github.com/owner/demo.git"] of
+      ParsedCommand (AddRepositoryCommand "https://github.com/owner/demo.git") -> True
+      _ -> False
+  assertBool "A lone package type is a usage error rather than a repository URL." $
+    case parseCommand ["add", "python"] of
+      InvalidCommand exitCode (Just "add") -> exitCode == usageExitCode
+      _ -> False
+  assertBool "The option terminator permits a description beginning with a dash." $
+    case parseCommand ["add", "python", "demo", "--", "--documented", "behavior"] of
+      ParsedCommand (AddPackageCommand "python" "demo" (Just "--documented behavior")) -> True
+      _ -> False
 invalidCommandEndToEndTest :: IO ()
 invalidCommandEndToEndTest =
   withTemporaryPackageRepository "invalid-command" $ \temporaryDirectory -> do
@@ -3558,7 +3664,7 @@ statusEndToEndTest =
           [RepositorySummary repositoryPath (Just repositoryReadme) [expectedGeneratedPythonPackageSummary]]
       )
       statusStdout
-    assertEqual "A successful JSON status leaves stderr empty." "" statusStderr
+    assertStatusMeasurementDiagnostics statusStderr
     (emptyExit, emptyStdout, emptyStderr) <- runEndToEndCommandIn temporaryRepository []
     assertEqual "An omitted subcommand uses Git's usage exit status." usageExitCode emptyExit
     assertEqual "An omitted subcommand leaves stdout empty." "" emptyStdout
@@ -3575,7 +3681,12 @@ haskellStatusEndToEndTest =
           [RepositorySummary repositoryPath Nothing [expectedGeneratedHaskellPackageSummary]]
       )
       statusStdout
-    assertEqual "A successful Haskell status leaves stderr empty." "" statusStderr
+    assertStatusMeasurementDiagnostics statusStderr
+assertStatusMeasurementDiagnostics :: String -> IO ()
+assertStatusMeasurementDiagnostics diagnostics =
+  assertBool
+    "Status is quiet when measurements resolve and warns when measurement discovery is unavailable."
+    (null diagnostics || "warning: could not evaluate Nix check output paths; test measurements are unavailable" `isPrefixOf` diagnostics)
 unlabeledHaskellPackageCheckEndToEndTest :: IO ()
 unlabeledHaskellPackageCheckEndToEndTest =
   withGeneratedHaskellPackageRepository "unlabeled-haskell-check-end-to-end" $ \temporaryRepository -> do
