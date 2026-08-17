@@ -6,6 +6,7 @@ Home and repository root `.gitignore` whitelists constrain their Git-visible dir
 
 OS: NixOS with a temporary root filesystem and explicitly preserved state.
 Git: `git canonicalization` detects either a home or flake repository layout and provides common `check` and `status` operations.
+Initialization: `git canonicalization init <local-path>` initializes `$HOME` with the home layout or any other existing directory with the minimal canonical flake layout.
 Home repositories: `git canonicalization add <url>` works from any directory and puts Git submodules under `$HOME/<host>/<repository-path>`.
 Flake repositories: `git canonicalization add <type> <name>` targets the selected repository, follows a restricted subset of the numtide/blueprint layout, and maintains its root `.gitignore` whitelist.
 README: explains the repository's intent.

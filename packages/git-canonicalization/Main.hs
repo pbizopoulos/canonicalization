@@ -11,7 +11,7 @@
 module Main (main, runPackageTests, runPackageTestsWithTimings) where
 import Control.Applicative ((<|>))
 import Control.Exception (IOException, finally, try)
-import Control.Monad (filterM, forM, forM_, guard, when)
+import Control.Monad (filterM, forM, forM_, guard, unless, when)
 import Data.Char (isAlphaNum, isAsciiLower, isControl, isDigit, isLower, isSpace, isUpper, ord, toLower, toUpper)
 import Data.Either (fromRight, lefts, rights)
 import Data.Fix (Fix (Fix))
@@ -21,7 +21,7 @@ import Data.List (find, intercalate, isInfixOf, isPrefixOf, isSuffixOf, mapAccum
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, fromMaybe, isNothing, listToMaybe, mapMaybe, maybeToList)
+import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing, listToMaybe, mapMaybe, maybeToList)
 import Data.Ord (comparing)
 import Data.Set qualified as Set
 import Data.Text qualified as T
@@ -44,14 +44,14 @@ import Numeric (showFFloat, showHex)
 import Prettyprinter (defaultLayoutOptions, layoutPretty)
 import Prettyprinter.Render.Text (renderStrict)
 import System.Directory (canonicalizePath, createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, doesPathExist, findExecutable, getCurrentDirectory, getTemporaryDirectory, listDirectory, pathIsSymbolicLink, removeFile, removePathForcibly, withCurrentDirectory)
-import System.Environment (getArgs, lookupEnv)
+import System.Environment (getArgs, getEnvironment, lookupEnv)
 import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitFailure, exitSuccess, exitWith)
 import System.FilePath (isAbsolute, (<.>), (</>))
 import System.FilePath.Posix (makeRelative, splitDirectories, takeBaseName, takeDirectory, takeFileName)
 import System.IO (hClose, hPutStr, hPutStrLn, openTempFile, stderr)
 import System.Posix.Files qualified as Posix
 import System.Posix.Process (executeFile)
-import System.Process (readProcessWithExitCode)
+import System.Process (CreateProcess (env), proc, readCreateProcessWithExitCode, readProcessWithExitCode)
 import Test.HUnit (Counts (errors, failures), Test (TestCase, TestLabel, TestList), assertBool, assertEqual, assertFailure, runTestTT)
 import Text.Read (readMaybe)
 import Text.Regex.TDFA ((=~))
@@ -259,6 +259,7 @@ data Command
   = CheckCommand
   | CheckFixCommand
   | StatusCommand
+  | InitCommand FilePath
   | AddRepositoryCommand String
   | AddPackageCommand String FilePath (Maybe String)
   | RemovePackageCommand FilePath
@@ -288,6 +289,7 @@ runCli commandLineArguments =
     ParsedCommand StatusCommand -> withDetectedRepositoryProfile $ \repositoryRoot -> \case
       HomeProfile -> renderHomeProfileStatus repositoryRoot
       FlakeProfile -> summarizeRepositoryLocation renderRepositorySummariesJSON repositoryRoot
+    ParsedCommand (InitCommand localPath) -> initializeCanonicalization localPath
     ParsedCommand (AddRepositoryCommand repositoryUrl) ->
       homeProfileRoot >>= \repositoryRoot -> addHomeRepository repositoryRoot repositoryUrl
     ParsedCommand (AddPackageCommand packageKindName packageName packageDescription) ->
@@ -326,6 +328,8 @@ parseCommand commandLineArguments =
     ["check", "--fix"] -> ParsedCommand CheckFixCommand
     "check" : _ -> InvalidCommand usageExitCode (Just "check")
     ["status"] -> ParsedCommand StatusCommand
+    ["init", localPath] -> ParsedCommand (InitCommand localPath)
+    "init" : _ -> InvalidCommand usageExitCode (Just "init")
     ["add", repositoryUrl] | hasSupportedRepositoryUrlPrefix repositoryUrl -> ParsedCommand (AddRepositoryCommand repositoryUrl)
     ["add", _] -> InvalidCommand usageExitCode (Just "add")
     ["rm", packageName] -> ParsedCommand (RemovePackageCommand packageName)
@@ -337,7 +341,7 @@ parseCommand commandLineArguments =
         Nothing -> InvalidCommand usageExitCode (listToMaybe commandLineArguments)
   where
     commandNames :: [String]
-    commandNames = ["add", "rm", "check", "status"]
+    commandNames = ["add", "rm", "check", "status", "init"]
 printHelpAndExit :: Maybe String -> IO a
 printHelpAndExit maybeCommand = do
   putStr (maybe mainHelpText (usageTextForCommand . Just) maybeCommand)
@@ -351,11 +355,13 @@ commandLineError = \case
   "rm" : _ -> "error: invalid arguments for 'git canonicalization rm'"
   "check" : _ -> "error: invalid arguments for 'git canonicalization check'"
   "status" : _ -> "error: invalid arguments for 'git canonicalization status'"
+  "init" : _ -> "error: invalid arguments for 'git canonicalization init'"
   command : _ -> "error: unknown command '" ++ command ++ "'"
 mainUsageText :: String
 mainUsageText =
   unlines
-    [ "usage: git canonicalization status",
+    [ "usage: git canonicalization init <local-path>",
+      "   or: git canonicalization status",
       "   or: git canonicalization add <url>",
       "   or: git canonicalization add <package-type> <package-name> [<description>...]",
       "   or: git canonicalization rm <package-name>",
@@ -370,6 +376,9 @@ mainHelpText =
       "Run from a work tree, or use 'git -C <directory> canonicalization ...'.",
       "",
       "Commands:",
+      "  init <local-path>",
+      "      Initialize $HOME as a home repository, or another path as a flake repository.",
+      "",
       "  add <url>",
       "      Add a Git submodule below $HOME using its host and repository path.",
       "",
@@ -392,6 +401,15 @@ mainHelpText =
     ]
 usageTextForCommand :: Maybe String -> String
 usageTextForCommand = \case
+  Just "init" ->
+    unlines
+      [ "usage: git canonicalization init <local-path>",
+        "",
+        "Initialize a canonical repository at <local-path>.",
+        "An exact $HOME path selects the home layout; every other path selects the flake layout.",
+        "Existing files are preserved and generated files are left unstaged.",
+        ""
+      ]
   Just "add" ->
     unlines
       [ "usage: git canonicalization add <url>",
@@ -455,7 +473,7 @@ withRequiredProfile requiredProfile resourceKind action =
 detectRepositoryProfile :: FilePath -> IO RepositoryProfile
 detectRepositoryProfile = detectRepositoryProfileWithDefault Nothing
 detectRepositoryProfileForFix :: FilePath -> IO RepositoryProfile
-detectRepositoryProfileForFix = detectRepositoryProfileWithDefault (Just HomeProfile)
+detectRepositoryProfileForFix = detectRepositoryProfile
 detectRepositoryProfileWithDefault :: Maybe RepositoryProfile -> FilePath -> IO RepositoryProfile
 detectRepositoryProfileWithDefault emptyDefault repositoryRoot = withCurrentDirectory repositoryRoot $ do
   flakeMarkerExists <- or <$> mapM doesPathExist ["flake.nix", "flake.lock", "packages", "checks", "hosts"]
@@ -468,7 +486,7 @@ detectRepositoryProfileWithDefault emptyDefault repositoryRoot = withCurrentDire
     (False, False) ->
       case emptyDefault of
         Just profile -> pure profile
-        Nothing -> hPutStrLn stderr "error: cannot determine the repository type; run 'git canonicalization check --fix' for a home repository or add flake markers" >> exitFailure
+        Nothing -> hPutStrLn stderr ("error: cannot determine the repository type; run 'git canonicalization init " ++ repositoryRoot ++ "'") >> exitFailure
     (True, True) -> hPutStrLn stderr "error: repository contains markers for both home and flake layouts" >> exitFailure
 renderRepositoryProfile :: RepositoryProfile -> String
 renderRepositoryProfile = \case
@@ -498,6 +516,156 @@ homeProfileRoot = do
   detectRepositoryProfile repositoryRoot >>= \case
     HomeProfile -> pure repositoryRoot
     FlakeProfile -> unsupportedResource "flake" "repository"
+minimalProjectFlakeSource :: T.Text
+minimalProjectFlakeSource =
+  T.unlines
+    [ "{",
+      "  inputs = {",
+      "    canonicalization.url = \"github:pbizopoulos/canonicalization\";",
+      "    nixpkgs.follows = \"canonicalization/nixpkgs\";",
+      "  };",
+      "  outputs =",
+      "    inputs:",
+      "    inputs.canonicalization.blueprint {",
+      "      inherit inputs;",
+      "    }",
+      "    // {",
+      "      inherit (inputs.canonicalization) formatter;",
+      "    };",
+      "}"
+    ]
+initializeCanonicalization :: FilePath -> IO ()
+initializeCanonicalization localPath = do
+  targetIsDirectory <- doesDirectoryExist localPath
+  unless targetIsDirectory $ do
+    hPutStrLn stderr ("error: initialization target is not an existing directory: " ++ localPath)
+    exitFailure
+  target <- canonicalizePath localPath
+  home <- homeDirectory
+  if target == home
+    then initializeHomeRepository target
+    else initializeProjectRepository home target
+initializeHomeRepository :: FilePath -> IO ()
+initializeHomeRepository repositoryRoot = do
+  flakeMarkerExists <- or <$> mapM doesPathExist [repositoryRoot </> "flake.nix", repositoryRoot </> "flake.lock", repositoryRoot </> "packages", repositoryRoot </> "checks", repositoryRoot </> "hosts"]
+  when flakeMarkerExists $ do
+    hPutStrLn stderr "error: cannot initialize the home layout because flake layout markers exist"
+    exitFailure
+  let gitignorePath = repositoryRoot </> ".gitignore"
+  existingGitignore <- readRegularTextFileIfExistsOrExit gitignorePath
+  case existingGitignore of
+    Just source
+      | not (homeGitignoreIsComplete source) -> do
+          hPutStrLn stderr ("error: " ++ gitignorePath ++ ": existing file is not the complete canonical home whitelist")
+          hPutStrLn stderr "hint: repair it with 'git canonicalization check --fix'"
+          exitFailure
+    _ -> pure ()
+  runGitOrExit ["init", "--quiet", repositoryRoot]
+  when (isNothing existingGitignore) (TIO.writeFile gitignorePath homeGitignoreSource)
+  checkHomeProfile repositoryRoot False
+initializeProjectRepository :: FilePath -> FilePath -> IO ()
+initializeProjectRepository home repositoryRoot = do
+  validateProjectLocation home repositoryRoot
+  gitmodulesExists <- doesPathExist (repositoryRoot </> ".gitmodules")
+  gitignoreSource <- readRegularTextFileIfExistsOrExit (repositoryRoot </> ".gitignore")
+  let hasHomeGitignoreMarker = maybe False (any (`elem` ["!.gitmodules", "!/.gitmodules"]) . T.lines) gitignoreSource
+  when (gitmodulesExists || hasHomeGitignoreMarker) $ do
+    hPutStrLn stderr "error: cannot initialize the flake layout because home layout markers exist"
+    exitFailure
+  let flakePath = repositoryRoot </> "flake.nix"
+      lockPath = repositoryRoot </> "flake.lock"
+  flakeExists <- regularFileExistsOrExit flakePath
+  lockExists <- regularFileExistsOrExit lockPath
+  when (lockExists && not flakeExists) $ do
+    hPutStrLn stderr ("error: " ++ lockPath ++ " exists but " ++ flakePath ++ " is missing")
+    exitFailure
+  runGitOrExit ["init", "--quiet", repositoryRoot]
+  expectedGitignore <- withCurrentDirectory repositoryRoot renderInitializedProjectGitignore
+  case gitignoreSource of
+    Just source
+      | source /= expectedGitignore -> do
+          hPutStrLn stderr "error: .gitignore: existing file is not the canonical root whitelist"
+          hPutStrLn stderr "hint: repair it with 'git canonicalization check --fix'"
+          exitFailure
+    _ -> pure ()
+  unless flakeExists (TIO.writeFile flakePath minimalProjectFlakeSource)
+  unless lockExists $
+    withCurrentDirectory repositoryRoot (runNixOrExit ["flake", "lock"])
+  when (isNothing gitignoreSource) (TIO.writeFile (repositoryRoot </> ".gitignore") expectedGitignore)
+  checkRepositoryLocation repositoryRoot
+renderInitializedProjectGitignore :: IO T.Text
+renderInitializedProjectGitignore = do
+  repositoryEntries <- collectStructurallyAllowedRepositoryEntriesWith []
+  pure (renderRootGitignore ("flake.nix" : "flake.lock" : concatMap whitelistPathsForRepositoryEntry repositoryEntries))
+readRegularTextFileIfExistsOrExit :: FilePath -> IO (Maybe T.Text)
+readRegularTextFileIfExistsOrExit path = do
+  exists <- doesPathExist path
+  if not exists
+    then pure Nothing
+    else do
+      status <- Posix.getSymbolicLinkStatus path
+      if Posix.isRegularFile status
+        then Just <$> TIO.readFile path
+        else hPutStrLn stderr ("error: " ++ path ++ ": existing path must be a regular file") >> exitFailure
+regularFileExistsOrExit :: FilePath -> IO Bool
+regularFileExistsOrExit path = isJust <$> readRegularTextFileIfExistsOrExit path
+runNixOrExit :: [String] -> IO ()
+runNixOrExit arguments = do
+  nixExecutable <- fromMaybe "nix" <$> lookupEnv "GIT_CANONICALIZATION_NIX"
+  (nixExit, nixStdout, nixStderr) <- readProcessWithExitCode nixExecutable arguments ""
+  when (nixExit /= ExitSuccess) $ do
+    putStr nixStdout
+    hPutStr stderr nixStderr
+    exitWith nixExit
+validateProjectLocation :: FilePath -> FilePath -> IO ()
+validateProjectLocation home repositoryRoot =
+  when (isStrictDescendantOf home repositoryRoot) $ do
+    ownsGitMetadata <- doesPathExist (repositoryRoot </> ".git")
+    when ownsGitMetadata $ do
+      maybeOrigin <- readGitOrigin repositoryRoot
+      forM_ maybeOrigin $ \origin ->
+        case canonicalHomeRepositoryPath origin of
+          Left originError -> hPutStrLn stderr ("error: origin: " ++ originError) >> exitFailure
+          Right expectedRelativePath -> do
+            let actualRelativePath = makeRelative home repositoryRoot
+                expectedPath = home </> expectedRelativePath
+            when (actualRelativePath /= expectedRelativePath) $ do
+              hPutStrLn stderr "error: project location does not match origin"
+              hPutStrLn stderr ("actual:   " ++ repositoryRoot)
+              hPutStrLn stderr ("expected: " ++ expectedPath)
+              hPutStrLn stderr ("hint: use 'git canonicalization add " ++ origin ++ "' from the home profile")
+              exitFailure
+            validateRegisteredHomeRepository home actualRelativePath expectedRelativePath
+isStrictDescendantOf :: FilePath -> FilePath -> Bool
+isStrictDescendantOf parent child =
+  let relativePath = makeRelative parent child
+   in relativePath /= "."
+        && not (isAbsolute relativePath)
+        && case splitDirectories relativePath of
+          ".." : _ -> False
+          _ -> True
+readGitOrigin :: FilePath -> IO (Maybe String)
+readGitOrigin repositoryRoot = do
+  (originExit, originStdout, originStderr) <- readProcessWithExitCode "git" ["-C", repositoryRoot, "config", "--get", "remote.origin.url"] ""
+  case originExit of
+    ExitSuccess -> pure (Just (T.unpack (T.strip (T.pack originStdout))))
+    ExitFailure 1 | null originStdout -> pure Nothing
+    _ -> do
+      hPutStr stderr originStderr
+      exitWith originExit
+validateRegisteredHomeRepository :: FilePath -> FilePath -> FilePath -> IO ()
+validateRegisteredHomeRepository home actualRelativePath originRelativePath =
+  readHomeRepositories home >>= \case
+    Left issues -> reportHomeCheckIssues issues
+    Right repositories ->
+      forM_ repositories $ \repository ->
+        case canonicalHomeRepositoryPath (homeRepositoryUrl repository) of
+          Right registeredRelativePath
+            | homeRepositoryPath repository == actualRelativePath || registeredRelativePath == originRelativePath ->
+                when (homeRepositoryPath repository /= actualRelativePath || registeredRelativePath /= originRelativePath) $ do
+                  hPutStrLn stderr "error: project path, origin, and home submodule registration do not agree"
+                  exitFailure
+          _ -> pure ()
 type HomeRepository :: Type
 data HomeRepository = HomeRepository
   { homeRepositoryName :: String,
@@ -2955,6 +3123,9 @@ hUnitPackageTests =
       TestLabel "Reports concise Nix template parameter differences." (TestCase nixTemplateParameterDifferenceTest),
       TestLabel "Accepts python_template without inputs or shellHook." (TestCase pythonTemplateOptionalInputsAndShellHookTest),
       TestLabel "Documents help and invokes it consistently." (TestCase commandLineHelpEndToEndTest),
+      TestLabel "Initializes home and project repositories without staging files." (TestCase initializationEndToEndTest),
+      TestLabel "Validates canonical project locations against origin." (TestCase initializationLocationEndToEndTest),
+      TestLabel "Preserves existing initialization files and rejects inconsistent state." (TestCase initializationExistingFilesEndToEndTest),
       TestLabel "Disambiguates repository URLs and package additions." (TestCase addCommandParsingTest),
       TestLabel "Rejects unknown commands with usage on stderr." (TestCase invalidCommandEndToEndTest),
       TestLabel "Parses and validates canonical home repository resources." (TestCase homeRepositoryParsingTest),
@@ -3323,6 +3494,7 @@ commandLineHelpEndToEndTest =
     assertBool
       "The top-level help command prints concise usage and commands to stdout."
       ( mainUsageText `isPrefixOf` helpStdout
+          && "\n  init <local-path>" `isInfixOf` helpStdout
           && "\n  add <package-type>" `isInfixOf` helpStdout
           && "\n  check [--fix]\n" `isInfixOf` helpStdout
           && "check [--fix]" `isInfixOf` helpStdout
@@ -3334,8 +3506,96 @@ commandLineHelpEndToEndTest =
     assertEqual "A command-specific help request succeeds." ExitSuccess commandHelpExit
     assertEqual "A command-specific help request prints specific help to stdout." (usageTextForCommand (Just "check")) commandHelpStdout
     assertEqual "A command-specific help request leaves stderr empty." "" commandHelpStderr
+    (initHelpExit, initHelpStdout, initHelpStderr) <- runEndToEndCommandIn temporaryDirectory ["init", "--help"]
+    assertEqual "Init help succeeds." ExitSuccess initHelpExit
+    assertEqual "Init help documents its path argument." (usageTextForCommand (Just "init")) initHelpStdout
+    assertEqual "Init help leaves stderr empty." "" initHelpStderr
+initializationEndToEndTest :: IO ()
+initializationEndToEndTest =
+  withTemporaryPackageRepository "initialization-home" $ \temporaryHome ->
+    withTemporaryPackageRepository "initialization-tools" $ \temporaryTools -> do
+      environment <- initializationTestEnvironment temporaryHome temporaryTools
+      (homeExit, homeStdout, homeStderr) <- runEndToEndCommandWithEnvironment "/tmp" environment ["init", temporaryHome]
+      assertEqual "Home initialization succeeds." ExitSuccess homeExit
+      assertEqual "Home initialization is quiet on stdout." "" homeStdout
+      assertEqual "Home initialization is quiet on stderr." "" homeStderr
+      homeGitignore <- TIO.readFile (temporaryHome </> ".gitignore")
+      assertEqual "Home initialization writes the canonical whitelist." homeGitignoreSource homeGitignore
+      (homeStatusExit, homeStatusStdout, _homeStatusStderr) <- readProcessWithExitCode "git" ["-C", temporaryHome, "status", "--porcelain=v1"] ""
+      assertEqual "The initialized home is a Git repository." ExitSuccess homeStatusExit
+      assertBool "Home initialization leaves its whitelist unstaged." ("?? .gitignore" `isInfixOf` homeStatusStdout)
+      let project = temporaryHome </> "github.com/owner/demo"
+      createDirectoryIfMissing True project
+      (projectExit, projectStdout, projectStderr) <- runEndToEndCommandWithEnvironment "/tmp" environment ["init", project]
+      assertEqual "Project initialization succeeds without origin." ExitSuccess projectExit
+      assertEqual "Project initialization is quiet on stdout." "" projectStdout
+      assertEqual "Project initialization is quiet on stderr." "" projectStderr
+      projectFlake <- TIO.readFile (project </> "flake.nix")
+      projectLock <- TIO.readFile (project </> "flake.lock")
+      projectGitignore <- TIO.readFile (project </> ".gitignore")
+      assertEqual "Project initialization writes the minimal Blueprint flake." minimalProjectFlakeSource projectFlake
+      assertEqual "The test Nix command writes a deterministic lock." "{}\n" projectLock
+      assertEqual "Project initialization writes the canonical root whitelist." "*\n!/.gitignore\n!/flake.lock\n!/flake.nix\n" projectGitignore
+      (projectStatusExit, projectStatusStdout, _projectStatusStderr) <- readProcessWithExitCode "git" ["-C", project, "status", "--porcelain=v1"] ""
+      assertEqual "The initialized project is a Git repository." ExitSuccess projectStatusExit
+      assertBool "Project initialization leaves all generated files unstaged." (all (`isInfixOf` projectStatusStdout) ["?? .gitignore", "?? flake.lock", "?? flake.nix"])
+      (repeatExit, repeatStdout, repeatStderr) <- runEndToEndCommandWithEnvironment "/tmp" environment ["init", project]
+      assertEqual "Repeated project initialization succeeds." ExitSuccess repeatExit
+      assertEqual "Repeated initialization remains quiet." "" (repeatStdout ++ repeatStderr)
+      repeatedFiles <- mapM TIO.readFile [project </> "flake.nix", project </> "flake.lock", project </> ".gitignore"]
+      assertEqual "Repeated initialization preserves generated files." [projectFlake, projectLock, projectGitignore] repeatedFiles
+initializationLocationEndToEndTest :: IO ()
+initializationLocationEndToEndTest =
+  withTemporaryPackageRepository "initialization-location-home" $ \temporaryHome ->
+    withTemporaryPackageRepository "initialization-location-tools" $ \temporaryTools -> do
+      environment <- initializationTestEnvironment temporaryHome temporaryTools
+      let canonicalProject = temporaryHome </> "github.com/owner/demo"
+      createDirectoryIfMissing True canonicalProject
+      initializeGitRepositoryFixture canonicalProject
+      runGitFixtureCommand ["-C", canonicalProject, "remote", "add", "origin", "git@github.com:owner/demo.git"]
+      (matchingExit, _, matchingStderr) <- runEndToEndCommandWithEnvironment "/tmp" environment ["init", canonicalProject]
+      assertEqual "A project at its origin-derived location initializes." ExitSuccess matchingExit
+      assertEqual "Matching location validation is quiet." "" matchingStderr
+      let mismatchedProject = temporaryHome </> "github.com/example/other"
+      createDirectoryIfMissing True mismatchedProject
+      initializeGitRepositoryFixture mismatchedProject
+      runGitFixtureCommand ["-C", mismatchedProject, "remote", "add", "origin", "git@github.com:owner/demo.git"]
+      (mismatchExit, mismatchStdout, mismatchStderr) <- runEndToEndCommandWithEnvironment "/tmp" environment ["init", mismatchedProject]
+      assertEqual "A project at a noncanonical origin-derived location is rejected." (ExitFailure 1) mismatchExit
+      assertEqual "Location rejection leaves stdout empty." "" mismatchStdout
+      assertBool "Location rejection reports actual and expected paths." ("project location does not match origin" `isInfixOf` mismatchStderr && canonicalProject `isInfixOf` mismatchStderr)
+      flakeWasCreated <- doesPathExist (mismatchedProject </> "flake.nix")
+      assertBool "Location validation happens before project files are written." (not flakeWasCreated)
+initializationExistingFilesEndToEndTest :: IO ()
+initializationExistingFilesEndToEndTest =
+  withTemporaryPackageRepository "initialization-existing-home" $ \temporaryHome ->
+    withTemporaryPackageRepository "initialization-existing-tools" $ \temporaryTools -> do
+      environment <- initializationTestEnvironment temporaryHome temporaryTools
+      let project = temporaryHome </> "project"
+      createDirectoryIfMissing True project
+      TIO.writeFile (project </> "flake.lock") "existing-lock\n"
+      (orphanLockExit, _, orphanLockStderr) <- runEndToEndCommandWithEnvironment "/tmp" environment ["init", project]
+      assertEqual "A lock without a flake is rejected." (ExitFailure 1) orphanLockExit
+      assertBool "The partial-state error identifies both files." ("flake.lock" `isInfixOf` orphanLockStderr && "flake.nix" `isInfixOf` orphanLockStderr)
+      removeFile (project </> "flake.lock")
+      let existingFlake :: T.Text
+          existingFlake = "{ outputs = _: {}; }\n"
+      TIO.writeFile (project </> "flake.nix") existingFlake
+      (existingExit, _, existingStderr) <- runEndToEndCommandWithEnvironment "/tmp" environment ["init", project]
+      assertEqual "Initialization completes an existing flake." ExitSuccess existingExit
+      assertEqual "Completing an existing flake is quiet." "" existingStderr
+      preservedFlake <- TIO.readFile (project </> "flake.nix")
+      assertEqual "An existing flake is preserved byte-for-byte." existingFlake preservedFlake
+      TIO.writeFile (project </> ".gitignore") "not canonical\n"
+      (whitelistExit, _, whitelistStderr) <- runEndToEndCommandWithEnvironment "/tmp" environment ["init", project]
+      assertEqual "A noncanonical existing whitelist is rejected." (ExitFailure 1) whitelistExit
+      assertBool "The whitelist error recommends the explicit repair command." ("check --fix" `isInfixOf` whitelistStderr)
 addCommandParsingTest :: IO ()
 addCommandParsingTest = do
+  assertBool "Init accepts exactly one local path." $
+    case parseCommand ["init", "project"] of
+      ParsedCommand (InitCommand "project") -> True
+      _ -> False
   assertBool "A supported URL prefix selects home repository addition." $
     case parseCommand ["add", "https://github.com/owner/demo.git"] of
       ParsedCommand (AddRepositoryCommand "https://github.com/owner/demo.git") -> True
@@ -3355,6 +3615,10 @@ invalidCommandEndToEndTest =
     assertEqual "An invalid command uses Git's usage exit status." usageExitCode invalidCommandExit
     assertEqual "An invalid command leaves stdout empty." "" invalidCommandStdout
     assertEqual "An invalid command prints an error and the main usage to stderr." ("error: unknown command 'unknown-command'\n" ++ mainUsageText) invalidCommandStderr
+    (missingInitPathExit, missingInitPathStdout, missingInitPathStderr) <- runEndToEndCommandIn temporaryDirectory ["init"]
+    assertEqual "Init without a path uses Git's usage exit status." usageExitCode missingInitPathExit
+    assertEqual "Invalid init leaves stdout empty." "" missingInitPathStdout
+    assertEqual "Invalid init prints command-specific usage." ("error: invalid arguments for 'git canonicalization init'\n" ++ usageTextForCommand (Just "init")) missingInitPathStderr
     (summaryExit, summaryStdout, summaryStderr) <- runEndToEndCommandIn temporaryDirectory ["summary"]
     assertEqual "The retired summary command uses Git's usage exit status." usageExitCode summaryExit
     assertEqual "The retired summary command leaves stdout empty." "" summaryStdout
@@ -3398,11 +3662,11 @@ homeRepositoryParsingTest = do
 homeProfileEndToEndTest :: IO ()
 homeProfileEndToEndTest =
   withTemporaryPackageRepository "home-profile-end-to-end" $ \temporaryDirectory -> do
-    initializeGitRepositoryFixture temporaryDirectory
-    (initialFixExit, initialFixStdout, initialFixStderr) <- runEndToEndCommandIn temporaryDirectory ["check", "--fix"]
-    assertEqual "Fixing an empty Git repository creates a home profile." ExitSuccess initialFixExit
-    assertEqual "Initial home fix emits no stdout." "" initialFixStdout
-    assertEqual "Initial home fix emits no stderr." "" initialFixStderr
+    environment <- environmentWithOverrides [("HOME", temporaryDirectory)]
+    (initialFixExit, initialFixStdout, initialFixStderr) <- runEndToEndCommandWithEnvironment temporaryDirectory environment ["init", temporaryDirectory]
+    assertEqual "Initializing an empty directory creates a home profile." ExitSuccess initialFixExit
+    assertEqual "Initial home initialization emits no stdout." "" initialFixStdout
+    assertEqual "Initial home initialization emits no stderr." "" initialFixStderr
     gitignoreSource <- TIO.readFile (temporaryDirectory </> ".gitignore")
     assertEqual "Initial home fix writes the canonical whitelist." "*\n!/.gitignore\n!/.gitmodules\n" gitignoreSource
     (checkExit, checkStdout, checkStderr) <- runEndToEndCommandIn temporaryDirectory ["check"]
@@ -3771,6 +4035,36 @@ runEndToEndCommandIn :: FilePath -> [String] -> IO (ExitCode, String, String)
 runEndToEndCommandIn workingDirectory arguments =
   withCurrentDirectory workingDirectory $
     readProcessWithExitCode "git-canonicalization" arguments ""
+runEndToEndCommandWithEnvironment :: FilePath -> [(String, String)] -> [String] -> IO (ExitCode, String, String)
+runEndToEndCommandWithEnvironment workingDirectory environment arguments =
+  withCurrentDirectory workingDirectory $
+    readCreateProcessWithExitCode (proc "git-canonicalization" arguments) {env = Just environment} ""
+initializationTestEnvironment :: FilePath -> FilePath -> IO [(String, String)]
+initializationTestEnvironment home toolsDirectory = do
+  let fakeNixPath = toolsDirectory </> "nix"
+  TIO.writeFile
+    fakeNixPath
+    ( T.unlines
+        [ "#!/bin/sh",
+          "if [ \"$1\" = flake ] && [ \"$2\" = lock ]; then",
+          "  printf '{}\\n' > flake.lock",
+          "  exit 0",
+          "fi",
+          "exit 2"
+        ]
+    )
+  Posix.setFileMode fakeNixPath 0o755
+  environment <- getEnvironment
+  let existingPath = fromMaybe "" (lookup "PATH" environment)
+  environmentWithOverrides
+    [ ("HOME", home),
+      ("PATH", toolsDirectory ++ ":" ++ existingPath),
+      ("GIT_CANONICALIZATION_NIX", fakeNixPath)
+    ]
+environmentWithOverrides :: [(String, String)] -> IO [(String, String)]
+environmentWithOverrides replacements = do
+  environment <- getEnvironment
+  pure (replacements ++ filter (\(name, _) -> name `notElem` map fst replacements) environment)
 initializeGitRepositoryFixture :: FilePath -> IO ()
 initializeGitRepositoryFixture repositoryPath =
   findExecutable "git" >>= \case
