@@ -44,14 +44,14 @@ import Numeric (showFFloat, showHex)
 import Prettyprinter (defaultLayoutOptions, layoutPretty)
 import Prettyprinter.Render.Text (renderStrict)
 import System.Directory (canonicalizePath, createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, doesPathExist, findExecutable, getCurrentDirectory, getTemporaryDirectory, listDirectory, pathIsSymbolicLink, removeFile, removePathForcibly, withCurrentDirectory)
-import System.Environment (getArgs)
+import System.Environment (getArgs, getEnvironment, lookupEnv)
 import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitFailure, exitSuccess, exitWith)
-import System.FilePath ((<.>), (</>))
+import System.FilePath (isAbsolute, (<.>), (</>))
 import System.FilePath.Posix (makeRelative, splitDirectories, takeBaseName, takeDirectory, takeFileName)
 import System.IO (hClose, hPutStr, hPutStrLn, openTempFile, stderr)
 import System.Posix.Files qualified as Posix
 import System.Posix.Process (executeFile)
-import System.Process (readProcessWithExitCode)
+import System.Process (CreateProcess (env), proc, readCreateProcessWithExitCode, readProcessWithExitCode)
 import Test.HUnit (Counts (errors, failures), Test (TestCase, TestLabel, TestList), assertBool, assertEqual, assertFailure, runTestTT)
 import Text.Read (readMaybe)
 import Text.Regex.TDFA ((=~))
@@ -276,7 +276,7 @@ runCli commandLineArguments =
     MainHelp -> printMainHelpAndExit
     InvalidCommand exitCode maybeCommand ->
       hPutStr stderr (usageTextForCommand maybeCommand) >> exitWith exitCode
-    ParsedCommand InitHomeCommand -> getCurrentDirectory >>= canonicalizePath >>= initializeHomeProfile
+    ParsedCommand InitHomeCommand -> homeDirectory >>= initializeHomeProfile
     ParsedCommand CheckCommand -> withDetectedRepositoryProfile $ \repositoryRoot -> \case
       HomeProfile -> checkHomeProfile repositoryRoot False
       FlakeProfile -> checkRepositoryLocation repositoryRoot
@@ -287,9 +287,7 @@ runCli commandLineArguments =
       HomeProfile -> renderHomeProfileStatus repositoryRoot
       FlakeProfile -> summarizeRepositoryLocation renderRepositorySummariesJSON repositoryRoot
     ParsedCommand (AddRepositoryCommand repositoryUrl) ->
-      withDetectedRepositoryProfile $ \repositoryRoot -> \case
-        HomeProfile -> addHomeRepository repositoryRoot repositoryUrl
-        FlakeProfile -> unsupportedResource "flake" "repository"
+      homeProfileRoot >>= \repositoryRoot -> addHomeRepository repositoryRoot repositoryUrl
     ParsedCommand (AddPackageCommand packageKindName packageName packageDescription) ->
       withRequiredProfile FlakeProfile "package" $
         runInGitRepositoryRoot "." $
@@ -324,9 +322,9 @@ parseCommand commandLineArguments =
     ["check", "--fix"] -> ParsedCommand CheckFixCommand
     "check" : _ -> InvalidCommand usageExitCode (Just "check")
     ["status"] -> ParsedCommand StatusCommand
-    ["init", "home"] -> ParsedCommand InitHomeCommand
-    ["add", "repository", repositoryUrl] -> ParsedCommand (AddRepositoryCommand repositoryUrl)
-    ["remove", "package", packageName] -> ParsedCommand (RemovePackageCommand packageName)
+    ["init"] -> ParsedCommand InitHomeCommand
+    ["add", repositoryUrl] -> ParsedCommand (AddRepositoryCommand repositoryUrl)
+    ["remove", packageName] -> ParsedCommand (RemovePackageCommand packageName)
     "remove" : _ -> InvalidCommand usageExitCode (Just "remove")
     _ ->
       case parseAddPackageArguments commandLineArguments of
@@ -342,11 +340,11 @@ usageExitCode = ExitFailure 129
 mainUsageText :: String
 mainUsageText =
   unlines
-    [ "usage: git canonicalization init home",
+    [ "usage: git canonicalization init",
       "   or: git canonicalization status",
-      "   or: git canonicalization add repository <url>",
-      "   or: git canonicalization add package <package-type> <package-name> [<description>...]",
-      "   or: git canonicalization remove package <package-name>",
+      "   or: git canonicalization add <url>",
+      "   or: git canonicalization add <package-type> <package-name> [<description>...]",
+      "   or: git canonicalization remove <package-name>",
       "   or: git canonicalization check [--fix]"
     ]
 mainHelpText :: String
@@ -357,16 +355,16 @@ mainHelpText =
       "Manage canonical home and Nix flake repositories.",
       "Use git -C <location> to select a repository.",
       "",
-      "init home",
-      "    Initialize the selected directory with the home profile.",
+      "init",
+      "    Initialize $HOME with the home profile.",
       "",
-      "add repository <url>",
-      "    Add a repository resource to a home profile.",
+      "add <url>",
+      "    Add a repository resource to the home profile at $HOME.",
       "",
-      "add package <package-type> <package-name> [<description>...]",
+      "add <package-type> <package-name> [<description>...]",
       "    Add a package resource and paired check to a flake profile.",
       "",
-      "remove package <package-name>",
+      "remove <package-name>",
       "    Remove a clean package and its paired check.",
       "",
       "check",
@@ -381,8 +379,8 @@ usageTextForCommand :: Maybe String -> String
 usageTextForCommand = \case
   Just "add" ->
     unlines
-      [ "usage: git canonicalization add repository <url>",
-        "   or: git canonicalization add package <package-type> <package-name> [<description>...]",
+      [ "usage: git canonicalization add <url>",
+        "   or: git canonicalization add <package-type> <package-name> [<description>...]",
         "",
         "Add a package and its check.",
         "Generated files are staged with git add.",
@@ -397,7 +395,7 @@ usageTextForCommand = \case
       ]
   Just "remove" ->
     unlines
-      [ "usage: git canonicalization remove package <package-name>",
+      [ "usage: git canonicalization remove <package-name>",
         "",
         "Remove a clean package and its check.",
         "Generated changes are staged with git add.",
@@ -413,7 +411,7 @@ usageTextForCommand = \case
       ]
   _ -> mainUsageText
 parseAddPackageArguments :: [String] -> Maybe (String, FilePath, Maybe String)
-parseAddPackageArguments ("add" : "package" : packageKindName : packageName : remainingArguments) = do
+parseAddPackageArguments ("add" : packageKindName : packageName : remainingArguments) = do
   guard (not (any ("--" `isPrefixOf`) remainingArguments))
   let packageDescription = unwords . NE.toList <$> NE.nonEmpty remainingArguments
   pure (packageKindName, packageName, packageDescription)
@@ -440,7 +438,7 @@ detectRepositoryProfile repositoryRoot = withCurrentDirectory repositoryRoot $ d
   case (homeMarkerExists, flakeMarkerExists) of
     (True, False) -> pure HomeProfile
     (False, True) -> pure FlakeProfile
-    (False, False) -> hPutStrLn stderr "error: cannot detect a canonicalization profile; run 'git canonicalization init home' or add flake markers" >> exitFailure
+    (False, False) -> hPutStrLn stderr "error: cannot detect a canonicalization profile; run 'git canonicalization init' for a home profile or add flake markers" >> exitFailure
     (True, True) -> hPutStrLn stderr "error: repository matches both home and flake profiles" >> exitFailure
 renderRepositoryProfile :: RepositoryProfile -> String
 renderRepositoryProfile = \case
@@ -451,6 +449,20 @@ unsupportedResource profile resourceKind =
   hPutStrLn stderr ("error: the " ++ profile ++ " profile does not support " ++ resourceKind ++ " resources") >> exitFailure
 homeGitignoreSource :: T.Text
 homeGitignoreSource = "*\n!.gitignore\n!.gitmodules\n"
+homeDirectory :: IO FilePath
+homeDirectory =
+  lookupEnv "HOME" >>= \case
+    Just directory
+      | isAbsolute directory -> canonicalizePath directory
+      | otherwise -> hPutStrLn stderr "error: HOME must be an absolute path" >> exitFailure
+    Nothing -> hPutStrLn stderr "error: HOME is not set" >> exitFailure
+homeProfileRoot :: IO FilePath
+homeProfileRoot = do
+  directory <- homeDirectory
+  repositoryRoot <- discoverGitRepositoryRoot directory
+  detectRepositoryProfile repositoryRoot >>= \case
+    HomeProfile -> pure repositoryRoot
+    FlakeProfile -> unsupportedResource "flake" "repository"
 type HomeRepository :: Type
 data HomeRepository = HomeRepository
   { homeRepositoryName :: String,
@@ -3247,10 +3259,10 @@ commandLineHelpEndToEndTest =
     assertBool
       "The top-level help command prints concise usage and commands to stdout."
       ( mainUsageText `isPrefixOf` helpStdout
-          && "\nadd package <package-type>" `isInfixOf` helpStdout
+          && "\nadd <package-type>" `isInfixOf` helpStdout
           && "\ncheck\n" `isInfixOf` helpStdout
           && "check [--fix]" `isInfixOf` helpStdout
-          && "\nremove package <package-name>" `isInfixOf` helpStdout
+          && "\nremove <package-name>" `isInfixOf` helpStdout
           && "\nstatus\n" `isInfixOf` helpStdout
       )
     assertEqual "The top-level help command leaves stderr empty." "" helpStderr
@@ -3300,24 +3312,25 @@ homeRepositoryParsingTest = do
 homeProfileEndToEndTest :: IO ()
 homeProfileEndToEndTest =
   withTemporaryPackageRepository "home-profile-end-to-end" $ \temporaryDirectory -> do
-    (initExit, initStdout, initStderr) <- runEndToEndCommandIn temporaryDirectory ["init", "home"]
-    assertEqual "Initializing a home profile succeeds." ExitSuccess initExit
-    assertEqual "Home initialization emits no stdout." "" initStdout
-    assertEqual "Home initialization emits no stderr." "" initStderr
-    gitignoreSource <- TIO.readFile (temporaryDirectory </> ".gitignore")
-    assertEqual "Home initialization writes the canonical whitelist." "*\n!.gitignore\n!.gitmodules\n" gitignoreSource
-    (checkExit, checkStdout, checkStderr) <- runEndToEndCommandIn temporaryDirectory ["check"]
-    assertEqual "An empty home profile passes its check." ExitSuccess checkExit
-    assertEqual "An empty home check emits no stdout." "" checkStdout
-    assertEqual "An empty home check emits no stderr." "" checkStderr
-    repositoryRoot <- canonicalizePath temporaryDirectory
-    (statusExit, statusStdout, statusStderr) <- runEndToEndCommandIn temporaryDirectory ["status"]
-    assertEqual "An empty home status succeeds." ExitSuccess statusExit
-    assertEqual
-      "An empty home status uses the common profile envelope."
-      (unlines ["{", "  \"profile\": \"home\",", "  \"root\": " ++ renderJSONString repositoryRoot ++ ",", "  \"resources\": []", "}"])
-      statusStdout
-    assertEqual "An empty home status emits no stderr." "" statusStderr
+    withTemporaryPackageRepository "outside-home-profile" $ \outsideDirectory -> do
+      (initExit, initStdout, initStderr) <- runEndToEndCommandWithHome outsideDirectory temporaryDirectory ["init"]
+      assertEqual "Initializing $HOME succeeds independently of the working directory." ExitSuccess initExit
+      assertEqual "Home initialization emits no stdout." "" initStdout
+      assertEqual "Home initialization emits no stderr." "" initStderr
+      gitignoreSource <- TIO.readFile (temporaryDirectory </> ".gitignore")
+      assertEqual "Home initialization writes the canonical whitelist." "*\n!.gitignore\n!.gitmodules\n" gitignoreSource
+      (checkExit, checkStdout, checkStderr) <- runEndToEndCommandIn temporaryDirectory ["check"]
+      assertEqual "An empty home profile passes its check." ExitSuccess checkExit
+      assertEqual "An empty home check emits no stdout." "" checkStdout
+      assertEqual "An empty home check emits no stderr." "" checkStderr
+      repositoryRoot <- canonicalizePath temporaryDirectory
+      (statusExit, statusStdout, statusStderr) <- runEndToEndCommandIn temporaryDirectory ["status"]
+      assertEqual "An empty home status succeeds." ExitSuccess statusExit
+      assertEqual
+        "An empty home status uses the common profile envelope."
+        (unlines ["{", "  \"profile\": \"home\",", "  \"root\": " ++ renderJSONString repositoryRoot ++ ",", "  \"resources\": []", "}"])
+        statusStdout
+      assertEqual "An empty home status emits no stderr." "" statusStderr
 addPackageEndToEndTest :: IO ()
 addPackageEndToEndTest =
   withTemporaryPackageRepository "add-package-end-to-end" $ \temporaryRepository -> do
@@ -3329,7 +3342,7 @@ addPackageEndToEndTest =
     (addExit, addStdout, addStderr) <-
       runEndToEndCommandIn
         nestedDirectory
-        ["add", "package", "python", "demo", "Demo package"]
+        ["add", "python", "demo", "Demo package"]
     assertEqual "Adding a package through the installed CLI succeeds." ExitSuccess addExit
     assertEqual "A successful add produces no stdout." "" addStdout
     assertEqual "A successful add leaves stderr empty." "" addStderr
@@ -3357,7 +3370,7 @@ addPackageEndToEndTest =
 removePackageEndToEndTest :: IO ()
 removePackageEndToEndTest =
   withGeneratedPythonPackageRepository "remove-package-end-to-end" $ \temporaryRepository -> do
-    (removeExit, removeStdout, removeStderr) <- runEndToEndCommandIn temporaryRepository ["remove", "package", "demo"]
+    (removeExit, removeStdout, removeStderr) <- runEndToEndCommandIn temporaryRepository ["remove", "demo"]
     assertEqual "Removing a clean package succeeds." ExitSuccess removeExit
     assertEqual "A successful removal leaves stdout empty." "" removeStdout
     assertEqual "A successful removal leaves stderr empty." "" removeStderr
@@ -3387,7 +3400,7 @@ assertUnsafeRemove :: String -> (FilePath -> IO ()) -> IO ()
 assertUnsafeRemove fixtureName preparePackage =
   withGeneratedPythonPackageRepository fixtureName $ \temporaryRepository -> do
     preparePackage temporaryRepository
-    (removeExit, removeStdout, removeStderr) <- runEndToEndCommandIn temporaryRepository ["remove", "package", "demo"]
+    (removeExit, removeStdout, removeStderr) <- runEndToEndCommandIn temporaryRepository ["remove", "demo"]
     assertEqual "Removing an unsafe package fails." (ExitFailure 1) removeExit
     assertEqual "A refused removal leaves stdout empty." "" removeStdout
     assertBool "The refusal explains that the target is not clean." ("package or check is not clean" `isInfixOf` removeStderr)
@@ -3466,7 +3479,7 @@ allPackageKindsEndToEndTest =
         (addExit, addStdout, addStderr) <-
           runEndToEndCommandIn
             temporaryRepository
-            ["add", "package", packageKindName, packageName, "E2E package"]
+            ["add", packageKindName, packageName, "E2E package"]
         assertEqual ("Scaffolding " ++ packageKindName ++ " succeeds.") ExitSuccess addExit
         assertEqual ("Scaffolding " ++ packageKindName ++ " leaves stdout empty.") "" addStdout
         assertEqual ("Scaffolding " ++ packageKindName ++ " leaves stderr empty.") "" addStderr
@@ -3492,7 +3505,7 @@ existingPackageCollisionEndToEndTest =
     (addExit, addStdout, addStderr) <-
       runEndToEndCommandIn
         temporaryRepository
-        ["add", "package", "haskell", "demo"]
+        ["add", "haskell", "demo"]
     assertEqual "Creating an existing package fails." (ExitFailure 1) addExit
     assertEqual "The collision produces no stdout." "" addStdout
     assertBool
@@ -3563,7 +3576,7 @@ unknownAddOptionEndToEndTest :: IO ()
 unknownAddOptionEndToEndTest =
   withEmptyCanonicalRepository "unknown-add-option-end-to-end" $ \temporaryRepository -> do
     (unknownOptionExit, unknownOptionStdout, unknownOptionStderr) <-
-      runEndToEndCommandIn temporaryRepository ["add", "package", "python", "demo", "--unknown"]
+      runEndToEndCommandIn temporaryRepository ["add", "python", "demo", "--unknown"]
     assertEqual "An unknown add option uses Git's usage exit status." usageExitCode unknownOptionExit
     assertEqual "An unknown add option leaves stdout empty." "" unknownOptionStdout
     assertBool "An unknown add option prints add usage to stderr." ("usage: git canonicalization add" `isPrefixOf` unknownOptionStderr)
@@ -3573,7 +3586,7 @@ invalidPackageNameEndToEndTest :: IO ()
 invalidPackageNameEndToEndTest =
   withEmptyCanonicalRepository "invalid-package-name-end-to-end" $ \temporaryRepository -> do
     (invalidNameExit, invalidNameStdout, invalidNameStderr) <-
-      runEndToEndCommandIn temporaryRepository ["add", "package", "python", "demo-python"]
+      runEndToEndCommandIn temporaryRepository ["add", "python", "demo-python"]
     assertEqual "An invalid package name fails." (ExitFailure 1) invalidNameExit
     assertEqual "An invalid package name leaves stdout empty." "" invalidNameStdout
     assertBool "An invalid package name reports its convention." ("must use snake_case" `isInfixOf` invalidNameStderr)
@@ -3583,7 +3596,7 @@ packageWithoutCheckEndToEndTest :: IO ()
 packageWithoutCheckEndToEndTest =
   withEmptyCanonicalRepository "package-without-check-end-to-end" $ \temporaryRepository -> do
     (addExit, addStdout, addStderr) <-
-      runEndToEndCommandIn temporaryRepository ["add", "package", "html", "demo"]
+      runEndToEndCommandIn temporaryRepository ["add", "html", "demo"]
     assertEqual "Adding a package type without a combined check succeeds." ExitSuccess addExit
     assertEqual "Adding the package leaves stdout empty." "" addStdout
     assertEqual "Adding the package leaves stderr empty." "" addStderr
@@ -3606,7 +3619,7 @@ withGeneratedPythonPackageRepository temporaryName action =
     (addExit, _addStdout, addStderr) <-
       runEndToEndCommandIn
         nestedDirectory
-        ["add", "package", "python", "demo", "Demo package"]
+        ["add", "python", "demo", "Demo package"]
     when (addExit /= ExitSuccess) $
       assertFailure ("Failed to generate the Python package fixture: " ++ addStderr)
     runGitFixtureCommand ["-C", temporaryRepository, "config", "user.name", "Canonicalization Tests"]
@@ -3621,7 +3634,7 @@ withGeneratedHaskellPackageRepository temporaryName action =
     (addExit, _addStdout, addStderr) <-
       runEndToEndCommandIn
         nestedDirectory
-        ["add", "package", "haskell", "demo", "Demo package"]
+        ["add", "haskell", "demo", "Demo package"]
     when (addExit /= ExitSuccess) $
       assertFailure ("Failed to generate the Haskell package fixture: " ++ addStderr)
     runGitFixtureCommand ["-C", temporaryRepository, "config", "user.name", "Canonicalization Tests"]
@@ -3653,6 +3666,12 @@ runEndToEndCommandIn :: FilePath -> [String] -> IO (ExitCode, String, String)
 runEndToEndCommandIn workingDirectory arguments =
   withCurrentDirectory workingDirectory $
     readProcessWithExitCode "git-canonicalization" arguments ""
+runEndToEndCommandWithHome :: FilePath -> FilePath -> [String] -> IO (ExitCode, String, String)
+runEndToEndCommandWithHome workingDirectory home arguments = do
+  environment <- getEnvironment
+  let environmentWithHome = ("HOME", home) : filter ((/= "HOME") . fst) environment
+  withCurrentDirectory workingDirectory $
+    readCreateProcessWithExitCode (proc "git-canonicalization" arguments) {env = Just environmentWithHome} ""
 initializeGitRepositoryFixture :: FilePath -> IO ()
 initializeGitRepositoryFixture repositoryPath =
   findExecutable "git" >>= \case
