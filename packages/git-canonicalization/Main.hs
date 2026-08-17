@@ -434,7 +434,7 @@ detectRepositoryProfile repositoryRoot = withCurrentDirectory repositoryRoot $ d
   flakeMarkerExists <- or <$> mapM doesPathExist ["flake.nix", "flake.lock", "packages", "checks", "hosts"]
   gitmodulesExists <- doesPathExist ".gitmodules"
   gitignoreSource <- readTextFileIfExists ".gitignore"
-  let homeMarkerExists = gitmodulesExists || maybe False (elem "!.gitmodules" . T.lines) gitignoreSource
+  let homeMarkerExists = gitmodulesExists || maybe False (any (`elem` ["!.gitmodules", "!/.gitmodules"]) . T.lines) gitignoreSource
   case (homeMarkerExists, flakeMarkerExists) of
     (True, False) -> pure HomeProfile
     (False, True) -> pure FlakeProfile
@@ -448,7 +448,12 @@ unsupportedResource :: String -> String -> IO a
 unsupportedResource profile resourceKind =
   hPutStrLn stderr ("error: the " ++ profile ++ " profile does not support " ++ resourceKind ++ " resources") >> exitFailure
 homeGitignoreSource :: T.Text
-homeGitignoreSource = "*\n!.gitignore\n!.gitmodules\n"
+homeGitignoreSource = "*\n!/.gitignore\n!/.gitmodules\n"
+homeRequiredGitignorePatterns :: [(T.Text, [T.Text])]
+homeRequiredGitignorePatterns =
+  [ ("!/.gitignore", ["!/.gitignore", "!.gitignore"]),
+    ("!/.gitmodules", ["!/.gitmodules", "!.gitmodules"])
+  ]
 homeDirectory :: IO FilePath
 homeDirectory =
   lookupEnv "HOME" >>= \case
@@ -480,25 +485,40 @@ initializeHomeProfile repositoryRoot = do
           hPutStrLn stderr ("error: " ++ gitignorePath ++ ": existing path must be a regular file") >> exitFailure
     _ -> pure ()
   existingGitignore <- readTextFileIfExists gitignorePath
-  case existingGitignore of
-    Just source
-      | not (homeGitignoreIsCompatible source) ->
-          hPutStrLn stderr ("error: " ++ gitignorePath ++ ": existing file must start with * and subsequent lines must start with !") >> exitFailure
-    _ -> pure ()
+  canonicalGitignore <- canonicalHomeGitignoreOrExit gitignorePath existingGitignore
   runGitOrExit ["init", "--quiet", repositoryRoot]
-  TIO.writeFile gitignorePath homeGitignoreSource
+  TIO.writeFile gitignorePath canonicalGitignore
 homeGitignoreIsCompatible :: T.Text -> Bool
 homeGitignoreIsCompatible source =
   case T.lines source of
     "*" : remainingLines -> all (T.isPrefixOf "!") remainingLines
     _ -> False
+homeGitignoreIsComplete :: T.Text -> Bool
+homeGitignoreIsComplete source =
+  homeGitignoreIsCompatible source
+    && all (any (`elem` T.lines source) . snd) homeRequiredGitignorePatterns
+completeHomeGitignore :: T.Text -> T.Text
+completeHomeGitignore source =
+  let missingLines = [canonicalPattern | (canonicalPattern, acceptedPatterns) <- homeRequiredGitignorePatterns, not (any (`elem` T.lines source) acceptedPatterns)]
+      separator :: T.Text
+      separator = if T.null source || T.isSuffixOf "\n" source then "" else "\n"
+   in source <> separator <> T.unlines missingLines
+canonicalHomeGitignoreOrExit :: FilePath -> Maybe T.Text -> IO T.Text
+canonicalHomeGitignoreOrExit gitignorePath = \case
+  Nothing -> pure homeGitignoreSource
+  Just source
+    | homeGitignoreIsCompatible source -> pure (completeHomeGitignore source)
+    | otherwise ->
+        hPutStrLn stderr ("error: " ++ gitignorePath ++ ": existing file must start with * and subsequent lines must start with !") >> exitFailure
 addHomeRepository :: FilePath -> String -> IO ()
 addHomeRepository repositoryRoot repositoryUrl =
   case canonicalHomeRepositoryPath repositoryUrl of
     Left urlError -> hPutStrLn stderr ("error: " ++ urlError) >> exitFailure
     Right canonicalPath -> do
+      let gitignorePath = repositoryRoot </> ".gitignore"
+      gitignoreSource <- readTextFileIfExists gitignorePath >>= canonicalHomeGitignoreOrExit gitignorePath
       runGitOrExit ["-C", repositoryRoot, "submodule", "add", "--force", repositoryUrl, canonicalPath]
-      TIO.writeFile (repositoryRoot </> ".gitignore") homeGitignoreSource
+      TIO.writeFile gitignorePath gitignoreSource
       runGitOrExit ["-C", repositoryRoot, "add", "--", ".gitignore"]
 checkHomeProfile :: FilePath -> Bool -> IO ()
 checkHomeProfile repositoryRoot fix = do
@@ -509,10 +529,19 @@ checkHomeProfile repositoryRoot fix = do
       | not (Posix.isRegularFile status) -> reportHomeCheckIssues [gitignorePath ++ ": must be a regular file"]
     _ -> do
       actualGitignore <- readTextFileIfExists gitignorePath
-      when (actualGitignore /= Just homeGitignoreSource) $
-        if fix
-          then TIO.writeFile gitignorePath homeGitignoreSource
-          else reportHomeCheckIssues [gitignorePath ++ ": does not match the canonical home whitelist"]
+      case actualGitignore of
+        Nothing ->
+          if fix
+            then TIO.writeFile gitignorePath homeGitignoreSource
+            else reportHomeCheckIssues [gitignorePath ++ ": is missing"]
+        Just source
+          | not (homeGitignoreIsCompatible source) ->
+              reportHomeCheckIssues [gitignorePath ++ ": must start with * and subsequent lines must start with !"]
+          | not (homeGitignoreIsComplete source) ->
+              if fix
+                then TIO.writeFile gitignorePath (completeHomeGitignore source)
+                else reportHomeCheckIssues [gitignorePath ++ ": must whitelist .gitignore and .gitmodules"]
+          | otherwise -> pure ()
   readHomeRepositories repositoryRoot >>= \case
     Left issues -> reportHomeCheckIssues issues
     Right repositories -> do
@@ -3318,11 +3347,21 @@ homeProfileEndToEndTest =
       assertEqual "Home initialization emits no stdout." "" initStdout
       assertEqual "Home initialization emits no stderr." "" initStderr
       gitignoreSource <- TIO.readFile (temporaryDirectory </> ".gitignore")
-      assertEqual "Home initialization writes the canonical whitelist." "*\n!.gitignore\n!.gitmodules\n" gitignoreSource
+      assertEqual "Home initialization writes the canonical whitelist." "*\n!/.gitignore\n!/.gitmodules\n" gitignoreSource
       (checkExit, checkStdout, checkStderr) <- runEndToEndCommandIn temporaryDirectory ["check"]
       assertEqual "An empty home profile passes its check." ExitSuccess checkExit
       assertEqual "An empty home check emits no stdout." "" checkStdout
       assertEqual "An empty home check emits no stderr." "" checkStderr
+      TIO.writeFile (temporaryDirectory </> ".gitignore") "*\n!/.custom\n!.gitmodules\n"
+      (fixExit, fixStdout, fixStderr) <- runEndToEndCommandIn temporaryDirectory ["check", "--fix"]
+      assertEqual "Fixing a user-edited home whitelist succeeds." ExitSuccess fixExit
+      assertEqual "Fixing a home whitelist emits no stdout." "" fixStdout
+      assertEqual "Fixing a home whitelist emits no stderr." "" fixStderr
+      fixedGitignoreSource <- TIO.readFile (temporaryDirectory </> ".gitignore")
+      assertEqual
+        "Fixing a home whitelist preserves user entries and adds only missing structural entries."
+        "*\n!/.custom\n!.gitmodules\n!/.gitignore\n"
+        fixedGitignoreSource
       repositoryRoot <- canonicalizePath temporaryDirectory
       (statusExit, statusStdout, statusStderr) <- runEndToEndCommandIn temporaryDirectory ["status"]
       assertEqual "An empty home status succeeds." ExitSuccess statusExit
