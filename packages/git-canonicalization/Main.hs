@@ -266,8 +266,6 @@ type CommandParseResult :: Type
 data CommandParseResult
   = ParsedCommand Command
   | Help (Maybe String)
-  | Version
-  | Completion String
   | InvalidCommand ExitCode (Maybe String)
 main :: IO ()
 main = getArgs >>= runCli
@@ -275,8 +273,6 @@ runCli :: [String] -> IO ()
 runCli commandLineArguments =
   case parseCommand commandLineArguments of
     Help maybeCommand -> printHelpAndExit maybeCommand
-    Version -> putStrLn "git canonicalization 0.0.0" >> exitSuccess
-    Completion shell -> printCompletionAndExit shell
     InvalidCommand exitCode maybeCommand ->
       hPutStrLn stderr (commandLineError commandLineArguments)
         >> hPutStr stderr (usageTextForCommand maybeCommand)
@@ -326,17 +322,14 @@ parseCommand commandLineArguments =
     ["help"] -> Help Nothing
     ["help", command] | command `elem` commandNames -> Help (Just command)
     [command, argument] | command `elem` commandNames && argument `elem` ["-h", "--help"] -> Help (Just command)
-    [argument] | argument `elem` ["-v", "--version"] -> Version
-    ["completion", shell] | shell `elem` ["bash", "zsh", "fish"] -> Completion shell
-    "completion" : _ -> InvalidCommand usageExitCode (Just "completion")
     ["check"] -> ParsedCommand CheckCommand
     ["check", "--fix"] -> ParsedCommand CheckFixCommand
     "check" : _ -> InvalidCommand usageExitCode (Just "check")
     ["status"] -> ParsedCommand StatusCommand
     ["add", repositoryUrl] | hasSupportedRepositoryUrlPrefix repositoryUrl -> ParsedCommand (AddRepositoryCommand repositoryUrl)
     ["add", _] -> InvalidCommand usageExitCode (Just "add")
-    ["remove", packageName] -> ParsedCommand (RemovePackageCommand packageName)
-    "remove" : _ -> InvalidCommand usageExitCode (Just "remove")
+    ["rm", packageName] -> ParsedCommand (RemovePackageCommand packageName)
+    "rm" : _ -> InvalidCommand usageExitCode (Just "rm")
     _ ->
       case parseAddPackageArguments commandLineArguments of
         Just (packageKindName, packageName, packageDescription) ->
@@ -344,7 +337,7 @@ parseCommand commandLineArguments =
         Nothing -> InvalidCommand usageExitCode (listToMaybe commandLineArguments)
   where
     commandNames :: [String]
-    commandNames = ["add", "remove", "check", "status", "completion"]
+    commandNames = ["add", "rm", "check", "status"]
 printHelpAndExit :: Maybe String -> IO a
 printHelpAndExit maybeCommand = do
   putStr (maybe mainHelpText (usageTextForCommand . Just) maybeCommand)
@@ -355,10 +348,9 @@ commandLineError :: [String] -> String
 commandLineError = \case
   [] -> "error: no command specified"
   "add" : _ -> "error: invalid arguments for 'git canonicalization add'"
-  "remove" : _ -> "error: invalid arguments for 'git canonicalization remove'"
+  "rm" : _ -> "error: invalid arguments for 'git canonicalization rm'"
   "check" : _ -> "error: invalid arguments for 'git canonicalization check'"
   "status" : _ -> "error: invalid arguments for 'git canonicalization status'"
-  "completion" : _ -> "error: invalid arguments for 'git canonicalization completion'"
   command : _ -> "error: unknown command '" ++ command ++ "'"
 mainUsageText :: String
 mainUsageText =
@@ -366,10 +358,9 @@ mainUsageText =
     [ "usage: git canonicalization status",
       "   or: git canonicalization add <url>",
       "   or: git canonicalization add <package-type> <package-name> [<description>...]",
-      "   or: git canonicalization remove <package-name>",
+      "   or: git canonicalization rm <package-name>",
       "   or: git canonicalization check [--fix]",
-      "   or: git canonicalization completion <bash|zsh|fish>",
-      "   or: git canonicalization --version"
+      "   or: git canonicalization --help"
     ]
 mainHelpText :: String
 mainHelpText =
@@ -385,7 +376,7 @@ mainHelpText =
       "  add <package-type> <package-name> [<description>...]",
       "      Generate and stage a package in the selected flake repository.",
       "",
-      "  remove <package-name>",
+      "  rm <package-name>",
       "      Remove and stage a clean package and its generated check, if any.",
       "",
       "  check [--fix]",
@@ -395,12 +386,8 @@ mainHelpText =
       "  status",
       "      Write the selected repository's canonicalization status as JSON.",
       "",
-      "  completion <bash|zsh|fish>",
-      "      Write a shell completion script to stdout.",
-      "",
       "Options:",
-      "  -h, --help       Show help.",
-      "  -v, --version    Show the version.",
+      "  -h, --help    Show help.",
       ""
     ]
 usageTextForCommand :: Maybe String -> String
@@ -423,9 +410,9 @@ usageTextForCommand = \case
         "Show the status of the nearest Git repository as JSON. Use 'git -C <location>' to select it.",
         ""
       ]
-  Just "remove" ->
+  Just "rm" ->
     unlines
-      [ "usage: git canonicalization remove <package-name>",
+      [ "usage: git canonicalization rm <package-name>",
         "",
         "Remove a package and its generated check, if any.",
         "Refuse removal if either contains uncommitted changes.",
@@ -440,13 +427,6 @@ usageTextForCommand = \case
         "With --fix, update the root .gitignore and canonical home-repository paths, then check.",
         ""
       ]
-  Just "completion" ->
-    unlines
-      [ "usage: git canonicalization completion <bash|zsh|fish>",
-        "",
-        "Print a shell completion script to stdout.",
-        ""
-      ]
   _ -> mainUsageText
 parseAddPackageArguments :: [String] -> Maybe (String, FilePath, Maybe String)
 parseAddPackageArguments ("add" : packageKindName : packageName : remainingArguments) = do
@@ -459,66 +439,6 @@ parseAddPackageArguments _ = Nothing
 hasSupportedRepositoryUrlPrefix :: String -> Bool
 hasSupportedRepositoryUrlPrefix repositoryUrl =
   any (`isPrefixOf` repositoryUrl) ["https://", "ssh://git@", "git+ssh://git@", "git@"]
-printCompletionAndExit :: String -> IO a
-printCompletionAndExit shell = do
-  putStr $ case shell of
-    "bash" -> bashCompletion
-    "zsh" -> zshCompletion
-    "fish" -> fishCompletion
-    _ -> ""
-  exitSuccess
-bashCompletion :: String
-bashCompletion =
-  unlines
-    [ "_git_canonicalization() {",
-      "  local cur command_index command package_types",
-      "  COMPREPLY=()",
-      "  cur=${COMP_WORDS[COMP_CWORD]}",
-      "  command_index=1",
-      "  [[ ${COMP_WORDS[0]} == git ]] && command_index=2",
-      "  command=${COMP_WORDS[command_index]}",
-      "  package_types='" ++ unwords (map fst supportedAddPackageKinds) ++ "'",
-      "  if [[ $COMP_CWORD -eq $command_index ]]; then",
-      "    COMPREPLY=( $(compgen -W 'add remove check status completion help --help --version' -- \"$cur\") )",
-      "  elif [[ $command == check ]]; then",
-      "    COMPREPLY=( $(compgen -W '--fix --help' -- \"$cur\") )",
-      "  elif [[ $command == completion ]]; then",
-      "    COMPREPLY=( $(compgen -W 'bash zsh fish' -- \"$cur\") )",
-      "  elif [[ $command == add && $COMP_CWORD -eq $((command_index + 1)) ]]; then",
-      "    COMPREPLY=( $(compgen -W \"$package_types\" -- \"$cur\") )",
-      "  fi",
-      "}",
-      "complete -F _git_canonicalization git-canonicalization"
-    ]
-zshCompletion :: String
-zshCompletion =
-  unlines
-    [ "#compdef git-canonicalization",
-      "_git_canonicalization() {",
-      "  local -a commands package_types",
-      "  commands=(add remove check status completion help)",
-      "  package_types=(" ++ unwords (map fst supportedAddPackageKinds) ++ ")",
-      "  _arguments -C '(-h --help)'{-h,--help}'[show help]' '(-v --version)'{-v,--version}'[show version]' '1:command:($commands)' '*::argument:->args'",
-      "  case $words[1] in",
-      "    check) _arguments '--fix[update managed files before checking]' '(-h --help)'{-h,--help}'[show help]' ;;",
-      "    completion) _values shell bash zsh fish ;;",
-      "    add) _values 'package type' $package_types ;;",
-      "  esac",
-      "}",
-      "_git-canonicalization() { _git_canonicalization \"$@\"; }",
-      "_git_canonicalization \"$@\""
-    ]
-fishCompletion :: String
-fishCompletion =
-  unlines
-    [ "complete -c git-canonicalization -f",
-      "complete -c git-canonicalization -n '__fish_use_subcommand' -a 'add remove check status completion help'",
-      "complete -c git-canonicalization -s h -l help -d 'Show help'",
-      "complete -c git-canonicalization -s v -l version -d 'Show version'",
-      "complete -c git-canonicalization -n '__fish_seen_subcommand_from check' -l fix -d 'Update managed files before checking'",
-      "complete -c git-canonicalization -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'",
-      "complete -c git-canonicalization -n '__fish_seen_subcommand_from add' -a '" ++ unwords (map fst supportedAddPackageKinds) ++ "'"
-    ]
 type RepositoryProfile :: Type
 data RepositoryProfile = HomeProfile | FlakeProfile deriving stock (Eq, Show)
 withDetectedRepositoryProfile :: (FilePath -> RepositoryProfile -> IO a) -> IO a
@@ -3406,7 +3326,7 @@ commandLineHelpEndToEndTest =
           && "\n  add <package-type>" `isInfixOf` helpStdout
           && "\n  check [--fix]\n" `isInfixOf` helpStdout
           && "check [--fix]" `isInfixOf` helpStdout
-          && "\n  remove <package-name>" `isInfixOf` helpStdout
+          && "\n  rm <package-name>" `isInfixOf` helpStdout
           && "\n  status\n" `isInfixOf` helpStdout
       )
     assertEqual "The top-level help command leaves stderr empty." "" helpStderr
@@ -3414,14 +3334,6 @@ commandLineHelpEndToEndTest =
     assertEqual "A command-specific help request succeeds." ExitSuccess commandHelpExit
     assertEqual "A command-specific help request prints specific help to stdout." (usageTextForCommand (Just "check")) commandHelpStdout
     assertEqual "A command-specific help request leaves stderr empty." "" commandHelpStderr
-    (versionExit, versionStdout, versionStderr) <- runEndToEndCommandIn temporaryDirectory ["--version"]
-    assertEqual "The version request succeeds." ExitSuccess versionExit
-    assertEqual "The version request identifies the command and version." "git canonicalization 0.0.0\n" versionStdout
-    assertEqual "The version request leaves stderr empty." "" versionStderr
-    (completionExit, completionStdout, completionStderr) <- runEndToEndCommandIn temporaryDirectory ["completion", "bash"]
-    assertEqual "Bash completion generation succeeds." ExitSuccess completionExit
-    assertBool "Bash completion targets the standalone executable." ("complete -F _git_canonicalization git-canonicalization" `isInfixOf` completionStdout)
-    assertEqual "Completion generation leaves stderr empty." "" completionStderr
 addCommandParsingTest :: IO ()
 addCommandParsingTest = do
   assertBool "A supported URL prefix selects home repository addition." $
@@ -3447,6 +3359,14 @@ invalidCommandEndToEndTest =
     assertEqual "The retired summary command uses Git's usage exit status." usageExitCode summaryExit
     assertEqual "The retired summary command leaves stdout empty." "" summaryStdout
     assertEqual "The retired summary command prints an error and the main usage to stderr." ("error: unknown command 'summary'\n" ++ mainUsageText) summaryStderr
+    forM_ ["--version", "completion", "remove"] $ \retiredCommand -> do
+      (retiredExit, retiredStdout, retiredStderr) <- runEndToEndCommandIn temporaryDirectory [retiredCommand]
+      assertEqual (retiredCommand ++ " uses Git's usage exit status.") usageExitCode retiredExit
+      assertEqual (retiredCommand ++ " leaves stdout empty.") "" retiredStdout
+      assertEqual
+        (retiredCommand ++ " is reported as an unknown command.")
+        ("error: unknown command '" ++ retiredCommand ++ "'\n" ++ mainUsageText)
+        retiredStderr
 homeRepositoryParsingTest :: IO ()
 homeRepositoryParsingTest = do
   forM_
@@ -3546,7 +3466,7 @@ addPackageEndToEndTest =
 removePackageEndToEndTest :: IO ()
 removePackageEndToEndTest =
   withGeneratedPythonPackageRepository "remove-package-end-to-end" $ \temporaryRepository -> do
-    (removeExit, removeStdout, removeStderr) <- runEndToEndCommandIn temporaryRepository ["remove", "demo"]
+    (removeExit, removeStdout, removeStderr) <- runEndToEndCommandIn temporaryRepository ["rm", "demo"]
     assertEqual "Removing a clean package succeeds." ExitSuccess removeExit
     assertEqual "A successful removal leaves stdout empty." "" removeStdout
     assertEqual "A successful removal leaves stderr empty." "" removeStderr
@@ -3576,7 +3496,7 @@ assertUnsafeRemove :: String -> (FilePath -> IO ()) -> IO ()
 assertUnsafeRemove fixtureName preparePackage =
   withGeneratedPythonPackageRepository fixtureName $ \temporaryRepository -> do
     preparePackage temporaryRepository
-    (removeExit, removeStdout, removeStderr) <- runEndToEndCommandIn temporaryRepository ["remove", "demo"]
+    (removeExit, removeStdout, removeStderr) <- runEndToEndCommandIn temporaryRepository ["rm", "demo"]
     assertEqual "Removing an unsafe package fails." (ExitFailure 1) removeExit
     assertEqual "A refused removal leaves stdout empty." "" removeStdout
     assertBool "The refusal explains that the target is not clean." ("package or check is not clean" `isInfixOf` removeStderr)
