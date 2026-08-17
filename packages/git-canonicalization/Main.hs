@@ -44,14 +44,14 @@ import Numeric (showFFloat, showHex)
 import Prettyprinter (defaultLayoutOptions, layoutPretty)
 import Prettyprinter.Render.Text (renderStrict)
 import System.Directory (canonicalizePath, createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, doesPathExist, findExecutable, getCurrentDirectory, getTemporaryDirectory, listDirectory, pathIsSymbolicLink, removeFile, removePathForcibly, withCurrentDirectory)
-import System.Environment (getArgs, getEnvironment, lookupEnv)
+import System.Environment (getArgs, lookupEnv)
 import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitFailure, exitSuccess, exitWith)
 import System.FilePath (isAbsolute, (<.>), (</>))
 import System.FilePath.Posix (makeRelative, splitDirectories, takeBaseName, takeDirectory, takeFileName)
 import System.IO (hClose, hPutStr, hPutStrLn, openTempFile, stderr)
 import System.Posix.Files qualified as Posix
 import System.Posix.Process (executeFile)
-import System.Process (CreateProcess (env), proc, readCreateProcessWithExitCode, readProcessWithExitCode)
+import System.Process (readProcessWithExitCode)
 import Test.HUnit (Counts (errors, failures), Test (TestCase, TestLabel, TestList), assertBool, assertEqual, assertFailure, runTestTT)
 import Text.Read (readMaybe)
 import Text.Regex.TDFA ((=~))
@@ -259,7 +259,6 @@ data Command
   = CheckCommand
   | CheckFixCommand
   | StatusCommand
-  | InitHomeCommand
   | AddRepositoryCommand String
   | AddPackageCommand String FilePath (Maybe String)
   | RemovePackageCommand FilePath
@@ -276,13 +275,14 @@ runCli commandLineArguments =
     MainHelp -> printMainHelpAndExit
     InvalidCommand exitCode maybeCommand ->
       hPutStr stderr (usageTextForCommand maybeCommand) >> exitWith exitCode
-    ParsedCommand InitHomeCommand -> homeDirectory >>= initializeHomeProfile
     ParsedCommand CheckCommand -> withDetectedRepositoryProfile $ \repositoryRoot -> \case
       HomeProfile -> checkHomeProfile repositoryRoot False
       FlakeProfile -> checkRepositoryLocation repositoryRoot
-    ParsedCommand CheckFixCommand -> withDetectedRepositoryProfile $ \repositoryRoot -> \case
-      HomeProfile -> checkHomeProfile repositoryRoot True
-      FlakeProfile -> fixAndCheckRepositoryLocation repositoryRoot
+    ParsedCommand CheckFixCommand -> do
+      repositoryRoot <- discoverGitRepositoryRoot "."
+      detectRepositoryProfileForFix repositoryRoot >>= \case
+        HomeProfile -> checkHomeProfile repositoryRoot True
+        FlakeProfile -> fixAndCheckRepositoryLocation repositoryRoot
     ParsedCommand StatusCommand -> withDetectedRepositoryProfile $ \repositoryRoot -> \case
       HomeProfile -> renderHomeProfileStatus repositoryRoot
       FlakeProfile -> summarizeRepositoryLocation renderRepositorySummariesJSON repositoryRoot
@@ -322,7 +322,6 @@ parseCommand commandLineArguments =
     ["check", "--fix"] -> ParsedCommand CheckFixCommand
     "check" : _ -> InvalidCommand usageExitCode (Just "check")
     ["status"] -> ParsedCommand StatusCommand
-    ["init"] -> ParsedCommand InitHomeCommand
     ["add", repositoryUrl] -> ParsedCommand (AddRepositoryCommand repositoryUrl)
     ["remove", packageName] -> ParsedCommand (RemovePackageCommand packageName)
     "remove" : _ -> InvalidCommand usageExitCode (Just "remove")
@@ -340,8 +339,7 @@ usageExitCode = ExitFailure 129
 mainUsageText :: String
 mainUsageText =
   unlines
-    [ "usage: git canonicalization init",
-      "   or: git canonicalization status",
+    [ "usage: git canonicalization status",
       "   or: git canonicalization add <url>",
       "   or: git canonicalization add <package-type> <package-name> [<description>...]",
       "   or: git canonicalization remove <package-name>",
@@ -354,9 +352,6 @@ mainHelpText =
       "",
       "Manage canonical home and Nix flake repositories.",
       "Use git -C <location> to select a repository.",
-      "",
-      "init",
-      "    Initialize $HOME with the home profile.",
       "",
       "add <url>",
       "    Add a repository resource to the home profile at $HOME.",
@@ -430,7 +425,11 @@ withRequiredProfile requiredProfile resourceKind action =
       then action
       else unsupportedResource (renderRepositoryProfile actualProfile) resourceKind
 detectRepositoryProfile :: FilePath -> IO RepositoryProfile
-detectRepositoryProfile repositoryRoot = withCurrentDirectory repositoryRoot $ do
+detectRepositoryProfile = detectRepositoryProfileWithDefault Nothing
+detectRepositoryProfileForFix :: FilePath -> IO RepositoryProfile
+detectRepositoryProfileForFix = detectRepositoryProfileWithDefault (Just HomeProfile)
+detectRepositoryProfileWithDefault :: Maybe RepositoryProfile -> FilePath -> IO RepositoryProfile
+detectRepositoryProfileWithDefault emptyDefault repositoryRoot = withCurrentDirectory repositoryRoot $ do
   flakeMarkerExists <- or <$> mapM doesPathExist ["flake.nix", "flake.lock", "packages", "checks", "hosts"]
   gitmodulesExists <- doesPathExist ".gitmodules"
   gitignoreSource <- readTextFileIfExists ".gitignore"
@@ -438,7 +437,10 @@ detectRepositoryProfile repositoryRoot = withCurrentDirectory repositoryRoot $ d
   case (homeMarkerExists, flakeMarkerExists) of
     (True, False) -> pure HomeProfile
     (False, True) -> pure FlakeProfile
-    (False, False) -> hPutStrLn stderr "error: cannot detect a canonicalization profile; run 'git canonicalization init' for a home profile or add flake markers" >> exitFailure
+    (False, False) ->
+      case emptyDefault of
+        Just profile -> pure profile
+        Nothing -> hPutStrLn stderr "error: cannot detect a canonicalization profile; run 'git canonicalization check --fix' for a home profile or add flake markers" >> exitFailure
     (True, True) -> hPutStrLn stderr "error: repository matches both home and flake profiles" >> exitFailure
 renderRepositoryProfile :: RepositoryProfile -> String
 renderRepositoryProfile = \case
@@ -475,19 +477,6 @@ data HomeRepository = HomeRepository
     homeRepositoryUrl :: String
   }
   deriving stock (Eq, Show)
-initializeHomeProfile :: FilePath -> IO ()
-initializeHomeProfile repositoryRoot = do
-  let gitignorePath = repositoryRoot </> ".gitignore"
-  gitignoreStatus <- try (Posix.getSymbolicLinkStatus gitignorePath) :: IO (Either IOException Posix.FileStatus)
-  case gitignoreStatus of
-    Right status
-      | not (Posix.isRegularFile status) ->
-          hPutStrLn stderr ("error: " ++ gitignorePath ++ ": existing path must be a regular file") >> exitFailure
-    _ -> pure ()
-  existingGitignore <- readTextFileIfExists gitignorePath
-  canonicalGitignore <- canonicalHomeGitignoreOrExit gitignorePath existingGitignore
-  runGitOrExit ["init", "--quiet", repositoryRoot]
-  TIO.writeFile gitignorePath canonicalGitignore
 homeGitignoreIsCompatible :: T.Text -> Bool
 homeGitignoreIsCompatible source =
   case T.lines source of
@@ -2923,7 +2912,7 @@ hUnitPackageTests =
       TestLabel "Documents help and invokes it consistently." (TestCase commandLineHelpEndToEndTest),
       TestLabel "Rejects unknown commands with usage on stderr." (TestCase invalidCommandEndToEndTest),
       TestLabel "Parses and validates canonical home repository resources." (TestCase homeRepositoryParsingTest),
-      TestLabel "Initializes, detects, checks, and summarizes an empty home profile." (TestCase homeProfileEndToEndTest),
+      TestLabel "Detects, checks, and summarizes an empty home profile." (TestCase homeProfileEndToEndTest),
       TestLabel "Scaffolds a package and its check from a nested directory." (TestCase addPackageEndToEndTest),
       TestLabel "Removes a clean package, its check, and whitelist entries." (TestCase removePackageEndToEndTest),
       TestLabel "Refuses to remove packages containing local changes." (TestCase unsafeRemovePackageEndToEndTest),
@@ -3341,35 +3330,35 @@ homeRepositoryParsingTest = do
 homeProfileEndToEndTest :: IO ()
 homeProfileEndToEndTest =
   withTemporaryPackageRepository "home-profile-end-to-end" $ \temporaryDirectory -> do
-    withTemporaryPackageRepository "outside-home-profile" $ \outsideDirectory -> do
-      (initExit, initStdout, initStderr) <- runEndToEndCommandWithHome outsideDirectory temporaryDirectory ["init"]
-      assertEqual "Initializing $HOME succeeds independently of the working directory." ExitSuccess initExit
-      assertEqual "Home initialization emits no stdout." "" initStdout
-      assertEqual "Home initialization emits no stderr." "" initStderr
-      gitignoreSource <- TIO.readFile (temporaryDirectory </> ".gitignore")
-      assertEqual "Home initialization writes the canonical whitelist." "*\n!/.gitignore\n!/.gitmodules\n" gitignoreSource
-      (checkExit, checkStdout, checkStderr) <- runEndToEndCommandIn temporaryDirectory ["check"]
-      assertEqual "An empty home profile passes its check." ExitSuccess checkExit
-      assertEqual "An empty home check emits no stdout." "" checkStdout
-      assertEqual "An empty home check emits no stderr." "" checkStderr
-      TIO.writeFile (temporaryDirectory </> ".gitignore") "*\n!/.custom\n!.gitmodules\n"
-      (fixExit, fixStdout, fixStderr) <- runEndToEndCommandIn temporaryDirectory ["check", "--fix"]
-      assertEqual "Fixing a user-edited home whitelist succeeds." ExitSuccess fixExit
-      assertEqual "Fixing a home whitelist emits no stdout." "" fixStdout
-      assertEqual "Fixing a home whitelist emits no stderr." "" fixStderr
-      fixedGitignoreSource <- TIO.readFile (temporaryDirectory </> ".gitignore")
-      assertEqual
-        "Fixing a home whitelist preserves user entries and adds only missing structural entries."
-        "*\n!/.custom\n!.gitmodules\n!/.gitignore\n"
-        fixedGitignoreSource
-      repositoryRoot <- canonicalizePath temporaryDirectory
-      (statusExit, statusStdout, statusStderr) <- runEndToEndCommandIn temporaryDirectory ["status"]
-      assertEqual "An empty home status succeeds." ExitSuccess statusExit
-      assertEqual
-        "An empty home status uses the common profile envelope."
-        (unlines ["{", "  \"profile\": \"home\",", "  \"root\": " ++ renderJSONString repositoryRoot ++ ",", "  \"resources\": []", "}"])
-        statusStdout
-      assertEqual "An empty home status emits no stderr." "" statusStderr
+    initializeGitRepositoryFixture temporaryDirectory
+    (initialFixExit, initialFixStdout, initialFixStderr) <- runEndToEndCommandIn temporaryDirectory ["check", "--fix"]
+    assertEqual "Fixing an empty Git repository creates a home profile." ExitSuccess initialFixExit
+    assertEqual "Initial home fix emits no stdout." "" initialFixStdout
+    assertEqual "Initial home fix emits no stderr." "" initialFixStderr
+    gitignoreSource <- TIO.readFile (temporaryDirectory </> ".gitignore")
+    assertEqual "Initial home fix writes the canonical whitelist." "*\n!/.gitignore\n!/.gitmodules\n" gitignoreSource
+    (checkExit, checkStdout, checkStderr) <- runEndToEndCommandIn temporaryDirectory ["check"]
+    assertEqual "An empty home profile passes its check." ExitSuccess checkExit
+    assertEqual "An empty home check emits no stdout." "" checkStdout
+    assertEqual "An empty home check emits no stderr." "" checkStderr
+    TIO.writeFile (temporaryDirectory </> ".gitignore") "*\n!/.custom\n!.gitmodules\n"
+    (fixExit, fixStdout, fixStderr) <- runEndToEndCommandIn temporaryDirectory ["check", "--fix"]
+    assertEqual "Fixing a user-edited home whitelist succeeds." ExitSuccess fixExit
+    assertEqual "Fixing a home whitelist emits no stdout." "" fixStdout
+    assertEqual "Fixing a home whitelist emits no stderr." "" fixStderr
+    fixedGitignoreSource <- TIO.readFile (temporaryDirectory </> ".gitignore")
+    assertEqual
+      "Fixing a home whitelist preserves user entries and adds only missing structural entries."
+      "*\n!/.custom\n!.gitmodules\n!/.gitignore\n"
+      fixedGitignoreSource
+    repositoryRoot <- canonicalizePath temporaryDirectory
+    (statusExit, statusStdout, statusStderr) <- runEndToEndCommandIn temporaryDirectory ["status"]
+    assertEqual "An empty home status succeeds." ExitSuccess statusExit
+    assertEqual
+      "An empty home status uses the common profile envelope."
+      (unlines ["{", "  \"profile\": \"home\",", "  \"root\": " ++ renderJSONString repositoryRoot ++ ",", "  \"resources\": []", "}"])
+      statusStdout
+    assertEqual "An empty home status emits no stderr." "" statusStderr
 addPackageEndToEndTest :: IO ()
 addPackageEndToEndTest =
   withTemporaryPackageRepository "add-package-end-to-end" $ \temporaryRepository -> do
@@ -3705,12 +3694,6 @@ runEndToEndCommandIn :: FilePath -> [String] -> IO (ExitCode, String, String)
 runEndToEndCommandIn workingDirectory arguments =
   withCurrentDirectory workingDirectory $
     readProcessWithExitCode "git-canonicalization" arguments ""
-runEndToEndCommandWithHome :: FilePath -> FilePath -> [String] -> IO (ExitCode, String, String)
-runEndToEndCommandWithHome workingDirectory home arguments = do
-  environment <- getEnvironment
-  let environmentWithHome = ("HOME", home) : filter ((/= "HOME") . fst) environment
-  withCurrentDirectory workingDirectory $
-    readCreateProcessWithExitCode (proc "git-canonicalization" arguments) {env = Just environmentWithHome} ""
 initializeGitRepositoryFixture :: FilePath -> IO ()
 initializeGitRepositoryFixture repositoryPath =
   findExecutable "git" >>= \case
