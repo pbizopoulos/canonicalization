@@ -10,7 +10,7 @@
 {-# OPTIONS_GHC -Wno-missing-import-lists -Wno-unsafe #-}
 module Main (main, runPackageTests, runPackageTestsWithTimings) where
 import Control.Applicative ((<|>))
-import Control.Exception (IOException, finally, try)
+import Control.Exception (IOException, finally, onException, try)
 import Control.Monad (filterM, forM, forM_, guard, unless, when)
 import Data.Char (isAlphaNum, isAsciiLower, isControl, isDigit, isLower, isSpace, isUpper, ord, toLower, toUpper)
 import Data.Either (fromRight, lefts, rights)
@@ -21,7 +21,7 @@ import Data.List (find, intercalate, isInfixOf, isPrefixOf, isSuffixOf, mapAccum
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing, listToMaybe, mapMaybe, maybeToList)
+import Data.Maybe (catMaybes, fromMaybe, isNothing, listToMaybe, mapMaybe, maybeToList)
 import Data.Ord (comparing)
 import Data.Set qualified as Set
 import Data.Text qualified as T
@@ -43,7 +43,7 @@ import Nix.Utils (Path (Path))
 import Numeric (showFFloat, showHex)
 import Prettyprinter (defaultLayoutOptions, layoutPretty)
 import Prettyprinter.Render.Text (renderStrict)
-import System.Directory (canonicalizePath, createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, doesPathExist, findExecutable, getCurrentDirectory, getTemporaryDirectory, listDirectory, pathIsSymbolicLink, removeFile, removePathForcibly, withCurrentDirectory)
+import System.Directory (canonicalizePath, createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, doesPathExist, findExecutable, getCurrentDirectory, getTemporaryDirectory, listDirectory, makeAbsolute, pathIsSymbolicLink, removeFile, removePathForcibly, withCurrentDirectory)
 import System.Environment (getArgs, getEnvironment, lookupEnv)
 import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitFailure, exitSuccess, exitWith)
 import System.FilePath (isAbsolute, (<.>), (</>))
@@ -259,10 +259,21 @@ data Command
   = CheckCommand
   | CheckFixCommand
   | StatusCommand
-  | InitCommand FilePath
+  | InitCommand InitSpec
   | AddRepositoryCommand String
   | AddPackageCommand String FilePath (Maybe String)
-  | RemovePackageCommand FilePath
+  | RemovePackageCommand RemoveSpec
+type InitSpec :: Type
+newtype InitSpec = InitSpec
+  { initLocalPath :: FilePath
+  }
+type RemoveSpec :: Type
+data RemoveSpec = RemoveSpec
+  { removePackageName :: FilePath,
+    removeDryRun :: Bool,
+    removeForce :: Bool,
+    removeIgnoreUnmatch :: Bool
+  }
 type CommandParseResult :: Type
 data CommandParseResult
   = ParsedCommand Command
@@ -289,9 +300,12 @@ runCli commandLineArguments =
     ParsedCommand StatusCommand -> withDetectedRepositoryProfile $ \repositoryRoot -> \case
       HomeProfile -> renderHomeProfileStatus repositoryRoot
       FlakeProfile -> summarizeRepositoryLocation renderRepositorySummariesJSON repositoryRoot
-    ParsedCommand (InitCommand localPath) -> initializeCanonicalization localPath
+    ParsedCommand (InitCommand initSpec) -> initializeCanonicalization initSpec
     ParsedCommand (AddRepositoryCommand repositoryUrl) ->
-      homeProfileRoot >>= \repositoryRoot -> addHomeRepository repositoryRoot repositoryUrl
+      withRequiredProfile HomeProfile "repository" $
+        runInGitRepositoryRoot "." $ do
+          repositoryRoot <- getCurrentDirectory
+          addHomeRepository repositoryRoot repositoryUrl
     ParsedCommand (AddPackageCommand packageKindName packageName packageDescription) ->
       withRequiredProfile FlakeProfile "package" $
         runInGitRepositoryRoot "." $
@@ -303,10 +317,10 @@ runCli commandLineArguments =
             Just scaffoldPackageKind -> do
               addResult <- addPackageToCurrentRepository scaffoldPackageKind packageName packageDescription
               stageGeneratedPathsOrExit addResult
-    ParsedCommand (RemovePackageCommand packageName) ->
+    ParsedCommand (RemovePackageCommand removeSpec) ->
       withRequiredProfile FlakeProfile "package" $
         runInGitRepositoryRoot "." $ do
-          removeResult <- removePackageFromCurrentRepository packageName
+          removeResult <- removePackageFromCurrentRepository removeSpec
           case removeResult of
             Left removeError -> hPutStrLn stderr ("error: " ++ removeError) >> exitFailure
             Right () -> exitSuccess
@@ -328,12 +342,9 @@ parseCommand commandLineArguments =
     ["check", "--fix"] -> ParsedCommand CheckFixCommand
     "check" : _ -> InvalidCommand usageExitCode (Just "check")
     ["status"] -> ParsedCommand StatusCommand
-    ["init", localPath] -> ParsedCommand (InitCommand localPath)
-    "init" : _ -> InvalidCommand usageExitCode (Just "init")
-    ["add", repositoryUrl] | hasSupportedRepositoryUrlPrefix repositoryUrl -> ParsedCommand (AddRepositoryCommand repositoryUrl)
-    ["add", _] -> InvalidCommand usageExitCode (Just "add")
-    ["rm", packageName] -> ParsedCommand (RemovePackageCommand packageName)
-    "rm" : _ -> InvalidCommand usageExitCode (Just "rm")
+    "init" : arguments -> maybe (InvalidCommand usageExitCode (Just "init")) (ParsedCommand . InitCommand) (parseInitArguments arguments)
+    ["add", repositoryUrl] -> ParsedCommand (AddRepositoryCommand repositoryUrl)
+    "rm" : arguments -> maybe (InvalidCommand usageExitCode (Just "rm")) (ParsedCommand . RemovePackageCommand) (parseRemoveArguments arguments)
     _ ->
       case parseAddPackageArguments commandLineArguments of
         Just (packageKindName, packageName, packageDescription) ->
@@ -360,11 +371,11 @@ commandLineError = \case
 mainUsageText :: String
 mainUsageText =
   unlines
-    [ "usage: git canonicalization init <local-path>",
+    [ "usage: git canonicalization init [--] [<directory>]",
       "   or: git canonicalization status",
       "   or: git canonicalization add <url>",
       "   or: git canonicalization add <package-type> <package-name> [<description>...]",
-      "   or: git canonicalization rm <package-name>",
+      "   or: git canonicalization rm [-n|--dry-run] [-f|--force] [--ignore-unmatch] <package-name>",
       "   or: git canonicalization check [--fix]",
       "   or: git canonicalization --help"
     ]
@@ -376,16 +387,16 @@ mainHelpText =
       "Run from a work tree, or use 'git -C <directory> canonicalization ...'.",
       "",
       "Commands:",
-      "  init <local-path>",
+      "  init [--] [<directory>]",
       "      Initialize $HOME as a home repository, or another path as a flake repository.",
       "",
       "  add <url>",
-      "      Add a Git submodule below $HOME using its host and repository path.",
+      "      Add a Git submodule to the selected home repository using its canonical path.",
       "",
       "  add <package-type> <package-name> [<description>...]",
       "      Generate and stage a package in the selected flake repository.",
       "",
-      "  rm <package-name>",
+      "  rm [-n|--dry-run] [-f|--force] [--ignore-unmatch] <package-name>",
       "      Remove and stage a clean package and its generated check, if any.",
       "",
       "  check [--fix]",
@@ -403,10 +414,12 @@ usageTextForCommand :: Maybe String -> String
 usageTextForCommand = \case
   Just "init" ->
     unlines
-      [ "usage: git canonicalization init <local-path>",
+      [ "usage: git canonicalization init [--] [<directory>]",
         "",
-        "Initialize a canonical repository at <local-path>.",
+        "Initialize a canonical repository in <directory>, which defaults to the current directory.",
         "An exact $HOME path selects the home layout; every other path selects the flake layout.",
+        "Use -- to delimit a directory whose name begins with '-'.",
+        "For advanced Git setup, run 'git init' with its options before this command.",
         "Existing files are preserved and generated files are left unstaged.",
         ""
       ]
@@ -415,7 +428,7 @@ usageTextForCommand = \case
       [ "usage: git canonicalization add <url>",
         "   or: git canonicalization add <package-type> <package-name> [<description>...]",
         "",
-        "Add a repository URL below $HOME, or generate a package in the selected flake repository.",
+        "Add a repository URL to the selected home repository, or generate a package in the selected flake repository.",
         "Supported package types: " ++ intercalate ", " (map fst supportedAddPackageKinds) ++ ".",
         "Package descriptions beginning with '-' must follow an explicit -- separator.",
         "Generated files are added to the Git index.",
@@ -430,10 +443,11 @@ usageTextForCommand = \case
       ]
   Just "rm" ->
     unlines
-      [ "usage: git canonicalization rm <package-name>",
+      [ "usage: git canonicalization rm [-n|--dry-run] [-f|--force] [--ignore-unmatch] <package-name>",
         "",
         "Remove a package and its generated check, if any.",
-        "Refuse removal if either contains uncommitted changes.",
+        "Use --dry-run to show the removal, --force to allow local changes, and",
+        "--ignore-unmatch to succeed when the package does not exist.",
         "Removals and the updated root .gitignore are added to the Git index.",
         ""
       ]
@@ -454,9 +468,29 @@ parseAddPackageArguments ("add" : packageKindName : packageName : remainingArgum
   let packageDescription = unwords . NE.toList <$> NE.nonEmpty descriptionArguments
   pure (packageKindName, packageName, packageDescription)
 parseAddPackageArguments _ = Nothing
-hasSupportedRepositoryUrlPrefix :: String -> Bool
-hasSupportedRepositoryUrlPrefix repositoryUrl =
-  any (`isPrefixOf` repositoryUrl) ["https://", "ssh://git@", "git+ssh://git@", "git@"]
+parseInitArguments :: [String] -> Maybe InitSpec
+parseInitArguments = \case
+  [] -> Just (InitSpec ".")
+  [directory] | not ("-" `isPrefixOf` directory) -> Just (InitSpec directory)
+  ["--"] -> Just (InitSpec ".")
+  ["--", directory] -> Just (InitSpec directory)
+  _ -> Nothing
+parseRemoveArguments :: [String] -> Maybe RemoveSpec
+parseRemoveArguments = go False False False Nothing
+  where
+    go :: Bool -> Bool -> Bool -> Maybe FilePath -> [String] -> Maybe RemoveSpec
+    go dryRun force ignoreUnmatch maybePackage = \case
+      [] -> RemoveSpec <$> maybePackage <*> pure dryRun <*> pure force <*> pure ignoreUnmatch
+      "--" : [packageName] | isNothing maybePackage -> Just (RemoveSpec packageName dryRun force ignoreUnmatch)
+      "-n" : remainingArguments -> go True force ignoreUnmatch maybePackage remainingArguments
+      "--dry-run" : remainingArguments -> go True force ignoreUnmatch maybePackage remainingArguments
+      "-f" : remainingArguments -> go dryRun True ignoreUnmatch maybePackage remainingArguments
+      "--force" : remainingArguments -> go dryRun True ignoreUnmatch maybePackage remainingArguments
+      "--ignore-unmatch" : remainingArguments -> go dryRun force True maybePackage remainingArguments
+      argument : remainingArguments
+        | "-" `isPrefixOf` argument -> Nothing
+        | isNothing maybePackage -> go dryRun force ignoreUnmatch (Just argument) remainingArguments
+        | otherwise -> Nothing
 type RepositoryProfile :: Type
 data RepositoryProfile = HomeProfile | FlakeProfile deriving stock (Eq, Show)
 withDetectedRepositoryProfile :: (FilePath -> RepositoryProfile -> IO a) -> IO a
@@ -509,13 +543,6 @@ homeDirectory =
       | isAbsolute directory -> canonicalizePath directory
       | otherwise -> hPutStrLn stderr "error: HOME must be an absolute path" >> exitFailure
     Nothing -> hPutStrLn stderr "error: HOME is not set" >> exitFailure
-homeProfileRoot :: IO FilePath
-homeProfileRoot = do
-  directory <- homeDirectory
-  repositoryRoot <- discoverGitRepositoryRoot directory
-  detectRepositoryProfile repositoryRoot >>= \case
-    HomeProfile -> pure repositoryRoot
-    FlakeProfile -> unsupportedResource "flake" "repository"
 minimalProjectFlakeSource :: T.Text
 minimalProjectFlakeSource =
   T.unlines
@@ -534,81 +561,76 @@ minimalProjectFlakeSource =
       "    };",
       "}"
     ]
-initializeCanonicalization :: FilePath -> IO ()
-initializeCanonicalization localPath = do
+initializeCanonicalization :: InitSpec -> IO ()
+initializeCanonicalization initSpec = do
+  let localPath = initLocalPath initSpec
+  targetExists <- doesPathExist localPath
   targetIsDirectory <- doesDirectoryExist localPath
-  unless targetIsDirectory $ do
-    hPutStrLn stderr ("error: initialization target is not an existing directory: " ++ localPath)
+  when (targetExists && not targetIsDirectory) $ do
+    hPutStrLn stderr ("error: initialization target exists and is not a directory: " ++ localPath)
     exitFailure
-  target <- canonicalizePath localPath
+  target <- if targetExists then canonicalizePath localPath else makeAbsolute localPath
   home <- homeDirectory
   if target == home
-    then initializeHomeRepository target
-    else initializeProjectRepository home target
-initializeHomeRepository :: FilePath -> IO ()
-initializeHomeRepository repositoryRoot = do
+    then initializeHomeRepository initSpec targetExists target
+    else initializeProjectRepository initSpec targetExists home target
+initializeHomeRepository :: InitSpec -> Bool -> FilePath -> IO ()
+initializeHomeRepository initSpec targetExisted repositoryRoot = do
   flakeMarkerExists <- or <$> mapM doesPathExist [repositoryRoot </> "flake.nix", repositoryRoot </> "flake.lock", repositoryRoot </> "packages", repositoryRoot </> "checks", repositoryRoot </> "hosts"]
   when flakeMarkerExists $ do
     hPutStrLn stderr "error: cannot initialize the home layout because flake layout markers exist"
     exitFailure
   let gitignorePath = repositoryRoot </> ".gitignore"
-  existingGitignore <- readRegularTextFileIfExistsOrExit gitignorePath
-  case existingGitignore of
-    Just source
-      | not (homeGitignoreIsComplete source) -> do
-          hPutStrLn stderr ("error: " ++ gitignorePath ++ ": existing file is not the complete canonical home whitelist")
-          hPutStrLn stderr "hint: repair it with 'git canonicalization check --fix'"
-          exitFailure
-    _ -> pure ()
-  runGitOrExit ["init", "--quiet", repositoryRoot]
-  when (isNothing existingGitignore) (TIO.writeFile gitignorePath homeGitignoreSource)
-  checkHomeProfile repositoryRoot False
-initializeProjectRepository :: FilePath -> FilePath -> IO ()
-initializeProjectRepository home repositoryRoot = do
+  gitignoreExists <- doesPathExist gitignorePath
+  gitMetadataExisted <- doesPathExist (repositoryRoot </> ".git")
+  let createdPaths = [gitignorePath | not gitignoreExists] ++ [repositoryRoot </> ".git" | targetExisted && not gitMetadataExisted]
+  ( do
+      runGitInitialization initSpec repositoryRoot
+      unless gitignoreExists (TIO.writeFile gitignorePath homeGitignoreSource)
+    )
+    `onException` rollbackInitialization targetExisted repositoryRoot createdPaths
+initializeProjectRepository :: InitSpec -> Bool -> FilePath -> FilePath -> IO ()
+initializeProjectRepository initSpec targetExisted home repositoryRoot = do
   validateProjectLocation home repositoryRoot
   gitmodulesExists <- doesPathExist (repositoryRoot </> ".gitmodules")
-  gitignoreSource <- readRegularTextFileIfExistsOrExit (repositoryRoot </> ".gitignore")
+  let gitignorePath = repositoryRoot </> ".gitignore"
+  gitignoreExists <- doesPathExist gitignorePath
+  gitignoreSource <- readTextFileIfExists gitignorePath
   let hasHomeGitignoreMarker = maybe False (any (`elem` ["!.gitmodules", "!/.gitmodules"]) . T.lines) gitignoreSource
   when (gitmodulesExists || hasHomeGitignoreMarker) $ do
     hPutStrLn stderr "error: cannot initialize the flake layout because home layout markers exist"
     exitFailure
   let flakePath = repositoryRoot </> "flake.nix"
       lockPath = repositoryRoot </> "flake.lock"
-  flakeExists <- regularFileExistsOrExit flakePath
-  lockExists <- regularFileExistsOrExit lockPath
-  when (lockExists && not flakeExists) $ do
-    hPutStrLn stderr ("error: " ++ lockPath ++ " exists but " ++ flakePath ++ " is missing")
-    exitFailure
-  runGitOrExit ["init", "--quiet", repositoryRoot]
-  expectedGitignore <- withCurrentDirectory repositoryRoot renderInitializedProjectGitignore
-  case gitignoreSource of
-    Just source
-      | source /= expectedGitignore -> do
-          hPutStrLn stderr "error: .gitignore: existing file is not the canonical root whitelist"
-          hPutStrLn stderr "hint: repair it with 'git canonicalization check --fix'"
-          exitFailure
-    _ -> pure ()
-  unless flakeExists (TIO.writeFile flakePath minimalProjectFlakeSource)
-  unless lockExists $
-    withCurrentDirectory repositoryRoot (runNixOrExit ["flake", "lock"])
-  when (isNothing gitignoreSource) (TIO.writeFile (repositoryRoot </> ".gitignore") expectedGitignore)
-  checkRepositoryLocation repositoryRoot
+  flakeExists <- doesPathExist flakePath
+  lockExists <- doesPathExist lockPath
+  gitMetadataExisted <- doesPathExist (repositoryRoot </> ".git")
+  let createdPaths =
+        [flakePath | not flakeExists]
+          ++ [lockPath | not lockExists]
+          ++ [gitignorePath | not gitignoreExists]
+          ++ [repositoryRoot </> ".git" | targetExisted && not gitMetadataExisted]
+  ( do
+      runGitInitialization initSpec repositoryRoot
+      expectedGitignore <- withCurrentDirectory repositoryRoot renderInitializedProjectGitignore
+      unless flakeExists (TIO.writeFile flakePath minimalProjectFlakeSource)
+      unless lockExists $ do
+        hPutStrLn stderr "Locking flake inputs..."
+        withCurrentDirectory repositoryRoot (runNixOrExit ["flake", "lock"])
+      unless gitignoreExists (TIO.writeFile gitignorePath expectedGitignore)
+    )
+    `onException` rollbackInitialization targetExisted repositoryRoot createdPaths
+runGitInitialization :: InitSpec -> FilePath -> IO ()
+runGitInitialization _ repositoryRoot =
+  runGitOrExit ["init", "--", repositoryRoot]
+rollbackInitialization :: Bool -> FilePath -> [FilePath] -> IO ()
+rollbackInitialization targetExisted repositoryRoot createdPaths = do
+  forM_ createdPaths $ \path -> doesPathExist path >>= \exists -> when exists (removePathForcibly path)
+  unless targetExisted (doesPathExist repositoryRoot >>= \exists -> when exists (removePathForcibly repositoryRoot))
 renderInitializedProjectGitignore :: IO T.Text
 renderInitializedProjectGitignore = do
   repositoryEntries <- collectStructurallyAllowedRepositoryEntriesWith []
   pure (renderRootGitignore ("flake.nix" : "flake.lock" : concatMap whitelistPathsForRepositoryEntry repositoryEntries))
-readRegularTextFileIfExistsOrExit :: FilePath -> IO (Maybe T.Text)
-readRegularTextFileIfExistsOrExit path = do
-  exists <- doesPathExist path
-  if not exists
-    then pure Nothing
-    else do
-      status <- Posix.getSymbolicLinkStatus path
-      if Posix.isRegularFile status
-        then Just <$> TIO.readFile path
-        else hPutStrLn stderr ("error: " ++ path ++ ": existing path must be a regular file") >> exitFailure
-regularFileExistsOrExit :: FilePath -> IO Bool
-regularFileExistsOrExit path = isJust <$> readRegularTextFileIfExistsOrExit path
 runNixOrExit :: [String] -> IO ()
 runNixOrExit arguments = do
   nixExecutable <- fromMaybe "nix" <$> lookupEnv "GIT_CANONICALIZATION_NIX"
@@ -624,18 +646,19 @@ validateProjectLocation home repositoryRoot =
     when ownsGitMetadata $ do
       maybeOrigin <- readGitOrigin repositoryRoot
       forM_ maybeOrigin $ \origin ->
-        case canonicalHomeRepositoryPath origin of
-          Left originError -> hPutStrLn stderr ("error: origin: " ++ originError) >> exitFailure
-          Right expectedRelativePath -> do
-            let actualRelativePath = makeRelative home repositoryRoot
-                expectedPath = home </> expectedRelativePath
-            when (actualRelativePath /= expectedRelativePath) $ do
-              hPutStrLn stderr "error: project location does not match origin"
-              hPutStrLn stderr ("actual:   " ++ repositoryRoot)
-              hPutStrLn stderr ("expected: " ++ expectedPath)
-              hPutStrLn stderr ("hint: use 'git canonicalization add " ++ origin ++ "' from the home profile")
-              exitFailure
-            validateRegisteredHomeRepository home actualRelativePath expectedRelativePath
+        resolveGitRemoteUrl repositoryRoot origin >>= \resolvedOrigin ->
+          case canonicalHomeRepositoryPath resolvedOrigin of
+            Left originError -> hPutStrLn stderr ("error: origin: " ++ originError) >> exitFailure
+            Right expectedRelativePath -> do
+              let actualRelativePath = makeRelative home repositoryRoot
+                  expectedPath = home </> expectedRelativePath
+              when (actualRelativePath /= expectedRelativePath) $ do
+                hPutStrLn stderr "error: project location does not match origin"
+                hPutStrLn stderr ("actual:   " ++ repositoryRoot)
+                hPutStrLn stderr ("expected: " ++ expectedPath)
+                hPutStrLn stderr ("hint: use 'git canonicalization add " ++ origin ++ "' from the home profile")
+                exitFailure
+              validateRegisteredHomeRepository home actualRelativePath expectedRelativePath
 isStrictDescendantOf :: FilePath -> FilePath -> Bool
 isStrictDescendantOf parent child =
   let relativePath = makeRelative parent child
@@ -696,13 +719,14 @@ canonicalHomeGitignoreOrExit gitignorePath = \case
     | otherwise ->
         hPutStrLn stderr ("error: " ++ gitignorePath ++ ": existing file must start with * and subsequent lines must start with !") >> exitFailure
 addHomeRepository :: FilePath -> String -> IO ()
-addHomeRepository repositoryRoot repositoryUrl =
-  case canonicalHomeRepositoryPath repositoryUrl of
+addHomeRepository repositoryRoot repositoryUrl = do
+  resolvedRepositoryUrl <- resolveGitRemoteUrl repositoryRoot repositoryUrl
+  case canonicalHomeRepositoryPath resolvedRepositoryUrl of
     Left urlError -> hPutStrLn stderr ("error: " ++ urlError) >> exitFailure
     Right canonicalPath -> do
       let gitignorePath = repositoryRoot </> ".gitignore"
       gitignoreSource <- readTextFileIfExists gitignorePath >>= canonicalHomeGitignoreOrExit gitignorePath
-      runGitOrExit ["-C", repositoryRoot, "submodule", "add", "--force", repositoryUrl, canonicalPath]
+      runGitOrExit ["-C", repositoryRoot, "submodule", "add", "--force", resolvedRepositoryUrl, canonicalPath]
       TIO.writeFile gitignorePath gitignoreSource
       runGitOrExit ["-C", repositoryRoot, "add", "--", ".gitignore"]
 checkHomeProfile :: FilePath -> Bool -> IO ()
@@ -848,30 +872,51 @@ duplicateHomeRepositoryValues select repositories =
   Map.keys (Map.filter (> (1 :: Int)) (Map.fromListWith (+) [(select repository, 1 :: Int) | repository <- repositories]))
 canonicalHomeRepositoryPath :: String -> Either String FilePath
 canonicalHomeRepositoryPath repositoryUrl = do
-  location <-
-    maybe
-      (Left ("unsupported repository URL: " ++ repositoryUrl))
-      Right
-      ( stripPrefix "https://" repositoryUrl
-          <|> stripPrefix "ssh://git@" repositoryUrl
-          <|> stripPrefix "git+ssh://git@" repositoryUrl
-          <|> (stripPrefix "git@" repositoryUrl >>= replaceFirstColonWithSlash)
-      )
-  let trimmedLocation = reverse (dropWhile (== '/') (reverse location))
-      components = splitOnCharacter '/' trimmedLocation
-  case components of
-    hostname : repositoryComponents
-      | not (null repositoryComponents) -> do
-          mapM_ validateHomePathComponent (hostname : repositoryComponents)
-          let repositoryPath = intercalate "/" repositoryComponents
-              withoutGitSuffix = fromMaybe repositoryPath (stripStringSuffix ".git" repositoryPath)
-          pure (hostname ++ "/" ++ withoutGitSuffix)
+  (hostname, repositoryPathWithSuffix) <-
+    maybe (Left ("remote URL has no canonical host and repository path: " ++ repositoryUrl)) Right (parseHostedGitRemote repositoryUrl)
+  let trimmedRepositoryPath = reverse (dropWhile (== '/') (reverse repositoryPathWithSuffix))
+      repositoryComponents = splitOnCharacter '/' trimmedRepositoryPath
+  case repositoryComponents of
+    _ : _ -> do
+      mapM_ validateHomePathComponent (hostname : repositoryComponents)
+      let repositoryPath = intercalate "/" repositoryComponents
+          withoutGitSuffix = fromMaybe repositoryPath (stripStringSuffix ".git" repositoryPath)
+      pure (hostname ++ "/" ++ withoutGitSuffix)
     _ -> Left ("unsupported or incomplete repository URL: " ++ repositoryUrl)
-replaceFirstColonWithSlash :: String -> Maybe String
-replaceFirstColonWithSlash source =
-  case break (== ':') source of
-    (_, []) -> Nothing
-    (hostname, _ : path) -> Just (hostname ++ "/" ++ path)
+parseHostedGitRemote :: String -> Maybe (String, String)
+parseHostedGitRemote repositoryUrl =
+  parseUrlStyle <|> parseScpStyle
+  where
+    parseUrlStyle :: Maybe (String, String)
+    parseUrlStyle = do
+      location <- foldr (<|>) Nothing [stripPrefix scheme repositoryUrl | scheme <- ["https://", "http://", "ssh://", "git+ssh://", "git://"]]
+      let (authority, pathWithSeparator) = break (== '/') location
+      path <- stripPrefix "/" pathWithSeparator
+      hostname <- hostnameFromAuthority authority
+      guard (not (null path))
+      pure (map toLower hostname, path)
+    parseScpStyle :: Maybe (String, String)
+    parseScpStyle = do
+      let (authority, pathWithSeparator) = break (== ':') repositoryUrl
+      path <- stripPrefix ":" pathWithSeparator
+      guard (not (null authority) && '/' `notElem` authority && not (null path))
+      hostname <- hostnameFromAuthority authority
+      pure (map toLower hostname, path)
+hostnameFromAuthority :: String -> Maybe String
+hostnameFromAuthority authority = do
+  let hostAndPort = reverse (takeWhile (/= '@') (reverse authority))
+      hostname = takeWhile (/= ':') hostAndPort
+  guard (not (null hostname))
+  pure hostname
+resolveGitRemoteUrl :: FilePath -> String -> IO String
+resolveGitRemoteUrl repositoryRoot repositoryUrl = do
+  (resolveExit, resolveStdout, resolveStderr) <- readProcessWithExitCode "git" ["-C", repositoryRoot, "ls-remote", "--get-url", repositoryUrl] ""
+  if resolveExit == ExitSuccess
+    then pure (T.unpack (T.strip (T.pack resolveStdout)))
+    else do
+      putStr resolveStdout
+      hPutStr stderr resolveStderr
+      exitWith resolveExit
 splitOnCharacter :: Char -> String -> [String]
 splitOnCharacter separator source =
   case break (== separator) source of
@@ -1617,8 +1662,9 @@ trackableTreeRoot repositoryPath =
     "packages" : packageName : "prm" : _ -> Just ("packages" </> packageName </> "prm")
     "packages" : packageName : "figures" : _ -> Just ("packages" </> packageName </> "figures")
     _ -> Nothing
-removePackageFromCurrentRepository :: FilePath -> IO (Either String ())
-removePackageFromCurrentRepository packageName = do
+removePackageFromCurrentRepository :: RemoveSpec -> IO (Either String ())
+removePackageFromCurrentRepository removeSpec = do
+  let packageName = removePackageName removeSpec
   let packagePath = "packages" </> packageName
       packageNameIsSafe = splitDirectories packageName == [packageName] && packageName `notElem` ["", ".", ".."]
   packageExists <- doesDirectoryExist packagePath
@@ -1626,7 +1672,10 @@ removePackageFromCurrentRepository packageName = do
     then pure (Left ("invalid package name: " ++ packageName))
     else
       if not packageExists
-        then pure (Left ("package does not exist: " ++ packagePath))
+        then
+          if removeIgnoreUnmatch removeSpec
+            then pure (Right ())
+            else pure (Left ("package does not exist: " ++ packagePath))
         else do
           (packages, structureIssues) <- inspectRepositoryStructure
           case lookup packageName packages of
@@ -1642,21 +1691,39 @@ removePackageFromCurrentRepository packageName = do
               let maybeCheckPath = ("checks" </>) <$> repositoryCheckNameForPackage packageKind packageName
               existingCheckPaths <- filterM doesPathExist (maybeToList maybeCheckPath)
               let removalPaths = packagePath : existingCheckPaths
-              (statusExit, statusStdout, statusStderr) <-
-                readProcessWithExitCode
-                  "git"
-                  (["status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching", "--"] ++ removalPaths)
-                  ""
-              if statusExit /= ExitSuccess
-                then pure (Left ("could not inspect package state: " ++ T.unpack (T.strip (T.pack statusStderr))))
-                else
-                  if not (null statusStdout)
-                    then pure (Left ("package or check is not clean:\n" ++ statusStdout))
+              cleanlinessResult <-
+                if removeForce removeSpec
+                  then pure (Right ())
+                  else do
+                    (statusExit, statusStdout, statusStderr) <-
+                      readProcessWithExitCode
+                        "git"
+                        (["status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching", "--"] ++ removalPaths)
+                        ""
+                    pure $
+                      if statusExit /= ExitSuccess
+                        then Left ("could not inspect package state: " ++ T.unpack (T.strip (T.pack statusStderr)))
+                        else
+                          if null statusStdout
+                            then Right ()
+                            else
+                              Left ("package or check is not clean:\n" ++ statusStdout)
+              case cleanlinessResult of
+                Left cleanlinessError -> pure (Left cleanlinessError)
+                Right () ->
+                  if removeDryRun removeSpec
+                    then do
+                      forM_ removalPaths (putStrLn . ("rm '" ++) . (++ "'"))
+                      putStrLn "update '.gitignore'"
+                      pure (Right ())
                     else do
-                      (removeExit, _removeStdout, removeStderr) <- readProcessWithExitCode "git" (["rm", "-r", "--"] ++ removalPaths) ""
+                      let forceArguments :: [String]
+                          forceArguments = ["-f" | removeForce removeSpec]
+                      (removeExit, removeStdout, removeStderr) <- readProcessWithExitCode "git" (["rm", "-r"] ++ forceArguments ++ ["--"] ++ removalPaths) ""
                       if removeExit /= ExitSuccess
                         then pure (Left ("git rm failed: " ++ T.unpack (T.strip (T.pack removeStderr))))
                         else do
+                          putStr removeStdout
                           rootGitignoreSource <- renderRootGitignoreFromCurrentRepository
                           TIO.writeFile ".gitignore" rootGitignoreSource
                           (addExit, _addStdout, addStderr) <- readProcessWithExitCode "git" ["add", "--", ".gitignore"] ""
@@ -3494,11 +3561,11 @@ commandLineHelpEndToEndTest =
     assertBool
       "The top-level help command prints concise usage and commands to stdout."
       ( mainUsageText `isPrefixOf` helpStdout
-          && "\n  init <local-path>" `isInfixOf` helpStdout
+          && "\n  init [--] [<directory>]" `isInfixOf` helpStdout
           && "\n  add <package-type>" `isInfixOf` helpStdout
           && "\n  check [--fix]\n" `isInfixOf` helpStdout
           && "check [--fix]" `isInfixOf` helpStdout
-          && "\n  rm <package-name>" `isInfixOf` helpStdout
+          && "\n  rm [-n|--dry-run]" `isInfixOf` helpStdout
           && "\n  status\n" `isInfixOf` helpStdout
       )
     assertEqual "The top-level help command leaves stderr empty." "" helpStderr
@@ -3517,19 +3584,18 @@ initializationEndToEndTest =
       environment <- initializationTestEnvironment temporaryHome temporaryTools
       (homeExit, homeStdout, homeStderr) <- runEndToEndCommandWithEnvironment "/tmp" environment ["init", temporaryHome]
       assertEqual "Home initialization succeeds." ExitSuccess homeExit
-      assertEqual "Home initialization is quiet on stdout." "" homeStdout
-      assertEqual "Home initialization is quiet on stderr." "" homeStderr
+      assertBool "Home initialization preserves Git's normal success output." ("Initialized empty Git repository" `isInfixOf` homeStdout)
+      assertBool "Home initialization preserves Git's branch-name advice when configured." (null homeStderr || "default branch" `isInfixOf` homeStderr)
       homeGitignore <- TIO.readFile (temporaryHome </> ".gitignore")
       assertEqual "Home initialization writes the canonical whitelist." homeGitignoreSource homeGitignore
       (homeStatusExit, homeStatusStdout, _homeStatusStderr) <- readProcessWithExitCode "git" ["-C", temporaryHome, "status", "--porcelain=v1"] ""
       assertEqual "The initialized home is a Git repository." ExitSuccess homeStatusExit
       assertBool "Home initialization leaves its whitelist unstaged." ("?? .gitignore" `isInfixOf` homeStatusStdout)
       let project = temporaryHome </> "github.com/owner/demo"
-      createDirectoryIfMissing True project
       (projectExit, projectStdout, projectStderr) <- runEndToEndCommandWithEnvironment "/tmp" environment ["init", project]
-      assertEqual "Project initialization succeeds without origin." ExitSuccess projectExit
-      assertEqual "Project initialization is quiet on stdout." "" projectStdout
-      assertEqual "Project initialization is quiet on stderr." "" projectStderr
+      assertEqual "Project initialization creates a missing nested path and succeeds without origin." ExitSuccess projectExit
+      assertBool "Project initialization preserves Git's normal success output." ("Initialized empty Git repository" `isInfixOf` projectStdout)
+      assertBool "Project initialization makes network-dependent work visible." ("Locking flake inputs..." `isInfixOf` projectStderr)
       projectFlake <- TIO.readFile (project </> "flake.nix")
       projectLock <- TIO.readFile (project </> "flake.lock")
       projectGitignore <- TIO.readFile (project </> ".gitignore")
@@ -3541,9 +3607,24 @@ initializationEndToEndTest =
       assertBool "Project initialization leaves all generated files unstaged." (all (`isInfixOf` projectStatusStdout) ["?? .gitignore", "?? flake.lock", "?? flake.nix"])
       (repeatExit, repeatStdout, repeatStderr) <- runEndToEndCommandWithEnvironment "/tmp" environment ["init", project]
       assertEqual "Repeated project initialization succeeds." ExitSuccess repeatExit
-      assertEqual "Repeated initialization remains quiet." "" (repeatStdout ++ repeatStderr)
+      assertBool "Repeated initialization preserves Git's reinitialization output." ("Reinitialized existing Git repository" `isInfixOf` repeatStdout)
+      assertEqual "Repeated initialization does not repeat lock work." "" repeatStderr
       repeatedFiles <- mapM TIO.readFile [project </> "flake.nix", project </> "flake.lock", project </> ".gitignore"]
       assertEqual "Repeated initialization preserves generated files." [projectFlake, projectLock, projectGitignore] repeatedFiles
+      let offlineProject = temporaryHome </> "--help"
+      (offlineExit, offlineStdout, offlineStderr) <- runEndToEndCommandWithEnvironment "/tmp" environment ["init", "--", offlineProject]
+      assertEqual "Option termination permits a dash-prefixed directory." ExitSuccess offlineExit
+      assertBool "Dash-prefixed initialization preserves Git's output." ("Initialized empty Git repository" `isInfixOf` offlineStdout)
+      assertBool "Dash-prefixed project initialization reports lock generation." ("Locking flake inputs..." `isInfixOf` offlineStderr)
+      offlineLockExists <- doesPathExist (offlineProject </> "flake.lock")
+      assertBool "Project initialization consistently generates its lock." offlineLockExists
+      let failedProject = temporaryHome </> "failed-lock"
+          fakeNixPath = temporaryTools </> "nix"
+      TIO.writeFile fakeNixPath "#!/bin/sh\nexit 2\n"
+      (failedExit, _, _) <- runEndToEndCommandWithEnvironment "/tmp" environment ["init", failedProject]
+      assertEqual "A failed lock phase propagates its exit status." (ExitFailure 2) failedExit
+      failedProjectExists <- doesPathExist failedProject
+      assertBool "A failed initialization removes a target created by the command." (not failedProjectExists)
 initializationLocationEndToEndTest :: IO ()
 initializationLocationEndToEndTest =
   withTemporaryPackageRepository "initialization-location-home" $ \temporaryHome ->
@@ -3555,7 +3636,7 @@ initializationLocationEndToEndTest =
       runGitFixtureCommand ["-C", canonicalProject, "remote", "add", "origin", "git@github.com:owner/demo.git"]
       (matchingExit, _, matchingStderr) <- runEndToEndCommandWithEnvironment "/tmp" environment ["init", canonicalProject]
       assertEqual "A project at its origin-derived location initializes." ExitSuccess matchingExit
-      assertEqual "Matching location validation is quiet." "" matchingStderr
+      assertBool "Matching location initialization reports lock generation." ("Locking flake inputs..." `isInfixOf` matchingStderr)
       let mismatchedProject = temporaryHome </> "github.com/example/other"
       createDirectoryIfMissing True mismatchedProject
       initializeGitRepositoryFixture mismatchedProject
@@ -3575,34 +3656,38 @@ initializationExistingFilesEndToEndTest =
       createDirectoryIfMissing True project
       TIO.writeFile (project </> "flake.lock") "existing-lock\n"
       (orphanLockExit, _, orphanLockStderr) <- runEndToEndCommandWithEnvironment "/tmp" environment ["init", project]
-      assertEqual "A lock without a flake is rejected." (ExitFailure 1) orphanLockExit
-      assertBool "The partial-state error identifies both files." ("flake.lock" `isInfixOf` orphanLockStderr && "flake.nix" `isInfixOf` orphanLockStderr)
+      assertEqual "A lock without a flake is completed non-destructively." ExitSuccess orphanLockExit
+      assertBool "Completing an existing lock does not run the lock phase." (not ("Locking flake inputs..." `isInfixOf` orphanLockStderr))
+      preservedLock <- TIO.readFile (project </> "flake.lock")
+      assertEqual "An existing lock is preserved byte-for-byte." "existing-lock\n" preservedLock
       removeFile (project </> "flake.lock")
       let existingFlake :: T.Text
           existingFlake = "{ outputs = _: {}; }\n"
       TIO.writeFile (project </> "flake.nix") existingFlake
       (existingExit, _, existingStderr) <- runEndToEndCommandWithEnvironment "/tmp" environment ["init", project]
       assertEqual "Initialization completes an existing flake." ExitSuccess existingExit
-      assertEqual "Completing an existing flake is quiet." "" existingStderr
+      assertBool "Completing an existing flake reports lock generation." ("Locking flake inputs..." `isInfixOf` existingStderr)
       preservedFlake <- TIO.readFile (project </> "flake.nix")
       assertEqual "An existing flake is preserved byte-for-byte." existingFlake preservedFlake
       TIO.writeFile (project </> ".gitignore") "not canonical\n"
       (whitelistExit, _, whitelistStderr) <- runEndToEndCommandWithEnvironment "/tmp" environment ["init", project]
-      assertEqual "A noncanonical existing whitelist is rejected." (ExitFailure 1) whitelistExit
-      assertBool "The whitelist error recommends the explicit repair command." ("check --fix" `isInfixOf` whitelistStderr)
+      assertEqual "Reinitialization preserves a noncanonical existing whitelist." ExitSuccess whitelistExit
+      assertEqual "Preserving existing files is quiet." "" whitelistStderr
+      preservedGitignore <- TIO.readFile (project </> ".gitignore")
+      assertEqual "An existing whitelist is preserved byte-for-byte." "not canonical\n" preservedGitignore
 addCommandParsingTest :: IO ()
 addCommandParsingTest = do
   assertBool "Init accepts exactly one local path." $
     case parseCommand ["init", "project"] of
-      ParsedCommand (InitCommand "project") -> True
+      ParsedCommand (InitCommand (InitSpec "project")) -> True
       _ -> False
   assertBool "A supported URL prefix selects home repository addition." $
     case parseCommand ["add", "https://github.com/owner/demo.git"] of
       ParsedCommand (AddRepositoryCommand "https://github.com/owner/demo.git") -> True
       _ -> False
-  assertBool "A lone package type is a usage error rather than a repository URL." $
+  assertBool "A single add argument is treated as a Git repository URL or alias." $
     case parseCommand ["add", "python"] of
-      InvalidCommand exitCode (Just "add") -> exitCode == usageExitCode
+      ParsedCommand (AddRepositoryCommand "python") -> True
       _ -> False
   assertBool "The option terminator permits a description beginning with a dash." $
     case parseCommand ["add", "python", "demo", "--", "--documented", "behavior"] of
@@ -3615,10 +3700,10 @@ invalidCommandEndToEndTest =
     assertEqual "An invalid command uses Git's usage exit status." usageExitCode invalidCommandExit
     assertEqual "An invalid command leaves stdout empty." "" invalidCommandStdout
     assertEqual "An invalid command prints an error and the main usage to stderr." ("error: unknown command 'unknown-command'\n" ++ mainUsageText) invalidCommandStderr
-    (missingInitPathExit, missingInitPathStdout, missingInitPathStderr) <- runEndToEndCommandIn temporaryDirectory ["init"]
-    assertEqual "Init without a path uses Git's usage exit status." usageExitCode missingInitPathExit
-    assertEqual "Invalid init leaves stdout empty." "" missingInitPathStdout
-    assertEqual "Invalid init prints command-specific usage." ("error: invalid arguments for 'git canonicalization init'\n" ++ usageTextForCommand (Just "init")) missingInitPathStderr
+    assertBool "Init without a path defaults to the current directory." $
+      case parseCommand ["init"] of
+        ParsedCommand (InitCommand (InitSpec ".")) -> True
+        _ -> False
     (summaryExit, summaryStdout, summaryStderr) <- runEndToEndCommandIn temporaryDirectory ["summary"]
     assertEqual "The retired summary command uses Git's usage exit status." usageExitCode summaryExit
     assertEqual "The retired summary command leaves stdout empty." "" summaryStdout
@@ -3635,14 +3720,17 @@ homeRepositoryParsingTest :: IO ()
 homeRepositoryParsingTest = do
   forM_
     [ "https://github.com/owner/demo.git",
+      "http://github.com/owner/demo.git",
       "ssh://git@github.com/owner/demo.git",
+      "ssh://somebody@github.com:2222/owner/demo.git",
       "git+ssh://git@github.com/owner/demo.git/",
+      "git://github.com/owner/demo.git",
       "git@github.com:owner/demo.git"
     ]
     (assertEqual "Supported repository URLs share one canonical path." (Right "github.com/owner/demo") . canonicalHomeRepositoryPath)
   forM_
     [ "../demo.git",
-      "http://github.com/owner/demo.git",
+      "file:///tmp/demo.git",
       "https://github.com/",
       "https://github.com/owner/../demo.git",
       "git@github.com:owner//demo.git"
@@ -3659,14 +3747,19 @@ homeRepositoryParsingTest = do
         (const False)
         (parseHomeRepositoryConfig "submodule.demo.path\none/demo\0submodule.demo.path\ntwo/demo\0submodule.demo.url\nhttps://example.test/owner/demo.git\0")
     )
+  withTemporaryPackageRepository "remote-alias-resolution" $ \temporaryRepository -> do
+    initializeGitRepositoryFixture temporaryRepository
+    runGitFixtureCommand ["-C", temporaryRepository, "config", "url.git@github.com:.insteadOf", "gh:"]
+    resolvedUrl <- resolveGitRemoteUrl temporaryRepository "gh:owner/demo.git"
+    assertEqual "Git-configured URL aliases are resolved without contacting the remote." "git@github.com:owner/demo.git" resolvedUrl
 homeProfileEndToEndTest :: IO ()
 homeProfileEndToEndTest =
   withTemporaryPackageRepository "home-profile-end-to-end" $ \temporaryDirectory -> do
     environment <- environmentWithOverrides [("HOME", temporaryDirectory)]
     (initialFixExit, initialFixStdout, initialFixStderr) <- runEndToEndCommandWithEnvironment temporaryDirectory environment ["init", temporaryDirectory]
     assertEqual "Initializing an empty directory creates a home profile." ExitSuccess initialFixExit
-    assertEqual "Initial home initialization emits no stdout." "" initialFixStdout
-    assertEqual "Initial home initialization emits no stderr." "" initialFixStderr
+    assertBool "Initial home initialization preserves Git's success output." ("Initialized empty Git repository" `isInfixOf` initialFixStdout)
+    assertBool "Initial home initialization preserves optional Git advice." (null initialFixStderr || "default branch" `isInfixOf` initialFixStderr)
     gitignoreSource <- TIO.readFile (temporaryDirectory </> ".gitignore")
     assertEqual "Initial home fix writes the canonical whitelist." "*\n!/.gitignore\n!/.gitmodules\n" gitignoreSource
     (checkExit, checkStdout, checkStderr) <- runEndToEndCommandIn temporaryDirectory ["check"]
@@ -3699,6 +3792,10 @@ addPackageEndToEndTest =
     TIO.writeFile (temporaryRepository </> "flake.lock") "{}"
     let nestedDirectory = temporaryRepository </> "packages"
     createDirectoryIfMissing True nestedDirectory
+    (repositoryAddExit, repositoryAddStdout, repositoryAddStderr) <- runEndToEndCommandIn nestedDirectory ["add", "git@github.com:owner/demo.git"]
+    assertEqual "Repository addition from a flake repository is rejected before contacting the remote." (ExitFailure 1) repositoryAddExit
+    assertEqual "Rejected repository addition leaves stdout empty." "" repositoryAddStdout
+    assertBool "Repository addition reports that it targets a home repository." ("flake repository does not support repository resources" `isInfixOf` repositoryAddStderr)
     (addExit, addStdout, addStderr) <-
       runEndToEndCommandIn
         nestedDirectory
@@ -3730,9 +3827,15 @@ addPackageEndToEndTest =
 removePackageEndToEndTest :: IO ()
 removePackageEndToEndTest =
   withGeneratedPythonPackageRepository "remove-package-end-to-end" $ \temporaryRepository -> do
+    (dryRunExit, dryRunStdout, dryRunStderr) <- runEndToEndCommandIn temporaryRepository ["rm", "--dry-run", "demo"]
+    assertEqual "Dry-run removal succeeds." ExitSuccess dryRunExit
+    assertBool "Dry-run removal reports package, check, and whitelist changes." (all (`isInfixOf` dryRunStdout) ["rm 'packages/demo'", "rm 'checks/demo_coverage'", "update '.gitignore'"])
+    assertEqual "Dry-run removal leaves stderr empty." "" dryRunStderr
+    packageStillExists <- doesPathExist (temporaryRepository </> "packages/demo")
+    assertBool "Dry-run removal does not change the package." packageStillExists
     (removeExit, removeStdout, removeStderr) <- runEndToEndCommandIn temporaryRepository ["rm", "demo"]
     assertEqual "Removing a clean package succeeds." ExitSuccess removeExit
-    assertEqual "A successful removal leaves stdout empty." "" removeStdout
+    assertBool "A successful removal preserves Git's path output." ("rm 'packages/demo/main.py'" `isInfixOf` removeStdout)
     assertEqual "A successful removal leaves stderr empty." "" removeStderr
     packageExists <- doesPathExist (temporaryRepository </> "packages/demo")
     checkExists <- doesPathExist (temporaryRepository </> "checks/demo_coverage")
@@ -3744,6 +3847,9 @@ removePackageEndToEndTest =
     assertEqual "The repository remains canonical after removal." ExitSuccess checkExit
     assertEqual "The successful post-removal check leaves stdout empty." "" checkStdout
     assertEqual "The successful post-removal check leaves stderr empty." "" checkStderr
+    (ignoreExit, ignoreStdout, ignoreStderr) <- runEndToEndCommandIn temporaryRepository ["rm", "--ignore-unmatch", "demo"]
+    assertEqual "Ignore-unmatch succeeds for an absent package." ExitSuccess ignoreExit
+    assertEqual "Ignore-unmatch is quiet." "" (ignoreStdout ++ ignoreStderr)
 unsafeRemovePackageEndToEndTest :: IO ()
 unsafeRemovePackageEndToEndTest = do
   assertUnsafeRemove "modified-remove-package" $ \temporaryRepository ->
@@ -3756,6 +3862,12 @@ unsafeRemovePackageEndToEndTest = do
     TIO.writeFile (temporaryRepository </> "packages/demo/prm/local") "local"
   assertUnsafeRemove "ignored-remove-package" $ \temporaryRepository ->
     TIO.writeFile (temporaryRepository </> "packages/demo/cache.bin") "ignored"
+  withGeneratedPythonPackageRepository "forced-remove-package" $ \temporaryRepository -> do
+    TIO.appendFile (temporaryRepository </> "packages/demo/main.py") "\n# local change\n"
+    (forceExit, forceStdout, forceStderr) <- runEndToEndCommandIn temporaryRepository ["rm", "--force", "demo"]
+    assertEqual "Forced removal permits local package changes." ExitSuccess forceExit
+    assertBool "Forced removal preserves Git's path output." ("rm 'packages/demo/main.py'" `isInfixOf` forceStdout)
+    assertEqual "Forced removal leaves stderr empty." "" forceStderr
 assertUnsafeRemove :: String -> (FilePath -> IO ()) -> IO ()
 assertUnsafeRemove fixtureName preparePackage =
   withGeneratedPythonPackageRepository fixtureName $ \temporaryRepository -> do
