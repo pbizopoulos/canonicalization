@@ -18,10 +18,10 @@ let
     find packages -name Cargo.toml -execdir cargo clippy --fix --allow-dirty --allow-staged --all-targets --all-features -- -D warnings -D clippy::all -D clippy::pedantic -D clippy::nursery -D clippy::cargo -D clippy::restriction -A clippy::implicit_return \;
   '';
   formatter = treefmtEval.config.build.wrapper;
-  git-repository-canonicalization-script = pkgs.writeShellScriptBin "git-repository-canonicalization-check" ''
+  git-canonicalization-script = pkgs.writeShellScriptBin "git-canonicalization-check" ''
     ${
-      inputs.self.packages.${pkgs.stdenv.system}."git-repository-canonicalization"
-    }/bin/git-repository-canonicalization check --fix
+      inputs.self.packages.${pkgs.stdenv.system}."git-canonicalization"
+    }/bin/git-canonicalization check --fix
   '';
   treefmtEval = inputs.treefmt-nix.lib.evalModule pkgs {
     programs = {
@@ -87,8 +87,8 @@ let
             "*.rs"
           ];
         };
-        git-repository-canonicalization = {
-          command = "${git-repository-canonicalization-script}/bin/git-repository-canonicalization-check";
+        git-canonicalization = {
+          command = "${git-canonicalization-script}/bin/git-canonicalization-check";
           includes = [
             "*.nix"
           ];

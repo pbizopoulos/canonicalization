@@ -6,12 +6,14 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneKindSignatures #-}
 {-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE TupleSections #-}
 {-# OPTIONS_GHC -Wno-missing-import-lists -Wno-unsafe #-}
 module Main (main, runPackageTests, runPackageTestsWithTimings) where
 import Control.Applicative ((<|>))
 import Control.Exception (IOException, finally, try)
 import Control.Monad (filterM, forM, forM_, guard, when)
 import Data.Char (isAlphaNum, isAsciiLower, isControl, isDigit, isLower, isSpace, isUpper, ord, toLower, toUpper)
+import Data.Either (fromRight, lefts, rights)
 import Data.Fix (Fix (Fix))
 import Data.Functor.Compose (Compose (Compose))
 import Data.Kind (Type)
@@ -257,8 +259,10 @@ data Command
   = CheckCommand
   | CheckFixCommand
   | StatusCommand
-  | AddCommand String FilePath (Maybe String)
-  | RemoveCommand FilePath
+  | InitHomeCommand
+  | AddRepositoryCommand String
+  | AddPackageCommand String FilePath (Maybe String)
+  | RemovePackageCommand FilePath
 type CommandParseResult :: Type
 data CommandParseResult
   = ParsedCommand Command
@@ -272,26 +276,38 @@ runCli commandLineArguments =
     MainHelp -> printMainHelpAndExit
     InvalidCommand exitCode maybeCommand ->
       hPutStr stderr (usageTextForCommand maybeCommand) >> exitWith exitCode
-    ParsedCommand CheckCommand -> checkRepositoryLocation "."
-    ParsedCommand CheckFixCommand -> fixAndCheckRepositoryLocation "."
-    ParsedCommand StatusCommand ->
-      summarizeRepositoryLocation renderRepositorySummariesJSON "."
-    ParsedCommand (AddCommand packageKindName packageName packageDescription) ->
-      runInGitRepositoryRoot "." $
-        case parseSupportedAddPackageKind packageKindName of
-          Nothing -> do
-            hPutStrLn stderr ("error: unsupported package type: " ++ packageKindName)
-            hPutStrLn stderr ("hint: supported package types: " ++ intercalate ", " (map fst supportedAddPackageKinds))
-            exitFailure
-          Just scaffoldPackageKind -> do
-            addResult <- addPackageToCurrentRepository scaffoldPackageKind packageName packageDescription
-            stageGeneratedPathsOrExit addResult
-    ParsedCommand (RemoveCommand packageName) ->
-      runInGitRepositoryRoot "." $ do
-        removeResult <- removePackageFromCurrentRepository packageName
-        case removeResult of
-          Left removeError -> hPutStrLn stderr ("error: " ++ removeError) >> exitFailure
-          Right () -> exitSuccess
+    ParsedCommand InitHomeCommand -> getCurrentDirectory >>= canonicalizePath >>= initializeHomeProfile
+    ParsedCommand CheckCommand -> withDetectedRepositoryProfile $ \repositoryRoot -> \case
+      HomeProfile -> checkHomeProfile repositoryRoot False
+      FlakeProfile -> checkRepositoryLocation repositoryRoot
+    ParsedCommand CheckFixCommand -> withDetectedRepositoryProfile $ \repositoryRoot -> \case
+      HomeProfile -> checkHomeProfile repositoryRoot True
+      FlakeProfile -> fixAndCheckRepositoryLocation repositoryRoot
+    ParsedCommand StatusCommand -> withDetectedRepositoryProfile $ \repositoryRoot -> \case
+      HomeProfile -> renderHomeProfileStatus repositoryRoot
+      FlakeProfile -> summarizeRepositoryLocation renderRepositorySummariesJSON repositoryRoot
+    ParsedCommand (AddRepositoryCommand repositoryUrl) ->
+      withDetectedRepositoryProfile $ \repositoryRoot -> \case
+        HomeProfile -> addHomeRepository repositoryRoot repositoryUrl
+        FlakeProfile -> unsupportedResource "flake" "repository"
+    ParsedCommand (AddPackageCommand packageKindName packageName packageDescription) ->
+      withRequiredProfile FlakeProfile "package" $
+        runInGitRepositoryRoot "." $
+          case parseSupportedAddPackageKind packageKindName of
+            Nothing -> do
+              hPutStrLn stderr ("error: unsupported package type: " ++ packageKindName)
+              hPutStrLn stderr ("hint: supported package types: " ++ intercalate ", " (map fst supportedAddPackageKinds))
+              exitFailure
+            Just scaffoldPackageKind -> do
+              addResult <- addPackageToCurrentRepository scaffoldPackageKind packageName packageDescription
+              stageGeneratedPathsOrExit addResult
+    ParsedCommand (RemovePackageCommand packageName) ->
+      withRequiredProfile FlakeProfile "package" $
+        runInGitRepositoryRoot "." $ do
+          removeResult <- removePackageFromCurrentRepository packageName
+          case removeResult of
+            Left removeError -> hPutStrLn stderr ("error: " ++ removeError) >> exitFailure
+            Right () -> exitSuccess
 stageGeneratedPathsOrExit :: Either String [FilePath] -> IO a
 stageGeneratedPathsOrExit = \case
   Left addError -> do
@@ -308,12 +324,14 @@ parseCommand commandLineArguments =
     ["check", "--fix"] -> ParsedCommand CheckFixCommand
     "check" : _ -> InvalidCommand usageExitCode (Just "check")
     ["status"] -> ParsedCommand StatusCommand
-    ["rm", packageName] -> ParsedCommand (RemoveCommand packageName)
-    "rm" : _ -> InvalidCommand usageExitCode (Just "rm")
+    ["init", "home"] -> ParsedCommand InitHomeCommand
+    ["add", "repository", repositoryUrl] -> ParsedCommand (AddRepositoryCommand repositoryUrl)
+    ["remove", "package", packageName] -> ParsedCommand (RemovePackageCommand packageName)
+    "remove" : _ -> InvalidCommand usageExitCode (Just "remove")
     _ ->
       case parseAddPackageArguments commandLineArguments of
         Just (packageKindName, packageName, packageDescription) ->
-          ParsedCommand (AddCommand packageKindName packageName packageDescription)
+          ParsedCommand (AddPackageCommand packageKindName packageName packageDescription)
         Nothing -> InvalidCommand usageExitCode (listToMaybe commandLineArguments)
 printMainHelpAndExit :: IO a
 printMainHelpAndExit = do
@@ -324,41 +342,47 @@ usageExitCode = ExitFailure 129
 mainUsageText :: String
 mainUsageText =
   unlines
-    [ "usage: git repository-canonicalization status",
-      "   or: git repository-canonicalization add <package-type> <package-name> [<description>...]",
-      "   or: git repository-canonicalization rm <package-name>",
-      "   or: git repository-canonicalization check [--fix]"
+    [ "usage: git canonicalization init home",
+      "   or: git canonicalization status",
+      "   or: git canonicalization add repository <url>",
+      "   or: git canonicalization add package <package-type> <package-name> [<description>...]",
+      "   or: git canonicalization remove package <package-name>",
+      "   or: git canonicalization check [--fix]"
     ]
 mainHelpText :: String
 mainHelpText =
   unlines
-    [ "usage: git repository-canonicalization status",
-      "   or: git repository-canonicalization add <package-type> <package-name> [<description>...]",
-      "   or: git repository-canonicalization rm <package-name>",
-      "   or: git repository-canonicalization check [--fix]",
+    [ mainUsageText,
       "",
-      "Manage packages and checks in the nearest Git repository.",
+      "Manage canonical home and Nix flake repositories.",
       "Use git -C <location> to select a repository.",
       "",
-      "add <package-type> <package-name> [<description>...]",
-      "    Add a package and its check, then stage the files.",
+      "init home",
+      "    Initialize the selected directory with the home profile.",
       "",
-      "rm <package-name>",
-      "    Remove a clean package and its check, then stage the changes.",
+      "add repository <url>",
+      "    Add a repository resource to a home profile.",
+      "",
+      "add package <package-type> <package-name> [<description>...]",
+      "    Add a package resource and paired check to a flake profile.",
+      "",
+      "remove package <package-name>",
+      "    Remove a clean package and its paired check.",
       "",
       "check",
       "    Check that the repository follows the canonical conventions.",
       "    Use --fix to regenerate the root .gitignore before checking.",
       "",
       "status",
-      "    Show repository intent, packages, and checks as JSON.",
+      "    Show the detected profile and managed resources as JSON.",
       ""
     ]
 usageTextForCommand :: Maybe String -> String
 usageTextForCommand = \case
   Just "add" ->
     unlines
-      [ "usage: git repository-canonicalization add <package-type> <package-name> [<description>...]",
+      [ "usage: git canonicalization add repository <url>",
+        "   or: git canonicalization add package <package-type> <package-name> [<description>...]",
         "",
         "Add a package and its check.",
         "Generated files are staged with git add.",
@@ -366,14 +390,14 @@ usageTextForCommand = \case
       ]
   Just "status" ->
     unlines
-      [ "usage: git repository-canonicalization status",
+      [ "usage: git canonicalization status",
         "",
         "Show the status of the nearest Git repository as JSON. Use 'git -C <location>' to select it.",
         ""
       ]
-  Just "rm" ->
+  Just "remove" ->
     unlines
-      [ "usage: git repository-canonicalization rm <package-name>",
+      [ "usage: git canonicalization remove package <package-name>",
         "",
         "Remove a clean package and its check.",
         "Generated changes are staged with git add.",
@@ -381,7 +405,7 @@ usageTextForCommand = \case
       ]
   Just "check" ->
     unlines
-      [ "usage: git repository-canonicalization check [--fix]",
+      [ "usage: git canonicalization check [--fix]",
         "",
         "Check the nearest Git repository. Use 'git -C <location>' to select it.",
         "With --fix, regenerate the root .gitignore before checking.",
@@ -389,11 +413,270 @@ usageTextForCommand = \case
       ]
   _ -> mainUsageText
 parseAddPackageArguments :: [String] -> Maybe (String, FilePath, Maybe String)
-parseAddPackageArguments ("add" : packageKindName : packageName : remainingArguments) = do
+parseAddPackageArguments ("add" : "package" : packageKindName : packageName : remainingArguments) = do
   guard (not (any ("--" `isPrefixOf`) remainingArguments))
   let packageDescription = unwords . NE.toList <$> NE.nonEmpty remainingArguments
   pure (packageKindName, packageName, packageDescription)
 parseAddPackageArguments _ = Nothing
+type RepositoryProfile :: Type
+data RepositoryProfile = HomeProfile | FlakeProfile deriving stock (Eq, Show)
+withDetectedRepositoryProfile :: (FilePath -> RepositoryProfile -> IO a) -> IO a
+withDetectedRepositoryProfile action = do
+  repositoryRoot <- discoverGitRepositoryRoot "."
+  profile <- detectRepositoryProfile repositoryRoot
+  action repositoryRoot profile
+withRequiredProfile :: RepositoryProfile -> String -> IO a -> IO a
+withRequiredProfile requiredProfile resourceKind action =
+  withDetectedRepositoryProfile $ \_ actualProfile ->
+    if actualProfile == requiredProfile
+      then action
+      else unsupportedResource (renderRepositoryProfile actualProfile) resourceKind
+detectRepositoryProfile :: FilePath -> IO RepositoryProfile
+detectRepositoryProfile repositoryRoot = withCurrentDirectory repositoryRoot $ do
+  flakeMarkerExists <- or <$> mapM doesPathExist ["flake.nix", "flake.lock", "packages", "checks", "hosts"]
+  gitmodulesExists <- doesPathExist ".gitmodules"
+  gitignoreSource <- readTextFileIfExists ".gitignore"
+  let homeMarkerExists = gitmodulesExists || maybe False (elem "!.gitmodules" . T.lines) gitignoreSource
+  case (homeMarkerExists, flakeMarkerExists) of
+    (True, False) -> pure HomeProfile
+    (False, True) -> pure FlakeProfile
+    (False, False) -> hPutStrLn stderr "error: cannot detect a canonicalization profile; run 'git canonicalization init home' or add flake markers" >> exitFailure
+    (True, True) -> hPutStrLn stderr "error: repository matches both home and flake profiles" >> exitFailure
+renderRepositoryProfile :: RepositoryProfile -> String
+renderRepositoryProfile = \case
+  HomeProfile -> "home"
+  FlakeProfile -> "flake"
+unsupportedResource :: String -> String -> IO a
+unsupportedResource profile resourceKind =
+  hPutStrLn stderr ("error: the " ++ profile ++ " profile does not support " ++ resourceKind ++ " resources") >> exitFailure
+homeGitignoreSource :: T.Text
+homeGitignoreSource = "*\n!.gitignore\n!.gitmodules\n"
+type HomeRepository :: Type
+data HomeRepository = HomeRepository
+  { homeRepositoryName :: String,
+    homeRepositoryPath :: FilePath,
+    homeRepositoryUrl :: String
+  }
+  deriving stock (Eq, Show)
+initializeHomeProfile :: FilePath -> IO ()
+initializeHomeProfile repositoryRoot = do
+  let gitignorePath = repositoryRoot </> ".gitignore"
+  gitignoreStatus <- try (Posix.getSymbolicLinkStatus gitignorePath) :: IO (Either IOException Posix.FileStatus)
+  case gitignoreStatus of
+    Right status
+      | not (Posix.isRegularFile status) ->
+          hPutStrLn stderr ("error: " ++ gitignorePath ++ ": existing path must be a regular file") >> exitFailure
+    _ -> pure ()
+  existingGitignore <- readTextFileIfExists gitignorePath
+  case existingGitignore of
+    Just source
+      | not (homeGitignoreIsCompatible source) ->
+          hPutStrLn stderr ("error: " ++ gitignorePath ++ ": existing file must start with * and subsequent lines must start with !") >> exitFailure
+    _ -> pure ()
+  runGitOrExit ["init", "--quiet", repositoryRoot]
+  TIO.writeFile gitignorePath homeGitignoreSource
+homeGitignoreIsCompatible :: T.Text -> Bool
+homeGitignoreIsCompatible source =
+  case T.lines source of
+    "*" : remainingLines -> all (T.isPrefixOf "!") remainingLines
+    _ -> False
+addHomeRepository :: FilePath -> String -> IO ()
+addHomeRepository repositoryRoot repositoryUrl =
+  case canonicalHomeRepositoryPath repositoryUrl of
+    Left urlError -> hPutStrLn stderr ("error: " ++ urlError) >> exitFailure
+    Right canonicalPath -> do
+      runGitOrExit ["-C", repositoryRoot, "submodule", "add", "--force", repositoryUrl, canonicalPath]
+      TIO.writeFile (repositoryRoot </> ".gitignore") homeGitignoreSource
+      runGitOrExit ["-C", repositoryRoot, "add", "--", ".gitignore"]
+checkHomeProfile :: FilePath -> Bool -> IO ()
+checkHomeProfile repositoryRoot fix = do
+  let gitignorePath = repositoryRoot </> ".gitignore"
+  gitignoreStatus <- try (Posix.getSymbolicLinkStatus gitignorePath) :: IO (Either IOException Posix.FileStatus)
+  case gitignoreStatus of
+    Right status
+      | not (Posix.isRegularFile status) -> reportHomeCheckIssues [gitignorePath ++ ": must be a regular file"]
+    _ -> do
+      actualGitignore <- readTextFileIfExists gitignorePath
+      when (actualGitignore /= Just homeGitignoreSource) $
+        if fix
+          then TIO.writeFile gitignorePath homeGitignoreSource
+          else reportHomeCheckIssues [gitignorePath ++ ": does not match the canonical home whitelist"]
+  readHomeRepositories repositoryRoot >>= \case
+    Left issues -> reportHomeCheckIssues issues
+    Right repositories -> do
+      let duplicateConfiguredPaths = duplicateHomeRepositoryValues homeRepositoryPath repositories
+          duplicateCanonicalPaths = duplicateHomeRepositoryValues (fromRight "" . canonicalHomeRepositoryPath . homeRepositoryUrl) repositories
+          configuredPathOwners = Map.fromList [(homeRepositoryPath repository, homeRepositoryName repository) | repository <- repositories]
+          occupiedTargetIssues =
+            [ "submodule \"" ++ homeRepositoryName repository ++ "\": canonical path '" ++ expectedPath ++ "' is currently used by submodule \"" ++ existingName ++ "\""
+            | repository <- repositories,
+              Right expectedPath <- [canonicalHomeRepositoryPath (homeRepositoryUrl repository)],
+              expectedPath /= homeRepositoryPath repository,
+              Just existingName <- [Map.lookup expectedPath configuredPathOwners]
+            ]
+          urlAndPathIssues = concatMap validateHomeRepository repositories
+          duplicateIssues =
+            map ("duplicate configured repository path: " ++) duplicateConfiguredPaths
+              ++ map ("duplicate canonical repository path: " ++) (filter (not . null) duplicateCanonicalPaths)
+          issues = urlAndPathIssues ++ duplicateIssues ++ occupiedTargetIssues
+      if not (null issues)
+        then reportHomeCheckIssues issues
+        else forM_ repositories $ \repository ->
+          case canonicalHomeRepositoryPath (homeRepositoryUrl repository) of
+            Right expectedPath
+              | expectedPath /= homeRepositoryPath repository ->
+                  if fix
+                    then fixHomeRepositoryPath repositoryRoot repository expectedPath
+                    else reportHomeCheckIssues ["submodule \"" ++ homeRepositoryName repository ++ "\": path '" ++ homeRepositoryPath repository ++ "' does not match URL; expected '" ++ expectedPath ++ "'"]
+            _ -> pure ()
+renderHomeProfileStatus :: FilePath -> IO ()
+renderHomeProfileStatus repositoryRoot = do
+  checkHomeProfile repositoryRoot False
+  readHomeRepositories repositoryRoot >>= \case
+    Left issues -> reportHomeCheckIssues issues
+    Right [] ->
+      putStr $
+        unlines
+          [ "{",
+            "  \"profile\": \"home\",",
+            "  \"root\": " ++ renderJSONString repositoryRoot ++ ",",
+            "  \"resources\": []",
+            "}"
+          ]
+    Right repositories ->
+      putStr $
+        unlines
+          [ "{",
+            "  \"profile\": \"home\",",
+            "  \"root\": " ++ renderJSONString repositoryRoot ++ ",",
+            "  \"resources\": [",
+            intercalate ",\n" (map renderHomeRepositoryJSON repositories),
+            "  ]",
+            "}"
+          ]
+renderHomeRepositoryJSON :: HomeRepository -> String
+renderHomeRepositoryJSON repository =
+  "    { \"kind\": \"repository\", \"name\": "
+    ++ renderJSONString (homeRepositoryName repository)
+    ++ ", \"path\": "
+    ++ renderJSONString (homeRepositoryPath repository)
+    ++ ", \"url\": "
+    ++ renderJSONString (homeRepositoryUrl repository)
+    ++ " }"
+readHomeRepositories :: FilePath -> IO (Either [String] [HomeRepository])
+readHomeRepositories repositoryRoot = do
+  let gitmodulesPath = repositoryRoot </> ".gitmodules"
+  gitmodulesStatus <- try (Posix.getSymbolicLinkStatus gitmodulesPath)
+  case gitmodulesStatus of
+    Left (_ :: IOException) -> pure (Right [])
+    Right status
+      | not (Posix.isRegularFile status) -> pure (Left [gitmodulesPath ++ ": must be a regular file"])
+      | otherwise -> do
+          (configExit, configStdout, configStderr) <-
+            readProcessWithExitCode "git" ["config", "get", "--file", gitmodulesPath, "--null", "--show-names", "--all", "--regexp", "^submodule\\..*"] ""
+          if configExit == ExitFailure 1 && null configStdout && null configStderr
+            then pure (Right [])
+            else
+              if configExit /= ExitSuccess
+                then pure (Left ["could not read " ++ gitmodulesPath ++ ": " ++ T.unpack (T.strip (T.pack configStderr))])
+                else pure (parseHomeRepositoryConfig configStdout)
+parseHomeRepositoryConfig :: String -> Either [String] [HomeRepository]
+parseHomeRepositoryConfig source =
+  let fields = mapMaybe parseHomeRepositoryField (splitNullTerminated source)
+      malformedCount = length (splitNullTerminated source) - length fields
+      grouped = Map.fromListWith (++) [(section, [(fieldName, value)]) | (section, fieldName, value) <- fields]
+      parseSection :: (String, [(String, String)]) -> Either String HomeRepository
+      parseSection (section, sectionFields) =
+        case ([value | ("path", value) <- sectionFields], [value | ("url", value) <- sectionFields]) of
+          ([path], [url]) -> Right (HomeRepository section path url)
+          (paths, urls) -> Left ("submodule \"" ++ section ++ "\": must have exactly one path and one URL (found " ++ show (length paths) ++ " paths and " ++ show (length urls) ++ " URLs)")
+      parsed = map parseSection (Map.toAscList grouped)
+      issues = lefts parsed ++ ["malformed .gitmodules field" | malformedCount > 0]
+   in if null issues then Right (rights parsed) else Left issues
+parseHomeRepositoryField :: String -> Maybe (String, String, String)
+parseHomeRepositoryField record = do
+  (key, value) <- splitOnce '\n' record
+  remainder <- stripPrefix "submodule." key
+  (section, fieldName) <-
+    (,"path") <$> stripStringSuffix ".path" remainder
+      <|> (,"url") <$> stripStringSuffix ".url" remainder
+  guard (not (null section))
+  pure (section, fieldName, value)
+splitOnce :: Char -> String -> Maybe (String, String)
+splitOnce separator source =
+  case break (== separator) source of
+    (_, []) -> Nothing
+    (prefix, _ : suffix) -> Just (prefix, suffix)
+stripStringSuffix :: String -> String -> Maybe String
+stripStringSuffix suffix source = reverse <$> stripPrefix (reverse suffix) (reverse source)
+validateHomeRepository :: HomeRepository -> [String]
+validateHomeRepository repository =
+  case canonicalHomeRepositoryPath (homeRepositoryUrl repository) of
+    Left urlError -> ["submodule \"" ++ homeRepositoryName repository ++ "\": " ++ urlError]
+    Right _ ->
+      [ "submodule \"" ++ homeRepositoryName repository ++ "\": invalid path '" ++ homeRepositoryPath repository ++ "'"
+      | not (validCanonicalHomePath (homeRepositoryPath repository))
+      ]
+duplicateHomeRepositoryValues :: (Ord value) => (HomeRepository -> value) -> [HomeRepository] -> [value]
+duplicateHomeRepositoryValues select repositories =
+  Map.keys (Map.filter (> (1 :: Int)) (Map.fromListWith (+) [(select repository, 1 :: Int) | repository <- repositories]))
+canonicalHomeRepositoryPath :: String -> Either String FilePath
+canonicalHomeRepositoryPath repositoryUrl = do
+  location <-
+    maybe
+      (Left ("unsupported repository URL: " ++ repositoryUrl))
+      Right
+      ( stripPrefix "https://" repositoryUrl
+          <|> stripPrefix "ssh://git@" repositoryUrl
+          <|> stripPrefix "git+ssh://git@" repositoryUrl
+          <|> (stripPrefix "git@" repositoryUrl >>= replaceFirstColonWithSlash)
+      )
+  let trimmedLocation = reverse (dropWhile (== '/') (reverse location))
+      components = splitOnCharacter '/' trimmedLocation
+  case components of
+    hostname : repositoryComponents
+      | not (null repositoryComponents) -> do
+          mapM_ validateHomePathComponent (hostname : repositoryComponents)
+          let repositoryPath = intercalate "/" repositoryComponents
+              withoutGitSuffix = fromMaybe repositoryPath (stripStringSuffix ".git" repositoryPath)
+          pure (hostname ++ "/" ++ withoutGitSuffix)
+    _ -> Left ("unsupported or incomplete repository URL: " ++ repositoryUrl)
+replaceFirstColonWithSlash :: String -> Maybe String
+replaceFirstColonWithSlash source =
+  case break (== ':') source of
+    (_, []) -> Nothing
+    (hostname, _ : path) -> Just (hostname ++ "/" ++ path)
+splitOnCharacter :: Char -> String -> [String]
+splitOnCharacter separator source =
+  case break (== separator) source of
+    (component, []) -> [component]
+    (component, _ : remaining) -> component : splitOnCharacter separator remaining
+validateHomePathComponent :: String -> Either String ()
+validateHomePathComponent component
+  | null component = Left "repository path components must not be empty"
+  | component `elem` [".", ".."] = Left "repository path components must not be '.' or '..'"
+  | all (\character -> isAlphaNum character && ord character < 128 || character `elem` (".-_" :: String)) component = Right ()
+  | otherwise = Left "repository path components must contain only ASCII letters, digits, '.', '-', or '_'"
+validCanonicalHomePath :: FilePath -> Bool
+validCanonicalHomePath path =
+  case splitOnCharacter '/' path of
+    _hostname : _repository : _ -> all (either (const False) (const True) . validateHomePathComponent) (splitOnCharacter '/' path)
+    _ -> False
+fixHomeRepositoryPath :: FilePath -> HomeRepository -> FilePath -> IO ()
+fixHomeRepositoryPath repositoryRoot repository expectedPath = do
+  createDirectoryIfMissing True (takeDirectory (repositoryRoot </> expectedPath))
+  runGitOrExit ["-C", repositoryRoot, "mv", "--", homeRepositoryPath repository, expectedPath]
+  runGitOrExit ["config", "set", "--file", repositoryRoot </> ".gitmodules", "submodule." ++ homeRepositoryName repository ++ ".path", expectedPath]
+reportHomeCheckIssues :: [String] -> IO a
+reportHomeCheckIssues issues = do
+  forM_ issues (hPutStrLn stderr . ("error: " ++))
+  exitFailure
+runGitOrExit :: [String] -> IO ()
+runGitOrExit arguments = do
+  (gitExit, gitStdout, gitStderr) <- readProcessWithExitCode "git" arguments ""
+  putStr gitStdout
+  hPutStr stderr gitStderr
+  when (gitExit /= ExitSuccess) (exitWith gitExit)
 runInGitRepositoryRoot :: FilePath -> IO a -> IO a
 runInGitRepositoryRoot repositoryDirectory action = do
   canonicalRepositoryRoot <- discoverGitRepositoryRoot repositoryDirectory
@@ -481,7 +764,7 @@ checkRootGitignore = do
 reportCheckRepositoryFailure :: RepositoryComplianceFailure -> IO ()
 reportCheckRepositoryFailure (RepositoryComplianceFailure checkPhase checkPhaseIssues) = do
   let checkPhaseName = renderRepositoryCheckPhase checkPhase
-  hPutStrLn stderr ("error: git repository-canonicalization check failed at phase: " ++ checkPhaseName)
+  hPutStrLn stderr ("error: git canonicalization check failed at phase: " ++ checkPhaseName)
   forM_ (NE.toList checkPhaseIssues) $ \issue ->
     hPutStrLn stderr ("- [" ++ checkPhaseName ++ "] " ++ issue)
   hPutStrLn stderr ("hint: " ++ repositoryCheckPhaseHint checkPhase)
@@ -563,33 +846,25 @@ summarizeRepositoryAt repositoryPath repositoryRoot =
               repositorySummaryPackages = packageSummaries
             }
 renderRepositorySummariesJSON :: [RepositorySummary] -> String
-renderRepositorySummariesJSON repositorySummaries =
+renderRepositorySummariesJSON [] =
+  unlines ["{", "  \"profile\": \"flake\",", "  \"root\": null,", "  \"readme\": null,", "  \"resources\": []", "}"]
+renderRepositorySummariesJSON (repositorySummary : _) =
   unlines
     [ "{",
-      "  \"repositories\": [",
-      intercalate ",\n" (map renderRepositorySummaryJSON repositorySummaries),
+      "  \"profile\": \"flake\",",
+      "  \"root\": " ++ renderJSONString (repositorySummaryPath repositorySummary) ++ ",",
+      "  \"readme\": " ++ maybe "null" renderJSONString (repositorySummaryReadme repositorySummary) ++ ",",
+      "  \"resources\": [",
+      intercalate ",\n" (map renderRepositoryPackageSummaryJSON (repositorySummaryPackages repositorySummary)),
       "  ]",
       "}"
     ]
-renderRepositorySummaryJSON :: RepositorySummary -> String
-renderRepositorySummaryJSON repositorySummary =
-  intercalate
-    "\n"
-    [ "    {",
-      "      \"path\": " ++ renderJSONString (repositorySummaryPath repositorySummary) ++ ",",
-      "      \"readme\": " ++ maybe "null" renderJSONString (repositorySummaryReadme repositorySummary) ++ ",",
-      "      \"packages\": [",
-      intercalate ",\n" (map (indentText 4 . renderRepositoryPackageSummaryJSON) (repositorySummaryPackages repositorySummary)),
-      "      ]",
-      "    }"
-    ]
-indentText :: Int -> String -> String
-indentText indentation = intercalate "\n" . map (replicate indentation ' ' ++) . lines
 renderRepositoryPackageSummaryJSON :: RepositoryPackageSummary -> String
 renderRepositoryPackageSummaryJSON packageSummary =
   intercalate
     "\n"
     ( [ "    {",
+        "      \"kind\": \"package\",",
         "      \"name\": " ++ renderJSONString (repositoryPackageName packageSummary) ++ ",",
         "      \"type\": " ++ renderJSONString (renderPackageKind (repositoryPackageKind packageSummary)) ++ ",",
         "      \"description\": " ++ maybe "null" renderJSONString (repositoryPackageDescription packageSummary) ++ ",",
@@ -2606,6 +2881,8 @@ hUnitPackageTests =
       TestLabel "Accepts python_template without inputs or shellHook." (TestCase pythonTemplateOptionalInputsAndShellHookTest),
       TestLabel "Documents help and invokes it consistently." (TestCase commandLineHelpEndToEndTest),
       TestLabel "Rejects unknown commands with usage on stderr." (TestCase invalidCommandEndToEndTest),
+      TestLabel "Parses and validates canonical home repository resources." (TestCase homeRepositoryParsingTest),
+      TestLabel "Initializes, detects, checks, and summarizes an empty home profile." (TestCase homeProfileEndToEndTest),
       TestLabel "Scaffolds a package and its check from a nested directory." (TestCase addPackageEndToEndTest),
       TestLabel "Removes a clean package, its check, and whitelist entries." (TestCase removePackageEndToEndTest),
       TestLabel "Refuses to remove packages containing local changes." (TestCase unsafeRemovePackageEndToEndTest),
@@ -2879,24 +3156,22 @@ repositorySummaryRenderingTest = do
     "JSON rendering preserves the schema and escapes strings."
     ( unlines
         [ "{",
-          "  \"repositories\": [",
+          "  \"profile\": \"flake\",",
+          "  \"root\": \"example.test/owner/demo\",",
+          "  \"readme\": \"Demo repository.\\n\\nIts intent is visible.\",",
+          "  \"resources\": [",
           "    {",
-          "      \"path\": \"example.test/owner/demo\",",
-          "      \"readme\": \"Demo repository.\\n\\nIts intent is visible.\",",
-          "      \"packages\": [",
-          "        {",
-          "          \"name\": \"demo\",",
-          "          \"type\": \"python\",",
-          "          \"description\": null,",
-          "          \"dependencies\": [\"alpha\", \"demo-two\"],",
-          "          \"tests\": {",
-          "            \"status\": \"measured\",",
-          "            \"coverage\": { \"metric\": \"statements\", \"covered\": 19, \"total\": 20, \"percent\": 95.0 },",
-          "            \"durationSeconds\": 1.234,",
-          "            \"cases\": [{ \"name\": \"Reports \\\"quoted\\\" behavior.\", \"durationSeconds\": 0.125 }]",
-          "          }",
-          "        }",
-          "      ]",
+          "      \"kind\": \"package\",",
+          "      \"name\": \"demo\",",
+          "      \"type\": \"python\",",
+          "      \"description\": null,",
+          "      \"dependencies\": [\"alpha\", \"demo-two\"],",
+          "      \"tests\": {",
+          "        \"status\": \"measured\",",
+          "        \"coverage\": { \"metric\": \"statements\", \"covered\": 19, \"total\": 20, \"percent\": 95.0 },",
+          "        \"durationSeconds\": 1.234,",
+          "        \"cases\": [{ \"name\": \"Reports \\\"quoted\\\" behavior.\", \"durationSeconds\": 0.125 }]",
+          "      }",
           "    }",
           "  ]",
           "}"
@@ -2972,10 +3247,10 @@ commandLineHelpEndToEndTest =
     assertBool
       "The top-level help command prints concise usage and commands to stdout."
       ( mainUsageText `isPrefixOf` helpStdout
-          && "\nadd <package-type>" `isInfixOf` helpStdout
+          && "\nadd package <package-type>" `isInfixOf` helpStdout
           && "\ncheck\n" `isInfixOf` helpStdout
           && "check [--fix]" `isInfixOf` helpStdout
-          && "\nrm <package-name>" `isInfixOf` helpStdout
+          && "\nremove package <package-name>" `isInfixOf` helpStdout
           && "\nstatus\n" `isInfixOf` helpStdout
       )
     assertEqual "The top-level help command leaves stderr empty." "" helpStderr
@@ -2994,6 +3269,55 @@ invalidCommandEndToEndTest =
     assertEqual "The retired summary command uses Git's usage exit status." usageExitCode summaryExit
     assertEqual "The retired summary command leaves stdout empty." "" summaryStdout
     assertEqual "The retired summary command prints the main usage to stderr." mainUsageText summaryStderr
+homeRepositoryParsingTest :: IO ()
+homeRepositoryParsingTest = do
+  forM_
+    [ "https://github.com/owner/demo.git",
+      "ssh://git@github.com/owner/demo.git",
+      "git+ssh://git@github.com/owner/demo.git/",
+      "git@github.com:owner/demo.git"
+    ]
+    (assertEqual "Supported repository URLs share one canonical path." (Right "github.com/owner/demo") . canonicalHomeRepositoryPath)
+  forM_
+    [ "../demo.git",
+      "http://github.com/owner/demo.git",
+      "https://github.com/",
+      "https://github.com/owner/../demo.git",
+      "git@github.com:owner//demo.git"
+    ]
+    (assertBool "Unsafe or unsupported repository URLs are rejected." . either (const True) (const False) . canonicalHomeRepositoryPath)
+  assertEqual
+    "A complete .gitmodules record becomes a repository resource."
+    (Right [HomeRepository "demo" "github.com/owner/demo" "https://github.com/owner/demo.git"])
+    (parseHomeRepositoryConfig "submodule.demo.path\ngithub.com/owner/demo\0submodule.demo.url\nhttps://github.com/owner/demo.git\0")
+  assertBool
+    "Duplicate .gitmodules fields are rejected."
+    ( either
+        (any ("must have exactly one path" `isInfixOf`))
+        (const False)
+        (parseHomeRepositoryConfig "submodule.demo.path\none/demo\0submodule.demo.path\ntwo/demo\0submodule.demo.url\nhttps://example.test/owner/demo.git\0")
+    )
+homeProfileEndToEndTest :: IO ()
+homeProfileEndToEndTest =
+  withTemporaryPackageRepository "home-profile-end-to-end" $ \temporaryDirectory -> do
+    (initExit, initStdout, initStderr) <- runEndToEndCommandIn temporaryDirectory ["init", "home"]
+    assertEqual "Initializing a home profile succeeds." ExitSuccess initExit
+    assertEqual "Home initialization emits no stdout." "" initStdout
+    assertEqual "Home initialization emits no stderr." "" initStderr
+    gitignoreSource <- TIO.readFile (temporaryDirectory </> ".gitignore")
+    assertEqual "Home initialization writes the canonical whitelist." "*\n!.gitignore\n!.gitmodules\n" gitignoreSource
+    (checkExit, checkStdout, checkStderr) <- runEndToEndCommandIn temporaryDirectory ["check"]
+    assertEqual "An empty home profile passes its check." ExitSuccess checkExit
+    assertEqual "An empty home check emits no stdout." "" checkStdout
+    assertEqual "An empty home check emits no stderr." "" checkStderr
+    repositoryRoot <- canonicalizePath temporaryDirectory
+    (statusExit, statusStdout, statusStderr) <- runEndToEndCommandIn temporaryDirectory ["status"]
+    assertEqual "An empty home status succeeds." ExitSuccess statusExit
+    assertEqual
+      "An empty home status uses the common profile envelope."
+      (unlines ["{", "  \"profile\": \"home\",", "  \"root\": " ++ renderJSONString repositoryRoot ++ ",", "  \"resources\": []", "}"])
+      statusStdout
+    assertEqual "An empty home status emits no stderr." "" statusStderr
 addPackageEndToEndTest :: IO ()
 addPackageEndToEndTest =
   withTemporaryPackageRepository "add-package-end-to-end" $ \temporaryRepository -> do
@@ -3005,7 +3329,7 @@ addPackageEndToEndTest =
     (addExit, addStdout, addStderr) <-
       runEndToEndCommandIn
         nestedDirectory
-        ["add", "python", "demo", "Demo package"]
+        ["add", "package", "python", "demo", "Demo package"]
     assertEqual "Adding a package through the installed CLI succeeds." ExitSuccess addExit
     assertEqual "A successful add produces no stdout." "" addStdout
     assertEqual "A successful add leaves stderr empty." "" addStderr
@@ -3033,7 +3357,7 @@ addPackageEndToEndTest =
 removePackageEndToEndTest :: IO ()
 removePackageEndToEndTest =
   withGeneratedPythonPackageRepository "remove-package-end-to-end" $ \temporaryRepository -> do
-    (removeExit, removeStdout, removeStderr) <- runEndToEndCommandIn temporaryRepository ["rm", "demo"]
+    (removeExit, removeStdout, removeStderr) <- runEndToEndCommandIn temporaryRepository ["remove", "package", "demo"]
     assertEqual "Removing a clean package succeeds." ExitSuccess removeExit
     assertEqual "A successful removal leaves stdout empty." "" removeStdout
     assertEqual "A successful removal leaves stderr empty." "" removeStderr
@@ -3063,7 +3387,7 @@ assertUnsafeRemove :: String -> (FilePath -> IO ()) -> IO ()
 assertUnsafeRemove fixtureName preparePackage =
   withGeneratedPythonPackageRepository fixtureName $ \temporaryRepository -> do
     preparePackage temporaryRepository
-    (removeExit, removeStdout, removeStderr) <- runEndToEndCommandIn temporaryRepository ["rm", "demo"]
+    (removeExit, removeStdout, removeStderr) <- runEndToEndCommandIn temporaryRepository ["remove", "package", "demo"]
     assertEqual "Removing an unsafe package fails." (ExitFailure 1) removeExit
     assertEqual "A refused removal leaves stdout empty." "" removeStdout
     assertBool "The refusal explains that the target is not clean." ("package or check is not clean" `isInfixOf` removeStderr)
@@ -3142,7 +3466,7 @@ allPackageKindsEndToEndTest =
         (addExit, addStdout, addStderr) <-
           runEndToEndCommandIn
             temporaryRepository
-            ["add", packageKindName, packageName, "E2E package"]
+            ["add", "package", packageKindName, packageName, "E2E package"]
         assertEqual ("Scaffolding " ++ packageKindName ++ " succeeds.") ExitSuccess addExit
         assertEqual ("Scaffolding " ++ packageKindName ++ " leaves stdout empty.") "" addStdout
         assertEqual ("Scaffolding " ++ packageKindName ++ " leaves stderr empty.") "" addStderr
@@ -3168,7 +3492,7 @@ existingPackageCollisionEndToEndTest =
     (addExit, addStdout, addStderr) <-
       runEndToEndCommandIn
         temporaryRepository
-        ["add", "haskell", "demo"]
+        ["add", "package", "haskell", "demo"]
     assertEqual "Creating an existing package fails." (ExitFailure 1) addExit
     assertEqual "The collision produces no stdout." "" addStdout
     assertBool
@@ -3232,24 +3556,24 @@ corruptedPackageCheckEndToEndTest =
     assertEqual "A failed check leaves stdout empty." "" failedCheckStdout
     assertBool
       "A failed check reports its phase and affected file."
-      ( "git repository-canonicalization check failed at phase: file-compliance" `isInfixOf` failedCheckStderr
+      ( "git canonicalization check failed at phase: file-compliance" `isInfixOf` failedCheckStderr
           && "packages/demo/default.nix:" `isInfixOf` failedCheckStderr
       )
 unknownAddOptionEndToEndTest :: IO ()
 unknownAddOptionEndToEndTest =
   withEmptyCanonicalRepository "unknown-add-option-end-to-end" $ \temporaryRepository -> do
     (unknownOptionExit, unknownOptionStdout, unknownOptionStderr) <-
-      runEndToEndCommandIn temporaryRepository ["add", "python", "demo", "--unknown"]
+      runEndToEndCommandIn temporaryRepository ["add", "package", "python", "demo", "--unknown"]
     assertEqual "An unknown add option uses Git's usage exit status." usageExitCode unknownOptionExit
     assertEqual "An unknown add option leaves stdout empty." "" unknownOptionStdout
-    assertBool "An unknown add option prints add usage to stderr." ("usage: git repository-canonicalization add" `isPrefixOf` unknownOptionStderr)
+    assertBool "An unknown add option prints add usage to stderr." ("usage: git canonicalization add" `isPrefixOf` unknownOptionStderr)
     packageDirectoryExists <- doesDirectoryExist (temporaryRepository </> "packages/demo")
     assertBool "An unknown option does not leave a partial package directory." (not packageDirectoryExists)
 invalidPackageNameEndToEndTest :: IO ()
 invalidPackageNameEndToEndTest =
   withEmptyCanonicalRepository "invalid-package-name-end-to-end" $ \temporaryRepository -> do
     (invalidNameExit, invalidNameStdout, invalidNameStderr) <-
-      runEndToEndCommandIn temporaryRepository ["add", "python", "demo-python"]
+      runEndToEndCommandIn temporaryRepository ["add", "package", "python", "demo-python"]
     assertEqual "An invalid package name fails." (ExitFailure 1) invalidNameExit
     assertEqual "An invalid package name leaves stdout empty." "" invalidNameStdout
     assertBool "An invalid package name reports its convention." ("must use snake_case" `isInfixOf` invalidNameStderr)
@@ -3259,7 +3583,7 @@ packageWithoutCheckEndToEndTest :: IO ()
 packageWithoutCheckEndToEndTest =
   withEmptyCanonicalRepository "package-without-check-end-to-end" $ \temporaryRepository -> do
     (addExit, addStdout, addStderr) <-
-      runEndToEndCommandIn temporaryRepository ["add", "html", "demo"]
+      runEndToEndCommandIn temporaryRepository ["add", "package", "html", "demo"]
     assertEqual "Adding a package type without a combined check succeeds." ExitSuccess addExit
     assertEqual "Adding the package leaves stdout empty." "" addStdout
     assertEqual "Adding the package leaves stderr empty." "" addStderr
@@ -3282,7 +3606,7 @@ withGeneratedPythonPackageRepository temporaryName action =
     (addExit, _addStdout, addStderr) <-
       runEndToEndCommandIn
         nestedDirectory
-        ["add", "python", "demo", "Demo package"]
+        ["add", "package", "python", "demo", "Demo package"]
     when (addExit /= ExitSuccess) $
       assertFailure ("Failed to generate the Python package fixture: " ++ addStderr)
     runGitFixtureCommand ["-C", temporaryRepository, "config", "user.name", "Canonicalization Tests"]
@@ -3297,7 +3621,7 @@ withGeneratedHaskellPackageRepository temporaryName action =
     (addExit, _addStdout, addStderr) <-
       runEndToEndCommandIn
         nestedDirectory
-        ["add", "haskell", "demo", "Demo package"]
+        ["add", "package", "haskell", "demo", "Demo package"]
     when (addExit /= ExitSuccess) $
       assertFailure ("Failed to generate the Haskell package fixture: " ++ addStderr)
     runGitFixtureCommand ["-C", temporaryRepository, "config", "user.name", "Canonicalization Tests"]
@@ -3328,7 +3652,7 @@ expectedGeneratedHaskellPackageSummary =
 runEndToEndCommandIn :: FilePath -> [String] -> IO (ExitCode, String, String)
 runEndToEndCommandIn workingDirectory arguments =
   withCurrentDirectory workingDirectory $
-    readProcessWithExitCode "git-repository-canonicalization" arguments ""
+    readProcessWithExitCode "git-canonicalization" arguments ""
 initializeGitRepositoryFixture :: FilePath -> IO ()
 initializeGitRepositoryFixture repositoryPath =
   findExecutable "git" >>= \case
