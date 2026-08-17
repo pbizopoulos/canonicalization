@@ -3341,7 +3341,7 @@ homeProfileEndToEndTest =
     assertEqual "An empty home profile passes its check." ExitSuccess checkExit
     assertEqual "An empty home check emits no stdout." "" checkStdout
     assertEqual "An empty home check emits no stderr." "" checkStderr
-    TIO.writeFile (temporaryDirectory </> ".gitignore") "*\n!/.custom\n!.gitmodules\n"
+    TIO.writeFile (temporaryDirectory </> ".gitignore") "*\n!.custom/\n!.gitmodules\n"
     (fixExit, fixStdout, fixStderr) <- runEndToEndCommandIn temporaryDirectory ["check", "--fix"]
     assertEqual "Fixing a user-edited home whitelist succeeds." ExitSuccess fixExit
     assertEqual "Fixing a home whitelist emits no stdout." "" fixStdout
@@ -3349,7 +3349,7 @@ homeProfileEndToEndTest =
     fixedGitignoreSource <- TIO.readFile (temporaryDirectory </> ".gitignore")
     assertEqual
       "Fixing a home whitelist preserves user entries and adds only missing structural entries."
-      "*\n!/.custom\n!.gitmodules\n!/.gitignore\n"
+      "*\n!.custom/\n!.gitmodules\n!/.gitignore\n"
       fixedGitignoreSource
     repositoryRoot <- canonicalizePath temporaryDirectory
     (statusExit, statusStdout, statusStderr) <- runEndToEndCommandIn temporaryDirectory ["status"]
