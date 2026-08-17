@@ -5,9 +5,9 @@ A Nix flake that selects and enforces consistent forms for NixOS systems, home G
 Home and repository root `.gitignore` whitelists constrain their Git-visible directory structures; arbitrary other paths may exist but are ignored.
 
 OS: NixOS with a temporary root filesystem and explicitly preserved state.
-Git: `git canonicalization` detects either a home or flake profile in the selected repository and provides common `check` and `status` operations.
-Home profile: `git canonicalization add <url>` works from any directory and puts Git submodules under `$HOME/<host>/<repository-path>`.
-Flake profile: `git canonicalization add <type> <name>` targets the selected repository, follows a restricted subset of the numtide/blueprint layout, and maintains its root `.gitignore` whitelist.
+Git: `git canonicalization` detects either a home or flake repository layout and provides common `check` and `status` operations.
+Home repositories: `git canonicalization add <url>` works from any directory and puts Git submodules under `$HOME/<host>/<repository-path>`.
+Flake repositories: `git canonicalization add <type> <name>` targets the selected repository, follows a restricted subset of the numtide/blueprint layout, and maintains its root `.gitignore` whitelist.
 README: explains the repository's intent.
 Test names: describe the expected behavior.
 Code: implements the expected behavior. `nix fmt` regenerates the repository whitelist and runs conventional formatters and strict linters; `nix flake check` verifies the canonical structure and runs builds and tests.

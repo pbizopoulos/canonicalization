@@ -278,7 +278,9 @@ runCli commandLineArguments =
     Version -> putStrLn "git canonicalization 0.0.0" >> exitSuccess
     Completion shell -> printCompletionAndExit shell
     InvalidCommand exitCode maybeCommand ->
-      hPutStr stderr (usageTextForCommand maybeCommand) >> exitWith exitCode
+      hPutStrLn stderr (commandLineError commandLineArguments)
+        >> hPutStr stderr (usageTextForCommand maybeCommand)
+        >> exitWith exitCode
     ParsedCommand CheckCommand -> withDetectedRepositoryProfile $ \repositoryRoot -> \case
       HomeProfile -> checkHomeProfile repositoryRoot False
       FlakeProfile -> checkRepositoryLocation repositoryRoot
@@ -349,6 +351,15 @@ printHelpAndExit maybeCommand = do
   exitSuccess
 usageExitCode :: ExitCode
 usageExitCode = ExitFailure 129
+commandLineError :: [String] -> String
+commandLineError = \case
+  [] -> "error: no command specified"
+  "add" : _ -> "error: invalid arguments for 'git canonicalization add'"
+  "remove" : _ -> "error: invalid arguments for 'git canonicalization remove'"
+  "check" : _ -> "error: invalid arguments for 'git canonicalization check'"
+  "status" : _ -> "error: invalid arguments for 'git canonicalization status'"
+  "completion" : _ -> "error: invalid arguments for 'git canonicalization completion'"
+  command : _ -> "error: unknown command '" ++ command ++ "'"
 mainUsageText :: String
 mainUsageText =
   unlines
@@ -364,29 +375,32 @@ mainHelpText :: String
 mainHelpText =
   unlines
     [ mainUsageText,
+      "Manage canonical home repositories and Nix flake repositories.",
+      "Run from a work tree, or use 'git -C <directory> canonicalization ...'.",
       "",
-      "Manage canonical home and Nix flake repositories.",
-      "Use git -C <location> to select a repository.",
-      "Repository URLs are always added to the home profile at $HOME.",
+      "Commands:",
+      "  add <url>",
+      "      Add a Git submodule below $HOME using its host and repository path.",
       "",
-      "add <url>",
-      "    Add a repository resource to the home profile at $HOME.",
+      "  add <package-type> <package-name> [<description>...]",
+      "      Generate and stage a package in the selected flake repository.",
       "",
-      "add <package-type> <package-name> [<description>...]",
-      "    Add a package resource and paired check to a flake profile.",
+      "  remove <package-name>",
+      "      Remove and stage a clean package and its generated check, if any.",
       "",
-      "remove <package-name>",
-      "    Remove a clean package and its paired check.",
+      "  check [--fix]",
+      "      Check the selected repository. With --fix, update managed files and",
+      "      canonical home-repository paths before checking.",
       "",
-      "check",
-      "    Check that the repository follows the canonical conventions.",
-      "    Use --fix to repair managed files and canonical home submodule paths before checking.",
+      "  status",
+      "      Write the selected repository's canonicalization status as JSON.",
       "",
-      "status",
-      "    Show the detected profile and managed resources as JSON.",
+      "  completion <bash|zsh|fish>",
+      "      Write a shell completion script to stdout.",
       "",
-      "completion <bash|zsh|fish>",
-      "    Print a shell completion script.",
+      "Options:",
+      "  -h, --help       Show help.",
+      "  -v, --version    Show the version.",
       ""
     ]
 usageTextForCommand :: Maybe String -> String
@@ -396,10 +410,10 @@ usageTextForCommand = \case
       [ "usage: git canonicalization add <url>",
         "   or: git canonicalization add <package-type> <package-name> [<description>...]",
         "",
-        "Add a repository URL to the home profile, or add a package and its check to a flake profile.",
+        "Add a repository URL below $HOME, or generate a package in the selected flake repository.",
         "Supported package types: " ++ intercalate ", " (map fst supportedAddPackageKinds) ++ ".",
         "Package descriptions beginning with '-' must follow an explicit -- separator.",
-        "Generated files are staged with Git.",
+        "Generated files are added to the Git index.",
         ""
       ]
   Just "status" ->
@@ -413,16 +427,17 @@ usageTextForCommand = \case
     unlines
       [ "usage: git canonicalization remove <package-name>",
         "",
-        "Remove a clean package and its check.",
-        "Package removals and the updated root .gitignore are staged with Git.",
+        "Remove a package and its generated check, if any.",
+        "Refuse removal if either contains uncommitted changes.",
+        "Removals and the updated root .gitignore are added to the Git index.",
         ""
       ]
   Just "check" ->
     unlines
       [ "usage: git canonicalization check [--fix]",
         "",
-        "Check the nearest Git repository. Use 'git -C <location>' to select it.",
-        "With --fix, repair the root .gitignore and canonical home submodule paths before checking.",
+        "Check the selected Git repository.",
+        "With --fix, update the root .gitignore and canonical home-repository paths, then check.",
         ""
       ]
   Just "completion" ->
@@ -456,12 +471,22 @@ bashCompletion :: String
 bashCompletion =
   unlines
     [ "_git_canonicalization() {",
-      "  local cur prev",
+      "  local cur command_index command package_types",
       "  COMPREPLY=()",
       "  cur=${COMP_WORDS[COMP_CWORD]}",
-      "  prev=${COMP_WORDS[COMP_CWORD-1]}",
-      "  if [[ $COMP_CWORD -eq 1 ]]; then COMPREPLY=( $(compgen -W 'add remove check status completion' -- \"$cur\") ); fi",
-      "  if [[ $prev == completion ]]; then COMPREPLY=( $(compgen -W 'bash zsh fish' -- \"$cur\") ); fi",
+      "  command_index=1",
+      "  [[ ${COMP_WORDS[0]} == git ]] && command_index=2",
+      "  command=${COMP_WORDS[command_index]}",
+      "  package_types='" ++ unwords (map fst supportedAddPackageKinds) ++ "'",
+      "  if [[ $COMP_CWORD -eq $command_index ]]; then",
+      "    COMPREPLY=( $(compgen -W 'add remove check status completion help --help --version' -- \"$cur\") )",
+      "  elif [[ $command == check ]]; then",
+      "    COMPREPLY=( $(compgen -W '--fix --help' -- \"$cur\") )",
+      "  elif [[ $command == completion ]]; then",
+      "    COMPREPLY=( $(compgen -W 'bash zsh fish' -- \"$cur\") )",
+      "  elif [[ $command == add && $COMP_CWORD -eq $((command_index + 1)) ]]; then",
+      "    COMPREPLY=( $(compgen -W \"$package_types\" -- \"$cur\") )",
+      "  fi",
       "}",
       "complete -F _git_canonicalization git-canonicalization"
     ]
@@ -469,13 +494,30 @@ zshCompletion :: String
 zshCompletion =
   unlines
     [ "#compdef git-canonicalization",
-      "_arguments '1:command:(add remove check status completion)' '2:argument:(bash zsh fish)'"
+      "_git_canonicalization() {",
+      "  local -a commands package_types",
+      "  commands=(add remove check status completion help)",
+      "  package_types=(" ++ unwords (map fst supportedAddPackageKinds) ++ ")",
+      "  _arguments -C '(-h --help)'{-h,--help}'[show help]' '(-v --version)'{-v,--version}'[show version]' '1:command:($commands)' '*::argument:->args'",
+      "  case $words[1] in",
+      "    check) _arguments '--fix[update managed files before checking]' '(-h --help)'{-h,--help}'[show help]' ;;",
+      "    completion) _values shell bash zsh fish ;;",
+      "    add) _values 'package type' $package_types ;;",
+      "  esac",
+      "}",
+      "_git-canonicalization() { _git_canonicalization \"$@\"; }",
+      "_git_canonicalization \"$@\""
     ]
 fishCompletion :: String
 fishCompletion =
   unlines
-    [ "complete -c git-canonicalization -f -n '__fish_use_subcommand' -a 'add remove check status completion'",
-      "complete -c git-canonicalization -f -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'"
+    [ "complete -c git-canonicalization -f",
+      "complete -c git-canonicalization -n '__fish_use_subcommand' -a 'add remove check status completion help'",
+      "complete -c git-canonicalization -s h -l help -d 'Show help'",
+      "complete -c git-canonicalization -s v -l version -d 'Show version'",
+      "complete -c git-canonicalization -n '__fish_seen_subcommand_from check' -l fix -d 'Update managed files before checking'",
+      "complete -c git-canonicalization -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'",
+      "complete -c git-canonicalization -n '__fish_seen_subcommand_from add' -a '" ++ unwords (map fst supportedAddPackageKinds) ++ "'"
     ]
 type RepositoryProfile :: Type
 data RepositoryProfile = HomeProfile | FlakeProfile deriving stock (Eq, Show)
@@ -506,15 +548,15 @@ detectRepositoryProfileWithDefault emptyDefault repositoryRoot = withCurrentDire
     (False, False) ->
       case emptyDefault of
         Just profile -> pure profile
-        Nothing -> hPutStrLn stderr "error: cannot detect a canonicalization profile; run 'git canonicalization check --fix' for a home profile or add flake markers" >> exitFailure
-    (True, True) -> hPutStrLn stderr "error: repository matches both home and flake profiles" >> exitFailure
+        Nothing -> hPutStrLn stderr "error: cannot determine the repository type; run 'git canonicalization check --fix' for a home repository or add flake markers" >> exitFailure
+    (True, True) -> hPutStrLn stderr "error: repository contains markers for both home and flake layouts" >> exitFailure
 renderRepositoryProfile :: RepositoryProfile -> String
 renderRepositoryProfile = \case
   HomeProfile -> "home"
   FlakeProfile -> "flake"
 unsupportedResource :: String -> String -> IO a
-unsupportedResource profile resourceKind =
-  hPutStrLn stderr ("error: the " ++ profile ++ " profile does not support " ++ resourceKind ++ " resources") >> exitFailure
+unsupportedResource repositoryType resourceKind =
+  hPutStrLn stderr ("error: a " ++ repositoryType ++ " repository does not support " ++ resourceKind ++ " resources") >> exitFailure
 homeGitignoreSource :: T.Text
 homeGitignoreSource = "*\n!/.gitignore\n!/.gitmodules\n"
 homeRequiredGitignorePatterns :: [(T.Text, [T.Text])]
@@ -634,7 +676,7 @@ renderHomeProfileStatus repositoryRoot = do
       putStr $
         unlines
           [ "{",
-            "  \"profile\": \"home\",",
+            "  \"repositoryType\": \"home\",",
             "  \"root\": " ++ renderJSONString repositoryRoot ++ ",",
             "  \"resources\": []",
             "}"
@@ -643,7 +685,7 @@ renderHomeProfileStatus repositoryRoot = do
       putStr $
         unlines
           [ "{",
-            "  \"profile\": \"home\",",
+            "  \"repositoryType\": \"home\",",
             "  \"root\": " ++ renderJSONString repositoryRoot ++ ",",
             "  \"resources\": [",
             intercalate ",\n" (map renderHomeRepositoryJSON repositories),
@@ -943,11 +985,11 @@ summarizeRepositoryAt repositoryPath repositoryRoot =
             }
 renderRepositorySummariesJSON :: [RepositorySummary] -> String
 renderRepositorySummariesJSON [] =
-  unlines ["{", "  \"profile\": \"flake\",", "  \"root\": null,", "  \"readme\": null,", "  \"resources\": []", "}"]
+  unlines ["{", "  \"repositoryType\": \"flake\",", "  \"root\": null,", "  \"readme\": null,", "  \"resources\": []", "}"]
 renderRepositorySummariesJSON (repositorySummary : _) =
   unlines
     [ "{",
-      "  \"profile\": \"flake\",",
+      "  \"repositoryType\": \"flake\",",
       "  \"root\": " ++ renderJSONString (repositorySummaryPath repositorySummary) ++ ",",
       "  \"readme\": " ++ maybe "null" renderJSONString (repositorySummaryReadme repositorySummary) ++ ",",
       "  \"resources\": [",
@@ -3270,7 +3312,7 @@ repositorySummaryRenderingTest = do
     "JSON rendering preserves the schema and escapes strings."
     ( unlines
         [ "{",
-          "  \"profile\": \"flake\",",
+          "  \"repositoryType\": \"flake\",",
           "  \"root\": \"example.test/owner/demo\",",
           "  \"readme\": \"Demo repository.\\n\\nIts intent is visible.\",",
           "  \"resources\": [",
@@ -3361,11 +3403,11 @@ commandLineHelpEndToEndTest =
     assertBool
       "The top-level help command prints concise usage and commands to stdout."
       ( mainUsageText `isPrefixOf` helpStdout
-          && "\nadd <package-type>" `isInfixOf` helpStdout
-          && "\ncheck\n" `isInfixOf` helpStdout
+          && "\n  add <package-type>" `isInfixOf` helpStdout
+          && "\n  check [--fix]\n" `isInfixOf` helpStdout
           && "check [--fix]" `isInfixOf` helpStdout
-          && "\nremove <package-name>" `isInfixOf` helpStdout
-          && "\nstatus\n" `isInfixOf` helpStdout
+          && "\n  remove <package-name>" `isInfixOf` helpStdout
+          && "\n  status\n" `isInfixOf` helpStdout
       )
     assertEqual "The top-level help command leaves stderr empty." "" helpStderr
     (commandHelpExit, commandHelpStdout, commandHelpStderr) <- runEndToEndCommandIn temporaryDirectory ["check", "--help"]
@@ -3400,11 +3442,11 @@ invalidCommandEndToEndTest =
     (invalidCommandExit, invalidCommandStdout, invalidCommandStderr) <- runEndToEndCommandIn temporaryDirectory ["unknown-command"]
     assertEqual "An invalid command uses Git's usage exit status." usageExitCode invalidCommandExit
     assertEqual "An invalid command leaves stdout empty." "" invalidCommandStdout
-    assertEqual "An invalid command prints the main usage to stderr." mainUsageText invalidCommandStderr
+    assertEqual "An invalid command prints an error and the main usage to stderr." ("error: unknown command 'unknown-command'\n" ++ mainUsageText) invalidCommandStderr
     (summaryExit, summaryStdout, summaryStderr) <- runEndToEndCommandIn temporaryDirectory ["summary"]
     assertEqual "The retired summary command uses Git's usage exit status." usageExitCode summaryExit
     assertEqual "The retired summary command leaves stdout empty." "" summaryStdout
-    assertEqual "The retired summary command prints the main usage to stderr." mainUsageText summaryStderr
+    assertEqual "The retired summary command prints an error and the main usage to stderr." ("error: unknown command 'summary'\n" ++ mainUsageText) summaryStderr
 homeRepositoryParsingTest :: IO ()
 homeRepositoryParsingTest = do
   forM_
@@ -3462,7 +3504,7 @@ homeProfileEndToEndTest =
     assertEqual "An empty home status succeeds." ExitSuccess statusExit
     assertEqual
       "An empty home status uses the common profile envelope."
-      (unlines ["{", "  \"profile\": \"home\",", "  \"root\": " ++ renderJSONString repositoryRoot ++ ",", "  \"resources\": []", "}"])
+      (unlines ["{", "  \"repositoryType\": \"home\",", "  \"root\": " ++ renderJSONString repositoryRoot ++ ",", "  \"resources\": []", "}"])
       statusStdout
     assertEqual "An empty home status emits no stderr." "" statusStderr
 addPackageEndToEndTest :: IO ()
@@ -3668,7 +3710,7 @@ statusEndToEndTest =
     (emptyExit, emptyStdout, emptyStderr) <- runEndToEndCommandIn temporaryRepository []
     assertEqual "An omitted subcommand uses Git's usage exit status." usageExitCode emptyExit
     assertEqual "An omitted subcommand leaves stdout empty." "" emptyStdout
-    assertEqual "An omitted subcommand prints the main usage to stderr." mainUsageText emptyStderr
+    assertEqual "An omitted subcommand prints an error and the main usage to stderr." ("error: no command specified\n" ++ mainUsageText) emptyStderr
 haskellStatusEndToEndTest :: IO ()
 haskellStatusEndToEndTest =
   withGeneratedHaskellPackageRepository "haskell-status-end-to-end" $ \temporaryRepository -> do
@@ -3718,7 +3760,11 @@ unknownAddOptionEndToEndTest =
       runEndToEndCommandIn temporaryRepository ["add", "python", "demo", "--unknown"]
     assertEqual "An unknown add option uses Git's usage exit status." usageExitCode unknownOptionExit
     assertEqual "An unknown add option leaves stdout empty." "" unknownOptionStdout
-    assertBool "An unknown add option prints add usage to stderr." ("usage: git canonicalization add" `isPrefixOf` unknownOptionStderr)
+    assertBool
+      "An unknown add option prints an error and add usage to stderr."
+      ( "error: invalid arguments for 'git canonicalization add'\nusage: git canonicalization add"
+          `isPrefixOf` unknownOptionStderr
+      )
     packageDirectoryExists <- doesDirectoryExist (temporaryRepository </> "packages/demo")
     assertBool "An unknown option does not leave a partial package directory." (not packageDirectoryExists)
 invalidPackageNameEndToEndTest :: IO ()
