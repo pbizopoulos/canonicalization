@@ -8,13 +8,16 @@ build-type:    Simple
 executable git-canonicalization
   main-is:       Main.hs
   build-depends:
-      base
+      aeson
+    , base
+    , bytestring
     , containers
     , data-fix
     , directory
     , filepath
     , hnix
     , HUnit
+    , optparse-applicative
     , prettyprinter
     , process
     , regex-tdfa

@@ -12,7 +12,9 @@ module Main (main, runPackageTests, runPackageTestsWithTimings) where
 import Control.Applicative ((<|>))
 import Control.Exception (IOException, finally, onException, try)
 import Control.Monad (filterM, forM, forM_, guard, unless, when)
-import Data.Char (isAlphaNum, isAsciiLower, isControl, isDigit, isLower, isSpace, isUpper, ord, toLower, toUpper)
+import Data.Aeson qualified as Aeson
+import Data.ByteString.Lazy qualified as BL
+import Data.Char (isAlphaNum, isAsciiLower, isDigit, isLower, isSpace, isUpper, ord, toLower, toUpper)
 import Data.Either (fromRight, lefts, rights)
 import Data.Fix (Fix (Fix))
 import Data.Functor.Compose (Compose (Compose))
@@ -25,6 +27,7 @@ import Data.Maybe (catMaybes, fromMaybe, isNothing, listToMaybe, mapMaybe, maybe
 import Data.Ord (comparing)
 import Data.Set qualified as Set
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
 import GHC.Clock (getMonotonicTimeNSec)
 import Nix.Expr.Types
@@ -40,7 +43,8 @@ import Nix.Expr.Types.Annotated (AnnUnit (AnnUnit), NExprLoc, stripAnnotation)
 import Nix.Parser (parseNixFileLoc)
 import Nix.Pretty (prettyNix)
 import Nix.Utils (Path (Path))
-import Numeric (showFFloat, showHex)
+import Numeric (showFFloat)
+import Options.Applicative qualified as OA
 import Prettyprinter (defaultLayoutOptions, layoutPretty)
 import Prettyprinter.Render.Text (renderStrict)
 import System.Directory (canonicalizePath, createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, doesPathExist, findExecutable, getCurrentDirectory, getTemporaryDirectory, listDirectory, makeAbsolute, pathIsSymbolicLink, removeFile, removePathForcibly, withCurrentDirectory)
@@ -263,10 +267,12 @@ data Command
   | AddRepositoryCommand String
   | AddPackageCommand String FilePath (Maybe String)
   | RemovePackageCommand RemoveSpec
+  deriving stock (Eq, Show)
 type InitSpec :: Type
 newtype InitSpec = InitSpec
   { initLocalPath :: FilePath
   }
+  deriving stock (Eq, Show)
 type RemoveSpec :: Type
 data RemoveSpec = RemoveSpec
   { removePackageName :: FilePath,
@@ -274,223 +280,131 @@ data RemoveSpec = RemoveSpec
     removeForce :: Bool,
     removeIgnoreUnmatch :: Bool
   }
-type CommandParseResult :: Type
-data CommandParseResult
-  = ParsedCommand Command
-  | Help (Maybe String)
-  | InvalidCommand ExitCode (Maybe String)
+  deriving stock (Eq, Show)
 main :: IO ()
 main = getArgs >>= runCli
 runCli :: [String] -> IO ()
 runCli commandLineArguments =
-  case parseCommand commandLineArguments of
-    Help maybeCommand -> printHelpAndExit maybeCommand
-    InvalidCommand exitCode maybeCommand ->
-      hPutStrLn stderr (commandLineError commandLineArguments)
-        >> hPutStr stderr (usageTextForCommand maybeCommand)
-        >> exitWith exitCode
-    ParsedCommand CheckCommand -> withDetectedRepositoryProfile $ \repositoryRoot -> \case
-      HomeProfile -> checkHomeProfile repositoryRoot False
-      FlakeProfile -> checkRepositoryLocation repositoryRoot
-    ParsedCommand CheckFixCommand -> do
-      repositoryRoot <- discoverGitRepositoryRoot "."
-      detectRepositoryProfileForFix repositoryRoot >>= \case
-        HomeProfile -> checkHomeProfile repositoryRoot True
-        FlakeProfile -> fixAndCheckRepositoryLocation repositoryRoot
-    ParsedCommand StatusCommand -> withDetectedRepositoryProfile $ \repositoryRoot -> \case
-      HomeProfile -> renderHomeProfileStatus repositoryRoot
-      FlakeProfile -> summarizeRepositoryLocation renderRepositorySummariesJSON repositoryRoot
-    ParsedCommand (InitCommand initSpec) -> initializeCanonicalization initSpec
-    ParsedCommand (AddRepositoryCommand repositoryUrl) ->
-      withRequiredProfile HomeProfile "repository" $
-        runInGitRepositoryRoot "." $ do
-          repositoryRoot <- getCurrentDirectory
-          addHomeRepository repositoryRoot repositoryUrl
-    ParsedCommand (AddPackageCommand packageKindName packageName packageDescription) ->
-      withRequiredProfile FlakeProfile "package" $
-        runInGitRepositoryRoot "." $
-          case parseSupportedAddPackageKind packageKindName of
-            Nothing -> do
-              hPutStrLn stderr ("error: unsupported package type: " ++ packageKindName)
-              hPutStrLn stderr ("hint: supported package types: " ++ intercalate ", " (map fst supportedAddPackageKinds))
-              exitFailure
-            Just scaffoldPackageKind -> do
-              addResult <- addPackageToCurrentRepository scaffoldPackageKind packageName packageDescription
-              stageGeneratedPathsOrExit addResult
-    ParsedCommand (RemovePackageCommand removeSpec) ->
-      withRequiredProfile FlakeProfile "package" $
-        runInGitRepositoryRoot "." $ do
-          removeResult <- removePackageFromCurrentRepository removeSpec
-          case removeResult of
-            Left removeError -> hPutStrLn stderr ("error: " ++ removeError) >> exitFailure
-            Right () -> exitSuccess
+  case OA.execParserPure cliParserPreferences cliParserInfo (normalizeHelpArguments commandLineArguments) of
+    OA.Success command -> runCommand command
+    OA.Failure parserFailure -> do
+      let (message, parserExitCode) = OA.renderFailure parserFailure "git canonicalization"
+      if parserExitCode == ExitSuccess
+        then putStr message >> exitSuccess
+        else hPutStr stderr message >> exitWith usageExitCode
+    OA.CompletionInvoked completion -> do
+      completionText <- OA.execCompletion completion "git canonicalization"
+      putStr completionText
+      exitSuccess
+runCommand :: Command -> IO ()
+runCommand = \case
+  CheckCommand -> withDetectedRepositoryProfile $ \repositoryRoot -> \case
+    HomeProfile -> checkHomeProfile repositoryRoot False
+    FlakeProfile -> checkRepositoryLocation repositoryRoot
+  CheckFixCommand -> do
+    repositoryRoot <- discoverGitRepositoryRoot "."
+    detectRepositoryProfile repositoryRoot >>= \case
+      HomeProfile -> checkHomeProfile repositoryRoot True
+      FlakeProfile -> fixAndCheckRepositoryLocation repositoryRoot
+  StatusCommand -> withDetectedRepositoryProfile $ \repositoryRoot -> \case
+    HomeProfile -> renderHomeProfileStatus repositoryRoot
+    FlakeProfile -> summarizeRepositoryLocation renderRepositorySummariesJSON repositoryRoot
+  InitCommand initSpec -> initializeCanonicalization initSpec
+  AddRepositoryCommand repositoryUrl ->
+    withRequiredProfile HomeProfile "repository" $
+      runInGitRepositoryRoot "." $ do
+        repositoryRoot <- getCurrentDirectory
+        addHomeRepository repositoryRoot repositoryUrl
+  AddPackageCommand packageKindName packageName packageDescription ->
+    withRequiredProfile FlakeProfile "package" $
+      runInGitRepositoryRoot "." $
+        case parseSupportedAddPackageKind packageKindName of
+          Nothing -> do
+            hPutStrLn stderr ("error: unsupported package type: " ++ packageKindName)
+            hPutStrLn stderr ("hint: supported package types: " ++ intercalate ", " (map fst supportedAddPackageKinds))
+            exitFailure
+          Just scaffoldPackageKind -> do
+            addResult <- addPackageToCurrentRepository scaffoldPackageKind packageName packageDescription
+            stageGeneratedPathsOrExit addResult
+  RemovePackageCommand removeSpec ->
+    withRequiredProfile FlakeProfile "package" $
+      runInGitRepositoryRoot "." $ do
+        removeResult <- removePackageFromCurrentRepository removeSpec
+        case removeResult of
+          Left removeError -> hPutStrLn stderr ("error: " ++ removeError) >> exitFailure
+          Right () -> exitSuccess
 stageGeneratedPathsOrExit :: Either String [FilePath] -> IO a
 stageGeneratedPathsOrExit = \case
   Left addError -> do
     hPutStrLn stderr ("error: " ++ addError)
     exitFailure
   Right generatedPaths -> delegateToGit (["add", "--"] ++ generatedPaths)
-parseCommand :: [String] -> CommandParseResult
-parseCommand commandLineArguments =
-  case commandLineArguments of
-    [] -> InvalidCommand usageExitCode Nothing
-    [argument] | argument `elem` ["-h", "--help"] -> Help Nothing
-    ["help"] -> Help Nothing
-    ["help", command] | command `elem` commandNames -> Help (Just command)
-    [command, argument] | command `elem` commandNames && argument `elem` ["-h", "--help"] -> Help (Just command)
-    ["check"] -> ParsedCommand CheckCommand
-    ["check", "--fix"] -> ParsedCommand CheckFixCommand
-    "check" : _ -> InvalidCommand usageExitCode (Just "check")
-    ["status"] -> ParsedCommand StatusCommand
-    "init" : arguments -> maybe (InvalidCommand usageExitCode (Just "init")) (ParsedCommand . InitCommand) (parseInitArguments arguments)
-    ["add", repositoryUrl] -> ParsedCommand (AddRepositoryCommand repositoryUrl)
-    "rm" : arguments -> maybe (InvalidCommand usageExitCode (Just "rm")) (ParsedCommand . RemovePackageCommand) (parseRemoveArguments arguments)
-    _ ->
-      case parseAddPackageArguments commandLineArguments of
-        Just (packageKindName, packageName, packageDescription) ->
-          ParsedCommand (AddPackageCommand packageKindName packageName packageDescription)
-        Nothing -> InvalidCommand usageExitCode (listToMaybe commandLineArguments)
-  where
-    commandNames :: [String]
-    commandNames = ["add", "rm", "check", "status", "init"]
-printHelpAndExit :: Maybe String -> IO a
-printHelpAndExit maybeCommand = do
-  putStr (maybe mainHelpText (usageTextForCommand . Just) maybeCommand)
-  exitSuccess
 usageExitCode :: ExitCode
 usageExitCode = ExitFailure 129
-commandLineError :: [String] -> String
-commandLineError = \case
-  [] -> "error: no command specified"
-  "add" : _ -> "error: invalid arguments for 'git canonicalization add'"
-  "rm" : _ -> "error: invalid arguments for 'git canonicalization rm'"
-  "check" : _ -> "error: invalid arguments for 'git canonicalization check'"
-  "status" : _ -> "error: invalid arguments for 'git canonicalization status'"
-  "init" : _ -> "error: invalid arguments for 'git canonicalization init'"
-  command : _ -> "error: unknown command '" ++ command ++ "'"
-mainUsageText :: String
-mainUsageText =
-  unlines
-    [ "usage: git canonicalization init [--] [<directory>]",
-      "   or: git canonicalization status",
-      "   or: git canonicalization add <url>",
-      "   or: git canonicalization add <package-type> <package-name> [<description>...]",
-      "   or: git canonicalization rm [-n|--dry-run] [-f|--force] [--ignore-unmatch] <package-name>",
-      "   or: git canonicalization check [--fix]",
-      "   or: git canonicalization --help"
-    ]
-mainHelpText :: String
-mainHelpText =
-  unlines
-    [ mainUsageText,
-      "Manage canonical home repositories and Nix flake repositories.",
-      "Run from a work tree, or use 'git -C <directory> canonicalization ...'.",
-      "",
-      "Commands:",
-      "  init [--] [<directory>]",
-      "      Initialize $HOME as a home repository, or another path as a flake repository.",
-      "",
-      "  add <url>",
-      "      Add a Git submodule to the selected home repository using its canonical path.",
-      "",
-      "  add <package-type> <package-name> [<description>...]",
-      "      Generate and stage a package in the selected flake repository.",
-      "",
-      "  rm [-n|--dry-run] [-f|--force] [--ignore-unmatch] <package-name>",
-      "      Remove and stage a clean package and its generated check, if any.",
-      "",
-      "  check [--fix]",
-      "      Check the selected repository. With --fix, update managed files and",
-      "      canonical home-repository paths before checking.",
-      "",
-      "  status",
-      "      Write the selected repository's canonicalization status as JSON.",
-      "",
-      "Options:",
-      "  -h, --help    Show help.",
-      ""
-    ]
-usageTextForCommand :: Maybe String -> String
-usageTextForCommand = \case
-  Just "init" ->
-    unlines
-      [ "usage: git canonicalization init [--] [<directory>]",
-        "",
-        "Initialize a canonical repository in <directory>, which defaults to the current directory.",
-        "An exact $HOME path selects the home layout; every other path selects the flake layout.",
-        "Use -- to delimit a directory whose name begins with '-'.",
-        "For advanced Git setup, run 'git init' with its options before this command.",
-        "Existing files are preserved and generated files are left unstaged.",
-        ""
-      ]
-  Just "add" ->
-    unlines
-      [ "usage: git canonicalization add <url>",
-        "   or: git canonicalization add <package-type> <package-name> [<description>...]",
-        "",
-        "Add a repository URL to the selected home repository, or generate a package in the selected flake repository.",
-        "Supported package types: " ++ intercalate ", " (map fst supportedAddPackageKinds) ++ ".",
-        "Package descriptions beginning with '-' must follow an explicit -- separator.",
-        "Generated files are added to the Git index.",
-        ""
-      ]
-  Just "status" ->
-    unlines
-      [ "usage: git canonicalization status",
-        "",
-        "Show the status of the nearest Git repository as JSON. Use 'git -C <location>' to select it.",
-        ""
-      ]
-  Just "rm" ->
-    unlines
-      [ "usage: git canonicalization rm [-n|--dry-run] [-f|--force] [--ignore-unmatch] <package-name>",
-        "",
-        "Remove a package and its generated check, if any.",
-        "Use --dry-run to show the removal, --force to allow local changes, and",
-        "--ignore-unmatch to succeed when the package does not exist.",
-        "Removals and the updated root .gitignore are added to the Git index.",
-        ""
-      ]
-  Just "check" ->
-    unlines
-      [ "usage: git canonicalization check [--fix]",
-        "",
-        "Check the selected Git repository.",
-        "With --fix, update the root .gitignore and canonical home-repository paths, then check.",
-        ""
-      ]
-  _ -> mainUsageText
-parseAddPackageArguments :: [String] -> Maybe (String, FilePath, Maybe String)
-parseAddPackageArguments ("add" : packageKindName : packageName : remainingArguments) = do
-  descriptionArguments <- case remainingArguments of
-    "--" : arguments -> Just arguments
-    arguments -> guard (not (any ("-" `isPrefixOf`) arguments)) >> Just arguments
-  let packageDescription = unwords . NE.toList <$> NE.nonEmpty descriptionArguments
-  pure (packageKindName, packageName, packageDescription)
-parseAddPackageArguments _ = Nothing
-parseInitArguments :: [String] -> Maybe InitSpec
-parseInitArguments = \case
-  [] -> Just (InitSpec ".")
-  [directory] | not ("-" `isPrefixOf` directory) -> Just (InitSpec directory)
-  ["--"] -> Just (InitSpec ".")
-  ["--", directory] -> Just (InitSpec directory)
-  _ -> Nothing
-parseRemoveArguments :: [String] -> Maybe RemoveSpec
-parseRemoveArguments = go False False False Nothing
+normalizeHelpArguments :: [String] -> [String]
+normalizeHelpArguments = \case
+  ["help"] -> ["--help"]
+  ["help", commandName] -> [commandName, "--help"]
+  arguments -> arguments
+cliParserPreferences :: OA.ParserPrefs
+cliParserPreferences = OA.prefs OA.showHelpOnError
+cliParserInfo :: OA.ParserInfo Command
+cliParserInfo =
+  OA.info
+    (OA.helper <*> commandParser)
+    ( OA.fullDesc
+        <> OA.progDesc "Manage canonical home repositories and Nix flake repositories."
+        <> OA.header "git canonicalization - canonical repository checks and scaffolding"
+    )
+parseCommandForTest :: [String] -> Maybe Command
+parseCommandForTest arguments =
+  case OA.execParserPure cliParserPreferences cliParserInfo (normalizeHelpArguments arguments) of
+    OA.Success command -> Just command
+    _ -> Nothing
+commandParser :: OA.Parser Command
+commandParser =
+  OA.hsubparser
+    ( command "init" "Initialize a canonical repository." initCommandParser
+        <> command "status" "Write repository status as JSON." (pure StatusCommand)
+        <> command "add" "Add a repository or scaffold a package." addCommandParser
+        <> command "rm" "Remove a package and its generated check." removeCommandParser
+        <> command "check" "Check the selected repository." checkCommandParser
+    )
   where
-    go :: Bool -> Bool -> Bool -> Maybe FilePath -> [String] -> Maybe RemoveSpec
-    go dryRun force ignoreUnmatch maybePackage = \case
-      [] -> RemoveSpec <$> maybePackage <*> pure dryRun <*> pure force <*> pure ignoreUnmatch
-      "--" : [packageName] | isNothing maybePackage -> Just (RemoveSpec packageName dryRun force ignoreUnmatch)
-      "-n" : remainingArguments -> go True force ignoreUnmatch maybePackage remainingArguments
-      "--dry-run" : remainingArguments -> go True force ignoreUnmatch maybePackage remainingArguments
-      "-f" : remainingArguments -> go dryRun True ignoreUnmatch maybePackage remainingArguments
-      "--force" : remainingArguments -> go dryRun True ignoreUnmatch maybePackage remainingArguments
-      "--ignore-unmatch" : remainingArguments -> go dryRun force True maybePackage remainingArguments
-      argument : remainingArguments
-        | "-" `isPrefixOf` argument -> Nothing
-        | isNothing maybePackage -> go dryRun force ignoreUnmatch (Just argument) remainingArguments
-        | otherwise -> Nothing
+    command :: String -> String -> OA.Parser Command -> OA.Mod OA.CommandFields Command
+    command name description parser = OA.command name (OA.info (OA.helper <*> parser) (OA.progDesc description))
+initCommandParser :: OA.Parser Command
+initCommandParser =
+  InitCommand . InitSpec
+    <$> OA.strArgument
+      ( OA.metavar "DIRECTORY"
+          <> OA.value "."
+          <> OA.showDefault
+          <> OA.help "Repository directory."
+      )
+addCommandParser :: OA.Parser Command
+addCommandParser = classifyAddArguments <$> OA.some (OA.strArgument (OA.metavar "ARGUMENT"))
+classifyAddArguments :: [String] -> Command
+classifyAddArguments = \case
+  [repositoryUrl] -> AddRepositoryCommand repositoryUrl
+  packageKindName : packageName : descriptionArguments ->
+    AddPackageCommand packageKindName packageName (unwords . NE.toList <$> NE.nonEmpty descriptionArguments)
+  [] -> error "optparse-applicative accepted an empty add argument list"
+removeCommandParser :: OA.Parser Command
+removeCommandParser =
+  RemovePackageCommand
+    <$> ( RemoveSpec
+            <$> OA.strArgument (OA.metavar "PACKAGE_NAME")
+            <*> OA.switch (OA.short 'n' <> OA.long "dry-run" <> OA.help "Show what would be removed.")
+            <*> OA.switch (OA.short 'f' <> OA.long "force" <> OA.help "Allow removal with local changes.")
+            <*> OA.switch (OA.long "ignore-unmatch" <> OA.help "Succeed if the package does not exist.")
+        )
+checkCommandParser :: OA.Parser Command
+checkCommandParser =
+  flagToCommand <$> OA.switch (OA.long "fix" <> OA.help "Repair managed files before checking.")
+  where
+    flagToCommand True = CheckFixCommand
+    flagToCommand False = CheckCommand
 type RepositoryProfile :: Type
 data RepositoryProfile = HomeProfile | FlakeProfile deriving stock (Eq, Show)
 withDetectedRepositoryProfile :: (FilePath -> RepositoryProfile -> IO a) -> IO a
@@ -506,8 +420,6 @@ withRequiredProfile requiredProfile resourceKind action =
       else unsupportedResource (renderRepositoryProfile actualProfile) resourceKind
 detectRepositoryProfile :: FilePath -> IO RepositoryProfile
 detectRepositoryProfile = detectRepositoryProfileWithDefault Nothing
-detectRepositoryProfileForFix :: FilePath -> IO RepositoryProfile
-detectRepositoryProfileForFix = detectRepositoryProfile
 detectRepositoryProfileWithDefault :: Maybe RepositoryProfile -> FilePath -> IO RepositoryProfile
 detectRepositoryProfileWithDefault emptyDefault repositoryRoot = withCurrentDirectory repositoryRoot $ do
   flakeMarkerExists <- or <$> mapM doesPathExist ["flake.nix", "flake.lock", "packages", "checks", "hosts"]
@@ -784,35 +696,22 @@ renderHomeProfileStatus repositoryRoot = do
   checkHomeProfile repositoryRoot False
   readHomeRepositories repositoryRoot >>= \case
     Left issues -> reportHomeCheckIssues issues
-    Right [] ->
-      putStr $
-        unlines
-          [ "{",
-            "  \"repositoryType\": \"home\",",
-            "  \"root\": " ++ renderJSONString repositoryRoot ++ ",",
-            "  \"resources\": []",
-            "}"
-          ]
-    Right repositories ->
-      putStr $
-        unlines
-          [ "{",
-            "  \"repositoryType\": \"home\",",
-            "  \"root\": " ++ renderJSONString repositoryRoot ++ ",",
-            "  \"resources\": [",
-            intercalate ",\n" (map renderHomeRepositoryJSON repositories),
-            "  ]",
-            "}"
-          ]
-renderHomeRepositoryJSON :: HomeRepository -> String
-renderHomeRepositoryJSON repository =
-  "    { \"kind\": \"repository\", \"name\": "
-    ++ renderJSONString (homeRepositoryName repository)
-    ++ ", \"path\": "
-    ++ renderJSONString (homeRepositoryPath repository)
-    ++ ", \"url\": "
-    ++ renderJSONString (homeRepositoryUrl repository)
-    ++ " }"
+    Right repositories -> putStrLn (renderJSON (homeStatusJSON repositoryRoot repositories))
+homeStatusJSON :: FilePath -> [HomeRepository] -> Aeson.Value
+homeStatusJSON repositoryRoot repositories =
+  Aeson.object
+    [ "repositoryType" Aeson..= ("home" :: String),
+      "root" Aeson..= repositoryRoot,
+      "resources" Aeson..= map homeRepositoryJSON repositories
+    ]
+homeRepositoryJSON :: HomeRepository -> Aeson.Value
+homeRepositoryJSON repository =
+  Aeson.object
+    [ "kind" Aeson..= ("repository" :: String),
+      "name" Aeson..= homeRepositoryName repository,
+      "path" Aeson..= homeRepositoryPath repository,
+      "url" Aeson..= homeRepositoryUrl repository
+    ]
 readHomeRepositories :: FilePath -> IO (Either [String] [HomeRepository])
 readHomeRepositories repositoryRoot = do
   let gitmodulesPath = repositoryRoot </> ".gitmodules"
@@ -845,20 +744,16 @@ parseHomeRepositoryConfig source =
    in if null issues then Right (rights parsed) else Left issues
 parseHomeRepositoryField :: String -> Maybe (String, String, String)
 parseHomeRepositoryField record = do
-  (key, value) <- splitOnce '\n' record
+  let (keyText, valueWithSeparator) = T.breakOn "\n" (T.pack record)
+  valueText <- T.stripPrefix "\n" valueWithSeparator
+  let key = T.unpack keyText
+      value = T.unpack valueText
   remainder <- stripPrefix "submodule." key
   (section, fieldName) <-
-    (,"path") <$> stripStringSuffix ".path" remainder
-      <|> (,"url") <$> stripStringSuffix ".url" remainder
+    ((,"path") . T.unpack <$> T.stripSuffix ".path" (T.pack remainder))
+      <|> ((,"url") . T.unpack <$> T.stripSuffix ".url" (T.pack remainder))
   guard (not (null section))
   pure (section, fieldName, value)
-splitOnce :: Char -> String -> Maybe (String, String)
-splitOnce separator source =
-  case break (== separator) source of
-    (_, []) -> Nothing
-    (prefix, _ : suffix) -> Just (prefix, suffix)
-stripStringSuffix :: String -> String -> Maybe String
-stripStringSuffix suffix source = reverse <$> stripPrefix (reverse suffix) (reverse source)
 validateHomeRepository :: HomeRepository -> [String]
 validateHomeRepository repository =
   case canonicalHomeRepositoryPath (homeRepositoryUrl repository) of
@@ -875,12 +770,12 @@ canonicalHomeRepositoryPath repositoryUrl = do
   (hostname, repositoryPathWithSuffix) <-
     maybe (Left ("remote URL has no canonical host and repository path: " ++ repositoryUrl)) Right (parseHostedGitRemote repositoryUrl)
   let trimmedRepositoryPath = reverse (dropWhile (== '/') (reverse repositoryPathWithSuffix))
-      repositoryComponents = splitOnCharacter '/' trimmedRepositoryPath
+      repositoryComponents = map T.unpack (T.splitOn "/" (T.pack trimmedRepositoryPath))
   case repositoryComponents of
     _ : _ -> do
       mapM_ validateHomePathComponent (hostname : repositoryComponents)
       let repositoryPath = intercalate "/" repositoryComponents
-          withoutGitSuffix = fromMaybe repositoryPath (stripStringSuffix ".git" repositoryPath)
+          withoutGitSuffix = maybe repositoryPath T.unpack (T.stripSuffix ".git" (T.pack repositoryPath))
       pure (hostname ++ "/" ++ withoutGitSuffix)
     _ -> Left ("unsupported or incomplete repository URL: " ++ repositoryUrl)
 parseHostedGitRemote :: String -> Maybe (String, String)
@@ -917,11 +812,6 @@ resolveGitRemoteUrl repositoryRoot repositoryUrl = do
       putStr resolveStdout
       hPutStr stderr resolveStderr
       exitWith resolveExit
-splitOnCharacter :: Char -> String -> [String]
-splitOnCharacter separator source =
-  case break (== separator) source of
-    (component, []) -> [component]
-    (component, _ : remaining) -> component : splitOnCharacter separator remaining
 validateHomePathComponent :: String -> Either String ()
 validateHomePathComponent component
   | null component = Left "repository path components must not be empty"
@@ -930,9 +820,11 @@ validateHomePathComponent component
   | otherwise = Left "repository path components must contain only ASCII letters, digits, '.', '-', or '_'"
 validCanonicalHomePath :: FilePath -> Bool
 validCanonicalHomePath path =
-  case splitOnCharacter '/' path of
-    _hostname : _repository : _ -> all (either (const False) (const True) . validateHomePathComponent) (splitOnCharacter '/' path)
+  case components of
+    _hostname : _repository : _ -> all (either (const False) (const True) . validateHomePathComponent) components
     _ -> False
+  where
+    components = map T.unpack (T.splitOn "/" (T.pack path))
 fixHomeRepositoryPath :: FilePath -> HomeRepository -> FilePath -> IO ()
 fixHomeRepositoryPath repositoryRoot repository expectedPath = do
   createDirectoryIfMissing True (takeDirectory (repositoryRoot </> expectedPath))
@@ -1117,86 +1009,78 @@ summarizeRepositoryAt repositoryPath repositoryRoot =
               repositorySummaryPackages = packageSummaries
             }
 renderRepositorySummariesJSON :: [RepositorySummary] -> String
-renderRepositorySummariesJSON [] =
-  unlines ["{", "  \"repositoryType\": \"flake\",", "  \"root\": null,", "  \"readme\": null,", "  \"resources\": []", "}"]
-renderRepositorySummariesJSON (repositorySummary : _) =
-  unlines
-    [ "{",
-      "  \"repositoryType\": \"flake\",",
-      "  \"root\": " ++ renderJSONString (repositorySummaryPath repositorySummary) ++ ",",
-      "  \"readme\": " ++ maybe "null" renderJSONString (repositorySummaryReadme repositorySummary) ++ ",",
-      "  \"resources\": [",
-      intercalate ",\n" (map renderRepositoryPackageSummaryJSON (repositorySummaryPackages repositorySummary)),
-      "  ]",
-      "}"
-    ]
-renderRepositoryPackageSummaryJSON :: RepositoryPackageSummary -> String
-renderRepositoryPackageSummaryJSON packageSummary =
-  intercalate
-    "\n"
-    ( [ "    {",
-        "      \"kind\": \"package\",",
-        "      \"name\": " ++ renderJSONString (repositoryPackageName packageSummary) ++ ",",
-        "      \"type\": " ++ renderJSONString (renderPackageKind (repositoryPackageKind packageSummary)) ++ ",",
-        "      \"description\": " ++ maybe "null" renderJSONString (repositoryPackageDescription packageSummary) ++ ",",
-        "      \"dependencies\": [" ++ intercalate ", " (map renderJSONString (repositoryPackageDependencies packageSummary)) ++ "]" ++ if hasTests then "," else ""
+renderRepositorySummariesJSON summaries = renderJSON (repositoryStatusJSON summaries) ++ "\n"
+repositoryStatusJSON :: [RepositorySummary] -> Aeson.Value
+repositoryStatusJSON summaries =
+  case summaries of
+    [] -> statusObject Nothing Nothing []
+    repositorySummary : _ ->
+      statusObject
+        (Just (repositorySummaryPath repositorySummary))
+        (repositorySummaryReadme repositorySummary)
+        (map repositoryPackageSummaryJSON (repositorySummaryPackages repositorySummary))
+  where
+    statusObject :: Maybe FilePath -> Maybe String -> [Aeson.Value] -> Aeson.Value
+    statusObject repositoryRoot repositoryReadme resources =
+      Aeson.object
+        [ "repositoryType" Aeson..= ("flake" :: String),
+          "root" Aeson..= repositoryRoot,
+          "readme" Aeson..= repositoryReadme,
+          "resources" Aeson..= resources
+        ]
+repositoryPackageSummaryJSON :: RepositoryPackageSummary -> Aeson.Value
+repositoryPackageSummaryJSON packageSummary =
+  Aeson.object
+    ( [ "kind" Aeson..= ("package" :: String),
+        "name" Aeson..= repositoryPackageName packageSummary,
+        "type" Aeson..= renderPackageKind (repositoryPackageKind packageSummary),
+        "description" Aeson..= repositoryPackageDescription packageSummary,
+        "dependencies" Aeson..= repositoryPackageDependencies packageSummary
       ]
-        ++ renderRepositoryPackageTestsJSON packageSummary
-        ++ ["    }"]
+        ++ ["tests" Aeson..= repositoryPackageTestsJSON packageSummary | not (null (repositoryPackageTestNames packageSummary))]
+    )
+repositoryPackageTestsJSON :: RepositoryPackageSummary -> Aeson.Value
+repositoryPackageTestsJSON packageSummary =
+  Aeson.object
+    ( [ "status" Aeson..= renderRepositoryPackageTestStatus testStatus,
+        "cases" Aeson..= map (repositoryPackageTestCaseJSON testDurations) (repositoryPackageTestNames packageSummary)
+      ]
+        ++ case testStatus of
+          RepositoryTestsMeasured coverage totalDuration _ ->
+            [ "coverage" Aeson..= coverageMeasurementJSON coverage,
+              "durationSeconds" Aeson..= durationSeconds totalDuration
+            ]
+          _ -> []
     )
   where
-    hasTests = not (null (repositoryPackageTestNames packageSummary))
-renderRepositoryPackageTestsJSON :: RepositoryPackageSummary -> [String]
-renderRepositoryPackageTestsJSON packageSummary
-  | null testNames = []
-  | otherwise =
-      [ "      \"tests\": {",
-        "        \"status\": " ++ renderJSONString (renderRepositoryPackageTestStatus (repositoryPackageTestStatus packageSummary)) ++ ","
-      ]
-        ++ renderRepositoryPackageTestMeasurementsJSON (repositoryPackageTestStatus packageSummary)
-        ++ [ "        \"cases\": [" ++ intercalate ", " (map (renderRepositoryPackageTestCaseJSON testDurations) testNames) ++ "]",
-             "      }"
-           ]
-  where
-    testNames = repositoryPackageTestNames packageSummary
+    testStatus = repositoryPackageTestStatus packageSummary
     testDurations = repositoryPackageTestDurations packageSummary
-renderRepositoryPackageTestMeasurementsJSON :: RepositoryPackageTestStatus -> [String]
-renderRepositoryPackageTestMeasurementsJSON = \case
-  RepositoryTestsMeasured coverage totalDuration _ ->
-    [ "        \"coverage\": " ++ renderCoverageMeasurementJSON coverage ++ ",",
-      "        \"durationSeconds\": " ++ renderDurationSeconds totalDuration ++ ","
-    ]
-  _ -> []
-renderRepositoryPackageTestCaseJSON :: Map.Map String Duration -> String -> String
-renderRepositoryPackageTestCaseJSON testDurations testName =
-  "{ \"name\": "
-    ++ renderJSONString testName
-    ++ maybe "" (\seconds -> ", \"durationSeconds\": " ++ renderDurationSeconds seconds) (Map.lookup testName testDurations)
-    ++ " }"
+repositoryPackageTestCaseJSON :: Map.Map String Duration -> String -> Aeson.Value
+repositoryPackageTestCaseJSON testDurations testName =
+  Aeson.object
+    ( ("name" Aeson..= testName)
+        : maybe [] (\duration -> ["durationSeconds" Aeson..= durationSeconds duration]) (Map.lookup testName testDurations)
+    )
 renderRepositoryPackageTestStatus :: RepositoryPackageTestStatus -> String
 renderRepositoryPackageTestStatus = \case
   RepositoryTestsNotConfigured -> "not-configured"
   RepositoryTestsUnmeasured -> "unmeasured"
   RepositoryTestsMeasured {} -> "measured"
-renderCoverageMeasurementJSON :: CoverageMeasurement -> String
-renderCoverageMeasurementJSON (CoverageMeasurement metric covered total) =
-  "{ \"metric\": "
-    ++ renderJSONString (renderCoverageMetric metric)
-    ++ ", \"covered\": "
-    ++ show covered
-    ++ ", \"total\": "
-    ++ show total
-    ++ ", \"percent\": "
-    ++ renderCoveragePercent covered total
-    ++ " }"
+coverageMeasurementJSON :: CoverageMeasurement -> Aeson.Value
+coverageMeasurementJSON (CoverageMeasurement metric covered total) =
+  Aeson.object
+    [ "metric" Aeson..= renderCoverageMetric metric,
+      "covered" Aeson..= covered,
+      "total" Aeson..= total,
+      "percent" Aeson..= coveragePercent covered total
+    ]
 renderCoverageMetric :: CoverageMetric -> String
 renderCoverageMetric = \case
   ExpressionCoverage -> "expressions"
   StatementCoverage -> "statements"
   LineCoverage -> "lines"
-renderCoveragePercent :: Integer -> Integer -> String
-renderCoveragePercent covered total =
-  showFFloat (Just 1) (100 * fromIntegral covered / fromIntegral total :: Double) ""
+coveragePercent :: Integer -> Integer -> Double
+coveragePercent covered total = 100 * fromIntegral covered / fromIntegral total
 repositoryPackageTestDurations :: RepositoryPackageSummary -> Map.Map String Duration
 repositoryPackageTestDurations packageSummary =
   case repositoryPackageTestStatus packageSummary of
@@ -1215,8 +1099,8 @@ repositoryPackageTestDurations packageSummary =
     _ -> Map.empty
 normalizeTestSpecification :: String -> String
 normalizeTestSpecification = map toLower . filter isAlphaNum
-renderDurationSeconds :: Duration -> String
-renderDurationSeconds (Duration seconds) = showFFloat (Just 3) seconds ""
+durationSeconds :: Duration -> Double
+durationSeconds (Duration seconds) = fromIntegral (round (seconds * 1000) :: Integer) / 1000
 summarizeRepositoryPackage :: Maybe (Map.Map FilePath FilePath) -> Set.Set FilePath -> FilePath -> PackageKind -> IO RepositoryPackageSummary
 summarizeRepositoryPackage checkOutputPaths repositoryCheckNames packageName packageKind = do
   let packageRoot = "packages" </> packageName
@@ -1247,8 +1131,11 @@ summarizeRepositoryPackage checkOutputPaths repositoryCheckNames packageName pac
         pure (maybe [] (discoverRustUnitTestNamesFromSource . T.unpack) maybeMainRustSourceText)
       _
         | packageKind `elem` [PythonPackage, PythonLaTeXPackage] -> do
-            maybeMainPythonSourceText <- readTextFileIfExists (packageRoot </> "main.py")
-            pure (maybe [] (discoverPythonUnitTestNamesFromSource . T.unpack) maybeMainPythonSourceText)
+            let mainPythonPath = packageRoot </> "main.py"
+            mainPythonExists <- doesFileExist mainPythonPath
+            if mainPythonExists
+              then fromRight [] <$> inspectPythonTests mainPythonPath
+              else pure []
       _ -> pure []
   let configuredRepositoryCheckName =
         repositoryCheckNameForPackage packageKind packageName
@@ -1425,28 +1312,11 @@ extractQuotedNixAssignmentValue assignmentPrefix sourceLine = do
   valueWithoutSemicolon <- T.stripSuffix ";" (T.strip quotedValue)
   valueWithoutPrefix <- T.stripPrefix "\"" valueWithoutSemicolon
   T.stripSuffix "\"" valueWithoutPrefix
-renderJSONString :: String -> String
-renderJSONString value =
-  "\"" ++ concatMap escapeCharacter value ++ "\""
-  where
-    escapeCharacter character =
-      case character of
-        '\b' -> "\\b"
-        '\f' -> "\\f"
-        '\\' -> "\\\\"
-        '"' -> "\\\""
-        '\n' -> "\\n"
-        '\r' -> "\\r"
-        '\t' -> "\\t"
-        _
-          | isControl character ->
-              "\\u" ++ replicate (4 - length hexadecimalCodePoint) '0' ++ hexadecimalCodePoint
-          | otherwise -> [character]
-          where
-            hexadecimalCodePoint = showHex (ord character) ""
+renderJSON :: (Aeson.ToJSON value) => value -> String
+renderJSON = T.unpack . TE.decodeUtf8 . BL.toStrict . Aeson.encode
 renderNixString :: String -> String
 renderNixString value =
-  "(builtins.fromJSON " ++ escapeInterpolation (renderJSONString (renderJSONString value)) ++ ")"
+  "(builtins.fromJSON " ++ escapeInterpolation (renderJSON (renderJSON value)) ++ ")"
   where
     escapeInterpolation :: String -> String
     escapeInterpolation ('$' : '{' : remainingCharacters) = '\\' : '$' : '{' : escapeInterpolation remainingCharacters
@@ -1465,37 +1335,18 @@ renderPackageKind packageKind =
     TerraformPackage -> "terraform"
     LaTeXPackage -> "latex"
     BinaryReleasePackage -> "binary-release"
-type ScaffoldPackageKind :: Type
-data ScaffoldPackageKind
-  = HaskellScaffold
-  | RustScaffold
-  | HTMLScaffold
-  | PythonLaTeXScaffold
-  | PythonScaffold
-  | CScaffold
-  | LaTeXScaffold
-  deriving stock (Eq)
-supportedAddPackageKinds :: [(String, ScaffoldPackageKind)]
+supportedAddPackageKinds :: [(String, PackageKind)]
 supportedAddPackageKinds =
-  [ ("haskell", HaskellScaffold),
-    ("rust", RustScaffold),
-    ("html", HTMLScaffold),
-    ("python", PythonScaffold),
-    ("python-latex", PythonLaTeXScaffold),
-    ("c", CScaffold),
-    ("latex", LaTeXScaffold)
+  [ ("haskell", HaskellPackage),
+    ("rust", RustPackage),
+    ("html", HTMLPackage),
+    ("python", PythonPackage),
+    ("python-latex", PythonLaTeXPackage),
+    ("c", CPackage),
+    ("latex", LaTeXPackage)
   ]
-parseSupportedAddPackageKind :: String -> Maybe ScaffoldPackageKind
+parseSupportedAddPackageKind :: String -> Maybe PackageKind
 parseSupportedAddPackageKind packageKindName = lookup packageKindName supportedAddPackageKinds
-packageKindForScaffold :: ScaffoldPackageKind -> PackageKind
-packageKindForScaffold = \case
-  HaskellScaffold -> HaskellPackage
-  RustScaffold -> RustPackage
-  HTMLScaffold -> HTMLPackage
-  PythonLaTeXScaffold -> PythonLaTeXPackage
-  PythonScaffold -> PythonPackage
-  CScaffold -> CPackage
-  LaTeXScaffold -> LaTeXPackage
 validatePackageNameForKind :: PackageKind -> FilePath -> Maybe String
 validatePackageNameForKind packageKind packageName =
   let (conventionName, separator) = packageNameConventionForKind packageKind
@@ -1531,8 +1382,8 @@ data RepositoryCheckSpec = RepositoryCheckSpec
   { repositoryCheckNameSuffix :: String,
     repositoryCheckSource :: T.Text
   }
-addPackageToCurrentRepository :: ScaffoldPackageKind -> FilePath -> Maybe String -> IO (Either String [FilePath])
-addPackageToCurrentRepository scaffoldPackageKind packageName packageDescription =
+addPackageToCurrentRepository :: PackageKind -> FilePath -> Maybe String -> IO (Either String [FilePath])
+addPackageToCurrentRepository packageKind packageName packageDescription =
   case validatePackageNameForKind packageKind packageName of
     Just validationError -> pure (Left validationError)
     Nothing -> do
@@ -1541,7 +1392,7 @@ addPackageToCurrentRepository scaffoldPackageKind packageName packageDescription
       if packageRootExists
         then pure (Left ("path already exists: " ++ packageRootDirectory))
         else do
-          let packageScaffoldFiles = renderScaffoldFiles scaffoldPackageKind packageName packageDescription
+          let packageScaffoldFiles = renderScaffoldFiles packageKind packageName packageDescription
               checkScaffoldFiles = maybeToList (renderRepositoryCheckScaffoldFile packageName <$> repositoryCheckSpecForPackageKind packageKind)
           createScaffoldFiles (packageScaffoldFiles ++ checkScaffoldFiles) >>= \case
             Left scaffoldError -> pure (Left scaffoldError)
@@ -1549,8 +1400,6 @@ addPackageToCurrentRepository scaffoldPackageKind packageName packageDescription
               rootGitignoreSource <- renderRootGitignoreFromCurrentRepositoryWith scaffoldPaths
               TIO.writeFile ".gitignore" rootGitignoreSource
               pure (Right (".gitignore" : scaffoldPaths))
-  where
-    packageKind = packageKindForScaffold scaffoldPackageKind
 createScaffoldFiles :: [ScaffoldFile] -> IO (Either String [FilePath])
 createScaffoldFiles scaffoldFiles = do
   let scaffoldPaths = map scaffoldFilePath scaffoldFiles
@@ -1582,45 +1431,46 @@ repositoryCheckSpecForPackageKind = \case
   where
     spec :: String -> T.Text -> RepositoryCheckSpec
     spec = RepositoryCheckSpec
-renderScaffoldFiles :: ScaffoldPackageKind -> FilePath -> Maybe String -> [ScaffoldFile]
-renderScaffoldFiles scaffoldPackageKind packageName packageDescription =
+renderScaffoldFiles :: PackageKind -> FilePath -> Maybe String -> [ScaffoldFile]
+renderScaffoldFiles packageKind packageName packageDescription =
   map prefixPackagePath $
-    case scaffoldPackageKind of
-      HaskellScaffold ->
+    case packageKind of
+      HaskellPackage ->
         [ ScaffoldFile "default.nix" haskellTemplateBaselineNixSource,
           ScaffoldFile "Main.hs" haskellMainSource,
           ScaffoldFile (packageName <.> "cabal") (renderScaffoldHaskellCabal packageName packageDescription)
         ]
-      RustScaffold ->
+      RustPackage ->
         [ ScaffoldFile "default.nix" rustTemplateBaselineNixSource,
           ScaffoldFile "Cargo.toml" (renderScaffoldCargoToml packageName packageDescription),
           ScaffoldFile "src/main.rs" rustMainSource
         ]
-      HTMLScaffold ->
+      HTMLPackage ->
         [ ScaffoldFile "default.nix" (renderNixTemplateDescription defaultHtmlTemplateDescription packageDescription htmlTemplateBaselineNixSource),
           ScaffoldFile "index.html" htmlIndexSource,
           ScaffoldFile "script.js" htmlScriptSource,
           ScaffoldFile "style.css" htmlStyleSource
         ]
-      PythonLaTeXScaffold ->
+      PythonLaTeXPackage ->
         [ ScaffoldFile "default.nix" (renderNixTemplateDescription defaultPythonLaTeXTemplateDescription packageDescription pythonLaTeXTemplateBaselineNixSource),
           ScaffoldFile "main.py" pythonLaTeXMainSource,
           ScaffoldFile "ms.tex" pythonLaTeXMsTexSource,
           ScaffoldFile "ms.bib" pythonLaTeXMsBibSource
         ]
-      PythonScaffold ->
+      PythonPackage ->
         [ ScaffoldFile "default.nix" (renderPythonTemplateNixSource (scaffoldDescription defaultPythonTemplateDescription packageDescription)),
           ScaffoldFile "main.py" pythonMainSource
         ]
-      CScaffold ->
+      CPackage ->
         [ ScaffoldFile "default.nix" (renderNixTemplateDescription defaultCTemplateDescription packageDescription cTemplateBaselineNixSource),
           ScaffoldFile "main.c" cMainSource
         ]
-      LaTeXScaffold ->
+      LaTeXPackage ->
         [ ScaffoldFile "default.nix" (renderNixTemplateDescription defaultLaTeXTemplateDescription packageDescription latexTemplateBaselineNixSource),
           ScaffoldFile "ms.tex" latexMsTexSource,
           ScaffoldFile "ms.bib" latexMsBibSource
         ]
+      unsupportedPackageKind -> error ("unsupported scaffold package kind: " ++ renderPackageKind unsupportedPackageKind)
   where
     prefixPackagePath scaffoldFile =
       scaffoldFile
@@ -2250,13 +2100,7 @@ checkPackage packageName packageKind = do
                   if packageName == "c_template" && matchedTemplateName == "c_template"
                     then defaultAllowedNixDifferenceKeys
                     else templateAllowedDifferenceKeys templateSpec
-                templateSource =
-                  case matchedTemplateName of
-                    "python_template" -> pythonTemplateBaselineNixSource
-                    "python_pypi_template" -> pythonPyPITemplateBaselineNixSource
-                    "python_pypi_application_template" -> pythonPyPIApplicationTemplateBaselineNixSource
-                    _ -> templateBaselineSource templateSpec
-            comparePackageDefaultNixWithTemplate packageKind packageDefaultNixPath ("packages" </> matchedTemplateName </> "default.nix") allowedNixDifferenceKeysForPackage templateSource
+            comparePackageDefaultNixWithTemplate packageKind packageDefaultNixPath ("packages" </> matchedTemplateName </> "default.nix") allowedNixDifferenceKeysForPackage (templateBaselineSource templateSpec)
   cargoTomlIssues <- checkCargoToml packageName
   cabalFileIssues <- checkCabalFile packageName
   defaultNixConventionIssues <- checkDefaultNixConventions packageName packageKind
@@ -2380,78 +2224,49 @@ checkPythonTestConventions packageName packageKind =
       if not mainPythonFileExists
         then pure []
         else do
-          python3Path <- findExecutable "python3"
-          case python3Path of
-            Nothing ->
-              pure
-                [ "packages/"
-                    ++ packageName
-                    ++ "/main.py: missing Python 3 interpreter"
-                ]
-            Just pythonCommand -> do
-              (exitCode, validatorStdout, validatorStderr) <- readProcessWithExitCode pythonCommand ["-c", pythonUnittestValidatorPythonSource, mainPythonPath] ""
-              let validatorOutputLines = lines validatorStdout
-                  validatorErrorCodes = [drop 4 validatorOutputLine | validatorOutputLine <- validatorOutputLines, "ERR " `isPrefixOf` validatorOutputLine]
-                  validatorErrorMessages = map (formatPythonValidatorError packageName) validatorErrorCodes
-              case exitCode of
-                ExitSuccess ->
-                  if "OK" `elem` validatorOutputLines
-                    then pure []
-                    else
-                      pure
-                        [ "packages/" ++ packageName ++ "/main.py: python AST validator produced unexpected output"
-                        ]
-                ExitFailure 1 -> pure validatorErrorMessages
-                ExitFailure _ ->
-                  pure
-                    [ "packages/"
-                        ++ packageName
-                        ++ "/main.py: python AST validator execution failed: "
-                        ++ compactTextToSingleLine (T.pack validatorStderr)
-                    ]
-discoverPythonUnitTestNamesFromSource :: String -> [String]
-discoverPythonUnitTestNamesFromSource =
-  Set.toAscList . Set.fromList . discoverPythonTestSpecifications . lines
-discoverPythonTestSpecifications :: [String] -> [String]
-discoverPythonTestSpecifications [] = []
-discoverPythonTestSpecifications (sourceLine : remainingLines) =
-  case extractPythonUnitTestName sourceLine of
-    Nothing -> discoverPythonTestSpecifications remainingLines
-    Just testName ->
-      let (definitionLines, linesAfterDefinition) = break (isSuffixOf ":" . dropWhileEndIsSpace) (sourceLine : remainingLines)
-          sourceAfterDefinition = case linesAfterDefinition of
-            [] -> drop (length definitionLines) (sourceLine : remainingLines)
-            _ : sourceAfter -> sourceAfter
-          testSpecification =
-            fromMaybe
-              (testSpecificationFromIdentifier testName)
-              (listToMaybe (dropWhile (null . dropWhile isSpace) sourceAfterDefinition) >>= extractPythonTestDocstring)
-       in testSpecification : discoverPythonTestSpecifications sourceAfterDefinition
-  where
-    dropWhileEndIsSpace = reverse . dropWhile isSpace . reverse
-extractPythonUnitTestName :: String -> Maybe String
-extractPythonUnitTestName sourceLine =
-  case stripPrefix "def " (dropWhile (== ' ') sourceLine) of
-    Just functionDefinition
-      | "test_" `isPrefixOf` functionDefinition ->
-          let functionName = takeWhile (`notElem` ("( :" :: String)) functionDefinition
-           in if null functionName then Nothing else Just functionName
-    _ -> Nothing
-extractPythonTestDocstring :: String -> Maybe String
-extractPythonTestDocstring sourceLine =
-  let trimmedLine = dropWhile isSpace sourceLine
-      extractBetween delimiter = do
-        sourceAfterOpeningDelimiter <- stripPrefix delimiter trimmedLine
-        let (description, sourceAfterDescription) = breakOnString delimiter sourceAfterOpeningDelimiter
-        if null description || null sourceAfterDescription then Nothing else Just description
-   in extractBetween "\"\"\"" <|> extractBetween "'''"
-breakOnString :: String -> String -> (String, String)
-breakOnString delimiter = go []
-  where
-    go reversedPrefix remainingSource
-      | delimiter `isPrefixOf` remainingSource = (reverse reversedPrefix, remainingSource)
-    go reversedPrefix (character : remainingSource) = go (character : reversedPrefix) remainingSource
-    go reversedPrefix [] = (reverse reversedPrefix, [])
+          inspection <- inspectPythonTests mainPythonPath
+          pure ["packages/" ++ packageName ++ "/main.py: " ++ inspectionError | Left inspectionError <- [inspection]]
+type PythonTestInspection :: Type
+data PythonTestInspection = PythonTestInspection
+  { inspectedPythonTestName :: String,
+    inspectedPythonTestDocstring :: Maybe String
+  }
+instance Aeson.FromJSON PythonTestInspection where
+  parseJSON =
+    Aeson.withObject "PythonTestInspection" $ \object ->
+      PythonTestInspection
+        <$> object Aeson..: "name"
+        <*> object Aeson..: "docstring"
+type PythonInspectionResult :: Type
+newtype PythonInspectionResult = PythonInspectionResult [PythonTestInspection]
+instance Aeson.FromJSON PythonInspectionResult where
+  parseJSON =
+    Aeson.withObject "PythonInspectionResult" $ \object ->
+      PythonInspectionResult <$> object Aeson..: "tests"
+inspectPythonTests :: FilePath -> IO (Either String [String])
+inspectPythonTests pythonSourcePath = do
+  findExecutable "python3" >>= \case
+    Nothing -> pure (Left "missing Python 3 interpreter")
+    Just pythonCommand -> do
+      (inspectionExit, inspectionStdout, inspectionStderr) <-
+        readProcessWithExitCode pythonCommand ["-c", pythonTestInspectorPythonSource, pythonSourcePath] ""
+      pure $
+        case inspectionExit of
+          ExitSuccess ->
+            case Aeson.eitherDecodeStrict' (TE.encodeUtf8 (T.pack inspectionStdout)) of
+              Left decodeError -> Left ("python AST inspector produced malformed output: " ++ decodeError)
+              Right (PythonInspectionResult tests) ->
+                Right
+                  ( Set.toAscList
+                      ( Set.fromList
+                          [ fromMaybe (testSpecificationFromIdentifier testName) (inspectedPythonTestDocstring test)
+                          | test <- tests,
+                            let testName = inspectedPythonTestName test
+                          ]
+                      )
+                  )
+          ExitFailure 1 -> Left "python source could not be parsed"
+          ExitFailure _ -> Left ("python AST inspector execution failed: " ++ compactTextToSingleLine (T.pack inspectionStderr))
 testSpecificationFromIdentifier :: String -> String
 testSpecificationFromIdentifier identifier =
   case renderTestWords (wordsFromTestIdentifier (stripTestFrameworkPrefixes identifier)) of
@@ -2640,27 +2455,27 @@ extractRustUnitTestNames = Set.toAscList . Set.fromList . go False
       | otherwise = go False rest
       where
         trimmed = dropWhile (== ' ') line
-formatPythonValidatorError :: FilePath -> String -> String
-formatPythonValidatorError packageName errorCode =
-  let messagePrefix = "packages/" ++ packageName ++ "/main.py: "
-   in case errorCode of
-        "parse_error" -> messagePrefix ++ "python source could not be parsed"
-        _ -> messagePrefix ++ "python validator failed with error code: " ++ errorCode
-pythonUnittestValidatorPythonSource :: String
-pythonUnittestValidatorPythonSource =
+pythonTestInspectorPythonSource :: String
+pythonTestInspectorPythonSource =
   unlines
     [ "import ast",
+      "import json",
       "import sys",
       "",
       "def main():",
       "    path = sys.argv[1]",
       "    try:",
       "        source = open(path, encoding='utf-8').read()",
-      "        ast.parse(source, filename=path)",
-      "    except Exception:",
-      "        print('ERR parse_error')",
-      "        sys.exit(2)",
-      "    print('OK')",
+      "        module = ast.parse(source, filename=path)",
+      "    except (OSError, SyntaxError, UnicodeError):",
+      "        sys.exit(1)",
+      "    tests = [",
+      "        {'name': node.name, 'docstring': ast.get_docstring(node)}",
+      "        for node in module.body",
+      "        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))",
+      "        and node.name.startswith('test_')",
+      "    ]",
+      "    print(json.dumps({'tests': tests}, ensure_ascii=False))",
       "    sys.exit(0)",
       "",
       "if __name__ == '__main__':",
@@ -3252,23 +3067,31 @@ haskellTestDiscoveryFalsePositiveTest =
         )
     )
 pythonTestDiscoveryTest :: IO ()
-pythonTestDiscoveryTest =
-  assertEqual
-    "A test's first statement supplies its specification, with an identifier fallback."
-    ["Handles a multiline definition.", "Undocumented behavior."]
-    ( discoverPythonUnitTestNamesFromSource
-        ( unlines
-            [ "def test_undocumented_behavior() -> None:",
-              "    assert True",
-              "",
-              "def test_multiline_definition(",
-              "    value: str,",
-              ") -> None:",
-              "    \"\"\"Handles a multiline definition.\"\"\"",
-              "    assert value"
-            ]
+pythonTestDiscoveryTest = do
+  python3Path <- findExecutable "python3"
+  forM_ python3Path $ \_ ->
+    withTemporaryPackageRepository "python-test-inspection" $ \temporaryDirectory -> do
+      let pythonSourcePath = temporaryDirectory </> "main.py"
+      TIO.writeFile
+        pythonSourcePath
+        ( T.pack
+            ( unlines
+                [ "def test_undocumented_behavior() -> None:",
+                  "    assert True",
+                  "",
+                  "async def test_multiline_definition(",
+                  "    value: str,",
+                  ") -> None:",
+                  "    \"\"\"Handles a multiline definition.\"\"\"",
+                  "    assert value"
+                ]
+            )
         )
-    )
+      discoveredTests <- inspectPythonTests pythonSourcePath
+      assertEqual
+        "Python AST inspection handles async multiline definitions, docstrings, and identifier fallback."
+        (Right ["Handles a multiline definition.", "Undocumented behavior."])
+        discoveredTests
 testIdentifierSpecificationTest :: IO ()
 testIdentifierSpecificationTest =
   assertEqual
@@ -3468,34 +3291,12 @@ repositorySummaryRenderingTest = do
     (repositoryPackageTestDurations packageSummary)
   assertEqual
     "JSON rendering preserves the schema and escapes strings."
-    ( unlines
-        [ "{",
-          "  \"repositoryType\": \"flake\",",
-          "  \"root\": \"example.test/owner/demo\",",
-          "  \"readme\": \"Demo repository.\\n\\nIts intent is visible.\",",
-          "  \"resources\": [",
-          "    {",
-          "      \"kind\": \"package\",",
-          "      \"name\": \"demo\",",
-          "      \"type\": \"python\",",
-          "      \"description\": null,",
-          "      \"dependencies\": [\"alpha\", \"demo-two\"],",
-          "      \"tests\": {",
-          "        \"status\": \"measured\",",
-          "        \"coverage\": { \"metric\": \"statements\", \"covered\": 19, \"total\": 20, \"percent\": 95.0 },",
-          "        \"durationSeconds\": 1.234,",
-          "        \"cases\": [{ \"name\": \"Reports \\\"quoted\\\" behavior.\", \"durationSeconds\": 0.125 }]",
-          "      }",
-          "    }",
-          "  ]",
-          "}"
-        ]
-    )
-    (renderRepositorySummariesJSON [repositorySummary])
+    (Right (repositoryStatusJSON [repositorySummary]))
+    (Aeson.eitherDecodeStrict' (TE.encodeUtf8 (T.pack (renderRepositorySummariesJSON [repositorySummary]))))
   assertEqual
     "JSON string rendering escapes control characters."
     "\"line one\\nline two\\u0001\""
-    (renderJSONString "line one\nline two\1")
+    (renderJSON ("line one\nline two\1" :: String))
   assertEqual
     "Nix string rendering prevents interpolation and preserves control characters."
     "(builtins.fromJSON \"\\\"\\${name}\\\\u0001\\\"\")"
@@ -3560,22 +3361,15 @@ commandLineHelpEndToEndTest =
     assertEqual "The top-level help command succeeds." ExitSuccess helpExit
     assertBool
       "The top-level help command prints concise usage and commands to stdout."
-      ( mainUsageText `isPrefixOf` helpStdout
-          && "\n  init [--] [<directory>]" `isInfixOf` helpStdout
-          && "\n  add <package-type>" `isInfixOf` helpStdout
-          && "\n  check [--fix]\n" `isInfixOf` helpStdout
-          && "check [--fix]" `isInfixOf` helpStdout
-          && "\n  rm [-n|--dry-run]" `isInfixOf` helpStdout
-          && "\n  status\n" `isInfixOf` helpStdout
-      )
+      (all (`isInfixOf` helpStdout) ["Usage:", "init", "add", "rm", "check", "status"])
     assertEqual "The top-level help command leaves stderr empty." "" helpStderr
     (commandHelpExit, commandHelpStdout, commandHelpStderr) <- runEndToEndCommandIn temporaryDirectory ["check", "--help"]
     assertEqual "A command-specific help request succeeds." ExitSuccess commandHelpExit
-    assertEqual "A command-specific help request prints specific help to stdout." (usageTextForCommand (Just "check")) commandHelpStdout
+    assertBool "A command-specific help request prints specific help to stdout." ("Usage:" `isInfixOf` commandHelpStdout && "--fix" `isInfixOf` commandHelpStdout)
     assertEqual "A command-specific help request leaves stderr empty." "" commandHelpStderr
     (initHelpExit, initHelpStdout, initHelpStderr) <- runEndToEndCommandIn temporaryDirectory ["init", "--help"]
     assertEqual "Init help succeeds." ExitSuccess initHelpExit
-    assertEqual "Init help documents its path argument." (usageTextForCommand (Just "init")) initHelpStdout
+    assertBool "Init help documents its path argument." ("Usage:" `isInfixOf` initHelpStdout && "DIRECTORY" `isInfixOf` initHelpStdout)
     assertEqual "Init help leaves stderr empty." "" initHelpStderr
 initializationEndToEndTest :: IO ()
 initializationEndToEndTest =
@@ -3677,45 +3471,33 @@ initializationExistingFilesEndToEndTest =
       assertEqual "An existing whitelist is preserved byte-for-byte." "not canonical\n" preservedGitignore
 addCommandParsingTest :: IO ()
 addCommandParsingTest = do
-  assertBool "Init accepts exactly one local path." $
-    case parseCommand ["init", "project"] of
-      ParsedCommand (InitCommand (InitSpec "project")) -> True
-      _ -> False
-  assertBool "A supported URL prefix selects home repository addition." $
-    case parseCommand ["add", "https://github.com/owner/demo.git"] of
-      ParsedCommand (AddRepositoryCommand "https://github.com/owner/demo.git") -> True
-      _ -> False
-  assertBool "A single add argument is treated as a Git repository URL or alias." $
-    case parseCommand ["add", "python"] of
-      ParsedCommand (AddRepositoryCommand "python") -> True
-      _ -> False
-  assertBool "The option terminator permits a description beginning with a dash." $
-    case parseCommand ["add", "python", "demo", "--", "--documented", "behavior"] of
-      ParsedCommand (AddPackageCommand "python" "demo" (Just "--documented behavior")) -> True
-      _ -> False
+  assertEqual "Init accepts exactly one local path." (Just (InitCommand (InitSpec "project"))) (parseCommandForTest ["init", "project"])
+  assertEqual
+    "A supported URL prefix selects home repository addition."
+    (Just (AddRepositoryCommand "https://github.com/owner/demo.git"))
+    (parseCommandForTest ["add", "https://github.com/owner/demo.git"])
+  assertEqual "A single add argument is treated as a Git repository URL or alias." (Just (AddRepositoryCommand "python")) (parseCommandForTest ["add", "python"])
+  assertEqual
+    "The option terminator permits a description beginning with a dash."
+    (Just (AddPackageCommand "python" "demo" (Just "--documented behavior")))
+    (parseCommandForTest ["add", "python", "demo", "--", "--documented", "behavior"])
 invalidCommandEndToEndTest :: IO ()
 invalidCommandEndToEndTest =
   withTemporaryPackageRepository "invalid-command" $ \temporaryDirectory -> do
     (invalidCommandExit, invalidCommandStdout, invalidCommandStderr) <- runEndToEndCommandIn temporaryDirectory ["unknown-command"]
     assertEqual "An invalid command uses Git's usage exit status." usageExitCode invalidCommandExit
     assertEqual "An invalid command leaves stdout empty." "" invalidCommandStdout
-    assertEqual "An invalid command prints an error and the main usage to stderr." ("error: unknown command 'unknown-command'\n" ++ mainUsageText) invalidCommandStderr
-    assertBool "Init without a path defaults to the current directory." $
-      case parseCommand ["init"] of
-        ParsedCommand (InitCommand (InitSpec ".")) -> True
-        _ -> False
+    assertBool "An invalid command prints an error and usage to stderr." ("Invalid argument" `isInfixOf` invalidCommandStderr && "Usage:" `isInfixOf` invalidCommandStderr)
+    assertEqual "Init without a path defaults to the current directory." (Just (InitCommand (InitSpec "."))) (parseCommandForTest ["init"])
     (summaryExit, summaryStdout, summaryStderr) <- runEndToEndCommandIn temporaryDirectory ["summary"]
     assertEqual "The retired summary command uses Git's usage exit status." usageExitCode summaryExit
     assertEqual "The retired summary command leaves stdout empty." "" summaryStdout
-    assertEqual "The retired summary command prints an error and the main usage to stderr." ("error: unknown command 'summary'\n" ++ mainUsageText) summaryStderr
+    assertBool "The retired summary command prints an error and usage to stderr." ("Invalid argument" `isInfixOf` summaryStderr && "Usage:" `isInfixOf` summaryStderr)
     forM_ ["--version", "completion", "remove"] $ \retiredCommand -> do
       (retiredExit, retiredStdout, retiredStderr) <- runEndToEndCommandIn temporaryDirectory [retiredCommand]
       assertEqual (retiredCommand ++ " uses Git's usage exit status.") usageExitCode retiredExit
       assertEqual (retiredCommand ++ " leaves stdout empty.") "" retiredStdout
-      assertEqual
-        (retiredCommand ++ " is reported as an unknown command.")
-        ("error: unknown command '" ++ retiredCommand ++ "'\n" ++ mainUsageText)
-        retiredStderr
+      assertBool (retiredCommand ++ " is reported as invalid.") (not (null retiredStderr) && "Usage:" `isInfixOf` retiredStderr)
 homeRepositoryParsingTest :: IO ()
 homeRepositoryParsingTest = do
   forM_
@@ -3781,8 +3563,8 @@ homeProfileEndToEndTest =
     assertEqual "An empty home status succeeds." ExitSuccess statusExit
     assertEqual
       "An empty home status uses the common profile envelope."
-      (unlines ["{", "  \"repositoryType\": \"home\",", "  \"root\": " ++ renderJSONString repositoryRoot ++ ",", "  \"resources\": []", "}"])
-      statusStdout
+      (Right (homeStatusJSON repositoryRoot []))
+      (Aeson.eitherDecodeStrict' (TE.encodeUtf8 (T.pack statusStdout)))
     assertEqual "An empty home status emits no stderr." "" statusStderr
 addPackageEndToEndTest :: IO ()
 addPackageEndToEndTest =
@@ -4006,7 +3788,7 @@ statusEndToEndTest =
     (emptyExit, emptyStdout, emptyStderr) <- runEndToEndCommandIn temporaryRepository []
     assertEqual "An omitted subcommand uses Git's usage exit status." usageExitCode emptyExit
     assertEqual "An omitted subcommand leaves stdout empty." "" emptyStdout
-    assertEqual "An omitted subcommand prints an error and the main usage to stderr." ("error: no command specified\n" ++ mainUsageText) emptyStderr
+    assertBool "An omitted subcommand prints an error and usage to stderr." ("Missing:" `isInfixOf` emptyStderr && "Usage:" `isInfixOf` emptyStderr)
 haskellStatusEndToEndTest :: IO ()
 haskellStatusEndToEndTest =
   withGeneratedHaskellPackageRepository "haskell-status-end-to-end" $ \temporaryRepository -> do
@@ -4058,9 +3840,7 @@ unknownAddOptionEndToEndTest =
     assertEqual "An unknown add option leaves stdout empty." "" unknownOptionStdout
     assertBool
       "An unknown add option prints an error and add usage to stderr."
-      ( "error: invalid arguments for 'git canonicalization add'\nusage: git canonicalization add"
-          `isPrefixOf` unknownOptionStderr
-      )
+      ("Invalid option" `isInfixOf` unknownOptionStderr && "Usage:" `isInfixOf` unknownOptionStderr && "add" `isInfixOf` unknownOptionStderr)
     packageDirectoryExists <- doesDirectoryExist (temporaryRepository </> "packages/demo")
     assertBool "An unknown option does not leave a partial package directory." (not packageDirectoryExists)
 invalidPackageNameEndToEndTest :: IO ()
