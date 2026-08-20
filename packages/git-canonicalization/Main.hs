@@ -866,8 +866,7 @@ runProcessOrExit successfulOutput executable arguments = do
 delegateToGit :: [String] -> IO a
 delegateToGit gitArguments = executeFile "git" True gitArguments Nothing
 checkRepositoryLocation :: FilePath -> IO ()
-checkRepositoryLocation location = do
-  repositoryRoot <- discoverGitRepositoryRoot location
+checkRepositoryLocation repositoryRoot =
   withCurrentDirectory repositoryRoot $
     collectRepositoryCompliance >>= \case
       Left repositoryComplianceFailure -> do
@@ -875,8 +874,7 @@ checkRepositoryLocation location = do
         exitFailure
       Right _ -> pure ()
 fixAndCheckRepositoryLocation :: FilePath -> IO ()
-fixAndCheckRepositoryLocation location = do
-  repositoryRoot <- discoverGitRepositoryRoot location
+fixAndCheckRepositoryLocation repositoryRoot = do
   withCurrentDirectory repositoryRoot $ do
     rootGitignoreSource <- renderRootGitignoreFromCurrentRepository
     TIO.writeFile ".gitignore" rootGitignoreSource
@@ -992,8 +990,7 @@ data RepositorySummary = RepositorySummary
   }
   deriving stock (Eq, Show)
 summarizeRepositoryLocation :: ([RepositorySummary] -> String) -> FilePath -> IO ()
-summarizeRepositoryLocation render location = do
-  repositoryRoot <- discoverGitRepositoryRoot location
+summarizeRepositoryLocation render repositoryRoot = do
   repositoryPath <- canonicalizePath repositoryRoot
   repositorySummary <- summarizeRepositoryAt repositoryPath repositoryRoot
   putStr (render [repositorySummary])
