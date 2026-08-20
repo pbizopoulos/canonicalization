@@ -827,7 +827,6 @@ fixHomeRepositoryPath :: FilePath -> HomeRepository -> FilePath -> IO ()
 fixHomeRepositoryPath repositoryRoot repository expectedPath = do
   createDirectoryIfMissing True (takeDirectory (repositoryRoot </> expectedPath))
   runGitOrExit ["-C", repositoryRoot, "mv", "--", homeRepositoryPath repository, expectedPath]
-  runGitOrExit ["config", "set", "--file", repositoryRoot </> ".gitmodules", "submodule." ++ homeRepositoryName repository ++ ".path", expectedPath]
 reportHomeCheckIssues :: [String] -> IO a
 reportHomeCheckIssues issues = do
   forM_ issues (hPutStrLn stderr . ("error: " ++))
