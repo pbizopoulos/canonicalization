@@ -326,13 +326,12 @@ runCommand = \case
     FlakeProfile -> summarizeRepositoryLocation renderRepositorySummariesJSON repositoryRoot
   InitCommand initSpec -> initializeCanonicalization initSpec
   AddRepositoryCommand repositoryUrl ->
-    withRequiredProfile HomeProfile "repository" $
-      runInGitRepositoryRoot "." $ do
-        repositoryRoot <- getCurrentDirectory
+    withRequiredProfile HomeProfile "repository" $ \repositoryRoot ->
+      withCurrentDirectory repositoryRoot $ do
         addHomeRepository repositoryRoot repositoryUrl
   AddPackageCommand packageKindName packageName packageDescription ->
-    withRequiredProfile FlakeProfile "package" $
-      runInGitRepositoryRoot "." $
+    withRequiredProfile FlakeProfile "package" $ \repositoryRoot ->
+      withCurrentDirectory repositoryRoot $
         case parseSupportedAddPackageKind packageKindName of
           Nothing -> do
             hPutStrLn stderr ("error: unsupported package type: " ++ packageKindName)
@@ -342,8 +341,8 @@ runCommand = \case
             addResult <- addPackageToCurrentRepository scaffoldPackageKind packageName packageDescription
             stageGeneratedPathsOrExit addResult
   RemovePackageCommand removeSpec ->
-    withRequiredProfile FlakeProfile "package" $
-      runInGitRepositoryRoot "." $ do
+    withRequiredProfile FlakeProfile "package" $ \repositoryRoot ->
+      withCurrentDirectory repositoryRoot $ do
         removeResult <- removePackageFromCurrentRepository removeSpec
         case removeResult of
           Left removeError -> hPutStrLn stderr ("error: " ++ removeError) >> exitFailure
@@ -427,11 +426,11 @@ withDetectedRepositoryProfile action = do
   repositoryRoot <- discoverGitRepositoryRoot "."
   profile <- detectRepositoryProfile repositoryRoot
   action repositoryRoot profile
-withRequiredProfile :: RepositoryProfile -> String -> IO a -> IO a
+withRequiredProfile :: RepositoryProfile -> String -> (FilePath -> IO a) -> IO a
 withRequiredProfile requiredProfile resourceKind action =
-  withDetectedRepositoryProfile $ \_ actualProfile ->
+  withDetectedRepositoryProfile $ \repositoryRoot actualProfile ->
     if actualProfile == requiredProfile
-      then action
+      then action repositoryRoot
       else unsupportedResource (renderRepositoryProfile actualProfile) resourceKind
 detectRepositoryProfile :: FilePath -> IO RepositoryProfile
 detectRepositoryProfile = detectRepositoryProfileWithDefault Nothing
@@ -837,10 +836,6 @@ runGitOrExit arguments = do
   pure ()
 readGitProcess :: [String] -> String -> IO (ExitCode, String, String)
 readGitProcess = readProcessWithExitCode "git"
-runInGitRepositoryRoot :: FilePath -> IO a -> IO a
-runInGitRepositoryRoot repositoryDirectory action = do
-  canonicalRepositoryRoot <- discoverGitRepositoryRoot repositoryDirectory
-  withCurrentDirectory canonicalRepositoryRoot action
 discoverGitRepositoryRoot :: FilePath -> IO FilePath
 discoverGitRepositoryRoot repositoryDirectory = do
   repositoryRootStdout <-
