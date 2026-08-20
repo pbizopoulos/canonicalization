@@ -316,11 +316,9 @@ runCommand = \case
   CheckCommand -> withDetectedRepositoryProfile $ \repositoryRoot -> \case
     HomeProfile -> checkHomeProfile repositoryRoot False
     FlakeProfile -> checkRepositoryLocation repositoryRoot
-  CheckFixCommand -> do
-    repositoryRoot <- discoverGitRepositoryRoot "."
-    detectRepositoryProfile repositoryRoot >>= \case
-      HomeProfile -> checkHomeProfile repositoryRoot True
-      FlakeProfile -> fixAndCheckRepositoryLocation repositoryRoot
+  CheckFixCommand -> withDetectedRepositoryProfile $ \repositoryRoot -> \case
+    HomeProfile -> checkHomeProfile repositoryRoot True
+    FlakeProfile -> fixAndCheckRepositoryLocation repositoryRoot
   StatusCommand -> withDetectedRepositoryProfile $ \repositoryRoot -> \case
     HomeProfile -> renderHomeProfileStatus repositoryRoot
     FlakeProfile -> summarizeRepositoryLocation renderRepositorySummariesJSON repositoryRoot
