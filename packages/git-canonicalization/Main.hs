@@ -515,12 +515,13 @@ initializeProjectRepository initSpec targetExisted home repositoryRoot = do
           ++ [gitignorePath | not gitignoreExists]
           ++ [repositoryRoot </> ".git" | targetExisted && not gitMetadataExisted]
   ( do
-      runGitInitialization initSpec repositoryRoot
+      createDirectoryIfMissing True repositoryRoot
       expectedGitignore <- withCurrentDirectory repositoryRoot renderInitializedProjectGitignore
       unless flakeExists (TIO.writeFile flakePath minimalProjectFlakeSource)
       unless lockExists $ do
         hPutStrLn stderr "Locking flake inputs..."
         withCurrentDirectory repositoryRoot (runNixOrExit ["flake", "lock"])
+      runGitInitialization initSpec repositoryRoot
       unless gitignoreExists (TIO.writeFile gitignorePath expectedGitignore)
     )
     `onException` rollbackInitialization targetExisted repositoryRoot createdPaths
@@ -3291,7 +3292,7 @@ initializationEndToEndTest =
       assertEqual "Project initialization writes the canonical root whitelist." "*\n!/.gitignore\n!/flake.lock\n!/flake.nix\n" projectGitignore
       (projectStatusExit, projectStatusStdout, _projectStatusStderr) <- readGitProcess ["-C", project, "status", "--porcelain=v1"] ""
       assertEqual "The initialized project is a Git repository." ExitSuccess projectStatusExit
-      assertBool "Project initialization leaves all generated files unstaged." (all (`isInfixOf` projectStatusStdout) ["?? .gitignore", "?? flake.lock", "?? flake.nix"])
+      assertEqual "Project initialization leaves all generated files unstaged." "?? .gitignore\n?? flake.lock\n?? flake.nix\n" projectStatusStdout
       (repeatExit, repeatStdout, repeatStderr) <- runEndToEndCommandWithEnvironment "/tmp" environment ["init", project]
       assertEqual "Repeated project initialization succeeds." ExitSuccess repeatExit
       assertBool "Repeated initialization preserves Git's reinitialization output." ("Reinitialized existing Git repository" `isInfixOf` repeatStdout)
