@@ -1683,8 +1683,6 @@ renderScaffoldHaskellCabal packageName packageDescription =
         otherLine -> otherLine
     | sourceLine <- T.lines haskellCabalBaseline
     ]
-checkRepositoryStructure :: IO [String]
-checkRepositoryStructure = snd <$> inspectRepositoryStructure
 inspectRepositoryStructure :: IO ([(FilePath, PackageKind)], [String])
 inspectRepositoryStructure = do
   repositoryEntries <- collectRepositoryEntries "."
@@ -1737,10 +1735,13 @@ inspectRepositoryStructure = do
   pure (detectedPackages, entryPolicyIssues ++ missingPackageDefaultNixIssues ++ missingHostConfigurationIssues ++ missingCabalForMainHaskellIssues ++ misnamedCabalFileIssues ++ packageNameConventionIssues ++ ambiguousPackageMarkerIssues)
 type RepositoryEntry :: Type
 type RepositoryEntry = (FilePath, Posix.FileStatus)
+type EntryKind :: Type
+data EntryKind = RegularFile | Directory
 type EntryRule :: Type
-data EntryRule
-  = RegularFileRule String
-  | DirectoryRule String
+data EntryRule = EntryRule
+  { entryRuleKind :: EntryKind,
+    entryRuleRegex :: String
+  }
 globalRegularFileRegexes :: [String]
 globalRegularFileRegexes =
   map exactPathRegex globalExactRegularFilePaths
@@ -1765,8 +1766,8 @@ exactPathRegex :: FilePath -> String
 exactPathRegex path = "^" ++ escapeRegexLiteral path ++ "$"
 repositoryEntryRules :: [PackageInfo] -> [EntryRule]
 repositoryEntryRules packageInfos =
-  map RegularFileRule (globalRegularFileRegexes ++ packageRegularFileRegexes)
-    ++ map DirectoryRule opaqueDirectoryRegexes
+  map (EntryRule RegularFile) (globalRegularFileRegexes ++ packageRegularFileRegexes)
+    ++ map (EntryRule Directory) opaqueDirectoryRegexes
   where
     packageRegularFileRegexes =
       concat
@@ -1780,18 +1781,14 @@ validateRepositoryEntry rules (path, status) =
     matchingRules
       | any (`entryRuleAccepts` status) matchingRules -> Nothing
       | otherwise -> Just (path ++ ": expected " ++ intercalate " or " (map renderEntryRule matchingRules) ++ ", found " ++ renderFileStatus status)
-entryRuleRegex :: EntryRule -> String
-entryRuleRegex = \case
-  RegularFileRule pathRegex -> pathRegex
-  DirectoryRule pathRegex -> pathRegex
 entryRuleAccepts :: EntryRule -> Posix.FileStatus -> Bool
-entryRuleAccepts = \case
-  RegularFileRule _ -> Posix.isRegularFile
-  DirectoryRule _ -> Posix.isDirectory
+entryRuleAccepts rule = case entryRuleKind rule of
+  RegularFile -> Posix.isRegularFile
+  Directory -> Posix.isDirectory
 renderEntryRule :: EntryRule -> String
-renderEntryRule = \case
-  RegularFileRule _ -> "regular file"
-  DirectoryRule _ -> "directory"
+renderEntryRule rule = case entryRuleKind rule of
+  RegularFile -> "regular file"
+  Directory -> "directory"
 renderFileStatus :: Posix.FileStatus -> String
 renderFileStatus status
   | Posix.isSymbolicLink status = "symbolic link"
@@ -3058,7 +3055,7 @@ entryKindStructureTest =
     initializeGitRepositoryFixture temporaryRepository
     writeFile (temporaryRepository </> "README") ""
     createFileLink "README" (temporaryRepository </> "LICENSE")
-    issues <- withCurrentDirectory temporaryRepository checkRepositoryStructure
+    issues <- withCurrentDirectory temporaryRepository (snd <$> inspectRepositoryStructure)
     assertBool
       "entry-kind diagnostic"
       ("LICENSE: expected regular file, found symbolic link" `elem` issues)
@@ -3078,7 +3075,7 @@ gitIgnoredRepositoryEntryTest =
     writeFile (temporaryRepository </> "tracked-artifact/unexpected.txt") ""
     writeFile (temporaryRepository </> "unexpected.txt") ""
     runGitFixtureCommand ["-C", temporaryRepository, "add", "-f", "--", ".gitignore", "README", "LICENSE", "tracked-artifact/unexpected.txt"]
-    issues <- withCurrentDirectory temporaryRepository checkRepositoryStructure
+    issues <- withCurrentDirectory temporaryRepository (snd <$> inspectRepositoryStructure)
     assertBool
       "A tracked path remains subject to entry-kind validation even when an ignore rule matches it."
       ("LICENSE: expected regular file, found symbolic link" `elem` issues)
@@ -3113,7 +3110,7 @@ parameterDirectoryStructureTest =
     forM_ parameterDirectories $ \parameterDirectory -> do
       createDirectoryIfMissing True (parameterDirectory </> "arbitrary/nested")
       writeFile (parameterDirectory </> "arbitrary/nested/user.data") ""
-    issues <- withCurrentDirectory temporaryRepository checkRepositoryStructure
+    issues <- withCurrentDirectory temporaryRepository (snd <$> inspectRepositoryStructure)
     assertEqual "Parameter directory contents do not participate in repository structure policy." [] issues
 repositoryTestResultParsingTest :: IO ()
 repositoryTestResultParsingTest = do
