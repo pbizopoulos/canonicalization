@@ -635,24 +635,13 @@ completeHomeGitignore source =
       separator :: T.Text
       separator = if T.null source || T.isSuffixOf "\n" source then "" else "\n"
    in source <> separator <> T.unlines missingLines
-canonicalHomeGitignoreOrExit :: FilePath -> Maybe T.Text -> IO T.Text
-canonicalHomeGitignoreOrExit gitignorePath = \case
-  Nothing -> pure homeGitignoreSource
-  Just source
-    | homeGitignoreIsCompatible source -> pure (completeHomeGitignore source)
-    | otherwise ->
-        hPutStrLn stderr ("error: " ++ gitignorePath ++ ": existing file must start with * and subsequent lines must start with !") >> exitFailure
 addHomeRepository :: FilePath -> String -> IO ()
 addHomeRepository repositoryRoot repositoryUrl = do
   resolvedRepositoryUrl <- resolveGitRemoteUrl repositoryRoot repositoryUrl
   case canonicalHomeRepositoryPath resolvedRepositoryUrl of
     Left urlError -> hPutStrLn stderr ("error: " ++ urlError) >> exitFailure
     Right canonicalPath -> do
-      let gitignorePath = repositoryRoot </> ".gitignore"
-      gitignoreSource <- readTextFileIfExists gitignorePath >>= canonicalHomeGitignoreOrExit gitignorePath
       runGitOrExit ["-C", repositoryRoot, "submodule", "add", "--force", resolvedRepositoryUrl, canonicalPath]
-      TIO.writeFile gitignorePath gitignoreSource
-      runGitOrExit ["-C", repositoryRoot, "add", "--", ".gitignore"]
 checkHomeProfile :: FilePath -> Bool -> IO ()
 checkHomeProfile repositoryRoot fix = do
   let gitignorePath = repositoryRoot </> ".gitignore"
