@@ -11,16 +11,20 @@ executable git-canonicalization
       aeson
     , base
     , bytestring
+    , Cabal-syntax
     , containers
     , data-fix
     , directory
     , filepath
+    , haskell-src-exts
     , hnix
     , HUnit
     , optparse-applicative
     , prettyprinter
     , process
     , regex-tdfa
+    , syb
     , text
+    , toml-reader
     , unix
   ghc-options:   -O2 -Weverything -Werror -threaded

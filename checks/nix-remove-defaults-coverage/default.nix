@@ -51,7 +51,7 @@ pkgs.runCommand checkName
       ${pkgs.time}/bin/time -f %e -o "$workspace/total-seconds" \
       "$workspace/$packageName" +RTS -p -RTS
     mv "$workspace/$packageName.prof" "$out/profile-report.prof"
-    printf 'profile-v1\ttotal-seconds\t%s\n' "$(cat "$workspace/total-seconds")" > "$out/profile-summary.tsv"
+    printf 'profile-v2\ttotal-seconds\t%s\n' "$(cat "$workspace/total-seconds")" > "$out/profile-summary.tsv"
     cat "$workspace/test-timings.tsv" >> "$out/profile-summary.tsv"
     hpc markup "$workspace/coverage/${packageName}.tix" --hpcdir="$workspace/hpc" --destdir="$out/html"
     hpc report "$workspace/coverage/${packageName}.tix" --hpcdir="$workspace/hpc" | tee "$out/report.txt"

@@ -11,12 +11,15 @@ let
     pkgs.haskellPackages.data-fix
     pkgs.haskellPackages.directory
     pkgs.haskellPackages.filepath
+    pkgs.haskellPackages.haskell-src-exts
     pkgs.haskellPackages.hnix
     pkgs.haskellPackages.optparse-applicative
     pkgs.haskellPackages.prettyprinter
     pkgs.haskellPackages.process
     pkgs.haskellPackages.regex-tdfa
+    pkgs.haskellPackages.syb
     pkgs.haskellPackages.text
+    pkgs.haskellPackages.toml-reader
     pkgs.haskellPackages.unix
   ];
   ghcForTests = pkgs.haskellPackages.ghcWithPackages (_: executableHaskellDepends);

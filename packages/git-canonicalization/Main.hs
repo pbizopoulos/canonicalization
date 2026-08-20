@@ -11,15 +11,18 @@
 module Main (main, runPackageTests, runPackageTestsWithTimings) where
 import Control.Applicative ((<|>))
 import Control.Exception (IOException, finally, onException, try)
-import Control.Monad (filterM, forM, forM_, guard, unless, when)
+import Control.Monad (filterM, forM, forM_, guard, unless, void, when)
 import Data.Aeson qualified as Aeson
+import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as BL
 import Data.Char (isAlphaNum, isAsciiLower, isDigit, isLower, isSpace, isUpper, ord, toLower, toUpper)
 import Data.Either (fromRight, lefts, rights)
 import Data.Fix (Fix (Fix))
+import Data.Foldable (asum, toList)
 import Data.Functor.Compose (Compose (Compose))
+import Data.Generics (everything, mkQ)
 import Data.Kind (Type)
-import Data.List (find, intercalate, isInfixOf, isPrefixOf, isSuffixOf, mapAccumL, maximumBy, sort, sortOn, stripPrefix)
+import Data.List (find, intercalate, isInfixOf, isPrefixOf, isSuffixOf, maximumBy, sort, sortOn, stripPrefix)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
@@ -29,11 +32,14 @@ import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
+import Distribution.Fields.Field (Field (Field, Section), FieldLine (FieldLine), Name (Name), SectionArg (SecArgName))
+import Distribution.Fields.Parser (readFields)
 import GHC.Clock (getMonotonicTimeNSec)
+import Language.Haskell.Exts qualified as HS
 import Nix.Expr.Types
   ( Antiquoted (Plain),
     Binding (Inherit, NamedVar),
-    NExprF (NAbs, NLet, NSet),
+    NExprF (NAbs, NLet, NSet, NStr),
     NKeyName (DynamicKey, StaticKey),
     NString (DoubleQuoted),
     Params (Param, ParamSet),
@@ -56,6 +62,7 @@ import System.IO (hClose, hPutStr, hPutStrLn, openTempFile, stderr)
 import System.Posix.Files qualified as Posix
 import System.Posix.Process (executeFile)
 import System.Process (CreateProcess (env), proc, readCreateProcessWithExitCode, readProcessWithExitCode)
+import TOML qualified
 import Test.HUnit (Counts (errors, failures), Test (TestCase, TestLabel, TestList), assertBool, assertEqual, assertFailure, runTestTT)
 import Text.Read (readMaybe)
 import Text.Regex.TDFA ((=~))
@@ -74,7 +81,6 @@ defaultAllowedNixDifferenceKeys =
       "postInstall",
       "passthru.rustCheckNativeBuildInputs",
       "meta",
-      "meta.description",
       "propagatedBuildInputs",
       "runtimeInputs",
       "version"
@@ -152,7 +158,7 @@ templateSpecs =
         templateMatches = \_ nixSource ->
           "writeShellApplication" `isInfixOf` nixSource
             && ("opentofu" `isInfixOf` nixSource || "agenix-shell" `isInfixOf` nixSource),
-        templateAllowedDifferenceKeys = Set.insert "meta.description" defaultAllowedNixDifferenceKeys,
+        templateAllowedDifferenceKeys = defaultAllowedNixDifferenceKeys,
         templateBaselineSource = deployHostTemplateBaselineNixSource
       },
     TemplateSpec
@@ -546,11 +552,8 @@ renderInitializedProjectGitignore = do
 runNixOrExit :: [String] -> IO ()
 runNixOrExit arguments = do
   nixExecutable <- fromMaybe "nix" <$> lookupEnv "GIT_CANONICALIZATION_NIX"
-  (nixExit, nixStdout, nixStderr) <- readProcessWithExitCode nixExecutable arguments ""
-  when (nixExit /= ExitSuccess) $ do
-    putStr nixStdout
-    hPutStr stderr nixStderr
-    exitWith nixExit
+  _ <- runProcessOrExit SuppressSuccessfulOutput nixExecutable arguments
+  pure ()
 validateProjectLocation :: FilePath -> FilePath -> IO ()
 validateProjectLocation home repositoryRoot =
   when (isStrictDescendantOf home repositoryRoot) $ do
@@ -836,10 +839,8 @@ reportHomeCheckIssues issues = do
   exitFailure
 runGitOrExit :: [String] -> IO ()
 runGitOrExit arguments = do
-  (gitExit, gitStdout, gitStderr) <- readProcessWithExitCode "git" arguments ""
-  putStr gitStdout
-  hPutStr stderr gitStderr
-  when (gitExit /= ExitSuccess) (exitWith gitExit)
+  _ <- runProcessOrExit PrintSuccessfulOutput "git" arguments
+  pure ()
 runInGitRepositoryRoot :: FilePath -> IO a -> IO a
 runInGitRepositoryRoot repositoryDirectory action = do
   canonicalRepositoryRoot <- discoverGitRepositoryRoot repositoryDirectory
@@ -850,14 +851,22 @@ discoverGitRepositoryRoot repositoryDirectory = do
     captureGitOrExit ["-C", repositoryDirectory, "rev-parse", "--path-format=absolute", "--show-toplevel"]
   pure (T.unpack (T.strip (T.pack repositoryRootStdout)))
 captureGitOrExit :: [String] -> IO String
-captureGitOrExit gitArguments = do
-  (gitExit, gitStdout, gitStderr) <- readProcessWithExitCode "git" gitArguments ""
-  if gitExit == ExitSuccess
-    then pure gitStdout
-    else do
-      putStr gitStdout
-      hPutStr stderr gitStderr
-      exitWith gitExit
+captureGitOrExit = runProcessOrExit SuppressSuccessfulOutput "git"
+type SuccessfulProcessOutput :: Type
+data SuccessfulProcessOutput = PrintSuccessfulOutput | SuppressSuccessfulOutput deriving stock (Eq)
+runProcessOrExit :: SuccessfulProcessOutput -> FilePath -> [String] -> IO String
+runProcessOrExit successfulOutput executable arguments = do
+  (processExit, processStdout, processStderr) <- readProcessWithExitCode executable arguments ""
+  case processExit of
+    ExitSuccess -> do
+      when (successfulOutput == PrintSuccessfulOutput) $ do
+        putStr processStdout
+        hPutStr stderr processStderr
+      pure processStdout
+    _ -> do
+      putStr processStdout
+      hPutStr stderr processStderr
+      exitWith processExit
 delegateToGit :: [String] -> IO a
 delegateToGit gitArguments = executeFile "git" True gitArguments Nothing
 checkRepositoryLocation :: FilePath -> IO ()
@@ -901,7 +910,9 @@ collectRepositoryContentCompliance = do
   (packages, repositoryStructureIssues) <- inspectRepositoryStructure
   case repositoryStructureIssues of
     [] -> do
-      packageComplianceIssues <- concat <$> forM packages (uncurry checkPackage)
+      packageComplianceResults <- forM packages (uncurry checkPackage)
+      let packageComplianceIssues = concatMap fst packageComplianceResults
+          packageTestNames = Map.fromList (zip (map fst packages) (map snd packageComplianceResults))
       checkNames <- listSubdirectoryNames "checks"
       let packageKinds = Map.fromList packages
       checkComplianceIssues <- concat <$> forM checkNames (checkTemplateWith packageKinds)
@@ -912,7 +923,8 @@ collectRepositoryContentCompliance = do
             ( Right
                 RepositoryComplianceSuccess
                   { repositoryCompliancePackages = packages,
-                    repositoryComplianceCheckNames = checkNames
+                    repositoryComplianceCheckNames = checkNames,
+                    repositoryCompliancePackageTestNames = packageTestNames
                   }
             )
         firstIssue : remainingIssues ->
@@ -962,7 +974,8 @@ newtype Duration = Duration Double
 type RepositoryComplianceSuccess :: Type
 data RepositoryComplianceSuccess = RepositoryComplianceSuccess
   { repositoryCompliancePackages :: [(FilePath, PackageKind)],
-    repositoryComplianceCheckNames :: [FilePath]
+    repositoryComplianceCheckNames :: [FilePath],
+    repositoryCompliancePackageTestNames :: Map.Map FilePath [String]
   }
   deriving stock (Eq, Show)
 type RepositoryPackageSummary :: Type
@@ -996,12 +1009,13 @@ summarizeRepositoryAt repositoryPath repositoryRoot =
         hPutStrLn stderr ("error: repository: " ++ repositoryPath)
         reportCheckRepositoryFailure repositoryComplianceFailure
         exitFailure
-      Right (RepositoryComplianceSuccess packages checkNames) -> do
+      Right (RepositoryComplianceSuccess packages checkNames packageTestNames) -> do
         let repositoryCheckNames = Set.fromList checkNames
             testCheckNames = filter (\checkName -> any (`isSuffixOf` checkName) ["-coverage", "_coverage"]) checkNames
         repositoryReadme <- fmap T.unpack <$> readTextFileIfExists "README"
         checkOutputPaths <- resolveRepositoryCheckOutputPaths testCheckNames
-        packageSummaries <- forM packages (uncurry (summarizeRepositoryPackage checkOutputPaths repositoryCheckNames))
+        packageSummaries <- forM packages $ \(packageName, packageKind) ->
+          summarizeRepositoryPackage checkOutputPaths repositoryCheckNames packageName packageKind (Map.findWithDefault [] packageName packageTestNames)
         pure
           RepositorySummary
             { repositorySummaryPath = repositoryPath,
@@ -1101,10 +1115,11 @@ normalizeTestSpecification :: String -> String
 normalizeTestSpecification = map toLower . filter isAlphaNum
 durationSeconds :: Duration -> Double
 durationSeconds (Duration seconds) = fromIntegral (round (seconds * 1000) :: Integer) / 1000
-summarizeRepositoryPackage :: Maybe (Map.Map FilePath FilePath) -> Set.Set FilePath -> FilePath -> PackageKind -> IO RepositoryPackageSummary
-summarizeRepositoryPackage checkOutputPaths repositoryCheckNames packageName packageKind = do
+summarizeRepositoryPackage :: Maybe (Map.Map FilePath FilePath) -> Set.Set FilePath -> FilePath -> PackageKind -> [String] -> IO RepositoryPackageSummary
+summarizeRepositoryPackage checkOutputPaths repositoryCheckNames packageName packageKind repositoryPackageTestNamesValue = do
   let packageRoot = "packages" </> packageName
   maybeDefaultNixContents <- readTextFileIfExists (packageRoot </> "default.nix")
+  maybeDefaultNixDescription <- maybe (pure Nothing) extractDefaultNixPackageDescription maybeDefaultNixContents
   let repositoryPackageDependenciesValue = maybe [] extractLocalPackageDependencies maybeDefaultNixContents
   repositoryPackageDescriptionValue <-
     case packageKind of
@@ -1118,25 +1133,8 @@ summarizeRepositoryPackage checkOutputPaths repositoryCheckNames packageName pac
         | packageKind `elem` [PythonPackage, PythonLaTeXPackage, PythonPyPIPackage] -> do
             maybePyprojectTomlContents <- readTextFileIfExists (packageRoot </> "pyproject.toml")
             let maybePyprojectDescription = maybePyprojectTomlContents >>= extractPythonPackageDescriptionFromPyprojectToml
-                maybeDefaultNixDescription = maybeDefaultNixContents >>= extractDefaultNixPackageDescription
             pure (maybePyprojectDescription <|> maybeDefaultNixDescription)
-      _ -> pure (maybeDefaultNixContents >>= extractDefaultNixPackageDescription)
-  repositoryPackageTestNamesValue <-
-    case packageKind of
-      HaskellPackage -> do
-        maybeMainHaskellSourceText <- readTextFileIfExists (packageRoot </> "Main.hs")
-        pure (maybe [] (discoverHaskellUnitTestNamesFromSource . T.unpack) maybeMainHaskellSourceText)
-      RustPackage -> do
-        maybeMainRustSourceText <- readTextFileIfExists (packageRoot </> "src/main.rs")
-        pure (maybe [] (discoverRustUnitTestNamesFromSource . T.unpack) maybeMainRustSourceText)
-      _
-        | packageKind `elem` [PythonPackage, PythonLaTeXPackage] -> do
-            let mainPythonPath = packageRoot </> "main.py"
-            mainPythonExists <- doesFileExist mainPythonPath
-            if mainPythonExists
-              then fromRight [] <$> inspectPythonTests mainPythonPath
-              else pure []
-      _ -> pure []
+      _ -> pure maybeDefaultNixDescription
   let configuredRepositoryCheckName =
         repositoryCheckNameForPackage packageKind packageName
           >>= \checkName ->
@@ -1242,7 +1240,7 @@ parseRepositoryTimingSummary timingText =
   case T.lines timingText of
     headerLine : testLines -> do
       totalSeconds <- case T.splitOn "\t" headerLine of
-        ["profile-v1", "total-seconds", secondsText] -> readDuration secondsText
+        ["profile-v2", "total-seconds", secondsText] -> readDuration secondsText
         _ -> Nothing
       testDurations <- parseRepositoryTestTimingLines testLines
       Just (totalSeconds, testDurations)
@@ -1257,10 +1255,16 @@ parseRepositoryTestTimingLines testLines = do
     parseTestLine :: T.Text -> Maybe (String, Duration)
     parseTestLine testLine =
       case T.splitOn "\t" testLine of
-        ["test", secondsText, testName] | not (T.null testName) -> do
+        ["test", secondsText, identifierJSON, descriptionJSON] -> do
           seconds <- readDuration secondsText
-          pure (T.unpack testName, seconds)
+          identifier <- Aeson.decodeStrict' (TE.encodeUtf8 identifierJSON)
+          description <- Aeson.decodeStrict' (TE.encodeUtf8 descriptionJSON)
+          let testName = fromMaybe (testSpecificationFromIdentifier (lastTestIdentifierComponent identifier)) description
+          guard (not (null testName))
+          pure (testName, seconds)
         _ -> Nothing
+    lastTestIdentifierComponent :: String -> String
+    lastTestIdentifierComponent = reverse . takeWhile (/= ':') . reverse
 readDuration :: T.Text -> Maybe Duration
 readDuration secondsText = do
   seconds <- readMaybe (T.unpack secondsText)
@@ -1271,29 +1275,41 @@ durationFromSeconds seconds =
     then Just (Duration seconds)
     else Nothing
 extractHaskellPackageDescription :: T.Text -> Maybe String
-extractHaskellPackageDescription cabalContents =
-  (T.unpack <$> lookupCabalField "description" cabalContents)
-    <|> (T.unpack <$> lookupCabalField "synopsis" cabalContents)
+extractHaskellPackageDescription cabalContents = do
+  cabalFields <- either (const Nothing) Just (parseCabalFields cabalContents)
+  T.unpack <$> (lookupCabalField "description" cabalFields <|> lookupCabalField "synopsis" cabalFields)
 extractRustPackageDescription :: T.Text -> Maybe String
-extractRustPackageDescription cargoTomlContents =
-  let packageSection = extractTomlSection "package" cargoTomlContents
-   in T.unpack <$> lookupTomlString "description" packageSection
+extractRustPackageDescription cargoTomlContents = do
+  cargoToml <- either (const Nothing) Just (parseToml cargoTomlContents)
+  T.unpack <$> lookupTomlStringAt ["package", "description"] cargoToml
 extractPythonPackageDescriptionFromPyprojectToml :: T.Text -> Maybe String
-extractPythonPackageDescriptionFromPyprojectToml pyprojectTomlContents =
-  T.unpack <$> lookupTomlString "description" (extractTomlSection "project" pyprojectTomlContents)
-extractDefaultNixPackageDescription :: T.Text -> Maybe String
-extractDefaultNixPackageDescription defaultNixContents =
-  go False (T.lines defaultNixContents)
+extractPythonPackageDescriptionFromPyprojectToml pyprojectTomlContents = do
+  pyprojectToml <- either (const Nothing) Just (parseToml pyprojectTomlContents)
+  T.unpack <$> lookupTomlStringAt ["project", "description"] pyprojectToml
+extractDefaultNixPackageDescription :: T.Text -> IO (Maybe String)
+extractDefaultNixPackageDescription defaultNixContents = do
+  parseResult <- parseNixExprFromText defaultNixContents
+  pure (either (const Nothing) (fmap T.unpack . findNixStringAtPath ["meta", "description"]) parseResult)
+findNixStringAtPath :: [T.Text] -> NExprLoc -> Maybe T.Text
+findNixStringAtPath targetPath (Fix (Compose (AnnUnit _ expressionFunctor))) =
+  case expressionFunctor of
+    NAbs _ body -> findNixStringAtPath targetPath body
+    NLet bindings body -> findInBindings targetPath bindings <|> findNixStringAtPath targetPath body
+    NSet _ bindings -> findInBindings targetPath bindings
+    NStr (DoubleQuoted fragments) | null targetPath -> T.concat <$> traverse plainFragment fragments
+    _ -> asum (map (findNixStringAtPath targetPath) (toList expressionFunctor))
   where
-    go _ [] = Nothing
-    go insideMetaBlock (sourceLine : remainingLines) =
-      case extractQuotedNixAssignmentValue "meta.description =" sourceLine
-        <|> if insideMetaBlock then extractQuotedNixAssignmentValue "description =" sourceLine else Nothing of
-        Just description -> Just (T.unpack description)
-        Nothing
-          | insideMetaBlock && "};" `T.isPrefixOf` T.strip sourceLine -> go False remainingLines
-          | not insideMetaBlock && "meta = {" `T.isPrefixOf` T.strip sourceLine -> go True remainingLines
-          | otherwise -> go insideMetaBlock remainingLines
+    plainFragment :: Antiquoted T.Text NExprLoc -> Maybe T.Text
+    plainFragment (Plain fragment) = Just fragment
+    plainFragment _ = Nothing
+    findInBindings :: [T.Text] -> [Binding NExprLoc] -> Maybe T.Text
+    findInBindings remainingPath = listToMaybe . mapMaybe (findInBinding remainingPath)
+    findInBinding :: [T.Text] -> Binding NExprLoc -> Maybe T.Text
+    findInBinding remainingPath (NamedVar keyPath value _) = do
+      staticPath <- traverse nixKeyNameText (NE.toList keyPath)
+      suffix <- stripPrefix staticPath remainingPath
+      findNixStringAtPath suffix value
+    findInBinding _ Inherit {} = Nothing
 extractLocalPackageDependencies :: T.Text -> [String]
 extractLocalPackageDependencies defaultNixContents =
   Set.toAscList . Set.fromList $
@@ -1306,12 +1322,6 @@ extractLocalPackageDependencies defaultNixContents =
     localPackagePrefix :: T.Text
     localPackagePrefix = "inputs.self.packages.${pkgs.stdenv.system}."
     isInputNameCharacter character = isAlphaNum character || character `elem` ("_-" :: String)
-extractQuotedNixAssignmentValue :: T.Text -> T.Text -> Maybe T.Text
-extractQuotedNixAssignmentValue assignmentPrefix sourceLine = do
-  quotedValue <- T.stripPrefix assignmentPrefix (T.strip sourceLine)
-  valueWithoutSemicolon <- T.stripSuffix ";" (T.strip quotedValue)
-  valueWithoutPrefix <- T.stripPrefix "\"" valueWithoutSemicolon
-  T.stripSuffix "\"" valueWithoutPrefix
 renderJSON :: (Aeson.ToJSON value) => value -> String
 renderJSON = T.unpack . TE.decodeUtf8 . BL.toStrict . Aeson.encode
 renderNixString :: String -> String
@@ -2083,7 +2093,7 @@ listSubdirectoryNames parentDirectory = do
             ]
         )
     )
-checkPackage :: FilePath -> PackageKind -> IO [String]
+checkPackage :: FilePath -> PackageKind -> IO ([String], [String])
 checkPackage packageName packageKind = do
   let packageDefaultNixPath = "packages" </> packageName </> "default.nix"
   maybePackageDefaultNixSource <- readTextFileIfExists packageDefaultNixPath
@@ -2104,17 +2114,14 @@ checkPackage packageName packageKind = do
   cargoTomlIssues <- checkCargoToml packageName
   cabalFileIssues <- checkCabalFile packageName
   defaultNixConventionIssues <- checkDefaultNixConventions packageName packageKind
-  pythonTestConventionIssues <- checkPythonTestConventions packageName packageKind
-  haskellTestConventionIssues <- checkHaskellTestConventions packageName packageKind
-  rustTestConventionIssues <- checkRustTestConventions packageName packageKind
+  (testConventionIssues, packageTestNames) <- inspectPackageTests packageName packageKind
   pure
     ( templateIssues
         ++ defaultNixConventionIssues
         ++ cargoTomlIssues
         ++ cabalFileIssues
-        ++ pythonTestConventionIssues
-        ++ haskellTestConventionIssues
-        ++ rustTestConventionIssues
+        ++ testConventionIssues,
+      packageTestNames
     )
 checkTemplateWith :: Map.Map FilePath PackageKind -> FilePath -> IO [String]
 checkTemplateWith packageKinds checkName = do
@@ -2183,7 +2190,6 @@ checkDefaultNixConventions packageName packageKind = do
     Nothing -> pure []
     Just defaultNixText ->
       let defaultNixSource = T.unpack defaultNixText
-          hasTopLevelMainProgram = "\n  mainProgram = pname;" `isInfixOf` defaultNixSource
           hasMetaMainProgram =
             "meta.mainProgram = pname;" `isInfixOf` defaultNixSource
               || ("meta = {" `isInfixOf` defaultNixSource && "mainProgram = pname;" `isInfixOf` defaultNixSource)
@@ -2192,20 +2198,14 @@ checkDefaultNixConventions packageName packageKind = do
           hasPlaceholderVersion = "version = \"0.0.0\";" `isInfixOf` defaultNixSource
           hasVersionAssignment = "version = \"" `isInfixOf` defaultNixSource
           expectsMetaMainProgram =
-            packageKind `elem` [RustPackage, PythonLaTeXPackage, PythonPackage, CPackage, BinaryReleasePackage]
+            packageKind `elem` [RustPackage, PythonLaTeXPackage, PythonPackage, CPackage]
        in pure $
             catMaybes
-              [ if packageKind == HaskellPackage && not hasTopLevelMainProgram
-                  then Just ("packages/" ++ packageName ++ "/default.nix: Haskell packages must set mainProgram = pname;")
-                  else Nothing,
-                if packageKind == HaskellPackage && hasMetaMainProgram
+              [ if packageKind == HaskellPackage && hasMetaMainProgram
                   then Just ("packages/" ++ packageName ++ "/default.nix: Haskell packages must not set meta.mainProgram = pname;")
                   else Nothing,
                 if expectsMetaMainProgram && not hasMetaMainProgram
                   then Just ("packages/" ++ packageName ++ "/default.nix: package kind requires meta.mainProgram = pname;")
-                  else Nothing,
-                if expectsMetaMainProgram && hasTopLevelMainProgram
-                  then Just ("packages/" ++ packageName ++ "/default.nix: package kind must use meta.mainProgram (not mainProgram)")
                   else Nothing,
                 if hasExternalFetchUrlSource && hasPlaceholderVersion
                   then Just ("packages/" ++ packageName ++ "/default.nix: fetchurl-based packages must use a non-placeholder version")
@@ -2214,18 +2214,24 @@ checkDefaultNixConventions packageName packageKind = do
                   then Just ("packages/" ++ packageName ++ "/default.nix: src = ./.; packages must use version = \"0.0.0\";")
                   else Nothing
               ]
-checkPythonTestConventions :: FilePath -> PackageKind -> IO [String]
-checkPythonTestConventions packageName packageKind =
-  if packageKind `notElem` [PythonPackage, PythonLaTeXPackage]
-    then pure []
-    else do
-      let mainPythonPath = "packages" </> packageName </> "main.py"
-      mainPythonFileExists <- doesFileExist mainPythonPath
-      if not mainPythonFileExists
-        then pure []
-        else do
-          inspection <- inspectPythonTests mainPythonPath
-          pure ["packages/" ++ packageName ++ "/main.py: " ++ inspectionError | Left inspectionError <- [inspection]]
+inspectPackageTests :: FilePath -> PackageKind -> IO ([String], [String])
+inspectPackageTests packageName packageKind
+  | packageKind `elem` [PythonPackage, PythonLaTeXPackage] = inspectPythonPackageTests packageName
+  | packageKind == HaskellPackage = inspectHaskellPackageTests packageName
+  | packageKind == RustPackage = inspectRustPackageTests packageName
+  | otherwise = pure ([], [])
+inspectPythonPackageTests :: FilePath -> IO ([String], [String])
+inspectPythonPackageTests packageName =
+  do
+    let mainPythonPath = "packages" </> packageName </> "main.py"
+    mainPythonFileExists <- doesFileExist mainPythonPath
+    if not mainPythonFileExists
+      then pure ([], [])
+      else do
+        inspection <- inspectPythonTests mainPythonPath
+        pure $ case inspection of
+          Left inspectionError -> (["packages/" ++ packageName ++ "/main.py: " ++ inspectionError], [])
+          Right testNames -> ([], testNames)
 type PythonTestInspection :: Type
 data PythonTestInspection = PythonTestInspection
   { inspectedPythonTestName :: String,
@@ -2317,130 +2323,110 @@ wordsFromTestIdentifier = filter (not . null) . go [] []
     startsCamelWord (previousCharacter : _) character remainingCharacters =
       isUpper character
         && (isLower previousCharacter || maybe False isLower (listToMaybe remainingCharacters))
-checkHaskellTestConventions :: FilePath -> PackageKind -> IO [String]
-checkHaskellTestConventions packageName packageKind =
-  if packageKind /= HaskellPackage
-    then pure []
-    else do
-      let mainHaskellPath = "packages" </> packageName </> "Main.hs"
-      maybeMainHaskellSourceText <- readTextFileIfExists mainHaskellPath
-      case maybeMainHaskellSourceText of
-        Nothing -> pure []
-        Just mainHaskellSourceText -> do
-          let haskellSource = T.unpack mainHaskellSourceText
-              haskellIdentifiers = [identifier | HaskellIdentifier identifier <- lexHaskellSource haskellSource]
-              hasHUnitTestRunner = "runTestTT" `elem` haskellIdentifiers
-              hasNamedTestSuite = "hUnitPackageTests" `elem` haskellIdentifiers
-              hasDiscoverableHUnitTest = any isMeaningfulTestLabel (discoverHaskellTestLabels haskellSource)
-          pure $
-            catMaybes
-              [ if hasHUnitTestRunner
-                  then Nothing
-                  else Just ("packages/" ++ packageName ++ "/Main.hs: must run HUnit tests with runTestTT"),
-                if hasNamedTestSuite
-                  then Nothing
-                  else Just ("packages/" ++ packageName ++ "/Main.hs: HUnit tests must use hUnitPackageTests"),
-                if hasDiscoverableHUnitTest
-                  then Nothing
-                  else Just ("packages/" ++ packageName ++ "/Main.hs: HUnit tests must use literal TestLabel descriptions")
-              ]
+inspectHaskellPackageTests :: FilePath -> IO ([String], [String])
+inspectHaskellPackageTests packageName = do
+  let mainHaskellPath = "packages" </> packageName </> "Main.hs"
+  maybeMainHaskellSourceText <- readTextFileIfExists mainHaskellPath
+  case maybeMainHaskellSourceText of
+    Nothing -> pure ([], [])
+    Just mainHaskellSourceText ->
+      case inspectHaskellSource (T.unpack mainHaskellSourceText) of
+        Left parseError -> pure (["packages/" ++ packageName ++ "/Main.hs: parse error: " ++ parseError], [])
+        Right inspection ->
+          pure
+            ( catMaybes
+                [ if Set.member "runTestTT" (haskellInspectionNames inspection)
+                    then Nothing
+                    else Just ("packages/" ++ packageName ++ "/Main.hs: must run HUnit tests with runTestTT"),
+                  if Set.member "hUnitPackageTests" (haskellInspectionNames inspection)
+                    then Nothing
+                    else Just ("packages/" ++ packageName ++ "/Main.hs: HUnit tests must use hUnitPackageTests"),
+                  if any isMeaningfulTestLabel (haskellInspectionLabels inspection)
+                    then Nothing
+                    else Just ("packages/" ++ packageName ++ "/Main.hs: HUnit tests must use literal TestLabel descriptions")
+                ],
+              Set.toAscList . Set.fromList $
+                filter isMeaningfulTestLabel (haskellInspectionLabels inspection)
+                  ++ map testSpecificationFromIdentifier (haskellInspectionProperties inspection)
+            )
 discoverHaskellUnitTestNamesFromSource :: String -> [String]
-discoverHaskellUnitTestNamesFromSource haskellSource =
-  Set.toAscList . Set.fromList $
-    filter isMeaningfulTestLabel (discoverHaskellTestLabels haskellSource)
-      ++ map testSpecificationFromIdentifier (discoverHaskellPropertyNames haskellSource)
+discoverHaskellUnitTestNamesFromSource haskellSource = case inspectHaskellSource haskellSource of
+  Left _ -> []
+  Right inspection ->
+    Set.toAscList . Set.fromList $
+      filter isMeaningfulTestLabel (haskellInspectionLabels inspection)
+        ++ map testSpecificationFromIdentifier (haskellInspectionProperties inspection)
 isMeaningfulTestLabel :: String -> Bool
 isMeaningfulTestLabel label =
   case dropWhile isSpace label of
     firstCharacter : _ -> isAlphaNum firstCharacter
     [] -> False
-type HaskellSourceToken :: Type
-data HaskellSourceToken
-  = HaskellIdentifier String
-  | HaskellStringLiteral String
-  | HaskellSymbol String
-  deriving stock (Eq, Show)
-discoverHaskellTestLabels :: String -> [String]
-discoverHaskellTestLabels = go . lexHaskellSource
+type HaskellInspection :: Type
+data HaskellInspection = HaskellInspection
+  { haskellInspectionLabels :: [String],
+    haskellInspectionProperties :: [String],
+    haskellInspectionNames :: Set.Set String
+  }
+inspectHaskellSource :: String -> Either String HaskellInspection
+inspectHaskellSource source = case HS.parseModuleWithMode haskellParseMode (normalizeHaskellImportsForParser source) of
+  HS.ParseFailed location message -> Left (show location ++ ": " ++ message)
+  HS.ParseOk haskellModule ->
+    Right
+      HaskellInspection
+        { haskellInspectionLabels = everything (++) ([] `mkQ` labelsFromExpression) haskellModule,
+          haskellInspectionProperties = everything (++) ([] `mkQ` propertiesFromDeclaration) haskellModule,
+          haskellInspectionNames = Set.fromList (everything (++) ([] `mkQ` namesFromName) haskellModule)
+        }
   where
-    go (HaskellIdentifier "TestLabel" : HaskellStringLiteral label : remainingTokens) = label : go remainingTokens
-    go (_ : remainingTokens) = go remainingTokens
-    go [] = []
-discoverHaskellPropertyNames :: String -> [String]
-discoverHaskellPropertyNames = go . lexHaskellSource
-  where
-    go (HaskellIdentifier propertyName : HaskellSymbol declarationSymbol : remainingTokens)
-      | "prop_" `isPrefixOf` propertyName && declarationSymbol `elem` ["::", "="] = propertyName : go remainingTokens
-    go (_ : remainingTokens) = go remainingTokens
-    go [] = []
-lexHaskellSource :: String -> [HaskellSourceToken]
-lexHaskellSource = go
-  where
-    go [] = []
-    go ('-' : '-' : remainingSource) = go (dropHaskellLineComment remainingSource)
-    go ('{' : '-' : remainingSource) = go (dropHaskellBlockComment 1 remainingSource)
-    go ('"' : remainingSource) =
-      case consumeHaskellString ['"'] remainingSource of
-        Just (literalSource, sourceAfterLiteral) ->
-          case reads literalSource of
-            [(literalValue, "")] -> HaskellStringLiteral literalValue : go sourceAfterLiteral
-            _ -> go sourceAfterLiteral
-        Nothing -> []
-    go ('\'' : remainingSource) = go (dropHaskellCharacterLiteral remainingSource)
-    go (':' : ':' : remainingSource) = HaskellSymbol "::" : go remainingSource
-    go ('=' : remainingSource) = HaskellSymbol "=" : go remainingSource
-    go (firstCharacter : remainingSource)
-      | isHaskellIdentifierStart firstCharacter =
-          let (identifierTail, sourceAfterIdentifier) = span isHaskellIdentifierCharacter remainingSource
-           in HaskellIdentifier (firstCharacter : identifierTail) : go sourceAfterIdentifier
-      | otherwise = go remainingSource
-isHaskellIdentifierStart :: Char -> Bool
-isHaskellIdentifierStart character = isAlphaNum character || character == '_'
-isHaskellIdentifierCharacter :: Char -> Bool
-isHaskellIdentifierCharacter character = isHaskellIdentifierStart character || character == '\''
-dropHaskellLineComment :: String -> String
-dropHaskellLineComment source =
-  case dropWhile (/= '\n') source of
-    [] -> []
-    _ : remainingSource -> remainingSource
-dropHaskellBlockComment :: Int -> String -> String
-dropHaskellBlockComment _ [] = []
-dropHaskellBlockComment nestingDepth ('{' : '-' : remainingSource) = dropHaskellBlockComment (nestingDepth + 1) remainingSource
-dropHaskellBlockComment nestingDepth ('-' : '}' : remainingSource)
-  | nestingDepth == 1 = remainingSource
-  | otherwise = dropHaskellBlockComment (nestingDepth - 1) remainingSource
-dropHaskellBlockComment nestingDepth (_ : remainingSource) = dropHaskellBlockComment nestingDepth remainingSource
-consumeHaskellString :: String -> String -> Maybe (String, String)
-consumeHaskellString _ [] = Nothing
-consumeHaskellString reversedLiteral ('\\' : escapedCharacter : remainingSource) =
-  consumeHaskellString (escapedCharacter : '\\' : reversedLiteral) remainingSource
-consumeHaskellString reversedLiteral ('"' : remainingSource) =
-  Just (reverse ('"' : reversedLiteral), remainingSource)
-consumeHaskellString reversedLiteral (character : remainingSource) =
-  consumeHaskellString (character : reversedLiteral) remainingSource
-dropHaskellCharacterLiteral :: String -> String
-dropHaskellCharacterLiteral [] = []
-dropHaskellCharacterLiteral ('\\' : _ : remainingSource) = dropHaskellCharacterLiteral remainingSource
-dropHaskellCharacterLiteral ('\'' : remainingSource) = remainingSource
-dropHaskellCharacterLiteral (_ : remainingSource) = dropHaskellCharacterLiteral remainingSource
-checkRustTestConventions :: FilePath -> PackageKind -> IO [String]
-checkRustTestConventions packageName packageKind =
-  if packageKind /= RustPackage
-    then pure []
-    else do
-      let mainRustPath = "packages" </> packageName </> "src/main.rs"
-      mainRustSource <- maybe "" T.unpack <$> readTextFileIfExists mainRustPath
-      let hasRustTestModule = "#[cfg(test)]" `isInfixOf` mainRustSource && "mod tests" `isInfixOf` mainRustSource
-          hasRustTestCases = "#[test]" `isInfixOf` mainRustSource
-      pure $
-        catMaybes
-          [ if hasRustTestModule
-              then Nothing
-              else Just ("packages/" ++ packageName ++ "/src/main.rs: missing #[cfg(test)] mod tests"),
-            if hasRustTestCases
-              then Nothing
-              else Just ("packages/" ++ packageName ++ "/src/main.rs: missing #[test] test cases")
-          ]
+    labelsFromExpression :: HS.Exp HS.SrcSpanInfo -> [String]
+    labelsFromExpression (HS.App _ (HS.Con _ (HS.UnQual _ (HS.Ident _ "TestLabel"))) (HS.Lit _ (HS.String _ label _))) = [label]
+    labelsFromExpression _ = []
+    propertiesFromDeclaration :: HS.Decl HS.SrcSpanInfo -> [String]
+    propertiesFromDeclaration (HS.TypeSig _ names _) = filter (isPrefixOf "prop_") (map haskellNameText names)
+    propertiesFromDeclaration (HS.FunBind _ matches) = filter (isPrefixOf "prop_") (map matchName matches)
+    propertiesFromDeclaration (HS.PatBind _ (HS.PVar _ name) _ _) = [propertyName | let propertyName = haskellNameText name, "prop_" `isPrefixOf` propertyName]
+    propertiesFromDeclaration _ = []
+    matchName :: HS.Match annotation -> String
+    matchName (HS.Match _ name _ _ _) = haskellNameText name
+    matchName (HS.InfixMatch _ _ name _ _ _) = haskellNameText name
+    namesFromName :: HS.Name HS.SrcSpanInfo -> [String]
+    namesFromName = pure . haskellNameText
+    haskellParseMode =
+      HS.defaultParseMode
+        { HS.extensions =
+            map
+              HS.EnableExtension
+              [HS.LambdaCase, HS.RoleAnnotations, HS.ScopedTypeVariables, HS.TupleSections]
+        }
+    normalizeHaskellImportsForParser = unlines . map normalizeImport . lines
+    normalizeImport sourceLine = case words compatibleLine of
+      "import" : moduleName : "qualified" : remainingWords ->
+        unwords ("import" : "qualified" : moduleName : remainingWords)
+      "type" : _typeName : "::" : _kind -> ""
+      "deriving" : "stock" : _remainingWords -> ""
+      _ -> compatibleLine
+      where
+        compatibleLine = T.unpack (T.replace " deriving stock (" " deriving (" (T.pack sourceLine))
+haskellNameText :: HS.Name annotation -> String
+haskellNameText (HS.Ident _ name) = name
+haskellNameText (HS.Symbol _ name) = name
+inspectRustPackageTests :: FilePath -> IO ([String], [String])
+inspectRustPackageTests packageName = do
+  let mainRustPath = "packages" </> packageName </> "src/main.rs"
+  mainRustSource <- maybe "" T.unpack <$> readTextFileIfExists mainRustPath
+  let hasRustTestModule = "#[cfg(test)]" `isInfixOf` mainRustSource && "mod tests" `isInfixOf` mainRustSource
+      hasRustTestCases = "#[test]" `isInfixOf` mainRustSource
+  pure
+    ( catMaybes
+        [ if hasRustTestModule
+            then Nothing
+            else Just ("packages/" ++ packageName ++ "/src/main.rs: missing #[cfg(test)] mod tests"),
+          if hasRustTestCases
+            then Nothing
+            else Just ("packages/" ++ packageName ++ "/src/main.rs: missing #[test] test cases")
+        ],
+      discoverRustUnitTestNamesFromSource mainRustSource
+    )
 discoverRustUnitTestNamesFromSource :: String -> [String]
 discoverRustUnitTestNamesFromSource = map testSpecificationFromIdentifier . extractRustUnitTestNames . lines
 extractRustUnitTestNames :: [String] -> [String]
@@ -2487,181 +2473,129 @@ checkCargoToml packageName = do
   maybeCargoTomlContents <- readTextFileIfExists cargoTomlPath
   case maybeCargoTomlContents of
     Nothing -> pure []
-    Just cargoTomlContents -> do
-      let packageSection = extractTomlSection "package" cargoTomlContents
-          rustLintsSection = extractTomlSection "lints.rust" cargoTomlContents
-          cargoPackageName = lookupTomlString "name" packageSection
-          unsafeCodeLint = lookupTomlString "unsafe_code" rustLintsSection
-          normalizedCargoToml = normalizeCargoTomlForBaselineComparison packageName cargoTomlContents
-          normalizedBaselineCargoToml = normalizeCargoTomlForBaselineComparison packageName rustCargoTomlBaseline
-      pure $
-        catMaybes
-          [ case cargoPackageName of
-              Nothing ->
-                Just ("packages/" ++ packageName ++ "/Cargo.toml: missing [package].name")
-              Just actualPackageName ->
-                if actualPackageName == T.pack packageName
+    Just cargoTomlContents ->
+      case parseToml cargoTomlContents of
+        Left parseError -> pure [cargoTomlPath ++ ": parse error: " ++ T.unpack parseError]
+        Right cargoToml -> do
+          let cargoPackageName = lookupTomlStringAt ["package", "name"] cargoToml
+              unsafeCodeLint = lookupTomlStringAt ["lints", "rust", "unsafe_code"] cargoToml
+              normalizedCargoToml = normalizeCargoTomlForBaselineComparison packageName cargoToml
+              normalizedBaselineCargoToml = parseToml rustCargoTomlBaseline >>= Right . normalizeCargoTomlForBaselineComparison packageName
+          pure $
+            catMaybes
+              [ case cargoPackageName of
+                  Nothing ->
+                    Just ("packages/" ++ packageName ++ "/Cargo.toml: missing [package].name")
+                  Just actualPackageName ->
+                    if actualPackageName == T.pack packageName
+                      then Nothing
+                      else
+                        Just
+                          ( "packages/"
+                              ++ packageName
+                              ++ "/Cargo.toml: [package].name must match directory name (expected \""
+                              ++ packageName
+                              ++ "\", got \""
+                              ++ T.unpack actualPackageName
+                              ++ "\")"
+                          ),
+                if unsafeCodeLint == Just "forbid"
+                  then Nothing
+                  else Just ("packages/" ++ packageName ++ "/Cargo.toml: [lints.rust].unsafe_code must be \"forbid\""),
+                if Right normalizedCargoToml == normalizedBaselineCargoToml
                   then Nothing
                   else
                     Just
                       ( "packages/"
                           ++ packageName
-                          ++ "/Cargo.toml: [package].name must match directory name (expected \""
-                          ++ packageName
-                          ++ "\", got \""
-                          ++ T.unpack actualPackageName
-                          ++ "\")"
-                      ),
-            if unsafeCodeLint == Just "forbid"
-              then Nothing
-              else Just ("packages/" ++ packageName ++ "/Cargo.toml: [lints.rust].unsafe_code must be \"forbid\""),
-            if normalizedCargoToml == normalizedBaselineCargoToml
-              then Nothing
-              else
-                Just
-                  ( "packages/"
-                      ++ packageName
-                      ++ "/Cargo.toml: only dependency sections and package metadata fields description/keywords may differ from the internal Rust Cargo baseline"
-                  )
-          ]
-normalizeCargoTomlForBaselineComparison :: FilePath -> T.Text -> T.Text
-normalizeCargoTomlForBaselineComparison packageName tomlContents =
-  let step currentTomlSectionHeader sourceLine
-        | isTomlSectionHeader trimmedLine =
-            ( Just trimmedLine,
-              if isCargoDependencySectionHeader trimmedLine
-                then Nothing
-                else Just trimmedLine
-            )
-        | maybe False isCargoDependencySectionHeader currentTomlSectionHeader =
-            (currentTomlSectionHeader, Nothing)
-        | T.null trimmedLine =
-            (currentTomlSectionHeader, Nothing)
-        | currentTomlSectionHeader == Just "[package]" && isTomlNameAssignment trimmedLine =
-            (currentTomlSectionHeader, Just normalizedNameLine)
-        | currentTomlSectionHeader == Just "[package]"
-            && (isTomlDescriptionAssignment trimmedLine || isTomlKeywordsAssignment trimmedLine) =
-            (currentTomlSectionHeader, Nothing)
-        | currentTomlSectionHeader == Just "[[bin]]" && isTomlNameAssignment trimmedLine =
-            (currentTomlSectionHeader, Just normalizedNameLine)
-        | otherwise =
-            (currentTomlSectionHeader, Just (normalizeCargoLine currentTomlSectionHeader trimmedLine))
-        where
-          trimmedLine = T.strip sourceLine
-      (_, normalizedLines) = mapAccumL step Nothing (T.lines tomlContents)
-      normalizedNameLine = "name = \"" <> T.pack packageName <> "\""
-   in T.unlines (catMaybes normalizedLines)
-normalizeCargoLine :: Maybe T.Text -> T.Text -> T.Text
-normalizeCargoLine (Just "[lints.clippy]") = T.replace " }" "}" . T.replace "{ " "{"
-normalizeCargoLine _ = id
-isCargoDependencySectionHeader :: T.Text -> Bool
-isCargoDependencySectionHeader trimmedLine =
-  trimmedLine == "[dependencies]"
-    || trimmedLine == "[dev-dependencies]"
-    || trimmedLine == "[build-dependencies]"
-    || isCargoTargetDependenciesSectionHeader trimmedLine
-isCargoTargetDependenciesSectionHeader :: T.Text -> Bool
-isCargoTargetDependenciesSectionHeader trimmedLine =
-  T.isPrefixOf "[target." trimmedLine
-    && T.isSuffixOf ".dependencies]" trimmedLine
-isTomlNameAssignment :: T.Text -> Bool
-isTomlNameAssignment trimmedLine = "name = \"" `T.isPrefixOf` trimmedLine
-isTomlDescriptionAssignment :: T.Text -> Bool
-isTomlDescriptionAssignment trimmedLine = "description = \"" `T.isPrefixOf` trimmedLine
-isTomlKeywordsAssignment :: T.Text -> Bool
-isTomlKeywordsAssignment trimmedLine = "keywords = [" `T.isPrefixOf` trimmedLine
-extractTomlSection :: T.Text -> T.Text -> T.Text
-extractTomlSection sectionName tomlContents =
-  let sectionHeader = "[" <> sectionName <> "]"
-      tomlLines = T.lines tomlContents
-      sectionStart = dropWhile (\tomlLine -> T.strip tomlLine /= sectionHeader) tomlLines
-      sectionBody = drop 1 sectionStart
-   in T.unlines (takeWhile (not . isTomlSectionHeader . T.strip) sectionBody)
-isTomlSectionHeader :: T.Text -> Bool
-isTomlSectionHeader tomlLine =
-  T.length tomlLine >= 3
-    && "[" `T.isPrefixOf` tomlLine
-    && "]" `T.isSuffixOf` tomlLine
-lookupTomlString :: T.Text -> T.Text -> Maybe T.Text
-lookupTomlString tomlKey sectionContents = do
-  let keyPrefix = tomlKey <> " = "
-  matchingLine <- find (T.isPrefixOf keyPrefix) (map T.strip (T.lines sectionContents))
-  quotedValue <- T.stripPrefix keyPrefix matchingLine
-  T.stripPrefix "\"" quotedValue >>= T.stripSuffix "\""
+                          ++ "/Cargo.toml: only dependency sections and package metadata fields description/keywords may differ from the internal Rust Cargo baseline"
+                      )
+              ]
+parseToml :: T.Text -> Either T.Text TOML.Value
+parseToml source = case TOML.decode source of
+  Left parseError -> Left (TOML.renderTOMLError parseError)
+  Right value -> Right value
+lookupTomlValueAt :: [T.Text] -> TOML.Value -> Maybe TOML.Value
+lookupTomlValueAt [] value = Just value
+lookupTomlValueAt (key : remainingKeys) (TOML.Table table) = Map.lookup key table >>= lookupTomlValueAt remainingKeys
+lookupTomlValueAt _ _ = Nothing
+lookupTomlStringAt :: [T.Text] -> TOML.Value -> Maybe T.Text
+lookupTomlStringAt path value = case lookupTomlValueAt path value of
+  Just (TOML.String textValue) -> Just textValue
+  _ -> Nothing
+normalizeCargoTomlForBaselineComparison :: FilePath -> TOML.Value -> TOML.Value
+normalizeCargoTomlForBaselineComparison packageName = normalize []
+  where
+    normalize path (TOML.Table table) =
+      TOML.Table
+        ( Map.mapWithKey
+            (\key -> normalize (path ++ [key]))
+            (foldr Map.delete table (ignoredKeys path))
+        )
+    normalize path (TOML.Array values) = TOML.Array (map (normalize path) values)
+    normalize path (TOML.String _)
+      | path == ["package", "name"] || path == ["bin", "name"] = TOML.String (T.pack packageName)
+    normalize _ value = value
+    ignoredKeys :: [T.Text] -> [T.Text]
+    ignoredKeys ("target" : _) = ["dependencies", "dev-dependencies", "build-dependencies"]
+    ignoredKeys path
+      | null path = ["dependencies", "dev-dependencies", "build-dependencies"]
+      | path == ["package"] = ["description", "keywords"]
+      | otherwise = []
 checkCabalFile :: FilePath -> IO [String]
 checkCabalFile packageName = do
   let cabalFilePath = "packages" </> packageName </> packageName <.> "cabal"
   maybeCabalContents <- readTextFileIfExists cabalFilePath
   case maybeCabalContents of
     Nothing -> pure []
-    Just cabalContents -> do
-      let normalizedCabal = normalizeCabalForBaselineComparison packageName cabalContents
-          normalizedBaselineCabal = normalizeCabalForBaselineComparison packageName haskellCabalBaseline
-          cabalPackageName = lookupCabalField "name" cabalContents
-      pure $
-        catMaybes
-          [ if cabalPackageName == Just (T.pack packageName)
-              then Nothing
-              else Just ("packages/" ++ packageName ++ "/" ++ packageName ++ ".cabal: name must match directory name"),
-            if normalizedCabal == normalizedBaselineCabal
-              then Nothing
-              else
-                Just
-                  ( "packages/"
-                      ++ packageName
-                      ++ "/"
-                      ++ packageName
-                      ++ ".cabal: only build-depends and package metadata fields synopsis/description may differ from the internal Haskell cabal baseline"
-                  )
-          ]
-normalizeCabalForBaselineComparison :: FilePath -> T.Text -> T.Text
-normalizeCabalForBaselineComparison packageName cabalContents =
-  let step (insideBuildDependsSection, insideIgnoredMetadataField) sourceLine
-        | insideBuildDependsSection =
-            if T.null trimmedLine || T.null (snd (T.breakOn ":" trimmedLine))
-              then ((True, False), Nothing)
-              else ((False, False), Just normalizedLine)
-        | insideIgnoredMetadataField && isCabalIndentedContinuationLine sourceLine =
-            ((False, True), Nothing)
-        | "build-depends:" `T.isPrefixOf` trimmedLine =
-            ((True, False), Nothing)
-        | T.null trimmedLine =
-            ((False, False), Nothing)
-        | isCabalSynopsisField trimmedLine || isCabalDescriptionField trimmedLine =
-            ((False, True), Nothing)
-        | otherwise =
-            ((False, False), Just normalizedLine)
-        where
-          trimmedLine = T.strip sourceLine
-          normalizedLine = normalizeCabalLineForBaselineComparison packageName trimmedLine
-      (_, normalizedLines) = mapAccumL step (False, False) (T.lines cabalContents)
-   in T.unlines (catMaybes normalizedLines)
-normalizeCabalLineForBaselineComparison :: FilePath -> T.Text -> T.Text
-normalizeCabalLineForBaselineComparison packageName trimmedLine
-  | "name:" `T.isPrefixOf` trimmedLine = "name:          " <> T.pack packageName
-  | "executable " `T.isPrefixOf` trimmedLine = "executable " <> T.pack packageName
-  | otherwise = trimmedLine
-isCabalSynopsisField :: T.Text -> Bool
-isCabalSynopsisField trimmedLine = "synopsis:" `T.isPrefixOf` trimmedLine
-isCabalDescriptionField :: T.Text -> Bool
-isCabalDescriptionField trimmedLine = "description:" `T.isPrefixOf` trimmedLine
-isCabalIndentedContinuationLine :: T.Text -> Bool
-isCabalIndentedContinuationLine sourceLine =
-  case T.uncons sourceLine of
-    Just (firstCharacter, _) -> firstCharacter == ' ' || firstCharacter == '\t'
-    Nothing -> False
-lookupCabalField :: T.Text -> T.Text -> Maybe T.Text
-lookupCabalField cabalField cabalContents =
-  let fieldPrefix = cabalField <> ":"
-      matchingLines = dropWhile (\sourceLine -> not (fieldPrefix `T.isPrefixOf` T.strip sourceLine)) (T.lines cabalContents)
-   in case matchingLines of
-        [] -> Nothing
-        sourceLine : remainingLines ->
-          let strippedValue = T.strip (T.drop (T.length fieldPrefix) (T.strip sourceLine))
-           in Just $
-                if T.null strippedValue
-                  then T.intercalate "\n" (map T.strip (takeWhile isCabalIndentedContinuationLine remainingLines))
-                  else stripCabalQuotedValue strippedValue
+    Just cabalContents ->
+      case parseCabalFields cabalContents of
+        Left parseError -> pure [cabalFilePath ++ ": parse error: " ++ parseError]
+        Right cabalFields -> do
+          let normalizedCabal = normalizeCabalForBaselineComparison packageName cabalFields
+              normalizedBaselineCabal = normalizeCabalForBaselineComparison packageName <$> parseCabalFields haskellCabalBaseline
+              cabalPackageName = lookupCabalField "name" cabalFields
+          pure $
+            catMaybes
+              [ if cabalPackageName == Just (T.pack packageName)
+                  then Nothing
+                  else Just ("packages/" ++ packageName ++ "/" ++ packageName ++ ".cabal: name must match directory name"),
+                if Right normalizedCabal == normalizedBaselineCabal
+                  then Nothing
+                  else
+                    Just
+                      ( "packages/"
+                          ++ packageName
+                          ++ "/"
+                          ++ packageName
+                          ++ ".cabal: only build-depends and package metadata fields synopsis/description may differ from the internal Haskell cabal baseline"
+                      )
+              ]
+parseCabalFields :: T.Text -> Either String [Field ()]
+parseCabalFields source = either (Left . show) (Right . map void) (readFields (TE.encodeUtf8 source))
+normalizeCabalForBaselineComparison :: FilePath -> [Field ()] -> [Field ()]
+normalizeCabalForBaselineComparison packageName = mapMaybe normalizeField
+  where
+    normalizeField (Field (Name _ fieldName) fieldLines)
+      | fieldName `elem` map BS8.pack ["build-depends", "synopsis", "description"] = Nothing
+      | fieldName == BS8.pack "name" = Just (Field (Name () fieldName) [FieldLine () (BS8.pack packageName)])
+      | otherwise = Just (Field (Name () fieldName) fieldLines)
+    normalizeField (Section (Name _ sectionName) sectionArguments nestedFields) =
+      Just
+        ( Section
+            (Name () sectionName)
+            (if sectionName == BS8.pack "executable" then [SecArgName () (BS8.pack packageName)] else sectionArguments)
+            (mapMaybe normalizeField nestedFields)
+        )
+lookupCabalField :: T.Text -> [Field ()] -> Maybe T.Text
+lookupCabalField requestedName fields = do
+  Field _ fieldLines <- find matches fields
+  let value = T.strip (TE.decodeUtf8 (BS8.intercalate (BS8.pack "\n") [line | FieldLine _ line <- fieldLines]))
+  pure (stripCabalQuotedValue value)
+  where
+    matches :: Field () -> Bool
+    matches (Field (Name _ fieldName) _) = fieldName == TE.encodeUtf8 requestedName
+    matches _ = False
 stripCabalQuotedValue :: T.Text -> T.Text
 stripCabalQuotedValue quotedValue =
   fromMaybe quotedValue (T.stripPrefix "\"" quotedValue >>= T.stripSuffix "\"")
@@ -2779,33 +2713,40 @@ inferCheckTemplateSpec :: Map.Map FilePath PackageKind -> FilePath -> String -> 
 inferCheckTemplateSpec packageKinds checkName nixSource =
   find (\checkTemplateSpec -> checkTemplateMatches checkTemplateSpec packageKinds checkName nixSource) checkTemplateSpecs
 normalizeNixExpr :: Set.Set T.Text -> Set.Set T.Text -> NExprLoc -> NExprLoc
-normalizeNixExpr ignoredTopLevelFunctionParams allowedNixDifferenceKeys (Fix (Compose (AnnUnit nixExprSpan expressionFunctor))) =
+normalizeNixExpr = normalizeNixExprAt []
+normalizeNixExprAt :: [T.Text] -> Set.Set T.Text -> Set.Set T.Text -> NExprLoc -> NExprLoc
+normalizeNixExprAt attributePath ignoredTopLevelFunctionParams allowedNixDifferenceKeys (Fix (Compose (AnnUnit nixExprSpan expressionFunctor))) =
   let rebuiltExpressionFunctor = case expressionFunctor of
-        NSet isRecursive bindings -> NSet isRecursive (normalizeNixBindings allowedNixDifferenceKeys bindings)
-        NLet bindings body -> NLet (normalizeNixBindings allowedNixDifferenceKeys bindings) (normalizeNixExpr ignoredTopLevelFunctionParams allowedNixDifferenceKeys body)
+        NSet isRecursive bindings -> NSet isRecursive (normalizeNixBindings attributePath allowedNixDifferenceKeys bindings)
+        NLet bindings body -> NLet (normalizeNixBindings [] allowedNixDifferenceKeys bindings) (normalizeNixExprAt [] ignoredTopLevelFunctionParams allowedNixDifferenceKeys body)
         NAbs (ParamSet paramsEllipsis paramsAt params) body ->
           NAbs
             (ParamSet paramsEllipsis paramsAt (sortNixParams (filterIgnoredNixParams ignoredTopLevelFunctionParams params)))
-            (normalizeNixExpr Set.empty allowedNixDifferenceKeys body)
-        NAbs (Param paramName) body -> NAbs (Param paramName) (normalizeNixExpr Set.empty allowedNixDifferenceKeys body)
-        otherNixExpr -> fmap (normalizeNixExpr Set.empty allowedNixDifferenceKeys) otherNixExpr
+            (normalizeNixExprAt [] Set.empty allowedNixDifferenceKeys body)
+        NAbs (Param paramName) body -> NAbs (Param paramName) (normalizeNixExprAt [] Set.empty allowedNixDifferenceKeys body)
+        otherNixExpr -> fmap (normalizeNixExprAt attributePath Set.empty allowedNixDifferenceKeys) otherNixExpr
    in Fix (Compose (AnnUnit nixExprSpan rebuiltExpressionFunctor))
 filterIgnoredNixParams :: Set.Set T.Text -> [(VarName, Maybe NExprLoc)] -> [(VarName, Maybe NExprLoc)]
 filterIgnoredNixParams ignoredTopLevelFunctionParams =
   filter (\(VarName paramName, _) -> Set.notMember paramName ignoredTopLevelFunctionParams)
 sortNixParams :: [(VarName, Maybe NExprLoc)] -> [(VarName, Maybe NExprLoc)]
 sortNixParams = sortOn (\(VarName paramName, _) -> paramName)
-normalizeNixBindings :: Set.Set T.Text -> [Binding NExprLoc] -> [Binding NExprLoc]
-normalizeNixBindings allowedNixDifferenceKeys bindings =
-  [normalizeNixBinding allowedNixDifferenceKeys binding | binding <- bindings, not (isAllowedNixDifferenceBinding allowedNixDifferenceKeys binding)]
-normalizeNixBinding :: Set.Set T.Text -> Binding NExprLoc -> Binding NExprLoc
-normalizeNixBinding allowedNixDifferenceKeys = \case
-  NamedVar keyPath bindingValue sourcePosition -> NamedVar keyPath (normalizeNixExpr Set.empty allowedNixDifferenceKeys bindingValue) sourcePosition
-  Inherit maybeBoundNixExpr inheritedNames sourcePosition -> Inherit (normalizeNixExpr Set.empty allowedNixDifferenceKeys <$> maybeBoundNixExpr) inheritedNames sourcePosition
-isAllowedNixDifferenceBinding :: Set.Set T.Text -> Binding NExprLoc -> Bool
-isAllowedNixDifferenceBinding allowedNixDifferenceKeys = \case
-  NamedVar (bindingKey :| _) _ _ ->
-    maybe False (`Set.member` allowedNixDifferenceKeys) (nixKeyNameText bindingKey)
+normalizeNixBindings :: [T.Text] -> Set.Set T.Text -> [Binding NExprLoc] -> [Binding NExprLoc]
+normalizeNixBindings attributePath allowedNixDifferenceKeys bindings =
+  [normalizeNixBinding attributePath allowedNixDifferenceKeys binding | binding <- bindings, not (isAllowedNixDifferenceBinding attributePath allowedNixDifferenceKeys binding)]
+normalizeNixBinding :: [T.Text] -> Set.Set T.Text -> Binding NExprLoc -> Binding NExprLoc
+normalizeNixBinding attributePath allowedNixDifferenceKeys = \case
+  NamedVar keyPath bindingValue sourcePosition ->
+    let bindingPath = attributePath ++ mapMaybe nixKeyNameText (NE.toList keyPath)
+     in NamedVar keyPath (normalizeNixExprAt bindingPath Set.empty allowedNixDifferenceKeys bindingValue) sourcePosition
+  Inherit maybeBoundNixExpr inheritedNames sourcePosition -> Inherit (normalizeNixExprAt attributePath Set.empty allowedNixDifferenceKeys <$> maybeBoundNixExpr) inheritedNames sourcePosition
+isAllowedNixDifferenceBinding :: [T.Text] -> Set.Set T.Text -> Binding NExprLoc -> Bool
+isAllowedNixDifferenceBinding attributePath allowedNixDifferenceKeys = \case
+  NamedVar keyPath _ _ ->
+    let bindingPath = attributePath ++ mapMaybe nixKeyNameText (NE.toList keyPath)
+        dottedBindingPath = T.intercalate "." bindingPath
+     in Set.member dottedBindingPath allowedNixDifferenceKeys
+          || any (`Set.member` allowedNixDifferenceKeys) bindingPath
   _ -> False
 nixKeyNameText :: NKeyName NExprLoc -> Maybe T.Text
 nixKeyNameText = \case
@@ -2939,26 +2880,10 @@ collectNixSetBindingGroupsFromBinding (NamedVar _ bindingValue _) = collectNixSe
 collectNixSetBindingGroupsFromBinding (Inherit maybeBoundNixExpr _ _) = maybe [] collectNixSetBindingGroups maybeBoundNixExpr
 extractNamedNixBindings :: [Binding NExprLoc] -> [(T.Text, T.Text)]
 extractNamedNixBindings bindings =
-  [ (bindingKey, normalizeRenderedNixBindingValue bindingKey (renderNixExpr bindingValue))
+  [ (bindingKey, T.pack (compactTextToSingleLine (renderNixExpr bindingValue)))
   | NamedVar keyPath bindingValue _ <- bindings,
     let bindingKey = T.intercalate "." (mapMaybe nixKeyNameText (NE.toList keyPath))
   ]
-normalizeRenderedNixBindingValue :: T.Text -> T.Text -> T.Text
-normalizeRenderedNixBindingValue bindingKey renderedBindingValue =
-  let normalizedValue = T.pack (compactTextToSingleLine renderedBindingValue)
-   in if bindingKey == "meta" then stripMetaDescriptionAssignment normalizedValue else normalizedValue
-stripMetaDescriptionAssignment :: T.Text -> T.Text
-stripMetaDescriptionAssignment renderedMetaValue =
-  let trimmedValue = T.strip renderedMetaValue
-      attrsetValue = fromMaybe trimmedValue (T.stripPrefix "meta = " trimmedValue)
-   in case T.stripPrefix "{ description = " attrsetValue of
-        Just descriptionPrefixRest ->
-          case T.breakOn "; " descriptionPrefixRest of
-            (descriptionValue, remainder) ->
-              if not (T.null descriptionValue) && not (T.null remainder)
-                then "{ " <> T.drop 2 remainder
-                else renderedMetaValue
-        Nothing -> renderedMetaValue
 runPackageTests :: IO ()
 runPackageTests = runPackageTestsWith hUnitPackageTests
 runPackageTestsWithTimings :: FilePath -> IO ()
@@ -2984,7 +2909,7 @@ timeTestAction timingsPath testName testAction = do
     `finally` do
       finishedAt <- getMonotonicTimeNSec
       let elapsedSeconds = fromIntegral (finishedAt - startedAt) / 1000000000 :: Double
-      appendFile timingsPath ("test\t" ++ showFFloat (Just 6) elapsedSeconds "" ++ "\t" ++ testName ++ "\n")
+      appendFile timingsPath ("test\t" ++ showFFloat (Just 6) elapsedSeconds "" ++ "\t" ++ renderJSON testName ++ "\t" ++ renderJSON (Just testName) ++ "\n")
 hUnitPackageTests :: Test
 hUnitPackageTests =
   TestList
@@ -3117,11 +3042,13 @@ packageDetectionTest =
       detectPackageFromEvidence (detectPackageMarkers ["Main.hs", "Cargo.toml"]) (Just "{ buildPythonPackage = true; src = fetchPypi {}; }")
     ]
 cargoTomlFormattingNormalizationTest :: IO ()
-cargoTomlFormattingNormalizationTest =
-  assertEqual
-    "Taplo's inline-table spacing does not change Cargo policy compliance."
-    (normalizeCargoTomlForBaselineComparison "remove-empty-lines" rustCargoTomlBaseline)
-    (normalizeCargoTomlForBaselineComparison "remove-empty-lines" removeEmptyLinesCargoTomlFixture)
+cargoTomlFormattingNormalizationTest = case (parseToml rustCargoTomlBaseline, parseToml removeEmptyLinesCargoTomlFixture) of
+  (Right baseline, Right fixture) ->
+    assertEqual
+      "Taplo's inline-table spacing does not change Cargo policy compliance."
+      (normalizeCargoTomlForBaselineComparison "remove-empty-lines" baseline)
+      (normalizeCargoTomlForBaselineComparison "remove-empty-lines" fixture)
+  _ -> assertFailure "Cargo TOML fixtures must parse."
 entryKindStructureTest :: IO ()
 entryKindStructureTest =
   withTemporaryPackageRepository "symbolic-link-structure" $ \temporaryRepository -> do
@@ -3217,12 +3144,12 @@ repositoryTestResultParsingTest = do
   assertEqual
     "A valid timing artifact preserves total and per-test durations."
     (Just (Duration 1.25, Map.fromList [("Reports behavior.", Duration 0.125)]))
-    (parseRepositoryTimingSummary "profile-v1\ttotal-seconds\t1.25\ntest\t0.125\tReports behavior.\n")
+    (parseRepositoryTimingSummary "profile-v2\ttotal-seconds\t1.25\ntest\t0.125\t\"reports_behavior\"\t\"Reports behavior.\"\n")
   forM_
-    [ "profile-v1\ttotal-seconds\tNaN\ntest\t0.125\tReports behavior.\n",
-      "profile-v1\ttotal-seconds\tInfinity\ntest\t0.125\tReports behavior.\n",
-      "profile-v1\ttotal-seconds\t1.0\ntest\tNaN\tReports behavior.\n",
-      "profile-v1\ttotal-seconds\t1.0\ntest\tInfinity\tReports behavior.\n"
+    [ "profile-v2\ttotal-seconds\tNaN\ntest\t0.125\t\"reports_behavior\"\tnull\n",
+      "profile-v2\ttotal-seconds\tInfinity\ntest\t0.125\t\"reports_behavior\"\tnull\n",
+      "profile-v2\ttotal-seconds\t1.0\ntest\tNaN\t\"reports_behavior\"\tnull\n",
+      "profile-v2\ttotal-seconds\t1.0\ntest\tInfinity\t\"reports_behavior\"\tnull\n"
     ]
     (assertEqual "Non-finite summary timings are rejected." Nothing . parseRepositoryTimingSummary)
 nixTemplateParameterDifferenceTest :: IO ()
@@ -4221,6 +4148,8 @@ haskellMainSource =
       "{-# OPTIONS_GHC -Wno-unsafe #-}",
       "module Main (main, runPackageTests, runPackageTestsWithTimings) where",
       "import Control.Exception (finally)",
+      "import Data.Aeson qualified as Aeson",
+      "import Data.ByteString.Lazy.Char8 qualified as BL8",
       "import GHC.Clock (getMonotonicTimeNSec)",
       "import Numeric (showFFloat)",
       "import System.Exit (exitFailure)",
@@ -4253,7 +4182,7 @@ haskellMainSource =
       "  testAction `finally` do",
       "    finishedAt <- getMonotonicTimeNSec",
       "    let elapsedSeconds = fromIntegral (finishedAt - startedAt) / 1000000000 :: Double",
-      "    appendFile timingsPath (\"test\\t\" ++ showFFloat (Just 6) elapsedSeconds \"\" ++ \"\\t\" ++ testName ++ \"\\n\")",
+      "    appendFile timingsPath (\"test\\t\" ++ showFFloat (Just 6) elapsedSeconds \"\" ++ \"\\t\" ++ BL8.unpack (Aeson.encode testName) ++ \"\\t\" ++ BL8.unpack (Aeson.encode (Just testName)) ++ \"\\n\")",
       "",
       "hUnitPackageTests :: Test",
       "hUnitPackageTests =",
@@ -5055,7 +4984,7 @@ haskellCoverageCheckBaselineNixSource =
       "      ${pkgs.time}/bin/time -f %e -o \"$workspace/total-seconds\" \\",
       "      \"$workspace/$packageName\" +RTS -p -RTS",
       "    mv \"$workspace/$packageName.prof\" \"$out/profile-report.prof\"",
-      "    printf 'profile-v1\\ttotal-seconds\\t%s\\n' \"$(cat \"$workspace/total-seconds\")\" > \"$out/profile-summary.tsv\"",
+      "    printf 'profile-v2\\ttotal-seconds\\t%s\\n' \"$(cat \"$workspace/total-seconds\")\" > \"$out/profile-summary.tsv\"",
       "    cat \"$workspace/test-timings.tsv\" >> \"$out/profile-summary.tsv\"",
       "    hpc markup \"$workspace/coverage/${packageName}.tix\" --hpcdir=\"$workspace/hpc\" --destdir=\"$out/html\"",
       "    hpc report \"$workspace/coverage/${packageName}.tix\" --hpcdir=\"$workspace/hpc\" | tee \"$out/report.txt\"",
@@ -5105,7 +5034,6 @@ pythonCoverageCheckBaselineNixSource =
       "    import json",
       "    import pathlib",
       "    import pstats",
-      "    import re",
       "    import sys",
       "    import xml.etree.ElementTree as ET",
       "    source_path, report_path, junit_path, coverage_path, profile_path, profile_report_path, profile_summary_path = map(pathlib.Path, sys.argv[1:])",
@@ -5116,17 +5044,16 @@ pythonCoverageCheckBaselineNixSource =
       "    specifications = {}",
       "    for node in ast.parse(source_path.read_text()).body:",
       "        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith(\"test_\"):",
-      "            words = re.sub(r\"^test_(?:property_)?\", \"\", node.name).replace(\"_\", \" \")",
-      "            specifications[node.name] = ast.get_docstring(node) or words[:1].upper() + words[1:] + \".\"",
+      "            specifications[node.name] = ast.get_docstring(node)",
       "    timing_lines = []",
       "    for test_case in sorted(ET.parse(junit_path).iter(\"testcase\"), key=lambda element: element.attrib[\"name\"]):",
       "        test_name = test_case.attrib[\"name\"].split(\"[\", 1)[0]",
-      "        timing_lines.append(f\"test\\t{test_case.attrib['time']}\\t{specifications[test_name]}\")",
+      "        timing_lines.append(f\"test\\t{test_case.attrib['time']}\\t{json.dumps(test_name, ensure_ascii=False)}\\t{json.dumps(specifications[test_name], ensure_ascii=False)}\")",
       "    with profile_report_path.open(\"w\") as stream:",
       "        profile_stats = pstats.Stats(str(profile_path), stream=stream)",
       "        profile_stats.sort_stats(\"cumulative\").print_stats(20)",
       "    profile_summary_path.write_text(",
-      "        \"\\n\".join([f\"profile-v1\\ttotal-seconds\\t{profile_stats.total_tt}\", *timing_lines]) + \"\\n\"",
+      "        \"\\n\".join([f\"profile-v2\\ttotal-seconds\\t{profile_stats.total_tt}\", *timing_lines]) + \"\\n\"",
       "    )",
       "    PY",
       "  ''"
@@ -5192,17 +5119,15 @@ rustCoverageCheckBaselineNixSource =
       "    test \"$covered\" != null && test \"$total\" != null",
       "    printf 'coverage-v1\\tlines\\t%s\\t%s\\n' \"$covered\" \"$total\" > \"$out/coverage-summary.tsv\"",
       "    python - \"$out/junit.xml\" \"$workspace/total-seconds\" \"$out/profile-summary.tsv\" <<'PY'",
+      "    import json",
       "    import pathlib",
-      "    import re",
       "    import sys",
       "    import xml.etree.ElementTree as ET",
       "    junit_path, total_path, profile_path = map(pathlib.Path, sys.argv[1:])",
-      "    lines = [f\"profile-v1\\ttotal-seconds\\t{total_path.read_text().strip()}\"]",
+      "    lines = [f\"profile-v2\\ttotal-seconds\\t{total_path.read_text().strip()}\"]",
       "    for test_case in sorted(ET.parse(junit_path).iter(\"testcase\"), key=lambda element: element.attrib[\"name\"]):",
       "        identifier = test_case.attrib[\"name\"].rsplit(\"::\", 1)[-1]",
-      "        words = re.sub(r\"^(?:test|quickcheck)_\", \"\", identifier).replace(\"_\", \" \")",
-      "        test_name = words[:1].upper() + words[1:] + \".\"",
-      "        lines.append(f\"test\\t{test_case.attrib['time']}\\t{test_name}\")",
+      "        lines.append(f\"test\\t{test_case.attrib['time']}\\t{json.dumps(identifier, ensure_ascii=False)}\\tnull\")",
       "    profile_path.write_text(\"\\n\".join(lines) + \"\\n\")",
       "    PY",
       "  ''"

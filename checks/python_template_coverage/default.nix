@@ -35,7 +35,6 @@ pkgs.runCommand checkName
     import json
     import pathlib
     import pstats
-    import re
     import sys
     import xml.etree.ElementTree as ET
     source_path, report_path, junit_path, coverage_path, profile_path, profile_report_path, profile_summary_path = map(pathlib.Path, sys.argv[1:])
@@ -46,17 +45,16 @@ pkgs.runCommand checkName
     specifications = {}
     for node in ast.parse(source_path.read_text()).body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
-            words = re.sub(r"^test_(?:property_)?", "", node.name).replace("_", " ")
-            specifications[node.name] = ast.get_docstring(node) or words[:1].upper() + words[1:] + "."
+            specifications[node.name] = ast.get_docstring(node)
     timing_lines = []
     for test_case in sorted(ET.parse(junit_path).iter("testcase"), key=lambda element: element.attrib["name"]):
         test_name = test_case.attrib["name"].split("[", 1)[0]
-        timing_lines.append(f"test\t{test_case.attrib['time']}\t{specifications[test_name]}")
+        timing_lines.append(f"test\t{test_case.attrib['time']}\t{json.dumps(test_name, ensure_ascii=False)}\t{json.dumps(specifications[test_name], ensure_ascii=False)}")
     with profile_report_path.open("w") as stream:
         profile_stats = pstats.Stats(str(profile_path), stream=stream)
         profile_stats.sort_stats("cumulative").print_stats(20)
     profile_summary_path.write_text(
-        "\n".join([f"profile-v1\ttotal-seconds\t{profile_stats.total_tt}", *timing_lines]) + "\n"
+        "\n".join([f"profile-v2\ttotal-seconds\t{profile_stats.total_tt}", *timing_lines]) + "\n"
     )
     PY
   ''
