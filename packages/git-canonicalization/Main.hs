@@ -1340,29 +1340,19 @@ renderNixString value =
     escapeInterpolation ('$' : '{' : remainingCharacters) = '\\' : '$' : '{' : escapeInterpolation remainingCharacters
     escapeInterpolation (character : remainingCharacters) = character : escapeInterpolation remainingCharacters
     escapeInterpolation [] = []
-renderPackageKind :: PackageKind -> String
-renderPackageKind packageKind =
-  case packageKind of
-    HaskellPackage -> "haskell"
-    RustPackage -> "rust"
-    HTMLPackage -> "html"
-    PythonLaTeXPackage -> "python-latex"
-    PythonPackage -> "python"
-    PythonPyPIPackage -> "python-pypi"
-    CPackage -> "c"
-    TerraformPackage -> "terraform"
-    LaTeXPackage -> "latex"
-    BinaryReleasePackage -> "binary-release"
 supportedAddPackageKinds :: [(String, PackageKind)]
 supportedAddPackageKinds =
   [ (renderPackageKind packageKind, packageKind)
-  | packageKind <- [HaskellPackage, RustPackage, HTMLPackage, PythonPackage, PythonLaTeXPackage, CPackage, LaTeXPackage]
+  | packageKind <- allPackageKinds,
+    packageKindSupportsScaffold (packageKindSpec packageKind)
   ]
 parseSupportedAddPackageKind :: String -> Maybe PackageKind
 parseSupportedAddPackageKind packageKindName = lookup packageKindName supportedAddPackageKinds
 validatePackageNameForKind :: PackageKind -> FilePath -> Maybe String
 validatePackageNameForKind packageKind packageName =
-  let (conventionName, separator) = packageNameConventionForKind packageKind
+  let packageSpec = packageKindSpec packageKind
+      conventionName = packageKindNameConvention packageSpec
+      separator = packageKindNameSeparator packageSpec
    in if isDelimitedLowercaseName separator packageName
         then Nothing
         else
@@ -1373,10 +1363,6 @@ validatePackageNameForKind packageKind packageName =
                 ++ renderPackageKind packageKind
                 ++ " packages"
             )
-packageNameConventionForKind :: PackageKind -> (String, Char)
-packageNameConventionForKind packageKind
-  | packageKind `elem` [HaskellPackage, RustPackage, BinaryReleasePackage] = ("kebab-case", '-')
-  | otherwise = ("snake_case", '_')
 isDelimitedLowercaseName :: Char -> String -> Bool
 isDelimitedLowercaseName separator packageName =
   all isValidNamePart (T.split (== separator) (T.pack packageName))
@@ -1814,6 +1800,40 @@ data PackageKind
   | LaTeXPackage
   | BinaryReleasePackage
   deriving stock (Eq, Ord, Show)
+type PackageKindSpec :: Type
+data PackageKindSpec = PackageKindSpec
+  { packageKindRenderedName :: String,
+    packageKindNameConvention :: String,
+    packageKindNameSeparator :: Char,
+    packageKindSupportsScaffold :: Bool
+  }
+allPackageKinds :: [PackageKind]
+allPackageKinds =
+  [ HaskellPackage,
+    RustPackage,
+    HTMLPackage,
+    PythonLaTeXPackage,
+    PythonPackage,
+    PythonPyPIPackage,
+    CPackage,
+    TerraformPackage,
+    LaTeXPackage,
+    BinaryReleasePackage
+  ]
+packageKindSpec :: PackageKind -> PackageKindSpec
+packageKindSpec = \case
+  HaskellPackage -> PackageKindSpec "haskell" "kebab-case" '-' True
+  RustPackage -> PackageKindSpec "rust" "kebab-case" '-' True
+  HTMLPackage -> PackageKindSpec "html" "snake_case" '_' True
+  PythonLaTeXPackage -> PackageKindSpec "python-latex" "snake_case" '_' True
+  PythonPackage -> PackageKindSpec "python" "snake_case" '_' True
+  PythonPyPIPackage -> PackageKindSpec "python-pypi" "snake_case" '_' False
+  CPackage -> PackageKindSpec "c" "snake_case" '_' True
+  TerraformPackage -> PackageKindSpec "terraform" "snake_case" '_' False
+  LaTeXPackage -> PackageKindSpec "latex" "snake_case" '_' True
+  BinaryReleasePackage -> PackageKindSpec "binary-release" "kebab-case" '-' False
+renderPackageKind :: PackageKind -> String
+renderPackageKind = packageKindRenderedName . packageKindSpec
 type PackageInfo :: Type
 data PackageInfo = PackageInfo
   { packageRootPath :: FilePath,
