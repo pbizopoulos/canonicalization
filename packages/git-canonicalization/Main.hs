@@ -36,6 +36,7 @@ import Distribution.Fields.Field (Field (Field, Section), FieldLine (FieldLine),
 import Distribution.Fields.Parser (readFields)
 import GHC.Clock (getMonotonicTimeNSec)
 import Language.Haskell.Exts qualified as HS
+import Network.URI (URIAuth (uriRegName), parseURI, uriAuthority, uriPath, uriScheme)
 import Nix.Expr.Types
   ( Antiquoted (Plain),
     Binding (Inherit, NamedVar),
@@ -742,8 +743,9 @@ readHomeRepositories repositoryRoot = do
                 else pure (parseHomeRepositoryConfig configStdout)
 parseHomeRepositoryConfig :: String -> Either [String] [HomeRepository]
 parseHomeRepositoryConfig source =
-  let fields = mapMaybe parseHomeRepositoryField (splitNullTerminated source)
-      malformedCount = length (splitNullTerminated source) - length fields
+  let records = splitNullTerminated source
+      fields = mapMaybe parseHomeRepositoryField records
+      malformedCount = length records - length fields
       grouped = Map.fromListWith (++) [(section, [(fieldName, value)]) | (section, fieldName, value) <- fields]
       parseSection :: (String, [(String, String)]) -> Either String HomeRepository
       parseSection (section, sectionFields) =
@@ -795,10 +797,11 @@ parseHostedGitRemote repositoryUrl =
   where
     parseUrlStyle :: Maybe (String, String)
     parseUrlStyle = do
-      location <- foldr (<|>) Nothing [stripPrefix scheme repositoryUrl | scheme <- ["https://", "http://", "ssh://", "git+ssh://", "git://"]]
-      let (authority, pathWithSeparator) = break (== '/') location
-      path <- stripPrefix "/" pathWithSeparator
-      hostname <- hostnameFromAuthority authority
+      uri <- parseURI repositoryUrl
+      guard (uriScheme uri `elem` ["https:", "http:", "ssh:", "git+ssh:", "git:"])
+      authority <- uriAuthority uri
+      path <- stripPrefix "/" (uriPath uri)
+      let hostname = uriRegName authority
       guard (not (null path))
       pure (map toLower hostname, path)
     parseScpStyle :: Maybe (String, String)
@@ -806,14 +809,9 @@ parseHostedGitRemote repositoryUrl =
       let (authority, pathWithSeparator) = break (== ':') repositoryUrl
       path <- stripPrefix ":" pathWithSeparator
       guard (not (null authority) && '/' `notElem` authority && not (null path))
-      hostname <- hostnameFromAuthority authority
+      let hostname = reverse (takeWhile (/= '@') (reverse authority))
+      guard (not (null hostname))
       pure (map toLower hostname, path)
-hostnameFromAuthority :: String -> Maybe String
-hostnameFromAuthority authority = do
-  let hostAndPort = reverse (takeWhile (/= '@') (reverse authority))
-      hostname = takeWhile (/= ':') hostAndPort
-  guard (not (null hostname))
-  pure hostname
 resolveGitRemoteUrl :: FilePath -> String -> IO String
 resolveGitRemoteUrl repositoryRoot repositoryUrl = do
   (resolveExit, resolveStdout, resolveStderr) <- readGitProcess ["-C", repositoryRoot, "ls-remote", "--get-url", repositoryUrl] ""
@@ -1883,28 +1881,40 @@ ambiguousPackageMarkerIssuesForPackage packageInfo =
     DetectedPackageKind _ -> []
 allowedRegularFileRegexesForPackageKind :: FilePath -> FilePath -> Maybe PackageKind -> [String]
 allowedRegularFileRegexesForPackageKind packageRootDirectory packageDirectoryName maybePackageKind =
-  map exactPathRegex (allowedRegularFilePathsForPackageKind packageRootDirectory packageDirectoryName maybePackageKind)
-    ++ case maybePackageKind of
-      Just PythonLaTeXPackage -> ["^" ++ escapeRegexLiteral (packageRootDirectory </> "figures") ++ "(/.*)?$"]
-      Just TerraformPackage -> ["^" ++ escapeRegexLiteral (packageRootDirectory </> ".terraform") ++ "(/.*)?$"]
-      _ -> []
+  let policy = packagePathPolicy packageRootDirectory packageDirectoryName maybePackageKind
+   in map exactPathRegex (packagePolicyRegularFiles policy)
+        ++ map treePathRegex (packagePolicyTraversedTrees policy)
 allowedRegularFilePathsForPackageKind :: FilePath -> FilePath -> Maybe PackageKind -> [FilePath]
 allowedRegularFilePathsForPackageKind packageRootDirectory packageDirectoryName maybePackageKind =
+  packagePolicyRegularFiles (packagePathPolicy packageRootDirectory packageDirectoryName maybePackageKind)
+type PackagePathPolicy :: Type
+data PackagePathPolicy = PackagePathPolicy
+  { packagePolicyRegularFiles :: [FilePath],
+    packagePolicyTraversedTrees :: [FilePath]
+  }
+packagePathPolicy :: FilePath -> FilePath -> Maybe PackageKind -> PackagePathPolicy
+packagePathPolicy packageRootDirectory packageDirectoryName maybePackageKind =
   let packagePath relativePath = packageRootDirectory </> relativePath
       basePaths = [packagePath "default.nix"]
-   in basePaths
-        ++ case maybePackageKind of
-          Just HaskellPackage -> [packagePath "Main.hs", packagePath (packageDirectoryName <.> "cabal")]
-          Just RustPackage -> map packagePath ["Cargo.toml", "Cargo.lock", "src/main.rs"]
-          Just HTMLPackage -> map packagePath ["index.html", "script.js", "style.css"]
-          Just PythonLaTeXPackage -> map packagePath ["main.py", "ms.tex", "ms.bib", "refs.bib"]
-          Just PythonPackage -> [packagePath "main.py"]
-          Just PythonPyPIPackage -> []
-          Just CPackage -> [packagePath "main.c"]
-          Just TerraformPackage -> map packagePath ["main.tf", ".terraform.lock.hcl"]
-          Just LaTeXPackage -> map packagePath ["ms.tex", "ms.bib"]
-          Just BinaryReleasePackage -> []
-          Nothing -> []
+      kindFiles = case maybePackageKind of
+        Just HaskellPackage -> [packagePath "Main.hs", packagePath (packageDirectoryName <.> "cabal")]
+        Just RustPackage -> map packagePath ["Cargo.toml", "Cargo.lock", "src/main.rs"]
+        Just HTMLPackage -> map packagePath ["index.html", "script.js", "style.css"]
+        Just PythonLaTeXPackage -> map packagePath ["main.py", "ms.tex", "ms.bib", "refs.bib"]
+        Just PythonPackage -> [packagePath "main.py"]
+        Just PythonPyPIPackage -> []
+        Just CPackage -> [packagePath "main.c"]
+        Just TerraformPackage -> map packagePath ["main.tf", ".terraform.lock.hcl"]
+        Just LaTeXPackage -> map packagePath ["ms.tex", "ms.bib"]
+        Just BinaryReleasePackage -> []
+        Nothing -> []
+      traversedTrees = case maybePackageKind of
+        Just PythonLaTeXPackage -> [packagePath "figures"]
+        Just TerraformPackage -> [packagePath ".terraform"]
+        _ -> []
+   in PackagePathPolicy (basePaths ++ kindFiles) traversedTrees
+treePathRegex :: FilePath -> String
+treePathRegex path = "^" ++ escapeRegexLiteral path ++ "(/.*)?$"
 collectStructurallyAllowedRepositoryEntriesWith :: [FilePath] -> IO [RepositoryEntry]
 collectStructurallyAllowedRepositoryEntriesWith projectedPaths = do
   packageInfos <- discoverPackageInfosFromFilesystem
@@ -1947,10 +1957,12 @@ allowedExistingPackageFilePaths packageInfo =
   allowedRegularFilePathsForPackageKind (packageRootPath packageInfo) (packageRootDirectoryName packageInfo) (packageKindFromDetection (packageDetection packageInfo))
 allowedTraversedPackageTreePaths :: PackageInfo -> [FilePath]
 allowedTraversedPackageTreePaths packageInfo =
-  case packageKindFromDetection (packageDetection packageInfo) of
-    Just PythonLaTeXPackage -> [packageRootPath packageInfo </> "figures"]
-    Just TerraformPackage -> [packageRootPath packageInfo </> ".terraform"]
-    _ -> []
+  packagePolicyTraversedTrees
+    ( packagePathPolicy
+        (packageRootPath packageInfo)
+        (packageRootDirectoryName packageInfo)
+        (packageKindFromDetection (packageDetection packageInfo))
+    )
 collectExistingRepositoryEntries :: [FilePath] -> IO [RepositoryEntry]
 collectExistingRepositoryEntries paths = catMaybes <$> mapM collectExistingRepositoryEntry paths
 collectExistingRepositoryEntry :: FilePath -> IO (Maybe RepositoryEntry)

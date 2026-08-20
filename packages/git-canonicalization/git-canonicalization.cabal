@@ -19,6 +19,7 @@ executable git-canonicalization
     , haskell-src-exts
     , hnix
     , HUnit
+    , network-uri
     , optparse-applicative
     , prettyprinter
     , process

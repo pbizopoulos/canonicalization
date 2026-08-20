@@ -13,6 +13,7 @@ let
     pkgs.haskellPackages.filepath
     pkgs.haskellPackages.haskell-src-exts
     pkgs.haskellPackages.hnix
+    pkgs.haskellPackages.network-uri
     pkgs.haskellPackages.optparse-applicative
     pkgs.haskellPackages.prettyprinter
     pkgs.haskellPackages.process
