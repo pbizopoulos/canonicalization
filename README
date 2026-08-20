@@ -2,13 +2,22 @@ Canonicalization
 
 A Nix flake that selects and enforces consistent forms for NixOS systems, home Git layouts, and repositories while making intent and expected behavior easy to inspect.
 
-Home and repository root `.gitignore` whitelists constrain their Git-visible directory structures; arbitrary other paths may exist but are ignored.
-
 OS: NixOS with a temporary root filesystem and explicitly preserved state.
 Git: `git canonicalization` detects either a home or flake repository layout and provides common `check` and `status` operations.
-Initialization: `git canonicalization init [--] [<directory>]` initializes `$HOME` with the home layout or any other path with the minimal canonical flake layout; run `git init` first when advanced Git options are needed.
-Home repositories: `git canonicalization add <url>` runs in the selected home repository and puts Git submodules under `<home-root>/<host>/<repository-path>`.
+Home repository:
+
+```sh
+cd "$HOME"
+git init
+printf '*\n!/.gitignore\n!/.gitmodules\n' > .gitignore # also add other required files/directories like .ssh
+git add .gitignore
+git commit -m 'Initialize home repository'
+git submodule add --force git@github.com:owner/demo.git github.com/owner/demo
+git commit -m 'Add demo repository'
+```
+
+Initialization: `git canonicalization init [--] [<directory>]` initializes a minimal canonical flake layout.
 Flake repositories: `git canonicalization add <type> <name>` targets the selected repository, follows a restricted subset of the numtide/blueprint layout, and maintains its root `.gitignore` whitelist.
 README: explains the repository's intent.
 Test names: describe the expected behavior.
-Code: implements the expected behavior. `nix fmt` regenerates the repository whitelist and runs conventional formatters and strict linters; `nix flake check` verifies the canonical structure and runs builds and tests.
+Code: implements the expected behavior. `nix fmt` runs conventional formatters and strict linters; `nix flake check` verifies the canonical structure and runs builds and tests.

@@ -9,7 +9,7 @@
 {-# LANGUAGE TupleSections #-}
 {-# OPTIONS_GHC -Wno-missing-import-lists -Wno-unsafe #-}
 module Main (main, runPackageTests, runPackageTestsWithTimings) where
-import Control.Applicative ((<|>))
+import Control.Applicative (some, (<|>))
 import Control.Exception (IOException, finally, onException, try)
 import Control.Monad (filterM, forM, forM_, guard, unless, void, when)
 import Data.Aeson qualified as Aeson
@@ -279,7 +279,6 @@ data Command
   | CheckFixCommand
   | StatusCommand
   | InitCommand InitSpec
-  | AddRepositoryCommand String
   | AddPackageCommand String FilePath (Maybe String)
   | RemovePackageCommand RemoveSpec
   deriving stock (Eq, Show)
@@ -323,10 +322,6 @@ runCommand = \case
     HomeProfile -> renderHomeProfileStatus repositoryRoot
     FlakeProfile -> summarizeRepositoryLocation renderRepositorySummariesJSON repositoryRoot
   InitCommand initSpec -> initializeCanonicalization initSpec
-  AddRepositoryCommand repositoryUrl ->
-    withRequiredProfile HomeProfile "repository" $ \repositoryRoot ->
-      withCurrentDirectory repositoryRoot $ do
-        addHomeRepository repositoryRoot repositoryUrl
   AddPackageCommand packageKindName packageName packageDescription ->
     withRequiredProfile FlakeProfile "package" $ \repositoryRoot ->
       withCurrentDirectory repositoryRoot $
@@ -365,7 +360,7 @@ cliParserInfo =
   OA.info
     (OA.helper <*> commandParser)
     ( OA.fullDesc
-        <> OA.progDesc "Manage canonical home repositories and Nix flake repositories."
+        <> OA.progDesc "Check canonical home repositories and manage Nix flake repositories."
         <> OA.header "git canonicalization - canonical repository checks and scaffolding"
     )
 parseCommandForTest :: [String] -> Maybe Command
@@ -376,9 +371,9 @@ parseCommandForTest arguments =
 commandParser :: OA.Parser Command
 commandParser =
   OA.hsubparser
-    ( command "init" "Initialize a canonical repository." initCommandParser
+    ( command "init" "Initialize a canonical flake repository." initCommandParser
         <> command "status" "Write repository status as JSON." (pure StatusCommand)
-        <> command "add" "Add a repository or scaffold a package." addCommandParser
+        <> command "add" "Scaffold a package." addCommandParser
         <> command "rm" "Remove a package and its generated check." removeCommandParser
         <> command "check" "Check the selected repository." checkCommandParser
     )
@@ -392,16 +387,14 @@ initCommandParser =
       ( OA.metavar "DIRECTORY"
           <> OA.value "."
           <> OA.showDefault
-          <> OA.help "Repository directory."
+          <> OA.help "Flake repository directory."
       )
 addCommandParser :: OA.Parser Command
-addCommandParser = classifyAddArguments <$> OA.some (OA.strArgument (OA.metavar "ARGUMENT"))
-classifyAddArguments :: [String] -> Command
-classifyAddArguments = \case
-  [repositoryUrl] -> AddRepositoryCommand repositoryUrl
-  packageKindName : packageName : descriptionArguments ->
-    AddPackageCommand packageKindName packageName (unwords . NE.toList <$> NE.nonEmpty descriptionArguments)
-  [] -> error "optparse-applicative accepted an empty add argument list"
+addCommandParser =
+  AddPackageCommand
+    <$> OA.strArgument (OA.metavar "TYPE")
+    <*> OA.strArgument (OA.metavar "NAME")
+    <*> OA.optional (unwords <$> some (OA.strArgument (OA.metavar "DESCRIPTION")))
 removeCommandParser :: OA.Parser Command
 removeCommandParser =
   RemovePackageCommand
@@ -495,24 +488,11 @@ initializeCanonicalization initSpec = do
     exitFailure
   target <- if targetExists then canonicalizePath localPath else makeAbsolute localPath
   home <- homeDirectory
-  if target == home
-    then initializeHomeRepository initSpec targetExists target
-    else initializeProjectRepository initSpec targetExists home target
-initializeHomeRepository :: InitSpec -> Bool -> FilePath -> IO ()
-initializeHomeRepository initSpec targetExisted repositoryRoot = do
-  flakeMarkerExists <- or <$> mapM doesPathExist [repositoryRoot </> "flake.nix", repositoryRoot </> "flake.lock", repositoryRoot </> "packages", repositoryRoot </> "checks", repositoryRoot </> "hosts"]
-  when flakeMarkerExists $ do
-    hPutStrLn stderr "error: cannot initialize the home layout because flake layout markers exist"
+  when (target == home) $ do
+    hPutStrLn stderr "error: cannot initialize the home directory as a flake repository"
+    hPutStrLn stderr "hint: initialize the home repository with Git as documented in README"
     exitFailure
-  let gitignorePath = repositoryRoot </> ".gitignore"
-  gitignoreExists <- doesPathExist gitignorePath
-  gitMetadataExisted <- doesPathExist (repositoryRoot </> ".git")
-  let createdPaths = [gitignorePath | not gitignoreExists] ++ [repositoryRoot </> ".git" | targetExisted && not gitMetadataExisted]
-  ( do
-      runGitInitialization initSpec repositoryRoot
-      unless gitignoreExists (TIO.writeFile gitignorePath homeGitignoreSource)
-    )
-    `onException` rollbackInitialization targetExisted repositoryRoot createdPaths
+  initializeProjectRepository initSpec targetExists home target
 initializeProjectRepository :: InitSpec -> Bool -> FilePath -> FilePath -> IO ()
 initializeProjectRepository initSpec targetExisted home repositoryRoot = do
   validateProjectLocation home repositoryRoot
@@ -577,7 +557,7 @@ validateProjectLocation home repositoryRoot =
                 hPutStrLn stderr "error: project location does not match origin"
                 hPutStrLn stderr ("actual:   " ++ repositoryRoot)
                 hPutStrLn stderr ("expected: " ++ expectedPath)
-                hPutStrLn stderr ("hint: use 'git canonicalization add " ++ origin ++ "' from the home profile")
+                hPutStrLn stderr ("hint: from the home repository, run 'git submodule add --force " ++ origin ++ " " ++ expectedRelativePath ++ "'")
                 exitFailure
               validateRegisteredHomeRepository home actualRelativePath expectedRelativePath
 isStrictDescendantOf :: FilePath -> FilePath -> Bool
@@ -632,13 +612,6 @@ completeHomeGitignore source =
       separator :: T.Text
       separator = if T.null source || T.isSuffixOf "\n" source then "" else "\n"
    in source <> separator <> T.unlines missingLines
-addHomeRepository :: FilePath -> String -> IO ()
-addHomeRepository repositoryRoot repositoryUrl = do
-  resolvedRepositoryUrl <- resolveGitRemoteUrl repositoryRoot repositoryUrl
-  case canonicalHomeRepositoryPath resolvedRepositoryUrl of
-    Left urlError -> hPutStrLn stderr ("error: " ++ urlError) >> exitFailure
-    Right canonicalPath -> do
-      runGitOrExit ["-C", repositoryRoot, "submodule", "add", "--force", resolvedRepositoryUrl, canonicalPath]
 checkHomeProfile :: FilePath -> Bool -> IO ()
 checkHomeProfile repositoryRoot fix = do
   let gitignorePath = repositoryRoot </> ".gitignore"
@@ -2925,7 +2898,7 @@ hUnitPackageTests =
       TestLabel "Reports concise Nix template parameter differences." (TestCase nixTemplateParameterDifferenceTest),
       TestLabel "Accepts python_template without inputs or shellHook." (TestCase pythonTemplateOptionalInputsAndShellHookTest),
       TestLabel "Documents help and invokes it consistently." (TestCase commandLineHelpEndToEndTest),
-      TestLabel "Initializes home and project repositories without staging files." (TestCase initializationEndToEndTest),
+      TestLabel "Initializes flake repositories and rejects home initialization." (TestCase initializationEndToEndTest),
       TestLabel "Validates canonical project locations against origin." (TestCase initializationLocationEndToEndTest),
       TestLabel "Preserves existing initialization files and rejects inconsistent state." (TestCase initializationExistingFilesEndToEndTest),
       TestLabel "Disambiguates repository URLs and package additions." (TestCase addCommandParsingTest),
@@ -3299,14 +3272,12 @@ initializationEndToEndTest =
     withTemporaryPackageRepository "initialization-tools" $ \temporaryTools -> do
       environment <- initializationTestEnvironment temporaryHome temporaryTools
       (homeExit, homeStdout, homeStderr) <- runEndToEndCommandWithEnvironment "/tmp" environment ["init", temporaryHome]
-      assertEqual "Home initialization succeeds." ExitSuccess homeExit
-      assertBool "Home initialization preserves Git's normal success output." ("Initialized empty Git repository" `isInfixOf` homeStdout)
-      assertBool "Home initialization preserves Git's branch-name advice when configured." (null homeStderr || "default branch" `isInfixOf` homeStderr)
-      homeGitignore <- TIO.readFile (temporaryHome </> ".gitignore")
-      assertEqual "Home initialization writes the canonical whitelist." homeGitignoreSource homeGitignore
-      (homeStatusExit, homeStatusStdout, _homeStatusStderr) <- readGitProcess ["-C", temporaryHome, "status", "--porcelain=v1"] ""
-      assertEqual "The initialized home is a Git repository." ExitSuccess homeStatusExit
-      assertBool "Home initialization leaves its whitelist unstaged." ("?? .gitignore" `isInfixOf` homeStatusStdout)
+      assertEqual "Home initialization is rejected." (ExitFailure 1) homeExit
+      assertEqual "Home initialization leaves stdout empty." "" homeStdout
+      assertBool "Home initialization directs users to the documented Git setup." ("initialize the home repository with Git" `isInfixOf` homeStderr)
+      homeGitMetadataExists <- doesPathExist (temporaryHome </> ".git")
+      homeGitignoreExists <- doesPathExist (temporaryHome </> ".gitignore")
+      assertBool "Rejected home initialization does not create Git metadata or a whitelist." (not homeGitMetadataExists && not homeGitignoreExists)
       let project = temporaryHome </> "github.com/owner/demo"
       (projectExit, projectStdout, projectStderr) <- runEndToEndCommandWithEnvironment "/tmp" environment ["init", project]
       assertEqual "Project initialization creates a missing nested path and succeeds without origin." ExitSuccess projectExit
@@ -3394,11 +3365,7 @@ initializationExistingFilesEndToEndTest =
 addCommandParsingTest :: IO ()
 addCommandParsingTest = do
   assertEqual "Init accepts exactly one local path." (Just (InitCommand (InitSpec "project"))) (parseCommandForTest ["init", "project"])
-  assertEqual
-    "A supported URL prefix selects home repository addition."
-    (Just (AddRepositoryCommand "https://github.com/owner/demo.git"))
-    (parseCommandForTest ["add", "https://github.com/owner/demo.git"])
-  assertEqual "A single add argument is treated as a Git repository URL or alias." (Just (AddRepositoryCommand "python")) (parseCommandForTest ["add", "python"])
+  assertEqual "A single add argument is rejected." Nothing (parseCommandForTest ["add", "python"])
   assertEqual
     "The option terminator permits a description beginning with a dash."
     (Just (AddPackageCommand "python" "demo" (Just "--documented behavior")))
@@ -3411,6 +3378,10 @@ invalidCommandEndToEndTest =
     assertEqual "An invalid command leaves stdout empty." "" invalidCommandStdout
     assertBool "An invalid command prints an error and usage to stderr." ("Invalid argument" `isInfixOf` invalidCommandStderr && "Usage:" `isInfixOf` invalidCommandStderr)
     assertEqual "Init without a path defaults to the current directory." (Just (InitCommand (InitSpec "."))) (parseCommandForTest ["init"])
+    (incompleteAddExit, incompleteAddStdout, incompleteAddStderr) <- runEndToEndCommandIn temporaryDirectory ["add", "python"]
+    assertEqual "An incomplete add command uses Git's usage exit status." usageExitCode incompleteAddExit
+    assertEqual "An incomplete add command leaves stdout empty." "" incompleteAddStdout
+    assertBool "An incomplete add command prints usage on stderr." ("Missing:" `isInfixOf` incompleteAddStderr && "Usage:" `isInfixOf` incompleteAddStderr)
     (summaryExit, summaryStdout, summaryStderr) <- runEndToEndCommandIn temporaryDirectory ["summary"]
     assertEqual "The retired summary command uses Git's usage exit status." usageExitCode summaryExit
     assertEqual "The retired summary command leaves stdout empty." "" summaryStdout
@@ -3459,13 +3430,10 @@ homeRepositoryParsingTest = do
 homeProfileEndToEndTest :: IO ()
 homeProfileEndToEndTest =
   withTemporaryPackageRepository "home-profile-end-to-end" $ \temporaryDirectory -> do
-    environment <- environmentWithOverrides [("HOME", temporaryDirectory)]
-    (initialFixExit, initialFixStdout, initialFixStderr) <- runEndToEndCommandWithEnvironment temporaryDirectory environment ["init", temporaryDirectory]
-    assertEqual "Initializing an empty directory creates a home profile." ExitSuccess initialFixExit
-    assertBool "Initial home initialization preserves Git's success output." ("Initialized empty Git repository" `isInfixOf` initialFixStdout)
-    assertBool "Initial home initialization preserves optional Git advice." (null initialFixStderr || "default branch" `isInfixOf` initialFixStderr)
+    initializeGitRepositoryFixture temporaryDirectory
+    TIO.writeFile (temporaryDirectory </> ".gitignore") homeGitignoreSource
     gitignoreSource <- TIO.readFile (temporaryDirectory </> ".gitignore")
-    assertEqual "Initial home fix writes the canonical whitelist." "*\n!/.gitignore\n!/.gitmodules\n" gitignoreSource
+    assertEqual "Standard Git home setup writes the canonical whitelist." homeGitignoreSource gitignoreSource
     (checkExit, checkStdout, checkStderr) <- runEndToEndCommandIn temporaryDirectory ["check"]
     assertEqual "An empty home profile passes its check." ExitSuccess checkExit
     assertEqual "An empty home check emits no stdout." "" checkStdout
@@ -3496,10 +3464,6 @@ addPackageEndToEndTest =
     TIO.writeFile (temporaryRepository </> "flake.lock") "{}"
     let nestedDirectory = temporaryRepository </> "packages"
     createDirectoryIfMissing True nestedDirectory
-    (repositoryAddExit, repositoryAddStdout, repositoryAddStderr) <- runEndToEndCommandIn nestedDirectory ["add", "git@github.com:owner/demo.git"]
-    assertEqual "Repository addition from a flake repository is rejected before contacting the remote." (ExitFailure 1) repositoryAddExit
-    assertEqual "Rejected repository addition leaves stdout empty." "" repositoryAddStdout
-    assertBool "Repository addition reports that it targets a home repository." ("flake repository does not support repository resources" `isInfixOf` repositoryAddStderr)
     (addExit, addStdout, addStderr) <-
       runEndToEndCommandIn
         nestedDirectory
