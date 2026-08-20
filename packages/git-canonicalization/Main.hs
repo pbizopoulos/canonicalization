@@ -2112,7 +2112,8 @@ checkPackage packageName packageKind = do
                   if packageName == "c_template" && matchedTemplateName == "c_template"
                     then defaultAllowedNixDifferenceKeys
                     else templateAllowedDifferenceKeys templateSpec
-            comparePackageDefaultNixWithTemplate packageKind packageDefaultNixPath ("packages" </> matchedTemplateName </> "default.nix") allowedNixDifferenceKeysForPackage (templateBaselineSource templateSpec)
+                ignoredTopLevelFunctionParams = optionalTemplateFunctionParams packageKind ("packages" </> matchedTemplateName </> "default.nix")
+            compareNixFileWithTemplate ignoredTopLevelFunctionParams packageDefaultNixPath ("packages" </> matchedTemplateName </> "default.nix") allowedNixDifferenceKeysForPackage (templateBaselineSource templateSpec)
   cargoTomlIssues <- checkCargoToml packageName
   cabalFileIssues <- checkCabalFile packageName
   defaultNixConventionIssues <- checkDefaultNixConventions packageName packageKind
@@ -2346,16 +2347,12 @@ inspectHaskellPackageTests packageName = do
                     else Just ("packages/" ++ packageName ++ "/Main.hs: HUnit tests must use literal TestLabel descriptions")
                 ],
               Set.toAscList . Set.fromList $
-                filter isMeaningfulTestLabel (haskellInspectionLabels inspection)
-                  ++ map testSpecificationFromIdentifier (haskellInspectionProperties inspection)
+                haskellInspectionTestNames inspection
             )
 discoverHaskellUnitTestNamesFromSource :: String -> [String]
 discoverHaskellUnitTestNamesFromSource haskellSource = case inspectHaskellSource haskellSource of
   Left _ -> []
-  Right inspection ->
-    Set.toAscList . Set.fromList $
-      filter isMeaningfulTestLabel (haskellInspectionLabels inspection)
-        ++ map testSpecificationFromIdentifier (haskellInspectionProperties inspection)
+  Right inspection -> Set.toAscList . Set.fromList $ haskellInspectionTestNames inspection
 isMeaningfulTestLabel :: String -> Bool
 isMeaningfulTestLabel label =
   case dropWhile isSpace label of
@@ -2367,6 +2364,10 @@ data HaskellInspection = HaskellInspection
     haskellInspectionProperties :: [String],
     haskellInspectionNames :: Set.Set String
   }
+haskellInspectionTestNames :: HaskellInspection -> [String]
+haskellInspectionTestNames inspection =
+  filter isMeaningfulTestLabel (haskellInspectionLabels inspection)
+    ++ map testSpecificationFromIdentifier (haskellInspectionProperties inspection)
 inspectHaskellSource :: String -> Either String HaskellInspection
 inspectHaskellSource source = case HS.parseModuleWithMode haskellParseMode (normalizeHaskellImportsForParser source) of
   HS.ParseFailed location message -> Left (show location ++ ": " ++ message)
@@ -2599,10 +2600,6 @@ lookupCabalField requestedName fields = do
 stripCabalQuotedValue :: T.Text -> T.Text
 stripCabalQuotedValue quotedValue =
   fromMaybe quotedValue (T.stripPrefix "\"" quotedValue >>= T.stripSuffix "\"")
-comparePackageDefaultNixWithTemplate :: PackageKind -> FilePath -> FilePath -> Set.Set T.Text -> T.Text -> IO [String]
-comparePackageDefaultNixWithTemplate packageKind subjectNixPath templateBaselineNixPath allowedNixDifferenceKeys templateBaselineSourceText = do
-  let ignoredTopLevelFunctionParams = optionalTemplateFunctionParams packageKind templateBaselineNixPath
-  compareNixFileWithTemplate ignoredTopLevelFunctionParams subjectNixPath templateBaselineNixPath allowedNixDifferenceKeys templateBaselineSourceText
 optionalTemplateFunctionParams :: PackageKind -> FilePath -> Set.Set T.Text
 optionalTemplateFunctionParams packageKind templateBaselineNixPath =
   if packageKind == CPackage || takeBaseName (takeDirectory templateBaselineNixPath) == "python_template"
