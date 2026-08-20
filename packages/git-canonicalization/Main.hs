@@ -22,7 +22,7 @@ import Data.Foldable (asum, toList)
 import Data.Functor.Compose (Compose (Compose))
 import Data.Generics (everything, mkQ)
 import Data.Kind (Type)
-import Data.List (find, intercalate, isInfixOf, isPrefixOf, isSuffixOf, maximumBy, sort, sortOn, stripPrefix)
+import Data.List (dropWhileEnd, find, intercalate, isInfixOf, isPrefixOf, isSuffixOf, maximumBy, sort, sortOn, stripPrefix)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
@@ -61,6 +61,7 @@ import System.FilePath.Posix (makeRelative, splitDirectories, takeBaseName, take
 import System.IO (hClose, hPutStr, hPutStrLn, openTempFile, stderr)
 import System.Posix.Files qualified as Posix
 import System.Posix.Process (executeFile)
+import System.Posix.Temp (mkdtemp)
 import System.Process (CreateProcess (env), proc, readCreateProcessWithExitCode, readProcessWithExitCode)
 import TOML qualified
 import Test.HUnit (Counts (errors, failures), Test (TestCase, TestLabel, TestList), assertBool, assertEqual, assertFailure, runTestTT)
@@ -97,7 +98,8 @@ data CheckTemplateSpec = CheckTemplateSpec
   { checkTemplateName :: FilePath,
     checkTemplateMatches :: Map.Map FilePath PackageKind -> FilePath -> String -> Bool,
     checkTemplateBaselineSource :: T.Text,
-    checkTemplateComparisonMode :: CheckTemplateComparisonMode
+    checkTemplateComparisonMode :: CheckTemplateComparisonMode,
+    checkTemplatePackageAssociation :: Maybe (String, [PackageKind])
   }
 type CheckTemplateComparisonMode :: Type
 data CheckTemplateComparisonMode
@@ -214,37 +216,43 @@ checkTemplateSpecs =
       { checkTemplateName = "haskell_coverage_check",
         checkTemplateMatches = matchesHaskellCoverageCheck,
         checkTemplateBaselineSource = haskellCoverageCheckBaselineNixSource,
-        checkTemplateComparisonMode = ExactCheckTemplate
+        checkTemplateComparisonMode = ExactCheckTemplate,
+        checkTemplatePackageAssociation = Just ("-coverage", [HaskellPackage])
       },
     CheckTemplateSpec
       { checkTemplateName = "python_coverage_check",
         checkTemplateMatches = matchesPythonCoverageCheck,
         checkTemplateBaselineSource = pythonCoverageCheckBaselineNixSource,
-        checkTemplateComparisonMode = ExactCheckTemplate
+        checkTemplateComparisonMode = ExactCheckTemplate,
+        checkTemplatePackageAssociation = Just ("_coverage", [PythonPackage, PythonLaTeXPackage])
       },
     CheckTemplateSpec
       { checkTemplateName = "rust_coverage_check",
         checkTemplateMatches = matchesRustCoverageCheck,
         checkTemplateBaselineSource = rustCoverageCheckBaselineNixSource,
-        checkTemplateComparisonMode = ExactCheckTemplate
+        checkTemplateComparisonMode = ExactCheckTemplate,
+        checkTemplatePackageAssociation = Just ("-coverage", [RustPackage])
       },
     CheckTemplateSpec
       { checkTemplateName = "c_package_vm_check",
         checkTemplateMatches = matchesCPackageVmCheck,
         checkTemplateBaselineSource = cTemplateCheckBaselineNixSource,
-        checkTemplateComparisonMode = StructuralCPackageVm
+        checkTemplateComparisonMode = StructuralCPackageVm,
+        checkTemplatePackageAssociation = Nothing
       },
     CheckTemplateSpec
       { checkTemplateName = "default_vm_with_disko_check",
         checkTemplateMatches = matchesDefaultVmWithDiskoCheck,
         checkTemplateBaselineSource = defaultVmWithDiskoCheckBaselineNixSource,
-        checkTemplateComparisonMode = ExactCheckTemplate
+        checkTemplateComparisonMode = ExactCheckTemplate,
+        checkTemplatePackageAssociation = Nothing
       },
     CheckTemplateSpec
       { checkTemplateName = "host_default_check",
         checkTemplateMatches = \_ checkName _ -> checkName == "host_default",
         checkTemplateBaselineSource = hostDefaultCheckBaselineNixSource,
-        checkTemplateComparisonMode = ExactCheckTemplate
+        checkTemplateComparisonMode = ExactCheckTemplate,
+        checkTemplatePackageAssociation = Nothing
       }
   ]
 matchesHaskellCoverageCheck :: Map.Map FilePath PackageKind -> FilePath -> String -> Bool
@@ -584,7 +592,7 @@ isStrictDescendantOf parent child =
           _ -> True
 readGitOrigin :: FilePath -> IO (Maybe String)
 readGitOrigin repositoryRoot = do
-  (originExit, originStdout, originStderr) <- readProcessWithExitCode "git" ["-C", repositoryRoot, "config", "--get", "remote.origin.url"] ""
+  (originExit, originStdout, originStderr) <- readGitProcess ["-C", repositoryRoot, "config", "--get", "remote.origin.url"] ""
   case originExit of
     ExitSuccess -> pure (Just (T.unpack (T.strip (T.pack originStdout))))
     ExitFailure 1 | null originStdout -> pure Nothing
@@ -725,7 +733,7 @@ readHomeRepositories repositoryRoot = do
       | not (Posix.isRegularFile status) -> pure (Left [gitmodulesPath ++ ": must be a regular file"])
       | otherwise -> do
           (configExit, configStdout, configStderr) <-
-            readProcessWithExitCode "git" ["config", "get", "--file", gitmodulesPath, "--null", "--show-names", "--all", "--regexp", "^submodule\\..*"] ""
+            readGitProcess ["config", "get", "--file", gitmodulesPath, "--null", "--show-names", "--all", "--regexp", "^submodule\\..*"] ""
           if configExit == ExitFailure 1 && null configStdout && null configStderr
             then pure (Right [])
             else
@@ -772,7 +780,7 @@ canonicalHomeRepositoryPath :: String -> Either String FilePath
 canonicalHomeRepositoryPath repositoryUrl = do
   (hostname, repositoryPathWithSuffix) <-
     maybe (Left ("remote URL has no canonical host and repository path: " ++ repositoryUrl)) Right (parseHostedGitRemote repositoryUrl)
-  let trimmedRepositoryPath = reverse (dropWhile (== '/') (reverse repositoryPathWithSuffix))
+  let trimmedRepositoryPath = dropWhileEnd (== '/') repositoryPathWithSuffix
       repositoryComponents = map T.unpack (T.splitOn "/" (T.pack trimmedRepositoryPath))
   case repositoryComponents of
     _ : _ -> do
@@ -808,7 +816,7 @@ hostnameFromAuthority authority = do
   pure hostname
 resolveGitRemoteUrl :: FilePath -> String -> IO String
 resolveGitRemoteUrl repositoryRoot repositoryUrl = do
-  (resolveExit, resolveStdout, resolveStderr) <- readProcessWithExitCode "git" ["-C", repositoryRoot, "ls-remote", "--get-url", repositoryUrl] ""
+  (resolveExit, resolveStdout, resolveStderr) <- readGitProcess ["-C", repositoryRoot, "ls-remote", "--get-url", repositoryUrl] ""
   if resolveExit == ExitSuccess
     then pure (T.unpack (T.strip (T.pack resolveStdout)))
     else do
@@ -841,6 +849,8 @@ runGitOrExit :: [String] -> IO ()
 runGitOrExit arguments = do
   _ <- runProcessOrExit PrintSuccessfulOutput "git" arguments
   pure ()
+readGitProcess :: [String] -> String -> IO (ExitCode, String, String)
+readGitProcess = readProcessWithExitCode "git"
 runInGitRepositoryRoot :: FilePath -> IO a -> IO a
 runInGitRepositoryRoot repositoryDirectory action = do
   canonicalRepositoryRoot <- discoverGitRepositoryRoot repositoryDirectory
@@ -913,7 +923,7 @@ collectRepositoryContentCompliance = do
       packageComplianceResults <- forM packages (uncurry checkPackage)
       let packageComplianceIssues = concatMap fst packageComplianceResults
           packageTestNames = Map.fromList (zip (map fst packages) (map snd packageComplianceResults))
-      checkNames <- listSubdirectoryNames "checks"
+      checkNames <- listGitVisibleChildNames "checks"
       let packageKinds = Map.fromList packages
       checkComplianceIssues <- concat <$> forM checkNames (checkTemplateWith packageKinds)
       rootGitignoreIssues <- checkRootGitignore
@@ -1347,13 +1357,8 @@ renderPackageKind packageKind =
     BinaryReleasePackage -> "binary-release"
 supportedAddPackageKinds :: [(String, PackageKind)]
 supportedAddPackageKinds =
-  [ ("haskell", HaskellPackage),
-    ("rust", RustPackage),
-    ("html", HTMLPackage),
-    ("python", PythonPackage),
-    ("python-latex", PythonLaTeXPackage),
-    ("c", CPackage),
-    ("latex", LaTeXPackage)
+  [ (renderPackageKind packageKind, packageKind)
+  | packageKind <- [HaskellPackage, RustPackage, HTMLPackage, PythonPackage, PythonLaTeXPackage, CPackage, LaTeXPackage]
   ]
 parseSupportedAddPackageKind :: String -> Maybe PackageKind
 parseSupportedAddPackageKind packageKindName = lookup packageKindName supportedAddPackageKinds
@@ -1387,11 +1392,6 @@ data ScaffoldFile = ScaffoldFile
   { scaffoldFilePath :: FilePath,
     scaffoldFileContents :: T.Text
   }
-type RepositoryCheckSpec :: Type
-data RepositoryCheckSpec = RepositoryCheckSpec
-  { repositoryCheckNameSuffix :: String,
-    repositoryCheckSource :: T.Text
-  }
 addPackageToCurrentRepository :: PackageKind -> FilePath -> Maybe String -> IO (Either String [FilePath])
 addPackageToCurrentRepository packageKind packageName packageDescription =
   case validatePackageNameForKind packageKind packageName of
@@ -1403,7 +1403,7 @@ addPackageToCurrentRepository packageKind packageName packageDescription =
         then pure (Left ("path already exists: " ++ packageRootDirectory))
         else do
           let packageScaffoldFiles = renderScaffoldFiles packageKind packageName packageDescription
-              checkScaffoldFiles = maybeToList (renderRepositoryCheckScaffoldFile packageName <$> repositoryCheckSpecForPackageKind packageKind)
+              checkScaffoldFiles = maybeToList (renderRepositoryCheckScaffoldFile packageName <$> checkTemplateSpecForPackageKind packageKind)
           createScaffoldFiles (packageScaffoldFiles ++ checkScaffoldFiles) >>= \case
             Left scaffoldError -> pure (Left scaffoldError)
             Right scaffoldPaths -> do
@@ -1422,25 +1422,23 @@ createScaffoldFiles scaffoldFiles = do
         createDirectoryIfMissing True (takeDirectory path)
         TIO.writeFile path (scaffoldFileContents scaffoldFile)
       pure (Right scaffoldPaths)
-renderRepositoryCheckScaffoldFile :: FilePath -> RepositoryCheckSpec -> ScaffoldFile
+renderRepositoryCheckScaffoldFile :: FilePath -> CheckTemplateSpec -> ScaffoldFile
 renderRepositoryCheckScaffoldFile packageName checkSpec =
-  ScaffoldFile
-    ("checks" </> (packageName ++ repositoryCheckNameSuffix checkSpec) </> "default.nix")
-    (repositoryCheckSource checkSpec)
+  case checkTemplatePackageAssociation checkSpec of
+    Just (suffix, _) ->
+      ScaffoldFile
+        ("checks" </> (packageName ++ suffix) </> "default.nix")
+        (checkTemplateBaselineSource checkSpec)
+    Nothing -> error "cannot scaffold an unassociated check template"
 repositoryCheckNameForPackage :: PackageKind -> FilePath -> Maybe FilePath
 repositoryCheckNameForPackage packageKind packageName =
-  (\checkSpec -> packageName ++ repositoryCheckNameSuffix checkSpec)
-    <$> repositoryCheckSpecForPackageKind packageKind
-repositoryCheckSpecForPackageKind :: PackageKind -> Maybe RepositoryCheckSpec
-repositoryCheckSpecForPackageKind = \case
-  HaskellPackage -> Just (spec "-coverage" haskellCoverageCheckBaselineNixSource)
-  RustPackage -> Just (spec "-coverage" rustCoverageCheckBaselineNixSource)
-  PythonPackage -> Just (spec "_coverage" pythonCoverageCheckBaselineNixSource)
-  PythonLaTeXPackage -> Just (spec "_coverage" pythonCoverageCheckBaselineNixSource)
-  _ -> Nothing
-  where
-    spec :: String -> T.Text -> RepositoryCheckSpec
-    spec = RepositoryCheckSpec
+  checkTemplateSpecForPackageKind packageKind
+    >>= (fmap ((packageName ++) . fst) . checkTemplatePackageAssociation)
+checkTemplateSpecForPackageKind :: PackageKind -> Maybe CheckTemplateSpec
+checkTemplateSpecForPackageKind packageKind =
+  find
+    (maybe False (elem packageKind . snd) . checkTemplatePackageAssociation)
+    checkTemplateSpecs
 renderScaffoldFiles :: PackageKind -> FilePath -> Maybe String -> [ScaffoldFile]
 renderScaffoldFiles packageKind packageName packageDescription =
   map prefixPackagePath $
@@ -1556,8 +1554,7 @@ removePackageFromCurrentRepository removeSpec = do
                   then pure (Right ())
                   else do
                     (statusExit, statusStdout, statusStderr) <-
-                      readProcessWithExitCode
-                        "git"
+                      readGitProcess
                         (["status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching", "--"] ++ removalPaths)
                         ""
                     pure $
@@ -1579,14 +1576,14 @@ removePackageFromCurrentRepository removeSpec = do
                     else do
                       let forceArguments :: [String]
                           forceArguments = ["-f" | removeForce removeSpec]
-                      (removeExit, removeStdout, removeStderr) <- readProcessWithExitCode "git" (["rm", "-r"] ++ forceArguments ++ ["--"] ++ removalPaths) ""
+                      (removeExit, removeStdout, removeStderr) <- readGitProcess (["rm", "-r"] ++ forceArguments ++ ["--"] ++ removalPaths) ""
                       if removeExit /= ExitSuccess
                         then pure (Left ("git rm failed: " ++ T.unpack (T.strip (T.pack removeStderr))))
                         else do
                           putStr removeStdout
                           rootGitignoreSource <- renderRootGitignoreFromCurrentRepository
                           TIO.writeFile ".gitignore" rootGitignoreSource
-                          (addExit, _addStdout, addStderr) <- readProcessWithExitCode "git" ["add", "--", ".gitignore"] ""
+                          (addExit, _addStdout, addStderr) <- readGitProcess ["add", "--", ".gitignore"] ""
                           if addExit == ExitSuccess
                             then pure (Right ())
                             else pure (Left ("could not stage .gitignore: " ++ T.unpack (T.strip (T.pack addStderr))))
@@ -1911,8 +1908,8 @@ allowedRegularFilePathsForPackageKind packageRootDirectory packageDirectoryName 
 collectStructurallyAllowedRepositoryEntriesWith :: [FilePath] -> IO [RepositoryEntry]
 collectStructurallyAllowedRepositoryEntriesWith projectedPaths = do
   packageInfos <- discoverPackageInfosFromFilesystem
-  checkNames <- listFilesystemSubdirectoryNames "checks"
-  hostNames <- listFilesystemSubdirectoryNames "hosts"
+  checkNames <- listFilesystemChildDirectories "checks"
+  hostNames <- listFilesystemChildDirectories "hosts"
   let checkPaths = ["checks" </> checkName </> "default.nix" | checkName <- checkNames]
       hostPaths =
         concat
@@ -1936,7 +1933,7 @@ collectStructurallyAllowedRepositoryEntriesWith projectedPaths = do
     ]
 discoverPackageInfosFromFilesystem :: IO [PackageInfo]
 discoverPackageInfosFromFilesystem = do
-  packageNames <- listFilesystemSubdirectoryNames "packages"
+  packageNames <- listFilesystemChildDirectories "packages"
   forM packageNames $ \packageName -> do
     let packageRootDirectory = "packages" </> packageName
         markerPaths =
@@ -1989,8 +1986,8 @@ collectTreeLeafRepositoryEntries path =
           childNames <- sort <$> listDirectory path
           childEntries <- concat <$> mapM (collectTreeLeafRepositoryEntries . (path </>)) childNames
           pure (if null childEntries then [repositoryEntry] else childEntries)
-listFilesystemSubdirectoryNames :: FilePath -> IO [FilePath]
-listFilesystemSubdirectoryNames parentDirectory = do
+listFilesystemChildDirectories :: FilePath -> IO [FilePath]
+listFilesystemChildDirectories parentDirectory = do
   collectExistingRepositoryEntry parentDirectory >>= \case
     Just (_, parentStatus) | Posix.isDirectory parentStatus -> do
       childNames <- sort <$> listDirectory parentDirectory
@@ -2015,7 +2012,7 @@ collectRepositoryEntries rootPath = do
   filterGitIgnoredRepositoryEntries repositoryEntries
 collectTrackedRepositoryDirectories :: IO (Set.Set FilePath)
 collectTrackedRepositoryDirectories = do
-  (gitLsFilesExit, trackedPathsOutput, gitLsFilesStderr) <- readProcessWithExitCode "git" ["ls-files", "-z"] ""
+  (gitLsFilesExit, trackedPathsOutput, gitLsFilesStderr) <- readGitProcess ["ls-files", "-z"] ""
   case gitLsFilesExit of
     ExitSuccess -> pure (Set.fromList (concatMap parentDirectoryPaths (splitNullTerminated trackedPathsOutput)))
     _ -> ioError (userError ("git ls-files failed: " ++ T.unpack (T.strip (T.pack gitLsFilesStderr))))
@@ -2053,7 +2050,7 @@ filterGitIgnoredRepositoryEntries [] = pure []
 filterGitIgnoredRepositoryEntries repositoryEntries = do
   let gitCheckIgnoreInput = concatMap ((++ "\0") . fst) repositoryEntries
   (checkIgnoreExit, ignoredPathsOutput, checkIgnoreStderr) <-
-    readProcessWithExitCode "git" ["check-ignore", "--stdin", "-z"] gitCheckIgnoreInput
+    readGitProcess ["check-ignore", "--stdin", "-z"] gitCheckIgnoreInput
   case checkIgnoreExit of
     ExitSuccess -> do
       let ignoredPaths = Set.fromList (splitNullTerminated ignoredPathsOutput)
@@ -2061,11 +2058,7 @@ filterGitIgnoredRepositoryEntries repositoryEntries = do
     ExitFailure 1 -> pure repositoryEntries
     _ -> ioError (userError ("git check-ignore failed: " ++ T.unpack (T.strip (T.pack checkIgnoreStderr))))
 splitNullTerminated :: String -> [String]
-splitNullTerminated = filter (not . null) . foldr splitCharacter [[]]
-  where
-    splitCharacter '\0' accumulatedParts = [] : accumulatedParts
-    splitCharacter character (currentPart : remainingParts) = (character : currentPart) : remainingParts
-    splitCharacter _ [] = []
+splitNullTerminated = map T.unpack . filter (not . T.null) . T.split (== '\0') . T.pack
 toRelativePath :: FilePath -> FilePath
 toRelativePath = makeRelative "."
 isOpaqueDirectory :: FilePath -> Bool
@@ -2080,8 +2073,8 @@ hostRootPathFromRepositoryPath repositoryPath =
   case splitDirectories repositoryPath of
     "hosts" : hostDirectoryName : _ -> Just ("hosts" </> hostDirectoryName)
     _ -> Nothing
-listSubdirectoryNames :: FilePath -> IO [FilePath]
-listSubdirectoryNames parentDirectory = do
+listGitVisibleChildNames :: FilePath -> IO [FilePath]
+listGitVisibleChildNames parentDirectory = do
   repositoryEntries <- collectRepositoryEntries "."
   pure
     ( Set.toAscList
@@ -2136,30 +2129,28 @@ checkTemplateWith packageKinds checkName = do
             [ "checks/" ++ checkName ++ "/default.nix: could not infer corresponding check template"
             ]
         Just checkTemplateSpec -> do
-          let packageAssociationIssues = validateCheckPackageAssociation packageKinds checkName checkTemplatePath (checkTemplateName checkTemplateSpec)
+          let packageAssociationIssues = validateCheckPackageAssociation packageKinds checkName checkTemplatePath checkTemplateSpec
           templateIssues <- validateCheckTemplate packageKinds checkName checkTemplatePath checkTemplateSpec
           pure (packageAssociationIssues ++ templateIssues)
-validateCheckPackageAssociation :: Map.Map FilePath PackageKind -> FilePath -> FilePath -> FilePath -> [String]
-validateCheckPackageAssociation packageKinds checkName checkTemplatePath matchedCheckTemplateName =
-  case checkPackageAssociation matchedCheckTemplateName checkName of
+validateCheckPackageAssociation :: Map.Map FilePath PackageKind -> FilePath -> FilePath -> CheckTemplateSpec -> [String]
+validateCheckPackageAssociation packageKinds checkName checkTemplatePath checkTemplateSpec =
+  case checkPackageAssociation checkTemplateSpec checkName of
     Nothing -> []
     Just (packageName, expectedPackageKinds) ->
       [ checkTemplatePath
           ++ ": "
-          ++ matchedCheckTemplateName
+          ++ checkTemplateName checkTemplateSpec
           ++ " requires corresponding "
           ++ intercalate " or " (map renderPackageKind expectedPackageKinds)
           ++ " package packages/"
           ++ packageName
       | maybe True (`notElem` expectedPackageKinds) (Map.lookup packageName packageKinds)
       ]
-checkPackageAssociation :: FilePath -> FilePath -> Maybe (FilePath, [PackageKind])
-checkPackageAssociation matchedCheckTemplateName checkName =
-  case matchedCheckTemplateName of
-    "haskell_coverage_check" -> withSuffix "-coverage" [HaskellPackage]
-    "python_coverage_check" -> withSuffix "_coverage" [PythonPackage, PythonLaTeXPackage]
-    "rust_coverage_check" -> withSuffix "-coverage" [RustPackage]
-    _ -> Nothing
+checkPackageAssociation :: CheckTemplateSpec -> FilePath -> Maybe (FilePath, [PackageKind])
+checkPackageAssociation checkTemplateSpec checkName =
+  case checkTemplatePackageAssociation checkTemplateSpec of
+    Just (suffix, expectedPackageKinds) -> withSuffix suffix expectedPackageKinds
+    Nothing -> Nothing
   where
     withSuffix :: String -> [PackageKind] -> Maybe (FilePath, [PackageKind])
     withSuffix checkNameSuffix expectedPackageKinds =
@@ -3309,7 +3300,7 @@ initializationEndToEndTest =
       assertBool "Home initialization preserves Git's branch-name advice when configured." (null homeStderr || "default branch" `isInfixOf` homeStderr)
       homeGitignore <- TIO.readFile (temporaryHome </> ".gitignore")
       assertEqual "Home initialization writes the canonical whitelist." homeGitignoreSource homeGitignore
-      (homeStatusExit, homeStatusStdout, _homeStatusStderr) <- readProcessWithExitCode "git" ["-C", temporaryHome, "status", "--porcelain=v1"] ""
+      (homeStatusExit, homeStatusStdout, _homeStatusStderr) <- readGitProcess ["-C", temporaryHome, "status", "--porcelain=v1"] ""
       assertEqual "The initialized home is a Git repository." ExitSuccess homeStatusExit
       assertBool "Home initialization leaves its whitelist unstaged." ("?? .gitignore" `isInfixOf` homeStatusStdout)
       let project = temporaryHome </> "github.com/owner/demo"
@@ -3323,7 +3314,7 @@ initializationEndToEndTest =
       assertEqual "Project initialization writes the minimal Blueprint flake." minimalProjectFlakeSource projectFlake
       assertEqual "The test Nix command writes a deterministic lock." "{}\n" projectLock
       assertEqual "Project initialization writes the canonical root whitelist." "*\n!/.gitignore\n!/flake.lock\n!/flake.nix\n" projectGitignore
-      (projectStatusExit, projectStatusStdout, _projectStatusStderr) <- readProcessWithExitCode "git" ["-C", project, "status", "--porcelain=v1"] ""
+      (projectStatusExit, projectStatusStdout, _projectStatusStderr) <- readGitProcess ["-C", project, "status", "--porcelain=v1"] ""
       assertEqual "The initialized project is a Git repository." ExitSuccess projectStatusExit
       assertBool "Project initialization leaves all generated files unstaged." (all (`isInfixOf` projectStatusStdout) ["?? .gitignore", "?? flake.lock", "?? flake.nix"])
       (repeatExit, repeatStdout, repeatStderr) <- runEndToEndCommandWithEnvironment "/tmp" environment ["init", project]
@@ -3619,7 +3610,7 @@ rootGitignoreStructurePolicyEndToEndTest =
     assertBool "An unrelated build result is not whitelisted." (not ("!/result\n" `T.isInfixOf` repairedRootGitignore))
     assertBool "A wrong-kind entry at an allowed path is not whitelisted." (not ("!/README\n" `T.isInfixOf` repairedRootGitignore))
     forM_ ["result", "README"] $ \ignoredPath -> do
-      (ignoreExit, _ignoreStdout, ignoreStderr) <- readProcessWithExitCode "git" ["-C", temporaryRepository, "check-ignore", "--quiet", "--", ignoredPath] ""
+      (ignoreExit, _ignoreStdout, ignoreStderr) <- readGitProcess ["-C", temporaryRepository, "check-ignore", "--quiet", "--", ignoredPath] ""
       assertEqual (ignoredPath ++ " is ignored after repair: " ++ ignoreStderr) ExitSuccess ignoreExit
 gitFileRootGitignoreFixEndToEndTest :: IO ()
 gitFileRootGitignoreFixEndToEndTest =
@@ -3889,21 +3880,18 @@ initializeGitRepositoryFixture repositoryPath =
   findExecutable "git" >>= \case
     Nothing -> assertFailure "git is required for command-line end-to-end tests"
     Just _ -> do
-      (gitInitExit, _gitInitStdout, gitInitStderr) <- readProcessWithExitCode "git" ["init", "--quiet", repositoryPath] ""
+      (gitInitExit, _gitInitStdout, gitInitStderr) <- readGitProcess ["init", "--quiet", repositoryPath] ""
       when (gitInitExit /= ExitSuccess) $
         assertFailure ("Failed to initialize Git repository fixture: " ++ gitInitStderr)
 runGitFixtureCommand :: [String] -> IO ()
 runGitFixtureCommand arguments = do
-  (gitExit, _gitStdout, gitStderr) <- readProcessWithExitCode "git" arguments ""
+  (gitExit, _gitStdout, gitStderr) <- readGitProcess arguments ""
   when (gitExit /= ExitSuccess) $
     assertFailure ("Git fixture command failed: git " ++ unwords arguments ++ if null gitStderr then "" else ": " ++ gitStderr)
 withTemporaryPackageRepository :: String -> (FilePath -> IO a) -> IO a
 withTemporaryPackageRepository tempDirName action = do
   temporaryDirectory <- getTemporaryDirectory
-  (temporaryPath, temporaryHandle) <- openTempFile temporaryDirectory tempDirName
-  hClose temporaryHandle
-  removeFile temporaryPath
-  createDirectoryIfMissing True temporaryPath
+  temporaryPath <- mkdtemp (temporaryDirectory </> tempDirName ++ ".XXXXXX")
   action temporaryPath `finally` removePathForcibly temporaryPath
 pythonMainSource :: T.Text
 pythonMainSource =
