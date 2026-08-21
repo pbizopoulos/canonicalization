@@ -12,11 +12,21 @@ git init
 printf '*\n!/.gitignore\n!/.gitmodules\n' > .gitignore # also add other required files/directories like .ssh
 git add .gitignore
 git commit -m 'Initialize home repository'
+```
+
+```sh
+# Create the empty remote before starting this workflow.
+cd "$HOME"
 git submodule add --force git@github.com:owner/demo.git github.com/owner/demo
+cd github.com/owner/demo
+git canonicalization init .
+git add flake.nix flake.lock .gitignore
+git commit -m 'Initialize flake repository'
+cd "$HOME"
+git add .gitmodules github.com/owner/demo
 git commit -m 'Add demo repository'
 ```
 
-Initialization: `git canonicalization init [--] [<directory>]` initializes a minimal canonical flake layout.
 Flake repositories: `git canonicalization add <type> <name>` targets the selected repository, follows a restricted subset of the numtide/blueprint layout, and maintains its root `.gitignore` whitelist.
 README: explains the repository's intent.
 Test names: describe the expected behavior.
