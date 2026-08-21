@@ -291,8 +291,7 @@ type RemoveSpec :: Type
 data RemoveSpec = RemoveSpec
   { removePackageName :: FilePath,
     removeDryRun :: Bool,
-    removeForce :: Bool,
-    removeIgnoreUnmatch :: Bool
+    removeForce :: Bool
   }
   deriving stock (Eq, Show)
 main :: IO ()
@@ -402,7 +401,6 @@ removeCommandParser =
             <$> OA.strArgument (OA.metavar "PACKAGE_NAME")
             <*> OA.switch (OA.short 'n' <> OA.long "dry-run" <> OA.help "Show what would be removed.")
             <*> OA.switch (OA.short 'f' <> OA.long "force" <> OA.help "Allow removal with local changes.")
-            <*> OA.switch (OA.long "ignore-unmatch" <> OA.help "Succeed if the package does not exist.")
         )
 checkCommandParser :: OA.Parser Command
 checkCommandParser =
@@ -1486,10 +1484,7 @@ removePackageFromCurrentRepository removeSpec = do
     then pure (Left ("invalid package name: " ++ packageName))
     else
       if not packageExists
-        then
-          if removeIgnoreUnmatch removeSpec
-            then pure (Right ())
-            else pure (Left ("package does not exist: " ++ packagePath))
+        then pure (Left ("package does not exist: " ++ packagePath))
         else do
           (packages, structureIssues) <- inspectRepositoryStructure
           case lookup packageName packages of
@@ -1522,9 +1517,7 @@ removePackageFromCurrentRepository removeSpec = do
                             else
                               Left ("package or check is not clean:\n" ++ statusStdout)
               rootGitignoreCleanlinessResult <-
-                if removeDryRun removeSpec
-                  then pure (Right ())
-                  else ensureRootGitignoreClean (removeForce removeSpec)
+                ensureRootGitignoreClean (removeForce removeSpec)
               let cleanlinessResult = packageCleanlinessResult >> rootGitignoreCleanlinessResult
               case cleanlinessResult of
                 Left cleanlinessError -> pure (Left cleanlinessError)
@@ -3548,9 +3541,10 @@ removePackageEndToEndTest =
     assertEqual "The repository remains canonical after removal." ExitSuccess checkExit
     assertEqual "The successful post-removal check leaves stdout empty." "" checkStdout
     assertEqual "The successful post-removal check leaves stderr empty." "" checkStderr
-    (ignoreExit, ignoreStdout, ignoreStderr) <- runEndToEndCommandIn temporaryRepository ["rm", "--ignore-unmatch", "demo"]
-    assertEqual "Ignore-unmatch succeeds for an absent package." ExitSuccess ignoreExit
-    assertEqual "Ignore-unmatch is quiet." "" (ignoreStdout ++ ignoreStderr)
+    (missingExit, missingStdout, missingStderr) <- runEndToEndCommandIn temporaryRepository ["rm", "demo"]
+    assertEqual "Removing an absent package fails." (ExitFailure 1) missingExit
+    assertEqual "Missing-package removal leaves stdout empty." "" missingStdout
+    assertBool "Missing-package removal identifies the package path." ("package does not exist: packages/demo" `isInfixOf` missingStderr)
 unsafeRemovePackageEndToEndTest :: IO ()
 unsafeRemovePackageEndToEndTest = do
   assertUnsafeRemove "modified-remove-package" $ \temporaryRepository ->
@@ -3575,6 +3569,10 @@ rootGitignoreMutationSafetyEndToEndTest =
     let rootGitignorePath = temporaryRepository </> ".gitignore"
     TIO.appendFile rootGitignorePath "# local change\n"
     dirtyRootGitignore <- TIO.readFile rootGitignorePath
+    (dryRunExit, dryRunStdout, dryRunStderr) <- runEndToEndCommandIn temporaryRepository ["rm", "--dry-run", "demo"]
+    assertEqual "Dry-run removal rejects a changed root Git ignore file." (ExitFailure 1) dryRunExit
+    assertEqual "A refused dry-run leaves stdout empty." "" dryRunStdout
+    assertBool "The dry-run refusal identifies the changed root Git ignore file." ("root .gitignore is not clean" `isInfixOf` dryRunStderr)
     (removeExit, removeStdout, removeStderr) <- runEndToEndCommandIn temporaryRepository ["rm", "demo"]
     assertEqual "Removal rejects a changed root Git ignore file." (ExitFailure 1) removeExit
     assertEqual "A refused removal leaves stdout empty." "" removeStdout
