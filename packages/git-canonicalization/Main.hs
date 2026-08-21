@@ -1342,14 +1342,30 @@ addPackageToCurrentRepository packageKind packageName packageDescription =
       if packageRootExists
         then pure (Left ("path already exists: " ++ packageRootDirectory))
         else do
-          let packageScaffoldFiles = renderScaffoldFiles packageKind packageName packageDescription
-              checkScaffoldFiles = maybeToList (renderRepositoryCheckScaffoldFile packageName <$> checkTemplateSpecForPackageKind packageKind)
-          createScaffoldFiles (packageScaffoldFiles ++ checkScaffoldFiles) >>= \case
-            Left scaffoldError -> pure (Left scaffoldError)
-            Right scaffoldPaths -> do
-              rootGitignoreSource <- renderRootGitignoreFromCurrentRepositoryWith scaffoldPaths
-              TIO.writeFile ".gitignore" rootGitignoreSource
-              pure (Right (".gitignore" : scaffoldPaths))
+          ensureRootGitignoreClean False >>= \case
+            Left cleanlinessError -> pure (Left cleanlinessError)
+            Right () -> do
+              let packageScaffoldFiles = renderScaffoldFiles packageKind packageName packageDescription
+                  checkScaffoldFiles = maybeToList (renderRepositoryCheckScaffoldFile packageName <$> checkTemplateSpecForPackageKind packageKind)
+              createScaffoldFiles (packageScaffoldFiles ++ checkScaffoldFiles) >>= \case
+                Left scaffoldError -> pure (Left scaffoldError)
+                Right scaffoldPaths -> do
+                  rootGitignoreSource <- renderRootGitignoreFromCurrentRepositoryWith scaffoldPaths
+                  TIO.writeFile ".gitignore" rootGitignoreSource
+                  pure (Right (".gitignore" : scaffoldPaths))
+ensureRootGitignoreClean :: Bool -> IO (Either String ())
+ensureRootGitignoreClean force
+  | force = pure (Right ())
+  | otherwise = do
+      (statusExit, statusStdout, statusStderr) <-
+        readGitProcess ["status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching", "--", ".gitignore"] ""
+      pure $
+        if statusExit /= ExitSuccess
+          then Left ("could not inspect root .gitignore state: " ++ T.unpack (T.strip (T.pack statusStderr)))
+          else
+            if null statusStdout
+              then Right ()
+              else Left ("root .gitignore is not clean:\n" ++ statusStdout)
 createScaffoldFiles :: [ScaffoldFile] -> IO (Either String [FilePath])
 createScaffoldFiles scaffoldFiles = do
   let scaffoldPaths = map scaffoldFilePath scaffoldFiles
@@ -1489,7 +1505,7 @@ removePackageFromCurrentRepository removeSpec = do
               let maybeCheckPath = ("checks" </>) <$> repositoryCheckNameForPackage packageKind packageName
               existingCheckPaths <- filterM doesPathExist (maybeToList maybeCheckPath)
               let removalPaths = packagePath : existingCheckPaths
-              cleanlinessResult <-
+              packageCleanlinessResult <-
                 if removeForce removeSpec
                   then pure (Right ())
                   else do
@@ -1505,6 +1521,11 @@ removePackageFromCurrentRepository removeSpec = do
                             then Right ()
                             else
                               Left ("package or check is not clean:\n" ++ statusStdout)
+              rootGitignoreCleanlinessResult <-
+                if removeDryRun removeSpec
+                  then pure (Right ())
+                  else ensureRootGitignoreClean (removeForce removeSpec)
+              let cleanlinessResult = packageCleanlinessResult >> rootGitignoreCleanlinessResult
               case cleanlinessResult of
                 Left cleanlinessError -> pure (Left cleanlinessError)
                 Right () ->
@@ -2913,6 +2934,7 @@ hUnitPackageTests =
       TestLabel "Scaffolds a package and its check from a nested directory." (TestCase addPackageEndToEndTest),
       TestLabel "Removes a clean package, its check, and whitelist entries." (TestCase removePackageEndToEndTest),
       TestLabel "Refuses to remove packages containing local changes." (TestCase unsafeRemovePackageEndToEndTest),
+      TestLabel "Protects root Git ignore changes during package mutations." (TestCase rootGitignoreMutationSafetyEndToEndTest),
       TestLabel "Rejects root whitelist drift." (TestCase rootGitignoreDriftEndToEndTest),
       TestLabel "Repairs the root whitelist from repository structure policy." (TestCase rootGitignoreStructurePolicyEndToEndTest),
       TestLabel "Repairs root whitelist drift in repositories that use a Gitfile." (TestCase gitFileRootGitignoreFixEndToEndTest),
@@ -3547,6 +3569,28 @@ unsafeRemovePackageEndToEndTest = do
     assertEqual "Forced removal permits local package changes." ExitSuccess forceExit
     assertBool "Forced removal preserves Git's path output." ("rm 'packages/demo/main.py'" `isInfixOf` forceStdout)
     assertEqual "Forced removal leaves stderr empty." "" forceStderr
+rootGitignoreMutationSafetyEndToEndTest :: IO ()
+rootGitignoreMutationSafetyEndToEndTest =
+  withGeneratedPythonPackageRepository "root-gitignore-mutation-safety" $ \temporaryRepository -> do
+    let rootGitignorePath = temporaryRepository </> ".gitignore"
+    TIO.appendFile rootGitignorePath "# local change\n"
+    dirtyRootGitignore <- TIO.readFile rootGitignorePath
+    (removeExit, removeStdout, removeStderr) <- runEndToEndCommandIn temporaryRepository ["rm", "demo"]
+    assertEqual "Removal rejects a changed root Git ignore file." (ExitFailure 1) removeExit
+    assertEqual "A refused removal leaves stdout empty." "" removeStdout
+    assertBool "The refusal identifies the changed root Git ignore file." ("root .gitignore is not clean" `isInfixOf` removeStderr)
+    rootGitignoreAfterRemove <- TIO.readFile rootGitignorePath
+    assertEqual "A refused removal preserves root Git ignore content." dirtyRootGitignore rootGitignoreAfterRemove
+    packageExists <- doesDirectoryExist (temporaryRepository </> "packages/demo")
+    assertBool "A refused removal leaves the package intact." packageExists
+    (addExit, addStdout, addStderr) <- runEndToEndCommandIn temporaryRepository ["add", "python", "other"]
+    assertEqual "Addition rejects a changed root Git ignore file." (ExitFailure 1) addExit
+    assertEqual "A refused addition leaves stdout empty." "" addStdout
+    assertBool "The refusal identifies the changed root Git ignore file." ("root .gitignore is not clean" `isInfixOf` addStderr)
+    rootGitignoreAfterAdd <- TIO.readFile rootGitignorePath
+    assertEqual "A refused addition preserves root Git ignore content." dirtyRootGitignore rootGitignoreAfterAdd
+    addedPackageExists <- doesDirectoryExist (temporaryRepository </> "packages/other")
+    assertBool "A refused addition creates no package files." (not addedPackageExists)
 assertUnsafeRemove :: String -> (FilePath -> IO ()) -> IO ()
 assertUnsafeRemove fixtureName preparePackage =
   withGeneratedPythonPackageRepository fixtureName $ \temporaryRepository -> do
@@ -3617,6 +3661,8 @@ gitFileRootGitignoreFixEndToEndTest =
 allPackageKindsEndToEndTest :: IO ()
 allPackageKindsEndToEndTest =
   withEmptyCanonicalRepository "all-package-kinds-end-to-end" $ \temporaryRepository -> do
+    runGitFixtureCommand ["-C", temporaryRepository, "config", "user.name", "Canonicalization Tests"]
+    runGitFixtureCommand ["-C", temporaryRepository, "config", "user.email", "canonicalization@example.test"]
     forM_
       [ ("haskell", "demo-haskell", "Main.hs", Just "demo-haskell-coverage"),
         ("rust", "demo-rust", "Cargo.toml", Just "demo-rust-coverage"),
@@ -3646,6 +3692,7 @@ allPackageKindsEndToEndTest =
         forM_ maybeCheckName $ \checkName -> do
           checkExists <- doesFileExist (temporaryRepository </> "checks" </> checkName </> "default.nix")
           assertBool ("Scaffolding " ++ packageKindName ++ " creates its combined check.") checkExists
+        runGitFixtureCommand ["-C", temporaryRepository, "commit", "--quiet", "-m", "Add " ++ packageName]
     (checkExit, checkStdout, checkStderr) <- runEndToEndCommandIn temporaryRepository ["check"]
     assertEqual "The repository containing every supported scaffold passes its check." ExitSuccess checkExit
     assertEqual "The successful scaffold-matrix check leaves stdout empty." "" checkStdout
