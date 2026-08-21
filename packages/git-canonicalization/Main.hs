@@ -379,7 +379,7 @@ commandParser =
     )
   where
     command :: String -> String -> OA.Parser Command -> OA.Mod OA.CommandFields Command
-    command name description parser = OA.command name (OA.info (OA.helper <*> parser) (OA.progDesc description))
+    command name description parser = OA.command name (OA.info parser (OA.progDesc description))
 initCommandParser :: OA.Parser Command
 initCommandParser =
   InitCommand . InitSpec
@@ -705,7 +705,7 @@ parseHomeRepositoryConfig :: String -> Either [String] [HomeRepository]
 parseHomeRepositoryConfig source =
   let records = splitNullTerminated source
       fields = mapMaybe parseHomeRepositoryField records
-      malformedCount = length records - length fields
+      malformedCount = length (filter isMalformedHomeRepositoryRecord records)
       grouped = Map.fromListWith (++) [(section, [(fieldName, value)]) | (section, fieldName, value) <- fields]
       parseSection :: (String, [(String, String)]) -> Either String HomeRepository
       parseSection (section, sectionFields) =
@@ -715,6 +715,10 @@ parseHomeRepositoryConfig source =
       parsed = map parseSection (Map.toAscList grouped)
       issues = lefts parsed ++ ["malformed .gitmodules field" | malformedCount > 0]
    in if null issues then Right (rights parsed) else Left issues
+isMalformedHomeRepositoryRecord :: String -> Bool
+isMalformedHomeRepositoryRecord record =
+  case T.breakOn "\n" (T.pack record) of
+    (_, valueWithSeparator) -> isNothing (T.stripPrefix "\n" valueWithSeparator)
 parseHomeRepositoryField :: String -> Maybe (String, String, String)
 parseHomeRepositoryField record = do
   let (keyText, valueWithSeparator) = T.breakOn "\n" (T.pack record)
@@ -3262,6 +3266,7 @@ commandLineHelpEndToEndTest =
     (commandHelpExit, commandHelpStdout, commandHelpStderr) <- runEndToEndCommandIn temporaryDirectory ["check", "--help"]
     assertEqual "A command-specific help request succeeds." ExitSuccess commandHelpExit
     assertBool "A command-specific help request prints specific help to stdout." ("Usage:" `isInfixOf` commandHelpStdout && "--fix" `isInfixOf` commandHelpStdout)
+    assertEqual "A command-specific help request lists each help flag once." 1 (length (filter (== "  -h,--help                Show this help text") (lines commandHelpStdout)))
     assertEqual "A command-specific help request leaves stderr empty." "" commandHelpStderr
     (initHelpExit, initHelpStdout, initHelpStderr) <- runEndToEndCommandIn temporaryDirectory ["init", "--help"]
     assertEqual "Init help succeeds." ExitSuccess initHelpExit
@@ -3417,6 +3422,10 @@ homeRepositoryParsingTest = do
     "A complete .gitmodules record becomes a repository resource."
     (Right [HomeRepository "demo" "github.com/owner/demo" "https://github.com/owner/demo.git"])
     (parseHomeRepositoryConfig "submodule.demo.path\ngithub.com/owner/demo\0submodule.demo.url\nhttps://github.com/owner/demo.git\0")
+  assertEqual
+    "Standard optional submodule metadata is ignored while its path and URL are retained."
+    (Right [HomeRepository "demo" "github.com/owner/demo" "https://github.com/owner/demo.git"])
+    (parseHomeRepositoryConfig "submodule.demo.path\ngithub.com/owner/demo\0submodule.demo.url\nhttps://github.com/owner/demo.git\0submodule.demo.branch\nmain\0")
   assertBool
     "Duplicate .gitmodules fields are rejected."
     ( either
