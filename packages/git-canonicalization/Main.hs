@@ -844,10 +844,25 @@ checkRepositoryLocation repositoryRoot =
       Right _ -> pure ()
 fixAndCheckRepositoryLocation :: FilePath -> IO ()
 fixAndCheckRepositoryLocation repositoryRoot = do
-  withCurrentDirectory repositoryRoot $ do
-    rootGitignoreSource <- renderRootGitignoreFromCurrentRepository
-    TIO.writeFile ".gitignore" rootGitignoreSource
+  repairResult <- withCurrentDirectory repositoryRoot $ do
+    ensureRootGitignoreIsSafeToRepair >>= \case
+      Left repairError -> pure (Left repairError)
+      Right () -> do
+        rootGitignoreSource <- renderRootGitignoreFromCurrentRepository
+        writeTextFileAtomically ".gitignore" rootGitignoreSource
+  case repairResult of
+    Left repairError -> hPutStrLn stderr ("error: " ++ repairError) >> exitFailure
+    Right () -> pure ()
   checkRepositoryLocation repositoryRoot
+ensureRootGitignoreIsSafeToRepair :: IO (Either String ())
+ensureRootGitignoreIsSafeToRepair = do
+  gitignoreStatus <- try (Posix.getSymbolicLinkStatus ".gitignore") :: IO (Either IOException Posix.FileStatus)
+  pure $
+    case gitignoreStatus of
+      Left _ -> Right ()
+      Right status
+        | Posix.isRegularFile status -> Right ()
+        | otherwise -> Left ".gitignore: must be a regular file before it can be repaired"
 requiredRepositoryRootFiles :: [FilePath]
 requiredRepositoryRootFiles = [".gitignore", "flake.nix", "flake.lock"]
 checkRequiredRepositoryRootFiles :: IO [String]
@@ -1351,15 +1366,13 @@ addPackageToCurrentRepository packageKind packageName packageDescription =
               case existingScaffoldRoots of
                 existingScaffoldRoot : _ -> pure (Left ("path already exists: " ++ existingScaffoldRoot))
                 [] ->
-                  createScaffoldFiles scaffoldFiles >>= \case
+                  createScaffoldFiles scaffoldRoots scaffoldFiles >>= \case
                     Left scaffoldError -> pure (Left scaffoldError)
                     Right scaffoldPaths -> do
                       rootGitignoreSource <- renderRootGitignoreFromCurrentRepositoryWith scaffoldPaths
                       writeTextFileAtomically ".gitignore" rootGitignoreSource >>= \case
                         Left writeError -> do
-                          forM_ scaffoldRoots $ \scaffoldRoot -> do
-                            scaffoldRootExists <- doesPathExist scaffoldRoot
-                            when scaffoldRootExists (removePathForcibly scaffoldRoot)
+                          removeScaffoldRoots scaffoldRoots
                           pure (Left ("could not update .gitignore: " ++ writeError))
                         Right () -> pure (Right (".gitignore" : scaffoldPaths))
 ensureRootGitignoreClean :: Bool -> IO (Either String ())
@@ -1375,18 +1388,27 @@ ensureRootGitignoreClean force
             if null statusStdout
               then Right ()
               else Left ("root .gitignore is not clean:\n" ++ statusStdout)
-createScaffoldFiles :: [ScaffoldFile] -> IO (Either String [FilePath])
-createScaffoldFiles scaffoldFiles = do
+createScaffoldFiles :: [FilePath] -> [ScaffoldFile] -> IO (Either String [FilePath])
+createScaffoldFiles scaffoldRoots scaffoldFiles = do
   let scaffoldPaths = map scaffoldFilePath scaffoldFiles
   existingPaths <- filterM doesPathExist scaffoldPaths
   case existingPaths of
     existingPath : _ -> pure (Left ("path already exists: " ++ existingPath))
     [] -> do
-      forM_ scaffoldFiles $ \scaffoldFile -> do
+      writeResult <- try $ forM_ scaffoldFiles $ \scaffoldFile -> do
         let path = scaffoldFilePath scaffoldFile
         createDirectoryIfMissing True (takeDirectory path)
         TIO.writeFile path (scaffoldFileContents scaffoldFile)
-      pure (Right scaffoldPaths)
+      case writeResult of
+        Left (writeError :: IOException) -> do
+          removeScaffoldRoots scaffoldRoots
+          pure (Left ("could not create scaffold files: " ++ show writeError))
+        Right () -> pure (Right scaffoldPaths)
+removeScaffoldRoots :: [FilePath] -> IO ()
+removeScaffoldRoots scaffoldRoots =
+  forM_ scaffoldRoots $ \scaffoldRoot -> do
+    scaffoldRootExists <- doesPathExist scaffoldRoot
+    when scaffoldRootExists (removePathForcibly scaffoldRoot)
 writeTextFileAtomically :: FilePath -> T.Text -> IO (Either String ())
 writeTextFileAtomically target source = do
   writeResult <- try $ do
@@ -2496,9 +2518,14 @@ pythonTestInspectorPythonSource =
       "        module = ast.parse(source, filename=path)",
       "    except (OSError, SyntaxError, UnicodeError):",
       "        sys.exit(1)",
+      "    test_containers = [module] + [",
+      "        node for node in module.body",
+      "        if isinstance(node, ast.ClassDef) and node.name.startswith('Test')",
+      "    ]",
       "    tests = [",
       "        {'name': node.name, 'docstring': ast.get_docstring(node)}",
-      "        for node in module.body",
+      "        for container in test_containers",
+      "        for node in container.body",
       "        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))",
       "        and node.name.startswith('test_')",
       "    ]",
@@ -2953,11 +2980,14 @@ hUnitPackageTests =
     [ TestLabel "Discovers conventional Haskell tests as behavioral specifications." (TestCase haskellTestDiscoveryTest),
       TestLabel "Ignores non-test Haskell strings and comments during discovery." (TestCase haskellTestDiscoveryFalsePositiveTest),
       TestLabel "Uses Python test docstrings as behavioral specifications." (TestCase pythonTestDiscoveryTest),
+      TestLabel "Discovers pytest test methods in conventional test classes." (TestCase pythonClassTestDiscoveryTest),
       TestLabel "Humanizes conventional test identifiers across frameworks." (TestCase testIdentifierSpecificationTest),
       TestLabel "Uses default.nix evidence only for markerless package classification." (TestCase packageDetectionTest),
       TestLabel "Parses test result summaries strictly." (TestCase repositoryTestResultParsingTest),
       TestLabel "Ignores formatter-only Cargo inline-table spacing." (TestCase cargoTomlFormattingNormalizationTest),
       TestLabel "Requires allowlisted filesystem entry kinds." (TestCase entryKindStructureTest),
+      TestLabel "Refuses to repair a non-regular root Git ignore entry." (TestCase rootGitignoreRepairSafetyTest),
+      TestLabel "Rolls back scaffold files when generation fails." (TestCase scaffoldCreationRollbackTest),
       TestLabel "Uses standard Git ignore semantics for repository entries." (TestCase gitIgnoredRepositoryEntryTest),
       TestLabel "Renders only supplied repository whitelist paths." (TestCase minimalRootGitignoreRenderingTest),
       TestLabel "Treats parameter directories as opaque user data." (TestCase parameterDirectoryStructureTest),
@@ -3047,15 +3077,29 @@ pythonTestDiscoveryTest = do
                   "    value: str,",
                   ") -> None:",
                   "    \"\"\"Handles a multiline definition.\"\"\"",
-                  "    assert value"
+                  "    assert value",
+                  "",
+                  "class TestBehavior:",
+                  "    def test_class_behavior(self) -> None:",
+                  "        \"\"\"Handles a test class.\"\"\"",
+                  "        assert True"
                 ]
             )
         )
       discoveredTests <- inspectPythonTests pythonSourcePath
       assertEqual
         "Python AST inspection handles async multiline definitions, docstrings, and identifier fallback."
-        (Right ["Handles a multiline definition.", "Undocumented behavior."])
+        (Right ["Handles a multiline definition.", "Handles a test class.", "Undocumented behavior."])
         discoveredTests
+pythonClassTestDiscoveryTest :: IO ()
+pythonClassTestDiscoveryTest = do
+  python3Path <- findExecutable "python3"
+  forM_ python3Path $ \_ ->
+    withTemporaryPackageRepository "python-class-test-inspection" $ \temporaryDirectory -> do
+      let pythonSourcePath = temporaryDirectory </> "main.py"
+      TIO.writeFile pythonSourcePath "class TestExample:\n  def test_behavior(self):\n    \"\"\"Reports class behavior.\"\"\"\n"
+      discoveredTests <- inspectPythonTests pythonSourcePath
+      assertEqual "Python AST inspection includes pytest test methods in Test classes." (Right ["Reports class behavior."]) discoveredTests
 testIdentifierSpecificationTest :: IO ()
 testIdentifierSpecificationTest =
   assertEqual
@@ -3098,6 +3142,30 @@ entryKindStructureTest =
     assertBool
       "entry-kind diagnostic"
       ("LICENSE: expected regular file, found symbolic link" `elem` issues)
+rootGitignoreRepairSafetyTest :: IO ()
+rootGitignoreRepairSafetyTest =
+  withTemporaryPackageRepository "root-gitignore-repair-safety" $ \temporaryRepository -> do
+    let targetPath = temporaryRepository </> "target"
+    TIO.writeFile targetPath "outside content\n"
+    createFileLink "target" (temporaryRepository </> ".gitignore")
+    repairResult <- withCurrentDirectory temporaryRepository ensureRootGitignoreIsSafeToRepair
+    assertBool "A symbolic-link .gitignore is rejected before repair." (either (const True) (const False) repairResult)
+    targetContents <- TIO.readFile targetPath
+    assertEqual "Rejecting repair leaves the symbolic-link target untouched." "outside content\n" targetContents
+scaffoldCreationRollbackTest :: IO ()
+scaffoldCreationRollbackTest =
+  withTemporaryPackageRepository "scaffold-creation-rollback" $ \temporaryRepository ->
+    withCurrentDirectory temporaryRepository $ do
+      writeFile "checks" "not a directory"
+      creationResult <-
+        createScaffoldFiles
+          ["packages/demo", "checks/demo"]
+          [ ScaffoldFile "packages/demo/default.nix" "package scaffold",
+            ScaffoldFile "checks/demo/default.nix" "check scaffold"
+          ]
+      assertBool "A scaffold write failure is returned as an error." (either (const True) (const False) creationResult)
+      packageDirectoryExists <- doesPathExist "packages/demo"
+      assertBool "A scaffold write failure removes files created earlier in the operation." (not packageDirectoryExists)
 gitIgnoredRepositoryEntryTest :: IO ()
 gitIgnoredRepositoryEntryTest =
   withTemporaryPackageRepository "git-ignored-repository-entry" $ \temporaryRepository -> do
