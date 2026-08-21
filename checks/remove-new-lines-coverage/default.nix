@@ -54,14 +54,14 @@ pkgs.runCommand checkName
     covered="$(jq -r '.data[0].totals.lines.covered' "$out/report.json")"
     total="$(jq -r '.data[0].totals.lines.count' "$out/report.json")"
     test "$covered" != null && test "$total" != null
-    printf 'coverage-v1\tlines\t%s\t%s\n' "$covered" "$total" > "$out/coverage-summary.tsv"
+    printf 'coverage\tlines\t%s\t%s\n' "$covered" "$total" > "$out/coverage-summary.tsv"
     python - "$out/junit.xml" "$workspace/total-seconds" "$out/profile-summary.tsv" <<'PY'
     import json
     import pathlib
     import sys
     import xml.etree.ElementTree as ET
     junit_path, total_path, profile_path = map(pathlib.Path, sys.argv[1:])
-    lines = [f"profile-v2\ttotal-seconds\t{total_path.read_text().strip()}"]
+    lines = [f"profile\ttotal-seconds\t{total_path.read_text().strip()}"]
     for test_case in sorted(ET.parse(junit_path).iter("testcase"), key=lambda element: element.attrib["name"]):
         identifier = test_case.attrib["name"].rsplit("::", 1)[-1]
         lines.append(f"test\t{test_case.attrib['time']}\t{json.dumps(identifier, ensure_ascii=False)}\tnull")

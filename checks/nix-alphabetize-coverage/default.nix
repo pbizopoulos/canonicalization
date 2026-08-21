@@ -51,12 +51,12 @@ pkgs.runCommand checkName
       ${pkgs.time}/bin/time -f %e -o "$workspace/total-seconds" \
       "$workspace/$packageName" +RTS -p -RTS
     mv "$workspace/$packageName.prof" "$out/profile-report.prof"
-    printf 'profile-v2\ttotal-seconds\t%s\n' "$(cat "$workspace/total-seconds")" > "$out/profile-summary.tsv"
+    printf 'profile\ttotal-seconds\t%s\n' "$(cat "$workspace/total-seconds")" > "$out/profile-summary.tsv"
     cat "$workspace/test-timings.tsv" >> "$out/profile-summary.tsv"
     hpc markup "$workspace/coverage/${packageName}.tix" --hpcdir="$workspace/hpc" --destdir="$out/html"
     hpc report "$workspace/coverage/${packageName}.tix" --hpcdir="$workspace/hpc" | tee "$out/report.txt"
     coverageCounts="$(sed -n 's/.*expressions used (\([0-9][0-9]*\)\/\([0-9][0-9]*\)).*/\1 \2/p' "$out/report.txt")"
     read -r covered total <<< "$coverageCounts"
     test -n "$covered" && test -n "$total"
-    printf 'coverage-v1\texpressions\t%s\t%s\n' "$covered" "$total" > "$out/coverage-summary.tsv"
+    printf 'coverage\texpressions\t%s\t%s\n' "$covered" "$total" > "$out/coverage-summary.tsv"
   ''

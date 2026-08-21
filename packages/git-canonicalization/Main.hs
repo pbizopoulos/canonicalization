@@ -430,7 +430,7 @@ detectRepositoryProfileWithDefault emptyDefault repositoryRoot = withCurrentDire
   flakeMarkerExists <- or <$> mapM doesPathExist ["flake.nix", "flake.lock", "packages", "checks", "hosts"]
   gitmodulesExists <- doesPathExist ".gitmodules"
   gitignoreSource <- readTextFileIfExists ".gitignore"
-  let homeMarkerExists = gitmodulesExists || maybe False (any (`elem` ["!.gitmodules", "!/.gitmodules"]) . T.lines) gitignoreSource
+  let homeMarkerExists = gitmodulesExists || maybe False (elem "!/.gitmodules" . T.lines) gitignoreSource
   case (homeMarkerExists, flakeMarkerExists) of
     (True, False) -> pure HomeProfile
     (False, True) -> pure FlakeProfile
@@ -448,10 +448,10 @@ unsupportedResource repositoryType resourceKind =
   hPutStrLn stderr ("error: a " ++ repositoryType ++ " repository does not support " ++ resourceKind ++ " resources") >> exitFailure
 homeGitignoreSource :: T.Text
 homeGitignoreSource = "*\n!/.gitignore\n!/.gitmodules\n"
-homeRequiredGitignorePatterns :: [(T.Text, [T.Text])]
+homeRequiredGitignorePatterns :: [T.Text]
 homeRequiredGitignorePatterns =
-  [ ("!/.gitignore", ["!/.gitignore", "!.gitignore"]),
-    ("!/.gitmodules", ["!/.gitmodules", "!.gitmodules"])
+  [ "!/.gitignore",
+    "!/.gitmodules"
   ]
 homeDirectory :: IO FilePath
 homeDirectory =
@@ -500,7 +500,7 @@ initializeProjectRepository initSpec targetExisted home repositoryRoot = do
   let gitignorePath = repositoryRoot </> ".gitignore"
   gitignoreExists <- doesPathExist gitignorePath
   gitignoreSource <- readTextFileIfExists gitignorePath
-  let hasHomeGitignoreMarker = maybe False (any (`elem` ["!.gitmodules", "!/.gitmodules"]) . T.lines) gitignoreSource
+  let hasHomeGitignoreMarker = maybe False (elem "!/.gitmodules" . T.lines) gitignoreSource
   when (gitmodulesExists || hasHomeGitignoreMarker) $ do
     hPutStrLn stderr "error: cannot initialize the flake layout because home layout markers exist"
     exitFailure
@@ -520,7 +520,7 @@ initializeProjectRepository initSpec targetExisted home repositoryRoot = do
       unless flakeExists (TIO.writeFile flakePath minimalProjectFlakeSource)
       unless lockExists $ do
         hPutStrLn stderr "Locking flake inputs..."
-        withCurrentDirectory repositoryRoot (runNixOrExit ["flake", "lock"])
+        withCurrentDirectory repositoryRoot (runNixOrExit ["flake", "lock", "path:."])
       runGitInitialization initSpec repositoryRoot
       unless gitignoreExists (TIO.writeFile gitignorePath expectedGitignore)
     )
@@ -601,15 +601,15 @@ data HomeRepository = HomeRepository
 homeGitignoreIsCompatible :: T.Text -> Bool
 homeGitignoreIsCompatible source =
   case T.lines source of
-    "*" : remainingLines -> all (T.isPrefixOf "!") remainingLines
+    "*" : remainingLines -> all (T.isPrefixOf "!/") remainingLines
     _ -> False
 homeGitignoreIsComplete :: T.Text -> Bool
 homeGitignoreIsComplete source =
   homeGitignoreIsCompatible source
-    && all (any (`elem` T.lines source) . snd) homeRequiredGitignorePatterns
+    && all (`elem` T.lines source) homeRequiredGitignorePatterns
 completeHomeGitignore :: T.Text -> T.Text
 completeHomeGitignore source =
-  let missingLines = [canonicalPattern | (canonicalPattern, acceptedPatterns) <- homeRequiredGitignorePatterns, not (any (`elem` T.lines source) acceptedPatterns)]
+  let missingLines = filter (`notElem` T.lines source) homeRequiredGitignorePatterns
       separator :: T.Text
       separator = if T.null source || T.isSuffixOf "\n" source then "" else "\n"
    in source <> separator <> T.unlines missingLines
@@ -629,7 +629,7 @@ checkHomeProfile repositoryRoot fix = do
             else reportHomeCheckIssues [gitignorePath ++ ": is missing"]
         Just source
           | not (homeGitignoreIsCompatible source) ->
-              reportHomeCheckIssues [gitignorePath ++ ": must start with * and subsequent lines must start with !"]
+              reportHomeCheckIssues [gitignorePath ++ ": must start with * and subsequent lines must start with !/"]
           | not (homeGitignoreIsComplete source) ->
               if fix
                 then TIO.writeFile gitignorePath (completeHomeGitignore source)
@@ -1181,7 +1181,7 @@ summarizeRepositoryPackageTestStatus (Just outputPath) = do
 parseRepositoryCoverageSummary :: T.Text -> Maybe CoverageMeasurement
 parseRepositoryCoverageSummary coverageText =
   case T.splitOn "\t" (T.strip coverageText) of
-    ["coverage-v1", metricText, coveredText, totalText] -> do
+    ["coverage", metricText, coveredText, totalText] -> do
       metric <-
         lookup
           metricText
@@ -1200,7 +1200,7 @@ parseRepositoryTimingSummary timingText =
   case T.lines timingText of
     headerLine : testLines -> do
       totalSeconds <- case T.splitOn "\t" headerLine of
-        ["profile-v2", "total-seconds", secondsText] -> readDuration secondsText
+        ["profile", "total-seconds", secondsText] -> readDuration secondsText
         _ -> Nothing
       testDurations <- parseRepositoryTestTimingLines testLines
       Just (totalSeconds, testDurations)
@@ -2887,7 +2887,7 @@ hUnitPackageTests =
       TestLabel "Uses Python test docstrings as behavioral specifications." (TestCase pythonTestDiscoveryTest),
       TestLabel "Humanizes conventional test identifiers across frameworks." (TestCase testIdentifierSpecificationTest),
       TestLabel "Uses default.nix evidence only for markerless package classification." (TestCase packageDetectionTest),
-      TestLabel "Parses versioned test result summaries strictly." (TestCase repositoryTestResultParsingTest),
+      TestLabel "Parses test result summaries strictly." (TestCase repositoryTestResultParsingTest),
       TestLabel "Ignores formatter-only Cargo inline-table spacing." (TestCase cargoTomlFormattingNormalizationTest),
       TestLabel "Requires allowlisted filesystem entry kinds." (TestCase entryKindStructureTest),
       TestLabel "Uses standard Git ignore semantics for repository entries." (TestCase gitIgnoredRepositoryEntryTest),
@@ -3090,13 +3090,13 @@ repositoryTestResultParsingTest = do
   assertEqual
     "A valid coverage artifact preserves its labeled numerator and denominator."
     (Just (CoverageMeasurement LineCoverage 91 100))
-    (parseRepositoryCoverageSummary "coverage-v1\tlines\t91\t100\n")
+    (parseRepositoryCoverageSummary "coverage\tlines\t91\t100\n")
   forM_
-    [ "coverage-v2\tlines\t91\t100",
-      "coverage-v1\tunknown\t91\t100",
-      "coverage-v1\tlines\t101\t100",
-      "coverage-v1\tlines\t0\t0",
-      "coverage-v1\tlines\tnan\t100"
+    [ "unknown\tlines\t91\t100",
+      "coverage\tunknown\t91\t100",
+      "coverage\tlines\t101\t100",
+      "coverage\tlines\t0\t0",
+      "coverage\tlines\tnan\t100"
     ]
     (assertEqual "Malformed coverage artifacts are rejected." Nothing . parseRepositoryCoverageSummary)
   assertEqual
@@ -3113,12 +3113,12 @@ repositoryTestResultParsingTest = do
   assertEqual
     "A valid timing artifact preserves total and per-test durations."
     (Just (Duration 1.25, Map.fromList [("Reports behavior.", Duration 0.125)]))
-    (parseRepositoryTimingSummary "profile-v2\ttotal-seconds\t1.25\ntest\t0.125\t\"reports_behavior\"\t\"Reports behavior.\"\n")
+    (parseRepositoryTimingSummary "profile\ttotal-seconds\t1.25\ntest\t0.125\t\"reports_behavior\"\t\"Reports behavior.\"\n")
   forM_
-    [ "profile-v2\ttotal-seconds\tNaN\ntest\t0.125\t\"reports_behavior\"\tnull\n",
-      "profile-v2\ttotal-seconds\tInfinity\ntest\t0.125\t\"reports_behavior\"\tnull\n",
-      "profile-v2\ttotal-seconds\t1.0\ntest\tNaN\t\"reports_behavior\"\tnull\n",
-      "profile-v2\ttotal-seconds\t1.0\ntest\tInfinity\t\"reports_behavior\"\tnull\n"
+    [ "profile\ttotal-seconds\tNaN\ntest\t0.125\t\"reports_behavior\"\tnull\n",
+      "profile\ttotal-seconds\tInfinity\ntest\t0.125\t\"reports_behavior\"\tnull\n",
+      "profile\ttotal-seconds\t1.0\ntest\tNaN\t\"reports_behavior\"\tnull\n",
+      "profile\ttotal-seconds\t1.0\ntest\tInfinity\t\"reports_behavior\"\tnull\n"
     ]
     (assertEqual "Non-finite summary timings are rejected." Nothing . parseRepositoryTimingSummary)
 nixTemplateParameterDifferenceTest :: IO ()
@@ -3279,6 +3279,7 @@ initializationEndToEndTest =
       homeGitMetadataExists <- doesPathExist (temporaryHome </> ".git")
       homeGitignoreExists <- doesPathExist (temporaryHome </> ".gitignore")
       assertBool "Rejected home initialization does not create Git metadata or a whitelist." (not homeGitMetadataExists && not homeGitignoreExists)
+      initializeGitRepositoryFixture temporaryHome
       let project = temporaryHome </> "github.com/owner/demo"
       (projectExit, projectStdout, projectStderr) <- runEndToEndCommandWithEnvironment "/tmp" environment ["init", project]
       assertEqual "Project initialization creates a missing nested path and succeeds without origin." ExitSuccess projectExit
@@ -3439,7 +3440,7 @@ homeProfileEndToEndTest =
     assertEqual "An empty home profile passes its check." ExitSuccess checkExit
     assertEqual "An empty home check emits no stdout." "" checkStdout
     assertEqual "An empty home check emits no stderr." "" checkStderr
-    TIO.writeFile (temporaryDirectory </> ".gitignore") "*\n!.custom/\n!.gitmodules\n"
+    TIO.writeFile (temporaryDirectory </> ".gitignore") "*\n!/.custom/\n!/.gitmodules\n"
     (fixExit, fixStdout, fixStderr) <- runEndToEndCommandIn temporaryDirectory ["check", "--fix"]
     assertEqual "Fixing a user-edited home whitelist succeeds." ExitSuccess fixExit
     assertEqual "Fixing a home whitelist emits no stdout." "" fixStdout
@@ -3447,7 +3448,7 @@ homeProfileEndToEndTest =
     fixedGitignoreSource <- TIO.readFile (temporaryDirectory </> ".gitignore")
     assertEqual
       "Fixing a home whitelist preserves user entries and adds only missing structural entries."
-      "*\n!.custom/\n!.gitmodules\n!/.gitignore\n"
+      "*\n!/.custom/\n!/.gitmodules\n!/.gitignore\n"
       fixedGitignoreSource
     repositoryRoot <- canonicalizePath temporaryDirectory
     (statusExit, statusStdout, statusStderr) <- runEndToEndCommandIn temporaryDirectory ["status"]
@@ -3825,7 +3826,7 @@ initializationTestEnvironment home toolsDirectory = do
     fakeNixPath
     ( T.unlines
         [ "#!/bin/sh",
-          "if [ \"$1\" = flake ] && [ \"$2\" = lock ]; then",
+          "if [ \"$1\" = flake ] && [ \"$2\" = lock ] && [ \"$3\" = path:. ]; then",
           "  printf '{}\\n' > flake.lock",
           "  exit 0",
           "fi",
@@ -4941,14 +4942,14 @@ haskellCoverageCheckBaselineNixSource =
       "      ${pkgs.time}/bin/time -f %e -o \"$workspace/total-seconds\" \\",
       "      \"$workspace/$packageName\" +RTS -p -RTS",
       "    mv \"$workspace/$packageName.prof\" \"$out/profile-report.prof\"",
-      "    printf 'profile-v2\\ttotal-seconds\\t%s\\n' \"$(cat \"$workspace/total-seconds\")\" > \"$out/profile-summary.tsv\"",
+      "    printf 'profile\\ttotal-seconds\\t%s\\n' \"$(cat \"$workspace/total-seconds\")\" > \"$out/profile-summary.tsv\"",
       "    cat \"$workspace/test-timings.tsv\" >> \"$out/profile-summary.tsv\"",
       "    hpc markup \"$workspace/coverage/${packageName}.tix\" --hpcdir=\"$workspace/hpc\" --destdir=\"$out/html\"",
       "    hpc report \"$workspace/coverage/${packageName}.tix\" --hpcdir=\"$workspace/hpc\" | tee \"$out/report.txt\"",
       "    coverageCounts=\"$(sed -n 's/.*expressions used (\\([0-9][0-9]*\\)\\/\\([0-9][0-9]*\\)).*/\\1 \\2/p' \"$out/report.txt\")\"",
       "    read -r covered total <<< \"$coverageCounts\"",
       "    test -n \"$covered\" && test -n \"$total\"",
-      "    printf 'coverage-v1\\texpressions\\t%s\\t%s\\n' \"$covered\" \"$total\" > \"$out/coverage-summary.tsv\"",
+      "    printf 'coverage\\texpressions\\t%s\\t%s\\n' \"$covered\" \"$total\" > \"$out/coverage-summary.tsv\"",
       "  ''"
     ]
 pythonCoverageCheckBaselineNixSource :: T.Text
@@ -4996,7 +4997,7 @@ pythonCoverageCheckBaselineNixSource =
       "    source_path, report_path, junit_path, coverage_path, profile_path, profile_report_path, profile_summary_path = map(pathlib.Path, sys.argv[1:])",
       "    totals = json.loads(report_path.read_text())[\"totals\"]",
       "    coverage_path.write_text(",
-      "        f\"coverage-v1\\tstatements\\t{totals['covered_lines']}\\t{totals['num_statements']}\\n\"",
+      "        f\"coverage\\tstatements\\t{totals['covered_lines']}\\t{totals['num_statements']}\\n\"",
       "    )",
       "    specifications = {}",
       "    for node in ast.parse(source_path.read_text()).body:",
@@ -5010,7 +5011,7 @@ pythonCoverageCheckBaselineNixSource =
       "        profile_stats = pstats.Stats(str(profile_path), stream=stream)",
       "        profile_stats.sort_stats(\"cumulative\").print_stats(20)",
       "    profile_summary_path.write_text(",
-      "        \"\\n\".join([f\"profile-v2\\ttotal-seconds\\t{profile_stats.total_tt}\", *timing_lines]) + \"\\n\"",
+      "        \"\\n\".join([f\"profile\\ttotal-seconds\\t{profile_stats.total_tt}\", *timing_lines]) + \"\\n\"",
       "    )",
       "    PY",
       "  ''"
@@ -5074,14 +5075,14 @@ rustCoverageCheckBaselineNixSource =
       "    covered=\"$(jq -r '.data[0].totals.lines.covered' \"$out/report.json\")\"",
       "    total=\"$(jq -r '.data[0].totals.lines.count' \"$out/report.json\")\"",
       "    test \"$covered\" != null && test \"$total\" != null",
-      "    printf 'coverage-v1\\tlines\\t%s\\t%s\\n' \"$covered\" \"$total\" > \"$out/coverage-summary.tsv\"",
+      "    printf 'coverage\\tlines\\t%s\\t%s\\n' \"$covered\" \"$total\" > \"$out/coverage-summary.tsv\"",
       "    python - \"$out/junit.xml\" \"$workspace/total-seconds\" \"$out/profile-summary.tsv\" <<'PY'",
       "    import json",
       "    import pathlib",
       "    import sys",
       "    import xml.etree.ElementTree as ET",
       "    junit_path, total_path, profile_path = map(pathlib.Path, sys.argv[1:])",
-      "    lines = [f\"profile-v2\\ttotal-seconds\\t{total_path.read_text().strip()}\"]",
+      "    lines = [f\"profile\\ttotal-seconds\\t{total_path.read_text().strip()}\"]",
       "    for test_case in sorted(ET.parse(junit_path).iter(\"testcase\"), key=lambda element: element.attrib[\"name\"]):",
       "        identifier = test_case.attrib[\"name\"].rsplit(\"::\", 1)[-1]",
       "        lines.append(f\"test\\t{test_case.attrib['time']}\\t{json.dumps(identifier, ensure_ascii=False)}\\tnull\")",

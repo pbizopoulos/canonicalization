@@ -40,7 +40,7 @@ pkgs.runCommand checkName
     source_path, report_path, junit_path, coverage_path, profile_path, profile_report_path, profile_summary_path = map(pathlib.Path, sys.argv[1:])
     totals = json.loads(report_path.read_text())["totals"]
     coverage_path.write_text(
-        f"coverage-v1\tstatements\t{totals['covered_lines']}\t{totals['num_statements']}\n"
+        f"coverage\tstatements\t{totals['covered_lines']}\t{totals['num_statements']}\n"
     )
     specifications = {}
     for node in ast.parse(source_path.read_text()).body:
@@ -54,7 +54,7 @@ pkgs.runCommand checkName
         profile_stats = pstats.Stats(str(profile_path), stream=stream)
         profile_stats.sort_stats("cumulative").print_stats(20)
     profile_summary_path.write_text(
-        "\n".join([f"profile-v2\ttotal-seconds\t{profile_stats.total_tt}", *timing_lines]) + "\n"
+        "\n".join([f"profile\ttotal-seconds\t{profile_stats.total_tt}", *timing_lines]) + "\n"
     )
     PY
   ''
