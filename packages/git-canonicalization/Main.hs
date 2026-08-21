@@ -54,7 +54,7 @@ import Numeric (showFFloat)
 import Options.Applicative qualified as OA
 import Prettyprinter (defaultLayoutOptions, layoutPretty)
 import Prettyprinter.Render.Text (renderStrict)
-import System.Directory (canonicalizePath, createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, doesPathExist, findExecutable, getCurrentDirectory, getTemporaryDirectory, listDirectory, makeAbsolute, pathIsSymbolicLink, removeFile, removePathForcibly, withCurrentDirectory)
+import System.Directory (canonicalizePath, createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, doesPathExist, findExecutable, getCurrentDirectory, getTemporaryDirectory, listDirectory, makeAbsolute, pathIsSymbolicLink, removeFile, removePathForcibly, renameFile, withCurrentDirectory)
 import System.Environment (getArgs, getEnvironment, lookupEnv)
 import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitFailure, exitSuccess, exitWith)
 import System.FilePath (isAbsolute, (<.>), (</>))
@@ -1345,12 +1345,23 @@ addPackageToCurrentRepository packageKind packageName packageDescription =
             Right () -> do
               let packageScaffoldFiles = renderScaffoldFiles packageKind packageName packageDescription
                   checkScaffoldFiles = maybeToList (renderRepositoryCheckScaffoldFile packageName <$> checkTemplateSpecForPackageKind packageKind)
-              createScaffoldFiles (packageScaffoldFiles ++ checkScaffoldFiles) >>= \case
-                Left scaffoldError -> pure (Left scaffoldError)
-                Right scaffoldPaths -> do
-                  rootGitignoreSource <- renderRootGitignoreFromCurrentRepositoryWith scaffoldPaths
-                  TIO.writeFile ".gitignore" rootGitignoreSource
-                  pure (Right (".gitignore" : scaffoldPaths))
+                  scaffoldFiles = packageScaffoldFiles ++ checkScaffoldFiles
+                  scaffoldRoots = packageRootDirectory : map (takeDirectory . scaffoldFilePath) checkScaffoldFiles
+              existingScaffoldRoots <- filterM doesPathExist scaffoldRoots
+              case existingScaffoldRoots of
+                existingScaffoldRoot : _ -> pure (Left ("path already exists: " ++ existingScaffoldRoot))
+                [] ->
+                  createScaffoldFiles scaffoldFiles >>= \case
+                    Left scaffoldError -> pure (Left scaffoldError)
+                    Right scaffoldPaths -> do
+                      rootGitignoreSource <- renderRootGitignoreFromCurrentRepositoryWith scaffoldPaths
+                      writeTextFileAtomically ".gitignore" rootGitignoreSource >>= \case
+                        Left writeError -> do
+                          forM_ scaffoldRoots $ \scaffoldRoot -> do
+                            scaffoldRootExists <- doesPathExist scaffoldRoot
+                            when scaffoldRootExists (removePathForcibly scaffoldRoot)
+                          pure (Left ("could not update .gitignore: " ++ writeError))
+                        Right () -> pure (Right (".gitignore" : scaffoldPaths))
 ensureRootGitignoreClean :: Bool -> IO (Either String ())
 ensureRootGitignoreClean force
   | force = pure (Right ())
@@ -1376,6 +1387,18 @@ createScaffoldFiles scaffoldFiles = do
         createDirectoryIfMissing True (takeDirectory path)
         TIO.writeFile path (scaffoldFileContents scaffoldFile)
       pure (Right scaffoldPaths)
+writeTextFileAtomically :: FilePath -> T.Text -> IO (Either String ())
+writeTextFileAtomically target source = do
+  writeResult <- try $ do
+    let targetDirectory = takeDirectory target
+    (temporaryPath, temporaryHandle) <- openTempFile targetDirectory (takeFileName target ++ ".git-canonicalization-")
+    hClose temporaryHandle
+    (TIO.writeFile temporaryPath source >> renameFile temporaryPath target)
+      `onException` (doesPathExist temporaryPath >>= \exists -> when exists (removeFile temporaryPath))
+  pure $
+    case writeResult of
+      Left (writeError :: IOException) -> Left (show writeError)
+      Right () -> Right ()
 renderRepositoryCheckScaffoldFile :: FilePath -> CheckTemplateSpec -> ScaffoldFile
 renderRepositoryCheckScaffoldFile packageName checkSpec =
   case checkTemplatePackageAssociation checkSpec of
@@ -1535,12 +1558,33 @@ removePackageFromCurrentRepository removeSpec = do
                         then pure (Left ("git rm failed: " ++ T.unpack (T.strip (T.pack removeStderr))))
                         else do
                           putStr removeStdout
+                          originalRootGitignoreSource <- TIO.readFile ".gitignore"
                           rootGitignoreSource <- renderRootGitignoreFromCurrentRepository
-                          TIO.writeFile ".gitignore" rootGitignoreSource
-                          (addExit, _addStdout, addStderr) <- readGitProcess ["add", "--", ".gitignore"] ""
-                          if addExit == ExitSuccess
-                            then pure (Right ())
-                            else pure (Left ("could not stage .gitignore: " ++ T.unpack (T.strip (T.pack addStderr))))
+                          let restoreRemovedPaths = do
+                                (restoreExit, _restoreStdout, restoreStderr) <- readGitProcess (["restore", "--staged", "--worktree", "--"] ++ removalPaths) ""
+                                pure $
+                                  if restoreExit == ExitSuccess
+                                    then Nothing
+                                    else Just ("; could not restore removed paths: " ++ T.unpack (T.strip (T.pack restoreStderr)))
+                          writeTextFileAtomically ".gitignore" rootGitignoreSource >>= \case
+                            Left writeError -> do
+                              maybeRestoreError <- restoreRemovedPaths
+                              pure (Left ("could not update .gitignore: " ++ writeError ++ fromMaybe "" maybeRestoreError))
+                            Right () -> do
+                              (addExit, _addStdout, addStderr) <- readGitProcess ["add", "--", ".gitignore"] ""
+                              if addExit == ExitSuccess
+                                then pure (Right ())
+                                else do
+                                  rootRestoreResult <- writeTextFileAtomically ".gitignore" originalRootGitignoreSource
+                                  maybeRestoreError <- restoreRemovedPaths
+                                  pure
+                                    ( Left
+                                        ( "could not stage .gitignore: "
+                                            ++ T.unpack (T.strip (T.pack addStderr))
+                                            ++ maybe "" ("; could not restore .gitignore: " ++) (either Just (const Nothing) rootRestoreResult)
+                                            ++ fromMaybe "" maybeRestoreError
+                                        )
+                                    )
 defaultPythonTemplateDescription :: String
 defaultPythonTemplateDescription = "A Python template package."
 defaultHaskellScaffoldDescription :: String
