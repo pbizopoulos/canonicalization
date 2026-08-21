@@ -1519,9 +1519,8 @@ removePackageFromCurrentRepository removeSpec = do
                         ++ if null structureIssues then "" else ": " ++ intercalate "; " structureIssues
                     )
                 )
-            Just packageKind -> do
-              let maybeCheckPath = ("checks" </>) <$> repositoryCheckNameForPackage packageKind packageName
-              existingCheckPaths <- filterM doesPathExist (maybeToList maybeCheckPath)
+            Just _ -> do
+              existingCheckPaths <- filterM doesPathExist (managedCheckPathsForPackage packageName)
               let removalPaths = packagePath : existingCheckPaths
               packageCleanlinessResult <-
                 if removeForce removeSpec
@@ -1585,6 +1584,13 @@ removePackageFromCurrentRepository removeSpec = do
                                             ++ fromMaybe "" maybeRestoreError
                                         )
                                     )
+managedCheckPathsForPackage :: FilePath -> [FilePath]
+managedCheckPathsForPackage packageName =
+  Set.toAscList . Set.fromList $
+    [ "checks" </> (packageName ++ suffix)
+    | checkSpec <- checkTemplateSpecs,
+      Just (suffix, _) <- [checkTemplatePackageAssociation checkSpec]
+    ]
 defaultPythonTemplateDescription :: String
 defaultPythonTemplateDescription = "A Python template package."
 defaultHaskellScaffoldDescription :: String
@@ -2970,6 +2976,7 @@ hUnitPackageTests =
       TestLabel "Detects, checks, and summarizes an empty home profile." (TestCase homeProfileEndToEndTest),
       TestLabel "Scaffolds a package and its check from a nested directory." (TestCase addPackageEndToEndTest),
       TestLabel "Removes a clean package, its check, and whitelist entries." (TestCase removePackageEndToEndTest),
+      TestLabel "Removes generated checks after a package changes detected type." (TestCase removeChangedPackageTypeEndToEndTest),
       TestLabel "Refuses to remove packages containing local changes." (TestCase unsafeRemovePackageEndToEndTest),
       TestLabel "Protects root Git ignore changes during package mutations." (TestCase rootGitignoreMutationSafetyEndToEndTest),
       TestLabel "Rejects root whitelist drift." (TestCase rootGitignoreDriftEndToEndTest),
@@ -3589,6 +3596,25 @@ removePackageEndToEndTest =
     assertEqual "Removing an absent package fails." (ExitFailure 1) missingExit
     assertEqual "Missing-package removal leaves stdout empty." "" missingStdout
     assertBool "Missing-package removal identifies the package path." ("package does not exist: packages/demo" `isInfixOf` missingStderr)
+removeChangedPackageTypeEndToEndTest :: IO ()
+removeChangedPackageTypeEndToEndTest =
+  withGeneratedPythonPackageRepository "remove-changed-package-type-end-to-end" $ \temporaryRepository -> do
+    let pythonSourcePath = temporaryRepository </> "packages/demo/main.py"
+        cSourcePath = temporaryRepository </> "packages/demo/main.c"
+    renameFile pythonSourcePath cSourcePath
+    runGitFixtureCommand ["-C", temporaryRepository, "add", "--update", "--", "packages/demo"]
+    runGitFixtureCommand ["-C", temporaryRepository, "add", "--force", "--", "packages/demo/main.c"]
+    runGitFixtureCommand ["-C", temporaryRepository, "commit", "--quiet", "-m", "Change generated package type"]
+    (removeExit, removeStdout, removeStderr) <- runEndToEndCommandIn temporaryRepository ["rm", "demo"]
+    assertEqual "Removing a package with changed markers succeeds." ExitSuccess removeExit
+    assertBool "Removal includes the package's former generated check." ("rm 'checks/demo_coverage/default.nix'" `isInfixOf` removeStdout)
+    assertEqual "Removal of a changed package leaves stderr empty." "" removeStderr
+    orphanedCheckExists <- doesPathExist (temporaryRepository </> "checks/demo_coverage")
+    assertBool "Removal leaves no former generated check behind." (not orphanedCheckExists)
+    (checkExit, checkStdout, checkStderr) <- runEndToEndCommandIn temporaryRepository ["check"]
+    assertEqual "Removing a package with changed markers keeps the repository canonical." ExitSuccess checkExit
+    assertEqual "The post-removal check leaves stdout empty." "" checkStdout
+    assertEqual "The post-removal check leaves stderr empty." "" checkStderr
 unsafeRemovePackageEndToEndTest :: IO ()
 unsafeRemovePackageEndToEndTest = do
   assertUnsafeRemove "modified-remove-package" $ \temporaryRepository ->
