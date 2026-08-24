@@ -18,20 +18,24 @@ let
     pkgs.haskellPackages.temporary
     pkgs.haskellPackages.text
   ];
-  ghcForTests = pkgs.haskellPackages.ghcWithPackages (_: executableHaskellDepends);
+  ghc = pkgs.haskellPackages.ghcWithPackages (_: executableHaskellDepends);
 in
-pkgs.haskellPackages.mkDerivation rec {
-  inherit executableHaskellDepends;
-  configureFlags = [
-    "--ghc-option=-O2"
-    "--ghc-option=-Weverything"
-    "--ghc-option=-Werror"
-    "--ghc-option=-threaded"
-  ];
-  executableToolDepends = [
+pkgs.stdenv.mkDerivation rec {
+  buildPhase = ''
+    runHook preBuild
+    ${ghc}/bin/ghc -O2 -Weverything -Werror -threaded -i. -o "$pname" Main.hs
+    runHook postBuild
+  '';
+  installPhase = ''
+    runHook preInstall
+    install -Dm755 "$pname" "$out/bin/$pname"
+    runHook postInstall
+  '';
+  meta.mainProgram = pname;
+  nativeBuildInputs = [
+    ghc
     pkgs.makeWrapper
   ];
-  mainProgram = pname;
   passthru.haskellExecutableDepends = executableHaskellDepends;
   pname = baseNameOf ./.;
   postInstall = ''
@@ -40,7 +44,7 @@ pkgs.haskellPackages.mkDerivation rec {
         pkgs.nix
       ]
     } --run "rm -f tmp/${pname}.tix" --set-default HPCTIXFILE tmp/${pname}.tix
-    ${ghcForTests}/bin/ghc -i. -e 'Main.runPackageTests' Main.hs
+    ${ghc}/bin/ghc -i. -e 'Main.runPackageTests' Main.hs
   '';
   src = ./.;
   version = "0.0.0";

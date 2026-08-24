@@ -27,9 +27,11 @@ pkgs.runCommand checkName
     export LLVM_PROFDATA='${pkgs.lib.getExe' pkgs.llvmPackages.llvm "llvm-profdata"}'
     workspace="$PWD/workspace"
     cp -R --no-preserve=mode "$src" "$workspace"
+    cp "${packageDrv.passthru.cargoToml}" "$workspace/Cargo.toml"
+    ln -s "${cargoDeps}" "$workspace/cargo-vendor-dir"
     install -Dm644 "${cargoDeps}/.cargo/config.toml" "$workspace/.cargo/config.toml"
     substituteInPlace "$workspace/.cargo/config.toml" \
-      --replace-fail "@vendor@" "${cargoDeps}"
+      --replace-warn "@vendor@" "${cargoDeps}"
     mkdir -p "$out" "$workspace/.config"
     export PACKAGE_E2E_EXECUTABLE="${packageDrv}/bin/${packageName}"
     cat > "$workspace/.config/nextest.toml" <<EOF

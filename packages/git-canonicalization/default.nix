@@ -23,23 +23,27 @@ let
     pkgs.haskellPackages.toml-reader
     pkgs.haskellPackages.unix
   ];
-  ghcForTests = pkgs.haskellPackages.ghcWithPackages (_: executableHaskellDepends);
+  ghc = pkgs.haskellPackages.ghcWithPackages (_: executableHaskellDepends);
 in
-pkgs.haskellPackages.mkDerivation rec {
-  inherit executableHaskellDepends;
-  configureFlags = [
-    "--ghc-option=-O2"
-    "--ghc-option=-Weverything"
-    "--ghc-option=-Werror"
-    "--ghc-option=-threaded"
-  ];
-  executableToolDepends = [
+pkgs.stdenv.mkDerivation rec {
+  buildPhase = ''
+    runHook preBuild
+    ${ghc}/bin/ghc -O2 -Weverything -Werror -threaded -i. -o "$pname" Main.hs
+    runHook postBuild
+  '';
+  installPhase = ''
+    runHook preInstall
+    install -Dm755 "$pname" "$out/bin/$pname"
+    runHook postInstall
+  '';
+  meta.mainProgram = pname;
+  nativeBuildInputs = [
+    ghc
     pkgs.git
     pkgs.makeWrapper
     pkgs.nix
     pkgs.python3
   ];
-  mainProgram = pname;
   passthru.haskellExecutableDepends = executableHaskellDepends;
   pname = baseNameOf ./.;
   postInstall = ''
@@ -50,7 +54,7 @@ pkgs.haskellPackages.mkDerivation rec {
         pkgs.python3
       ]
     } --run "rm -f tmp/${pname}.tix" --set-default HPCTIXFILE tmp/${pname}.tix
-    PATH="$out/bin:$PATH" ${ghcForTests}/bin/ghc -i. -e 'Main.runPackageTests' Main.hs
+    PATH="$out/bin:$PATH" ${ghc}/bin/ghc -i. -e 'Main.runPackageTests' Main.hs
   '';
   src = ./.;
   version = "0.0.0";

@@ -42,7 +42,6 @@
 !/packages/git-canonicalization/
 !/packages/git-canonicalization/Main.hs
 !/packages/git-canonicalization/default.nix
-!/packages/git-canonicalization/git-canonicalization.cabal
 !/packages/html_template/
 !/packages/html_template/default.nix
 !/packages/html_template/index.html
@@ -55,11 +54,9 @@
 !/packages/nix-alphabetize/
 !/packages/nix-alphabetize/Main.hs
 !/packages/nix-alphabetize/default.nix
-!/packages/nix-alphabetize/nix-alphabetize.cabal
 !/packages/nix-remove-defaults/
 !/packages/nix-remove-defaults/Main.hs
 !/packages/nix-remove-defaults/default.nix
-!/packages/nix-remove-defaults/nix-remove-defaults.cabal
 !/packages/pytest_profiling/
 !/packages/pytest_profiling/default.nix
 !/packages/python_latex_template/
@@ -72,13 +69,11 @@
 !/packages/python_template/main.py
 !/packages/remove-empty-lines/
 !/packages/remove-empty-lines/Cargo.lock
-!/packages/remove-empty-lines/Cargo.toml
 !/packages/remove-empty-lines/default.nix
 !/packages/remove-empty-lines/src/
 !/packages/remove-empty-lines/src/main.rs
 !/packages/remove-new-lines/
 !/packages/remove-new-lines/Cargo.lock
-!/packages/remove-new-lines/Cargo.toml
 !/packages/remove-new-lines/default.nix
 !/packages/remove-new-lines/src/
 !/packages/remove-new-lines/src/main.rs

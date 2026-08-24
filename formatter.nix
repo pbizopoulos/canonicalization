@@ -15,7 +15,19 @@ let
         pkgs.stdenv.cc
       ]
     }:$PATH"
-    find packages -name Cargo.toml -execdir cargo clippy --fix --allow-dirty --allow-staged --all-targets --all-features -- -D warnings -D clippy::all -D clippy::pedantic -D clippy::nursery -D clippy::cargo -D clippy::restriction -A clippy::implicit_return \;
+    ${pkgs.lib.concatMapStringsSep "\n" (packageName: ''
+      workspace=$(mktemp -d)
+      cp -R "packages/${packageName}/." "$workspace"
+      cp "${
+        inputs.self.packages.${pkgs.stdenv.system}.${packageName}.passthru.cargoToml
+      }" "$workspace/Cargo.toml"
+      (
+        cd "$workspace"
+        cargo clippy --fix --allow-dirty --allow-staged --all-targets --all-features -- -D warnings -D clippy::all -D clippy::pedantic -D clippy::nursery -D clippy::cargo -D clippy::restriction -A clippy::implicit_return
+      )
+      cp "$workspace/src/main.rs" "packages/${packageName}/src/main.rs"
+      rm -rf "$workspace"
+    '') rustPackageNames}
   '';
   formatter = treefmtEval.config.build.wrapper;
   git-canonicalization-script = pkgs.writeShellScriptBin "git-canonicalization-check" ''
@@ -23,6 +35,10 @@ let
       inputs.self.packages.${pkgs.stdenv.system}."git-canonicalization"
     }/bin/git-canonicalization check --fix
   '';
+  rustPackageNames = [
+    "remove-empty-lines"
+    "remove-new-lines"
+  ];
   treefmtEval = inputs.treefmt-nix.lib.evalModule pkgs {
     programs = {
       actionlint.enable = true;
