@@ -25,5 +25,5 @@ pkgs.rustPlatform.buildRustPackage rec {
   pname = baseNameOf ./.;
   src = ./.;
   strictDeps = true;
-  version = "0.0.0";
+  version = "0.1.0";
 }

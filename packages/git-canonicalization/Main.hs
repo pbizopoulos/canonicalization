@@ -1104,8 +1104,7 @@ summarizeRepositoryPackage checkOutputPaths repositoryCheckNames packageName pac
         maybeCabalContents <- readTextFileIfExists (packageRoot </> (packageName <.> "cabal"))
         pure (maybeCabalContents >>= extractHaskellPackageDescription)
       RustPackage -> do
-        maybeCargoTomlContents <- readTextFileIfExists (packageRoot </> "Cargo.toml")
-        pure (maybeCargoTomlContents >>= extractRustPackageDescription)
+        pure maybeDefaultNixDescription
       _
         | packageKind `elem` [PythonPackage, PythonLaTeXPackage, PythonPyPIPackage] -> do
             maybePyprojectTomlContents <- readTextFileIfExists (packageRoot </> "pyproject.toml")
@@ -1255,10 +1254,6 @@ extractHaskellPackageDescription :: T.Text -> Maybe String
 extractHaskellPackageDescription cabalContents = do
   cabalFields <- either (const Nothing) Just (parseCabalFields cabalContents)
   T.unpack <$> (lookupCabalField "description" cabalFields <|> lookupCabalField "synopsis" cabalFields)
-extractRustPackageDescription :: T.Text -> Maybe String
-extractRustPackageDescription cargoTomlContents = do
-  cargoToml <- either (const Nothing) Just (parseToml cargoTomlContents)
-  T.unpack <$> lookupTomlStringAt ["package", "description"] cargoToml
 extractPythonPackageDescriptionFromPyprojectToml :: T.Text -> Maybe String
 extractPythonPackageDescriptionFromPyprojectToml pyprojectTomlContents = do
   pyprojectToml <- either (const Nothing) Just (parseToml pyprojectTomlContents)
@@ -1267,6 +1262,10 @@ extractDefaultNixPackageDescription :: T.Text -> IO (Maybe String)
 extractDefaultNixPackageDescription defaultNixContents = do
   parseResult <- parseNixExprFromText defaultNixContents
   pure (either (const Nothing) (fmap T.unpack . findNixStringAtPath ["meta", "description"]) parseResult)
+extractDefaultNixPackageVersion :: T.Text -> IO (Maybe T.Text)
+extractDefaultNixPackageVersion defaultNixContents = do
+  parseResult <- parseNixExprFromText defaultNixContents
+  pure (either (const Nothing) (findNixStringAtPath ["version"]) parseResult)
 findNixStringAtPath :: [T.Text] -> NExprLoc -> Maybe T.Text
 findNixStringAtPath targetPath (Fix (Compose (AnnUnit _ expressionFunctor))) =
   case expressionFunctor of
@@ -1449,7 +1448,7 @@ renderScaffoldFiles packageKind packageName packageDescription =
         ]
       RustPackage ->
         [ ScaffoldFile "default.nix" rustTemplateBaselineNixSource,
-          ScaffoldFile "Cargo.toml" (renderScaffoldCargoToml packageName packageDescription),
+          ScaffoldFile "Cargo.toml" (renderScaffoldCargoToml packageName),
           ScaffoldFile "src/main.rs" rustMainSource
         ]
       HTMLPackage ->
@@ -1617,8 +1616,6 @@ defaultPythonTemplateDescription :: String
 defaultPythonTemplateDescription = "A Python template package."
 defaultHaskellScaffoldDescription :: String
 defaultHaskellScaffoldDescription = "Generated Haskell package"
-defaultRustScaffoldDescription :: String
-defaultRustScaffoldDescription = "Generated Rust package."
 defaultHtmlTemplateDescription :: String
 defaultHtmlTemplateDescription = "An HTML, CSS, and JavaScript template package."
 defaultPythonLaTeXTemplateDescription :: String
@@ -1686,15 +1683,14 @@ renderPythonTemplateNixSource packageDescription =
     ]
 pythonTemplateBaselineNixSource :: T.Text
 pythonTemplateBaselineNixSource = renderPythonTemplateNixSource defaultPythonTemplateDescription
-renderScaffoldCargoToml :: FilePath -> Maybe String -> T.Text
-renderScaffoldCargoToml packageName packageDescription =
+renderScaffoldCargoToml :: FilePath -> T.Text
+renderScaffoldCargoToml packageName =
   T.unlines
     [ line
     | sourceLine <- T.lines removeEmptyLinesCargoTomlFixture,
       let line =
             case sourceLine of
               "name = \"remove-empty-lines\"" -> T.pack ("name = \"" ++ packageName ++ "\"")
-              "description = \"A CLI tool to remove empty lines from text files.\"" -> T.pack ("description = \"" ++ escapeNixDoubleQuotedString (scaffoldDescription defaultRustScaffoldDescription packageDescription) ++ "\"")
               "all = { level = \"deny\", priority = -1 }" -> "all = {level = \"deny\", priority = -1}"
               "pedantic = { level = \"deny\", priority = -1 }" -> "pedantic = {level = \"deny\", priority = -1}"
               "nursery = { level = \"deny\", priority = -1 }" -> "nursery = {level = \"deny\", priority = -1}"
@@ -2273,7 +2269,7 @@ checkDefaultNixConventions packageName packageKind = do
                 if hasExternalFetchUrlSource && hasPlaceholderVersion
                   then Just ("packages/" ++ packageName ++ "/default.nix: fetchurl-based packages must use a non-placeholder version")
                   else Nothing,
-                if hasLocalSource && hasVersionAssignment && not hasPlaceholderVersion
+                if packageKind /= RustPackage && hasLocalSource && hasVersionAssignment && not hasPlaceholderVersion
                   then Just ("packages/" ++ packageName ++ "/default.nix: src = ./.; packages must use version = \"0.0.0\";")
                   else Nothing
               ]
@@ -2538,6 +2534,7 @@ pythonTestInspectorPythonSource =
 checkCargoToml :: FilePath -> IO [String]
 checkCargoToml packageName = do
   let cargoTomlPath = "packages" </> packageName </> "Cargo.toml"
+      defaultNixPath = "packages" </> packageName </> "default.nix"
   maybeCargoTomlContents <- readTextFileIfExists cargoTomlPath
   case maybeCargoTomlContents of
     Nothing -> pure []
@@ -2546,9 +2543,12 @@ checkCargoToml packageName = do
         Left parseError -> pure [cargoTomlPath ++ ": parse error: " ++ T.unpack parseError]
         Right cargoToml -> do
           let cargoPackageName = lookupTomlStringAt ["package", "name"] cargoToml
+              cargoPackageVersion = lookupTomlStringAt ["package", "version"] cargoToml
               unsafeCodeLint = lookupTomlStringAt ["lints", "rust", "unsafe_code"] cargoToml
               normalizedCargoToml = normalizeCargoTomlForBaselineComparison packageName cargoToml
               normalizedBaselineCargoToml = parseToml rustCargoTomlBaseline >>= Right . normalizeCargoTomlForBaselineComparison packageName
+          maybeDefaultNixContents <- readTextFileIfExists defaultNixPath
+          maybeDefaultNixVersion <- maybe (pure Nothing) extractDefaultNixPackageVersion maybeDefaultNixContents
           pure $
             catMaybes
               [ case cargoPackageName of
@@ -2567,6 +2567,21 @@ checkCargoToml packageName = do
                               ++ T.unpack actualPackageName
                               ++ "\")"
                           ),
+                case (cargoPackageVersion, maybeDefaultNixVersion) of
+                  (Just cargoVersion, Just defaultNixVersion)
+                    | cargoVersion == defaultNixVersion -> Nothing
+                    | otherwise ->
+                        Just
+                          ( "packages/"
+                              ++ packageName
+                              ++ "/default.nix: version must match Cargo.toml [package].version (expected \""
+                              ++ T.unpack cargoVersion
+                              ++ "\", got \""
+                              ++ T.unpack defaultNixVersion
+                              ++ "\")"
+                          )
+                  (Nothing, _) -> Just ("packages/" ++ packageName ++ "/Cargo.toml: missing [package].version")
+                  (_, Nothing) -> Just ("packages/" ++ packageName ++ "/default.nix: missing a literal version"),
                 if unsafeCodeLint == Just "forbid"
                   then Nothing
                   else Just ("packages/" ++ packageName ++ "/Cargo.toml: [lints.rust].unsafe_code must be \"forbid\""),
@@ -2576,7 +2591,7 @@ checkCargoToml packageName = do
                     Just
                       ( "packages/"
                           ++ packageName
-                          ++ "/Cargo.toml: only dependency sections and package metadata fields description/keywords may differ from the internal Rust Cargo baseline"
+                          ++ "/Cargo.toml: only dependency sections may differ from the internal Rust Cargo baseline"
                       )
               ]
 parseToml :: T.Text -> Either T.Text TOML.Value
@@ -2608,7 +2623,6 @@ normalizeCargoTomlForBaselineComparison packageName = normalize []
     ignoredKeys ("target" : _) = ["dependencies", "dev-dependencies", "build-dependencies"]
     ignoredKeys path
       | null path = ["dependencies", "dev-dependencies", "build-dependencies"]
-      | path == ["package"] = ["description", "keywords"]
       | otherwise = []
 checkCabalFile :: FilePath -> IO [String]
 checkCabalFile packageName = do
@@ -2985,6 +2999,7 @@ hUnitPackageTests =
       TestLabel "Uses default.nix evidence only for markerless package classification." (TestCase packageDetectionTest),
       TestLabel "Parses test result summaries strictly." (TestCase repositoryTestResultParsingTest),
       TestLabel "Ignores formatter-only Cargo inline-table spacing." (TestCase cargoTomlFormattingNormalizationTest),
+      TestLabel "Requires Rust Nix and Cargo versions to match." (TestCase rustVersionSynchronizationTest),
       TestLabel "Requires allowlisted filesystem entry kinds." (TestCase entryKindStructureTest),
       TestLabel "Refuses to repair a non-regular root Git ignore entry." (TestCase rootGitignoreRepairSafetyTest),
       TestLabel "Rolls back scaffold files when generation fails." (TestCase scaffoldCreationRollbackTest),
@@ -3132,6 +3147,19 @@ cargoTomlFormattingNormalizationTest = case (parseToml rustCargoTomlBaseline, pa
       (normalizeCargoTomlForBaselineComparison "remove-empty-lines" baseline)
       (normalizeCargoTomlForBaselineComparison "remove-empty-lines" fixture)
   _ -> assertFailure "Cargo TOML fixtures must parse."
+rustVersionSynchronizationTest :: IO ()
+rustVersionSynchronizationTest =
+  withTemporaryPackageRepository "rust-version-synchronization" $ \temporaryRepository -> do
+    let packageRoot = temporaryRepository </> "packages/demo"
+    createDirectoryIfMissing True packageRoot
+    TIO.writeFile (packageRoot </> "Cargo.toml") (T.replace "remove-empty-lines" "demo" removeEmptyLinesCargoTomlFixture)
+    TIO.writeFile (packageRoot </> "default.nix") "{ pkgs ? import <nixpkgs> { }, }: { version = \"0.0.0\"; }"
+    issues <- withCurrentDirectory temporaryRepository (checkCargoToml "demo")
+    assertBool
+      "A Rust package must synchronize its Cargo and Nix versions."
+      ( "packages/demo/default.nix: version must match Cargo.toml [package].version (expected \"0.1.0\", got \"0.0.0\")"
+          `elem` issues
+      )
 entryKindStructureTest :: IO ()
 entryKindStructureTest =
   withTemporaryPackageRepository "symbolic-link-structure" $ \temporaryRepository -> do
@@ -4574,11 +4602,7 @@ latexMsBibSource =
 removeEmptyLinesCargoTomlFixture :: T.Text
 removeEmptyLinesCargoTomlFixture =
   T.unlines
-    [ "[[bin]]",
-      "name = \"remove-empty-lines\"",
-      "path = \"src/main.rs\"",
-      "",
-      "[dependencies]",
+    [ "[dependencies]",
       "ignore = \"0.4\"",
       "anyhow = \"1.0\"",
       "content_inspector = \"0.2\"",
@@ -4597,22 +4621,12 @@ removeEmptyLinesCargoTomlFixture =
       "name = \"remove-empty-lines\"",
       "version = \"0.1.0\"",
       "edition = \"2021\"",
-      "description = \"A CLI tool to remove empty lines from text files.\"",
-      "license = \"MIT\"",
-      "repository = \"https://github.com/pbizopoulos/canonicalization\"",
-      "readme = \"../../README\"",
-      "keywords = [\"cleanup\", \"formatter\"]",
-      "categories = [\"development-tools\"]",
       ""
     ]
 rustCargoTomlBaseline :: T.Text
 rustCargoTomlBaseline =
   T.unlines
-    [ "[[bin]]",
-      "name = \"rust-template\"",
-      "path = \"src/main.rs\"",
-      "",
-      "[dependencies]",
+    [ "[dependencies]",
       "colored = \"2.1.0\"",
       "",
       "[lints.clippy]",
@@ -4628,12 +4642,6 @@ rustCargoTomlBaseline =
       "name = \"rust-template\"",
       "version = \"0.1.0\"",
       "edition = \"2021\"",
-      "description = \"A Rust template project.\"",
-      "license = \"MIT\"",
-      "repository = \"https://github.com/pbizopoulos/canonicalization\"",
-      "readme = \"../../README\"",
-      "keywords = [\"template\"]",
-      "categories = [\"development-tools\"]",
       ""
     ]
 haskellCabalBaseline :: T.Text
@@ -4710,7 +4718,7 @@ rustTemplateBaselineNixSource =
       "  pname = baseNameOf ./.;",
       "  src = ./.;",
       "  strictDeps = true;",
-      "  version = \"0.0.0\";",
+      "  version = \"0.1.0\";",
       "}",
       ""
     ]
