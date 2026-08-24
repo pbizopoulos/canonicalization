@@ -7,15 +7,12 @@ let
   checkName = baseNameOf ./.;
   packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${packageName};
   packageName = pkgs.lib.removeSuffix "_coverage" checkName;
-  profilingDrv = pkgs.callPackage (
-    (inputs.canonicalization or inputs.self) + "/packages/pytest_profiling"
-  ) { };
   pythonEnv = packageDrv.python.withPackages (
     _:
     packageDrv.propagatedBuildInputs
     ++ [
+      packageDrv.python.pkgs.pytest
       packageDrv.python.pkgs.pytest-cov
-      profilingDrv
     ]
   );
 in
@@ -29,32 +26,15 @@ pkgs.runCommand checkName
   ''
     export HOME="$(mktemp -d)"
     mkdir -p "$out/html"
-    PACKAGE_E2E_EXECUTABLE="${packageDrv}/bin/${packageName}" python -m pytest -p no:cacheprovider --profile --pstats-dir "$out/prof" --cov="$src" --cov-report term --cov-report "json:$out/report.json" --cov-report "html:$out/html" --junitxml="$out/junit.xml" "$src/main.py"
-    python - "$src/main.py" "$out/report.json" "$out/junit.xml" "$out/coverage-summary.tsv" "$out/prof/combined.prof" "$out/profile-report.txt" "$out/profile-summary.tsv" <<'PY'
-    import ast
+    PACKAGE_E2E_EXECUTABLE="${packageDrv}/bin/${packageName}" python -m pytest -p no:cacheprovider --cov="$src" --cov-report term --cov-report "json:$out/report.json" --cov-report "html:$out/html" "$src/main.py"
+    python - "$out/report.json" "$out/coverage-summary.tsv" <<'PY'
     import json
     import pathlib
-    import pstats
     import sys
-    import xml.etree.ElementTree as ET
-    source_path, report_path, junit_path, coverage_path, profile_path, profile_report_path, profile_summary_path = map(pathlib.Path, sys.argv[1:])
+    report_path, coverage_path = map(pathlib.Path, sys.argv[1:])
     totals = json.loads(report_path.read_text())["totals"]
     coverage_path.write_text(
         f"coverage\tstatements\t{totals['covered_lines']}\t{totals['num_statements']}\n"
-    )
-    specifications = {}
-    for node in ast.parse(source_path.read_text()).body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
-            specifications[node.name] = ast.get_docstring(node)
-    timing_lines = []
-    for test_case in sorted(ET.parse(junit_path).iter("testcase"), key=lambda element: element.attrib["name"]):
-        test_name = test_case.attrib["name"].split("[", 1)[0]
-        timing_lines.append(f"test\t{test_case.attrib['time']}\t{json.dumps(test_name, ensure_ascii=False)}\t{json.dumps(specifications[test_name], ensure_ascii=False)}")
-    with profile_report_path.open("w") as stream:
-        profile_stats = pstats.Stats(str(profile_path), stream=stream)
-        profile_stats.sort_stats("cumulative").print_stats(20)
-    profile_summary_path.write_text(
-        "\n".join([f"profile\ttotal-seconds\t{profile_stats.total_tt}", *timing_lines]) + "\n"
     )
     PY
   ''

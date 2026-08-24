@@ -15,7 +15,6 @@ pkgs.runCommand checkName
     nativeBuildInputs = [
       packageDrv
       pkgs.git
-      pkgs.time
       testGhc
     ];
     src = ../.. + "/packages/${packageName}";
@@ -30,14 +29,11 @@ pkgs.runCommand checkName
     module TestMain (main) where
     import qualified Main as PackageMain
     main :: IO ()
-    main = PackageMain.runPackageTestsWithTimings "$workspace/test-timings.tsv"
+    main = PackageMain.runPackageTests
     EOF
     "${testGhc}/bin/ghc" \
       -fhpc \
       -hpcdir "$workspace/hpc" \
-      -prof \
-      -fprof-auto \
-      -rtsopts \
       -O2 \
       -main-is TestMain.main \
       -i"$src" \
@@ -48,11 +44,7 @@ pkgs.runCommand checkName
       "$workspace/TestMain.hs" \
       "$src/Main.hs"
     PACKAGE_E2E_EXECUTABLE="${packageDrv}/bin/${packageName}" HPCTIXFILE="$workspace/coverage/$packageName.tix" \
-      ${pkgs.time}/bin/time -f %e -o "$workspace/total-seconds" \
-      "$workspace/$packageName" +RTS -p -RTS
-    mv "$workspace/$packageName.prof" "$out/profile-report.prof"
-    printf 'profile\ttotal-seconds\t%s\n' "$(cat "$workspace/total-seconds")" > "$out/profile-summary.tsv"
-    cat "$workspace/test-timings.tsv" >> "$out/profile-summary.tsv"
+      "$workspace/$packageName"
     hpc markup "$workspace/coverage/${packageName}.tix" --hpcdir="$workspace/hpc" --destdir="$out/html"
     hpc report "$workspace/coverage/${packageName}.tix" --hpcdir="$workspace/hpc" | tee "$out/report.txt"
     coverageCounts="$(sed -n 's/.*expressions used (\([0-9][0-9]*\)\/\([0-9][0-9]*\)).*/\1 \2/p' "$out/report.txt")"

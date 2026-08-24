@@ -8,7 +8,7 @@
 {-# LANGUAGE Trustworthy #-}
 {-# LANGUAGE TupleSections #-}
 {-# OPTIONS_GHC -Wno-missing-import-lists -Wno-unsafe #-}
-module Main (main, runPackageTests, runPackageTestsWithTimings) where
+module Main (main, runPackageTests) where
 import Control.Applicative (some, (<|>))
 import Control.Exception (IOException, finally, onException, try)
 import Control.Monad (filterM, forM, forM_, guard, unless, void, when)
@@ -34,7 +34,6 @@ import Data.Text.Encoding qualified as TE
 import Data.Text.IO qualified as TIO
 import Distribution.Fields.Field (Field (Field, Section), FieldLine (FieldLine), Name (Name), SectionArg (SecArgName))
 import Distribution.Fields.Parser (readFields)
-import GHC.Clock (getMonotonicTimeNSec)
 import Language.Haskell.Exts qualified as HS
 import Network.URI (URIAuth (uriRegName), parseURI, uriAuthority, uriPath, uriScheme)
 import Nix.Expr.Types
@@ -50,7 +49,6 @@ import Nix.Expr.Types.Annotated (AnnUnit (AnnUnit), NExprLoc, stripAnnotation)
 import Nix.Parser (parseNixFileLoc)
 import Nix.Pretty (prettyNix)
 import Nix.Utils (Path (Path))
-import Numeric (showFFloat)
 import Options.Applicative qualified as OA
 import Prettyprinter (defaultLayoutOptions, layoutPretty)
 import Prettyprinter.Render.Text (renderStrict)
@@ -935,7 +933,7 @@ type RepositoryPackageTestStatus :: Type
 data RepositoryPackageTestStatus
   = RepositoryTestsNotConfigured
   | RepositoryTestsUnmeasured
-  | RepositoryTestsMeasured CoverageMeasurement Duration
+  | RepositoryTestsMeasured CoverageMeasurement
   deriving stock (Eq, Show)
 type CoverageMeasurement :: Type
 data CoverageMeasurement = CoverageMeasurement CoverageMetric Integer Integer
@@ -946,9 +944,6 @@ data CoverageMetric
   | StatementCoverage
   | LineCoverage
   deriving stock (Eq, Show)
-type Duration :: Type
-newtype Duration = Duration Double
-  deriving stock (Eq, Ord, Show)
 type RepositoryComplianceSuccess :: Type
 data RepositoryComplianceSuccess = RepositoryComplianceSuccess
   { repositoryCompliancePackages :: [(FilePath, PackageKind)],
@@ -1037,10 +1032,7 @@ repositoryPackageTestsJSON packageSummary =
         "cases" Aeson..= map repositoryPackageTestCaseJSON (repositoryPackageTestNames packageSummary)
       ]
         ++ case testStatus of
-          RepositoryTestsMeasured coverage totalDuration ->
-            [ "coverage" Aeson..= coverageMeasurementJSON coverage,
-              "durationSeconds" Aeson..= durationSeconds totalDuration
-            ]
+          RepositoryTestsMeasured coverage -> ["coverage" Aeson..= coverageMeasurementJSON coverage]
           _ -> []
     )
   where
@@ -1064,8 +1056,6 @@ renderCoverageMetric = \case
   ExpressionCoverage -> "expressions"
   StatementCoverage -> "statements"
   LineCoverage -> "lines"
-durationSeconds :: Duration -> Double
-durationSeconds (Duration seconds) = fromIntegral (round (seconds * 1000) :: Integer) / 1000
 summarizeRepositoryPackage :: Maybe (Map.Map FilePath FilePath) -> Set.Set FilePath -> FilePath -> PackageKind -> [String] -> IO RepositoryPackageSummary
 summarizeRepositoryPackage checkOutputPaths repositoryCheckNames packageName packageKind repositoryPackageTestNamesValue = do
   let packageRoot = "packages" </> packageName
@@ -1162,11 +1152,9 @@ summarizeRepositoryPackageTestStatus Nothing =
   pure RepositoryTestsUnmeasured
 summarizeRepositoryPackageTestStatus (Just outputPath) = do
   maybeCoverageText <- readTextFileIfExists (outputPath </> "coverage-summary.tsv")
-  maybeTimingText <- readTextFileIfExists (outputPath </> "profile-summary.tsv")
   pure $
-    case (maybeCoverageText >>= parseRepositoryCoverageSummary, maybeTimingText >>= parseRepositoryTimingSummary) of
-      (Just coverage, Just totalDuration) ->
-        RepositoryTestsMeasured coverage totalDuration
+    case maybeCoverageText >>= parseRepositoryCoverageSummary of
+      Just coverage -> RepositoryTestsMeasured coverage
       _ -> RepositoryTestsUnmeasured
 parseRepositoryCoverageSummary :: T.Text -> Maybe CoverageMeasurement
 parseRepositoryCoverageSummary coverageText =
@@ -1185,23 +1173,6 @@ parseRepositoryCoverageSummary coverageText =
         then Just (CoverageMeasurement metric covered total)
         else Nothing
     _ -> Nothing
-parseRepositoryTimingSummary :: T.Text -> Maybe Duration
-parseRepositoryTimingSummary timingText =
-  case T.lines timingText of
-    headerLine : _ ->
-      case T.splitOn "\t" headerLine of
-        ["profile", "total-seconds", secondsText] -> readDuration secondsText
-        _ -> Nothing
-    [] -> Nothing
-readDuration :: T.Text -> Maybe Duration
-readDuration secondsText = do
-  seconds <- readMaybe (T.unpack secondsText)
-  durationFromSeconds seconds
-durationFromSeconds :: Double -> Maybe Duration
-durationFromSeconds seconds =
-  if seconds >= 0 && not (isNaN seconds) && not (isInfinite seconds)
-    then Just (Duration seconds)
-    else Nothing
 extractHaskellPackageDescription :: T.Text -> Maybe String
 extractHaskellPackageDescription cabalContents = do
   cabalFields <- either (const Nothing) Just (parseCabalFields cabalContents)
@@ -2896,30 +2867,12 @@ extractNamedNixBindings bindings =
   ]
 runPackageTests :: IO ()
 runPackageTests = runPackageTestsWith hUnitPackageTests
-runPackageTestsWithTimings :: FilePath -> IO ()
-runPackageTestsWithTimings timingsPath = do
-  writeFile timingsPath ""
-  runPackageTestsWith (timeHUnitTests timingsPath hUnitPackageTests)
 runPackageTestsWith :: Test -> IO ()
 runPackageTestsWith packageTests = do
   hUnitCounts <- runTestTT packageTests
   if errors hUnitCounts == 0 && failures hUnitCounts == 0
     then putStrLn "test ... ok"
     else exitFailure
-timeHUnitTests :: FilePath -> Test -> Test
-timeHUnitTests timingsPath = \case
-  TestLabel testName (TestCase testAction) -> TestLabel testName (TestCase (timeTestAction timingsPath testName testAction))
-  TestLabel testName nestedTest -> TestLabel testName (timeHUnitTests timingsPath nestedTest)
-  TestList nestedTests -> TestList (map (timeHUnitTests timingsPath) nestedTests)
-  testCase -> testCase
-timeTestAction :: FilePath -> String -> IO a -> IO a
-timeTestAction timingsPath testName testAction = do
-  startedAt <- getMonotonicTimeNSec
-  testAction
-    `finally` do
-      finishedAt <- getMonotonicTimeNSec
-      let elapsedSeconds = fromIntegral (finishedAt - startedAt) / 1000000000 :: Double
-      appendFile timingsPath ("test\t" ++ showFFloat (Just 6) elapsedSeconds "" ++ "\t" ++ renderJSON testName ++ "\t" ++ renderJSON (Just testName) ++ "\n")
 hUnitPackageTests :: Test
 hUnitPackageTests =
   TestList
@@ -3207,15 +3160,6 @@ repositoryTestResultParsingTest = do
     "Incomplete batched Nix results are rejected."
     Nothing
     (parseRepositoryCheckOutputPaths ["demo-coverage", "sample_coverage"] "demo-coverage\t/nix/store/demo")
-  assertEqual
-    "A valid timing artifact preserves the total duration."
-    (Just (Duration 1.25))
-    (parseRepositoryTimingSummary "profile\ttotal-seconds\t1.25\ntest\t0.125\t\"reports_behavior\"\t\"Reports behavior.\"\n")
-  forM_
-    [ "profile\ttotal-seconds\tNaN\n",
-      "profile\ttotal-seconds\tInfinity\n"
-    ]
-    (assertEqual "Non-finite summary timings are rejected." Nothing . parseRepositoryTimingSummary)
 nixTemplateParameterDifferenceTest :: IO ()
 nixTemplateParameterDifferenceTest = do
   actualParseResult <- parseNixExprFromText "{ pkgs ? import <nixpkgs> {} }: let python = pkgs.python3; in { pname = baseNameOf ./.; }"
@@ -3257,7 +3201,6 @@ repositorySummaryRenderingTest = do
             repositoryPackageTestStatus =
               RepositoryTestsMeasured
                 (CoverageMeasurement StatementCoverage 19 20)
-                (Duration 1.234)
           }
       repositorySummary =
         RepositorySummary
@@ -4210,12 +4153,7 @@ haskellMainSource =
   T.unlines
     [ "{-# LANGUAGE Trustworthy #-}",
       "{-# OPTIONS_GHC -Wno-unsafe #-}",
-      "module Main (main, runPackageTests, runPackageTestsWithTimings) where",
-      "import Control.Exception (finally)",
-      "import Data.Aeson qualified as Aeson",
-      "import Data.ByteString.Lazy.Char8 qualified as BL8",
-      "import GHC.Clock (getMonotonicTimeNSec)",
-      "import Numeric (showFFloat)",
+      "module Main (main, runPackageTests) where",
       "import System.Exit (exitFailure)",
       "import Test.HUnit (Counts (errors, failures), Test (TestCase, TestLabel, TestList), assertEqual, runTestTT)",
       "",
@@ -4224,29 +4162,12 @@ haskellMainSource =
       "",
       "runPackageTests :: IO ()",
       "runPackageTests = runPackageTestsWith hUnitPackageTests",
-      "runPackageTestsWithTimings :: FilePath -> IO ()",
-      "runPackageTestsWithTimings timingsPath = do",
-      "  writeFile timingsPath \"\"",
-      "  runPackageTestsWith (timeHUnitTests timingsPath hUnitPackageTests)",
       "runPackageTestsWith :: Test -> IO ()",
       "runPackageTestsWith packageTests = do",
       "  counts <- runTestTT packageTests",
       "  if errors counts == 0 && failures counts == 0",
       "    then putStrLn \"test ... ok\"",
       "    else exitFailure",
-      "",
-      "timeHUnitTests :: FilePath -> Test -> Test",
-      "timeHUnitTests timingsPath (TestLabel testName (TestCase testAction)) = TestLabel testName (TestCase (timeTestAction timingsPath testName testAction))",
-      "timeHUnitTests timingsPath (TestLabel testName nestedTest) = TestLabel testName (timeHUnitTests timingsPath nestedTest)",
-      "timeHUnitTests timingsPath (TestList nestedTests) = TestList (map (timeHUnitTests timingsPath) nestedTests)",
-      "timeHUnitTests _ testCase = testCase",
-      "timeTestAction :: FilePath -> String -> IO a -> IO a",
-      "timeTestAction timingsPath testName testAction = do",
-      "  startedAt <- getMonotonicTimeNSec",
-      "  testAction `finally` do",
-      "    finishedAt <- getMonotonicTimeNSec",
-      "    let elapsedSeconds = fromIntegral (finishedAt - startedAt) / 1000000000 :: Double",
-      "    appendFile timingsPath (\"test\\t\" ++ showFFloat (Just 6) elapsedSeconds \"\" ++ \"\\t\" ++ BL8.unpack (Aeson.encode testName) ++ \"\\t\" ++ BL8.unpack (Aeson.encode (Just testName)) ++ \"\\n\")",
       "",
       "hUnitPackageTests :: Test",
       "hUnitPackageTests =",
@@ -4997,7 +4918,6 @@ haskellCoverageCheckBaselineNixSource =
       "    nativeBuildInputs = [",
       "      packageDrv",
       "      pkgs.git",
-      "      pkgs.time",
       "      testGhc",
       "    ];",
       "    src = ../.. + \"/packages/${packageName}\";",
@@ -5012,14 +4932,11 @@ haskellCoverageCheckBaselineNixSource =
       "    module TestMain (main) where",
       "    import qualified Main as PackageMain",
       "    main :: IO ()",
-      "    main = PackageMain.runPackageTestsWithTimings \"$workspace/test-timings.tsv\"",
+      "    main = PackageMain.runPackageTests",
       "    EOF",
       "    \"${testGhc}/bin/ghc\" \\",
       "      -fhpc \\",
       "      -hpcdir \"$workspace/hpc\" \\",
-      "      -prof \\",
-      "      -fprof-auto \\",
-      "      -rtsopts \\",
       "      -O2 \\",
       "      -main-is TestMain.main \\",
       "      -i\"$src\" \\",
@@ -5030,11 +4947,7 @@ haskellCoverageCheckBaselineNixSource =
       "      \"$workspace/TestMain.hs\" \\",
       "      \"$src/Main.hs\"",
       "    PACKAGE_E2E_EXECUTABLE=\"${packageDrv}/bin/${packageName}\" HPCTIXFILE=\"$workspace/coverage/$packageName.tix\" \\",
-      "      ${pkgs.time}/bin/time -f %e -o \"$workspace/total-seconds\" \\",
-      "      \"$workspace/$packageName\" +RTS -p -RTS",
-      "    mv \"$workspace/$packageName.prof\" \"$out/profile-report.prof\"",
-      "    printf 'profile\\ttotal-seconds\\t%s\\n' \"$(cat \"$workspace/total-seconds\")\" > \"$out/profile-summary.tsv\"",
-      "    cat \"$workspace/test-timings.tsv\" >> \"$out/profile-summary.tsv\"",
+      "      \"$workspace/$packageName\"",
       "    hpc markup \"$workspace/coverage/${packageName}.tix\" --hpcdir=\"$workspace/hpc\" --destdir=\"$out/html\"",
       "    hpc report \"$workspace/coverage/${packageName}.tix\" --hpcdir=\"$workspace/hpc\" | tee \"$out/report.txt\"",
       "    coverageCounts=\"$(sed -n 's/.*expressions used (\\([0-9][0-9]*\\)\\/\\([0-9][0-9]*\\)).*/\\1 \\2/p' \"$out/report.txt\")\"",
@@ -5055,15 +4968,12 @@ pythonCoverageCheckBaselineNixSource =
       "  checkName = baseNameOf ./.;",
       "  packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${packageName};",
       "  packageName = pkgs.lib.removeSuffix \"_coverage\" checkName;",
-      "  profilingDrv = pkgs.callPackage (",
-      "    (inputs.canonicalization or inputs.self) + \"/packages/pytest_profiling\"",
-      "  ) { };",
       "  pythonEnv = packageDrv.python.withPackages (",
       "    _:",
       "    packageDrv.propagatedBuildInputs",
       "    ++ [",
+      "      packageDrv.python.pkgs.pytest",
       "      packageDrv.python.pkgs.pytest-cov",
-      "      profilingDrv",
       "    ]",
       "  );",
       "in",
@@ -5077,32 +4987,15 @@ pythonCoverageCheckBaselineNixSource =
       "  ''",
       "    export HOME=\"$(mktemp -d)\"",
       "    mkdir -p \"$out/html\"",
-      "    PACKAGE_E2E_EXECUTABLE=\"${packageDrv}/bin/${packageName}\" python -m pytest -p no:cacheprovider --profile --pstats-dir \"$out/prof\" --cov=\"$src\" --cov-report term --cov-report \"json:$out/report.json\" --cov-report \"html:$out/html\" --junitxml=\"$out/junit.xml\" \"$src/main.py\"",
-      "    python - \"$src/main.py\" \"$out/report.json\" \"$out/junit.xml\" \"$out/coverage-summary.tsv\" \"$out/prof/combined.prof\" \"$out/profile-report.txt\" \"$out/profile-summary.tsv\" <<'PY'",
-      "    import ast",
+      "    PACKAGE_E2E_EXECUTABLE=\"${packageDrv}/bin/${packageName}\" python -m pytest -p no:cacheprovider --cov=\"$src\" --cov-report term --cov-report \"json:$out/report.json\" --cov-report \"html:$out/html\" \"$src/main.py\"",
+      "    python - \"$out/report.json\" \"$out/coverage-summary.tsv\" <<'PY'",
       "    import json",
       "    import pathlib",
-      "    import pstats",
       "    import sys",
-      "    import xml.etree.ElementTree as ET",
-      "    source_path, report_path, junit_path, coverage_path, profile_path, profile_report_path, profile_summary_path = map(pathlib.Path, sys.argv[1:])",
+      "    report_path, coverage_path = map(pathlib.Path, sys.argv[1:])",
       "    totals = json.loads(report_path.read_text())[\"totals\"]",
       "    coverage_path.write_text(",
       "        f\"coverage\\tstatements\\t{totals['covered_lines']}\\t{totals['num_statements']}\\n\"",
-      "    )",
-      "    specifications = {}",
-      "    for node in ast.parse(source_path.read_text()).body:",
-      "        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith(\"test_\"):",
-      "            specifications[node.name] = ast.get_docstring(node)",
-      "    timing_lines = []",
-      "    for test_case in sorted(ET.parse(junit_path).iter(\"testcase\"), key=lambda element: element.attrib[\"name\"]):",
-      "        test_name = test_case.attrib[\"name\"].split(\"[\", 1)[0]",
-      "        timing_lines.append(f\"test\\t{test_case.attrib['time']}\\t{json.dumps(test_name, ensure_ascii=False)}\\t{json.dumps(specifications[test_name], ensure_ascii=False)}\")",
-      "    with profile_report_path.open(\"w\") as stream:",
-      "        profile_stats = pstats.Stats(str(profile_path), stream=stream)",
-      "        profile_stats.sort_stats(\"cumulative\").print_stats(20)",
-      "    profile_summary_path.write_text(",
-      "        \"\\n\".join([f\"profile\\ttotal-seconds\\t{profile_stats.total_tt}\", *timing_lines]) + \"\\n\"",
       "    )",
       "    PY",
       "  ''"
@@ -5128,9 +5021,6 @@ rustCoverageCheckBaselineNixSource =
       "      pkgs.cargo-nextest",
       "      pkgs.jq",
       "      pkgs.llvmPackages.llvm",
-      "      pkgs.perf",
-      "      pkgs.python3",
-      "      pkgs.time",
       "    ];",
       "    src = ../.. + \"/packages/${packageName}\";",
       "  }",
@@ -5147,40 +5037,18 @@ rustCoverageCheckBaselineNixSource =
       "    mkdir -p \"$out\" \"$workspace/.config\"",
       "    export PACKAGE_E2E_EXECUTABLE=\"${packageDrv}/bin/${packageName}\"",
       "    cat > \"$workspace/.config/nextest.toml\" <<EOF",
-      "    [profile.profile.junit]",
-      "    path = \"$out/junit.xml\"",
+      "    [profile.profile]",
       "    EOF",
       "    cd \"$workspace\"",
       "    eval \"$(cargo llvm-cov show-env --sh)\"",
       "    cargo nextest list --profile profile >/dev/null",
       "    cargo llvm-cov clean --profraw-only",
-      "    if perf stat -e cpu-clock true >/dev/null 2>&1; then",
-      "      NEXTEST_TEST_THREADS=1 ${pkgs.time}/bin/time -f %e -o \"$workspace/total-seconds\" \\",
-      "        perf record --no-buildid-mmap --call-graph dwarf -e cpu-clock -o \"$out/perf.data\" -- \\",
-      "        cargo nextest run --profile profile",
-      "      perf report --stdio -i \"$out/perf.data\" > \"$out/profile-report.txt\"",
-      "    else",
-      "      echo \"perf is unavailable in this environment; timings were still recorded.\" > \"$out/profile-report.txt\"",
-      "      NEXTEST_TEST_THREADS=1 ${pkgs.time}/bin/time -f %e -o \"$workspace/total-seconds\" \\",
-      "        cargo nextest run --profile profile",
-      "    fi",
+      "    NEXTEST_TEST_THREADS=1 cargo nextest run --profile profile",
       "    cargo llvm-cov report --json --summary-only --output-path \"$out/report.json\"",
       "    covered=\"$(jq -r '.data[0].totals.lines.covered' \"$out/report.json\")\"",
       "    total=\"$(jq -r '.data[0].totals.lines.count' \"$out/report.json\")\"",
       "    test \"$covered\" != null && test \"$total\" != null",
       "    printf 'coverage\\tlines\\t%s\\t%s\\n' \"$covered\" \"$total\" > \"$out/coverage-summary.tsv\"",
-      "    python - \"$out/junit.xml\" \"$workspace/total-seconds\" \"$out/profile-summary.tsv\" <<'PY'",
-      "    import json",
-      "    import pathlib",
-      "    import sys",
-      "    import xml.etree.ElementTree as ET",
-      "    junit_path, total_path, profile_path = map(pathlib.Path, sys.argv[1:])",
-      "    lines = [f\"profile\\ttotal-seconds\\t{total_path.read_text().strip()}\"]",
-      "    for test_case in sorted(ET.parse(junit_path).iter(\"testcase\"), key=lambda element: element.attrib[\"name\"]):",
-      "        identifier = test_case.attrib[\"name\"].rsplit(\"::\", 1)[-1]",
-      "        lines.append(f\"test\\t{test_case.attrib['time']}\\t{json.dumps(identifier, ensure_ascii=False)}\\tnull\")",
-      "    profile_path.write_text(\"\\n\".join(lines) + \"\\n\")",
-      "    PY",
       "  ''"
     ]
 cTemplateCheckBaselineNixSource :: T.Text
