@@ -57,8 +57,6 @@
 !/packages/nix-remove-defaults/
 !/packages/nix-remove-defaults/Main.hs
 !/packages/nix-remove-defaults/default.nix
-!/packages/pytest_profiling/
-!/packages/pytest_profiling/default.nix
 !/packages/python_latex_template/
 !/packages/python_latex_template/default.nix
 !/packages/python_latex_template/main.py
