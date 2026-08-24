@@ -22,7 +22,9 @@ let
   pname = baseNameOf ./.;
   version = "0.1.0";
 in
-pkgs.rustPlatform.buildRustPackage rec {
+pkgs.rustPlatform.buildRustPackage {
+  inherit pname;
+  inherit version;
   cargoLock.lockFile = ./Cargo.lock;
   doInstallCheck = pkgs.stdenv.isLinux;
   env = {
@@ -60,11 +62,9 @@ pkgs.rustPlatform.buildRustPackage rec {
       '';
     };
   };
-  pname = baseNameOf ./.;
   postPatch = ''
     cp ${cargoToml} Cargo.toml
   '';
   src = ./.;
   strictDeps = true;
-  version = "0.1.0";
 }

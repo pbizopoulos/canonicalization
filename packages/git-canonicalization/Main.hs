@@ -2797,7 +2797,15 @@ isAllowedNixDifferenceBinding attributePath allowedNixDifferenceKeys = \case
         dottedBindingPath = T.intercalate "." bindingPath
      in Set.member dottedBindingPath allowedNixDifferenceKeys
           || any (`Set.member` allowedNixDifferenceKeys) bindingPath
-  _ -> False
+  Inherit _ inheritedNames _ ->
+    all
+      ( \(VarName inheritedName) ->
+          let bindingPath = attributePath ++ [inheritedName]
+              dottedBindingPath = T.intercalate "." bindingPath
+           in Set.member dottedBindingPath allowedNixDifferenceKeys
+                || any (`Set.member` allowedNixDifferenceKeys) bindingPath
+      )
+      inheritedNames
 nixKeyNameText :: NKeyName NExprLoc -> Maybe T.Text
 nixKeyNameText = \case
   StaticKey (VarName keyText) -> Just keyText
@@ -4673,7 +4681,7 @@ rustTemplateBaselineNixSource =
       "    dependencies = { };",
       "  };",
       "in",
-      "pkgs.rustPlatform.buildRustPackage rec {",
+      "pkgs.rustPlatform.buildRustPackage {",
       "  cargoLock.lockFile = ./Cargo.lock;",
       "  doInstallCheck = pkgs.stdenv.isLinux;",
       "  env = {",
@@ -4689,8 +4697,8 @@ rustTemplateBaselineNixSource =
       "    runHook postInstallCheck",
       "  '';",
       "  meta.mainProgram = pname;",
-      "  pname = baseNameOf ./.;",
-      "  version = \"0.1.0\";",
+      "  pname = pname;",
+      "  version = version;",
       "  postPatch = ''",
       "    cp ${cargoToml} Cargo.toml",
       "  '';",
