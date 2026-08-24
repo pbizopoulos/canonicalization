@@ -34,7 +34,7 @@ pkgs.runCommand checkName
     cd "$workspace"
     eval "$(cargo llvm-cov show-env --sh)"
     cargo llvm-cov clean --profraw-only
-    NEXTEST_TEST_THREADS=1 cargo nextest run
+    cargo nextest run
     cargo llvm-cov report --json --summary-only --output-path "$out/report.json"
     covered="$(jq -r '.data[0].totals.lines.covered' "$out/report.json")"
     total="$(jq -r '.data[0].totals.lines.count' "$out/report.json")"
