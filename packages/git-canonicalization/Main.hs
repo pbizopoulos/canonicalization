@@ -935,7 +935,7 @@ type RepositoryPackageTestStatus :: Type
 data RepositoryPackageTestStatus
   = RepositoryTestsNotConfigured
   | RepositoryTestsUnmeasured
-  | RepositoryTestsMeasured CoverageMeasurement Duration (Map.Map String Duration)
+  | RepositoryTestsMeasured CoverageMeasurement Duration
   deriving stock (Eq, Show)
 type CoverageMeasurement :: Type
 data CoverageMeasurement = CoverageMeasurement CoverageMetric Integer Integer
@@ -1034,10 +1034,10 @@ repositoryPackageTestsJSON :: RepositoryPackageSummary -> Aeson.Value
 repositoryPackageTestsJSON packageSummary =
   Aeson.object
     ( [ "status" Aeson..= renderRepositoryPackageTestStatus testStatus,
-        "cases" Aeson..= map (repositoryPackageTestCaseJSON testDurations) (repositoryPackageTestNames packageSummary)
+        "cases" Aeson..= map repositoryPackageTestCaseJSON (repositoryPackageTestNames packageSummary)
       ]
         ++ case testStatus of
-          RepositoryTestsMeasured coverage totalDuration _ ->
+          RepositoryTestsMeasured coverage totalDuration ->
             [ "coverage" Aeson..= coverageMeasurementJSON coverage,
               "durationSeconds" Aeson..= durationSeconds totalDuration
             ]
@@ -1045,13 +1045,8 @@ repositoryPackageTestsJSON packageSummary =
     )
   where
     testStatus = repositoryPackageTestStatus packageSummary
-    testDurations = repositoryPackageTestDurations packageSummary
-repositoryPackageTestCaseJSON :: Map.Map String Duration -> String -> Aeson.Value
-repositoryPackageTestCaseJSON testDurations testName =
-  Aeson.object
-    ( ("name" Aeson..= testName)
-        : maybe [] (\duration -> ["durationSeconds" Aeson..= durationSeconds duration]) (Map.lookup testName testDurations)
-    )
+repositoryPackageTestCaseJSON :: String -> Aeson.Value
+repositoryPackageTestCaseJSON testName = Aeson.object ["name" Aeson..= testName]
 renderRepositoryPackageTestStatus :: RepositoryPackageTestStatus -> String
 renderRepositoryPackageTestStatus = \case
   RepositoryTestsNotConfigured -> "not-configured"
@@ -1062,34 +1057,13 @@ coverageMeasurementJSON (CoverageMeasurement metric covered total) =
   Aeson.object
     [ "metric" Aeson..= renderCoverageMetric metric,
       "covered" Aeson..= covered,
-      "total" Aeson..= total,
-      "percent" Aeson..= coveragePercent covered total
+      "total" Aeson..= total
     ]
 renderCoverageMetric :: CoverageMetric -> String
 renderCoverageMetric = \case
   ExpressionCoverage -> "expressions"
   StatementCoverage -> "statements"
   LineCoverage -> "lines"
-coveragePercent :: Integer -> Integer -> Double
-coveragePercent covered total = 100 * fromIntegral covered / fromIntegral total
-repositoryPackageTestDurations :: RepositoryPackageSummary -> Map.Map String Duration
-repositoryPackageTestDurations packageSummary =
-  case repositoryPackageTestStatus packageSummary of
-    RepositoryTestsMeasured _ _ recordedDurations ->
-      let durationsByNormalizedName =
-            Map.fromListWith
-              (++)
-              [ (normalizeTestSpecification testName, [duration])
-              | (testName, duration) <- Map.toAscList recordedDurations
-              ]
-       in Map.fromList
-            [ (testName, duration)
-            | testName <- repositoryPackageTestNames packageSummary,
-              Just [duration] <- [Map.lookup (normalizeTestSpecification testName) durationsByNormalizedName]
-            ]
-    _ -> Map.empty
-normalizeTestSpecification :: String -> String
-normalizeTestSpecification = map toLower . filter isAlphaNum
 durationSeconds :: Duration -> Double
 durationSeconds (Duration seconds) = fromIntegral (round (seconds * 1000) :: Integer) / 1000
 summarizeRepositoryPackage :: Maybe (Map.Map FilePath FilePath) -> Set.Set FilePath -> FilePath -> PackageKind -> [String] -> IO RepositoryPackageSummary
@@ -1191,8 +1165,8 @@ summarizeRepositoryPackageTestStatus (Just outputPath) = do
   maybeTimingText <- readTextFileIfExists (outputPath </> "profile-summary.tsv")
   pure $
     case (maybeCoverageText >>= parseRepositoryCoverageSummary, maybeTimingText >>= parseRepositoryTimingSummary) of
-      (Just coverage, Just (totalDuration, testDurations)) ->
-        RepositoryTestsMeasured coverage totalDuration testDurations
+      (Just coverage, Just totalDuration) ->
+        RepositoryTestsMeasured coverage totalDuration
       _ -> RepositoryTestsUnmeasured
 parseRepositoryCoverageSummary :: T.Text -> Maybe CoverageMeasurement
 parseRepositoryCoverageSummary coverageText =
@@ -1211,36 +1185,14 @@ parseRepositoryCoverageSummary coverageText =
         then Just (CoverageMeasurement metric covered total)
         else Nothing
     _ -> Nothing
-parseRepositoryTimingSummary :: T.Text -> Maybe (Duration, Map.Map String Duration)
+parseRepositoryTimingSummary :: T.Text -> Maybe Duration
 parseRepositoryTimingSummary timingText =
   case T.lines timingText of
-    headerLine : testLines -> do
-      totalSeconds <- case T.splitOn "\t" headerLine of
+    headerLine : _ ->
+      case T.splitOn "\t" headerLine of
         ["profile", "total-seconds", secondsText] -> readDuration secondsText
         _ -> Nothing
-      testDurations <- parseRepositoryTestTimingLines testLines
-      Just (totalSeconds, testDurations)
     [] -> Nothing
-parseRepositoryTestTimingLines :: [T.Text] -> Maybe (Map.Map String Duration)
-parseRepositoryTestTimingLines testLines = do
-  testDurations <- Map.fromList <$> mapM parseTestLine testLines
-  if Map.size testDurations == length testLines
-    then Just testDurations
-    else Nothing
-  where
-    parseTestLine :: T.Text -> Maybe (String, Duration)
-    parseTestLine testLine =
-      case T.splitOn "\t" testLine of
-        ["test", secondsText, identifierJSON, descriptionJSON] -> do
-          seconds <- readDuration secondsText
-          identifier <- Aeson.decodeStrict' (TE.encodeUtf8 identifierJSON)
-          description <- Aeson.decodeStrict' (TE.encodeUtf8 descriptionJSON)
-          let testName = fromMaybe (testSpecificationFromIdentifier (lastTestIdentifierComponent identifier)) description
-          guard (not (null testName))
-          pure (testName, seconds)
-        _ -> Nothing
-    lastTestIdentifierComponent :: String -> String
-    lastTestIdentifierComponent = reverse . takeWhile (/= ':') . reverse
 readDuration :: T.Text -> Maybe Duration
 readDuration secondsText = do
   seconds <- readMaybe (T.unpack secondsText)
@@ -2987,7 +2939,6 @@ hUnitPackageTests =
       TestLabel "Renders only supplied repository whitelist paths." (TestCase minimalRootGitignoreRenderingTest),
       TestLabel "Treats parameter directories as opaque user data." (TestCase parameterDirectoryStructureTest),
       TestLabel "Renders stable text and JSON repository summaries." (TestCase repositorySummaryRenderingTest),
-      TestLabel "Reconciles recorded timing vocabulary with canonical test names." (TestCase testDurationReconciliationTest),
       TestLabel "Extracts local package dependencies." (TestCase localPackageDependencyExtractionTest),
       TestLabel "Reports concise Nix template parameter differences." (TestCase nixTemplateParameterDifferenceTest),
       TestLabel "Accepts python_template without inputs or shellHook." (TestCase pythonTemplateOptionalInputsAndShellHookTest),
@@ -3257,14 +3208,12 @@ repositoryTestResultParsingTest = do
     Nothing
     (parseRepositoryCheckOutputPaths ["demo-coverage", "sample_coverage"] "demo-coverage\t/nix/store/demo")
   assertEqual
-    "A valid timing artifact preserves total and per-test durations."
-    (Just (Duration 1.25, Map.fromList [("Reports behavior.", Duration 0.125)]))
+    "A valid timing artifact preserves the total duration."
+    (Just (Duration 1.25))
     (parseRepositoryTimingSummary "profile\ttotal-seconds\t1.25\ntest\t0.125\t\"reports_behavior\"\t\"Reports behavior.\"\n")
   forM_
-    [ "profile\ttotal-seconds\tNaN\ntest\t0.125\t\"reports_behavior\"\tnull\n",
-      "profile\ttotal-seconds\tInfinity\ntest\t0.125\t\"reports_behavior\"\tnull\n",
-      "profile\ttotal-seconds\t1.0\ntest\tNaN\t\"reports_behavior\"\tnull\n",
-      "profile\ttotal-seconds\t1.0\ntest\tInfinity\t\"reports_behavior\"\tnull\n"
+    [ "profile\ttotal-seconds\tNaN\n",
+      "profile\ttotal-seconds\tInfinity\n"
     ]
     (assertEqual "Non-finite summary timings are rejected." Nothing . parseRepositoryTimingSummary)
 nixTemplateParameterDifferenceTest :: IO ()
@@ -3309,7 +3258,6 @@ repositorySummaryRenderingTest = do
               RepositoryTestsMeasured
                 (CoverageMeasurement StatementCoverage 19 20)
                 (Duration 1.234)
-                (Map.fromList [("Reports \"quoted\" behavior.", Duration 0.125)])
           }
       repositorySummary =
         RepositorySummary
@@ -3328,10 +3276,6 @@ repositorySummaryRenderingTest = do
         ]
     )
   assertEqual
-    "Recorded timings are used for test durations."
-    (Map.fromList [("Reports \"quoted\" behavior.", Duration 0.125)])
-    (repositoryPackageTestDurations packageSummary)
-  assertEqual
     "JSON rendering preserves the schema and escapes strings."
     (Right (repositoryStatusJSON [repositorySummary]))
     (Aeson.eitherDecodeStrict' (TE.encodeUtf8 (T.pack (renderRepositorySummariesJSON [repositorySummary]))))
@@ -3343,44 +3287,6 @@ repositorySummaryRenderingTest = do
     "Nix string rendering prevents interpolation and preserves control characters."
     "(builtins.fromJSON \"\\\"\\${name}\\\\u0001\\\"\")"
     (renderNixString "${name}\1")
-testDurationReconciliationTest :: IO ()
-testDurationReconciliationTest =
-  let canonicalTestNames :: [String]
-      canonicalTestNames =
-        [ "Parses URLs.",
-          "Preserves non-UTF-8 data.",
-          "Reads .gitignore.",
-          "Reports behavior."
-        ]
-      packageSummary =
-        RepositoryPackageSummary
-          { repositoryPackageName = "demo",
-            repositoryPackageKind = RustPackage,
-            repositoryPackageDescription = Nothing,
-            repositoryPackageDependencies = [],
-            repositoryPackageTestNames = canonicalTestNames,
-            repositoryPackageTestStatus =
-              RepositoryTestsMeasured
-                (CoverageMeasurement LineCoverage 1 1)
-                (Duration 1)
-                ( Map.fromList
-                    [ ("Parses urls.", Duration 0.1),
-                      ("Preserves non utf8 data.", Duration 0.2),
-                      ("Reads gitignore.", Duration 0.3),
-                      ("Reports behavior", Duration 0.4),
-                      ("Reports-behavior.", Duration 0.5)
-                    ]
-                )
-          }
-   in assertEqual
-        "Unique normalized names retain canonical spelling while ambiguous recordings are omitted."
-        ( Map.fromList
-            [ ("Parses URLs.", Duration 0.1),
-              ("Preserves non-UTF-8 data.", Duration 0.2),
-              ("Reads .gitignore.", Duration 0.3)
-            ]
-        )
-        (repositoryPackageTestDurations packageSummary)
 localPackageDependencyExtractionTest :: IO ()
 localPackageDependencyExtractionTest =
   assertEqual
