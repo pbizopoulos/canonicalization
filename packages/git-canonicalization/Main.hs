@@ -488,9 +488,9 @@ initializeCanonicalization initSpec = do
     hPutStrLn stderr "error: cannot initialize the home directory as a flake repository"
     hPutStrLn stderr "hint: initialize the home repository with Git as documented in README"
     exitFailure
-  initializeProjectRepository initSpec targetExists home target
-initializeProjectRepository :: InitSpec -> Bool -> FilePath -> FilePath -> IO ()
-initializeProjectRepository initSpec targetExisted home repositoryRoot = do
+  initializeProjectRepository targetExists home target
+initializeProjectRepository :: Bool -> FilePath -> FilePath -> IO ()
+initializeProjectRepository targetExisted home repositoryRoot = do
   validateProjectLocation home repositoryRoot
   gitmodulesExists <- doesPathExist (repositoryRoot </> ".gitmodules")
   let gitignorePath = repositoryRoot </> ".gitignore"
@@ -517,12 +517,12 @@ initializeProjectRepository initSpec targetExisted home repositoryRoot = do
       unless lockExists $ do
         hPutStrLn stderr "Locking flake inputs..."
         withCurrentDirectory repositoryRoot (runNixOrExit ["flake", "lock", "path:."])
-      runGitInitialization initSpec repositoryRoot
+      runGitInitialization repositoryRoot
       unless gitignoreExists (TIO.writeFile gitignorePath expectedGitignore)
     )
     `onException` rollbackInitialization targetExisted repositoryRoot createdPaths
-runGitInitialization :: InitSpec -> FilePath -> IO ()
-runGitInitialization _ repositoryRoot =
+runGitInitialization :: FilePath -> IO ()
+runGitInitialization repositoryRoot =
   runGitOrExit ["init", "--", repositoryRoot]
 rollbackInitialization :: Bool -> FilePath -> [FilePath] -> IO ()
 rollbackInitialization targetExisted repositoryRoot createdPaths = do
@@ -1994,7 +1994,7 @@ collectUnfilteredRepositoryEntries trackedDirectories rootPath = do
 collectUnfilteredRepositoryEntry :: Set.Set FilePath -> FilePath -> IO [RepositoryEntry]
 collectUnfilteredRepositoryEntry trackedDirectories path = do
   status <- Posix.getSymbolicLinkStatus path
-  let relativePath = toRelativePath path
+  let relativePath = makeRelative "." path
       collectDirectoryDescendants = do
         descendants <- collectUnfilteredRepositoryEntries trackedDirectories path
         pure (if null descendants then [(relativePath, status)] else descendants)
@@ -2024,8 +2024,6 @@ filterGitIgnoredRepositoryEntries repositoryEntries = do
     _ -> ioError (userError ("git check-ignore failed: " ++ T.unpack (T.strip (T.pack checkIgnoreStderr))))
 splitNullTerminated :: String -> [String]
 splitNullTerminated = map T.unpack . filter (not . T.null) . T.split (== '\0') . T.pack
-toRelativePath :: FilePath -> FilePath
-toRelativePath = makeRelative "."
 isOpaqueDirectory :: FilePath -> Bool
 isOpaqueDirectory path = any (path =~) opaqueDirectoryRegexes
 packageRootPathFromRepositoryPath :: FilePath -> Maybe FilePath
