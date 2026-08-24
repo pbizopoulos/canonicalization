@@ -1266,6 +1266,10 @@ extractDefaultNixPackageVersion :: T.Text -> IO (Maybe T.Text)
 extractDefaultNixPackageVersion defaultNixContents = do
   parseResult <- parseNixExprFromText defaultNixContents
   pure (either (const Nothing) (findNixStringAtPath ["version"]) parseResult)
+extractDefaultNixRustFlags :: T.Text -> IO (Maybe T.Text)
+extractDefaultNixRustFlags defaultNixContents = do
+  parseResult <- parseNixExprFromText defaultNixContents
+  pure (either (const Nothing) (findNixStringAtPath ["env", "RUSTFLAGS"]) parseResult)
 findNixStringAtPath :: [T.Text] -> NExprLoc -> Maybe T.Text
 findNixStringAtPath targetPath (Fix (Compose (AnnUnit _ expressionFunctor))) =
   case expressionFunctor of
@@ -2544,11 +2548,11 @@ checkCargoToml packageName = do
         Right cargoToml -> do
           let cargoPackageName = lookupTomlStringAt ["package", "name"] cargoToml
               cargoPackageVersion = lookupTomlStringAt ["package", "version"] cargoToml
-              unsafeCodeLint = lookupTomlStringAt ["lints", "rust", "unsafe_code"] cargoToml
               normalizedCargoToml = normalizeCargoTomlForBaselineComparison packageName cargoToml
               normalizedBaselineCargoToml = parseToml rustCargoTomlBaseline >>= Right . normalizeCargoTomlForBaselineComparison packageName
           maybeDefaultNixContents <- readTextFileIfExists defaultNixPath
           maybeDefaultNixVersion <- maybe (pure Nothing) extractDefaultNixPackageVersion maybeDefaultNixContents
+          maybeDefaultNixRustFlags <- maybe (pure Nothing) extractDefaultNixRustFlags maybeDefaultNixContents
           pure $
             catMaybes
               [ case cargoPackageName of
@@ -2582,9 +2586,9 @@ checkCargoToml packageName = do
                           )
                   (Nothing, _) -> Just ("packages/" ++ packageName ++ "/Cargo.toml: missing [package].version")
                   (_, Nothing) -> Just ("packages/" ++ packageName ++ "/default.nix: missing a literal version"),
-                if unsafeCodeLint == Just "forbid"
+                if maybe False (T.isInfixOf "-F unsafe-code") maybeDefaultNixRustFlags
                   then Nothing
-                  else Just ("packages/" ++ packageName ++ "/Cargo.toml: [lints.rust].unsafe_code must be \"forbid\""),
+                  else Just ("packages/" ++ packageName ++ "/default.nix: RUSTFLAGS must forbid unsafe-code"),
                 if Right normalizedCargoToml == normalizedBaselineCargoToml
                   then Nothing
                   else
@@ -4614,9 +4618,6 @@ removeEmptyLinesCargoTomlFixture =
       "nursery = {level = \"deny\", priority = -1}",
       "cargo = {level = \"deny\", priority = -1}",
       "",
-      "[lints.rust]",
-      "unsafe_code = \"forbid\"",
-      "",
       "[package]",
       "name = \"remove-empty-lines\"",
       "version = \"0.1.0\"",
@@ -4634,9 +4635,6 @@ rustCargoTomlBaseline =
       "pedantic = { level = \"deny\", priority = -1 }",
       "nursery = { level = \"deny\", priority = -1 }",
       "cargo = { level = \"deny\", priority = -1 }",
-      "",
-      "[lints.rust]",
-      "unsafe_code = \"forbid\"",
       "",
       "[package]",
       "name = \"rust-template\"",
@@ -4659,7 +4657,6 @@ haskellCabalBaseline =
       "    , base",
       "    , bytestring",
       "    , HUnit",
-      "  ghc-options:   -O2 -Weverything -Werror -threaded",
       ""
     ]
 haskellTemplateBaselineNixSource :: T.Text
@@ -4679,6 +4676,12 @@ haskellTemplateBaselineNixSource =
       "in",
       "pkgs.haskellPackages.mkDerivation rec {",
       "  inherit executableHaskellDepends;",
+      "  configureFlags = [",
+      "    \"--ghc-option=-O2\"",
+      "    \"--ghc-option=-Weverything\"",
+      "    \"--ghc-option=-Werror\"",
+      "    \"--ghc-option=-threaded\"",
+      "  ];",
       "  executableToolDepends = [",
       "    pkgs.makeWrapper",
       "  ];",
@@ -4704,7 +4707,7 @@ rustTemplateBaselineNixSource =
       "  doInstallCheck = pkgs.stdenv.isLinux;",
       "  env = {",
       "    RUSTDOCFLAGS = \"-D warnings\";",
-      "    RUSTFLAGS = \"-D warnings\";",
+      "    RUSTFLAGS = \"-D warnings -F unsafe-code\";",
       "  };",
       "  installCheckPhase = ''",
       "    runHook preInstallCheck",

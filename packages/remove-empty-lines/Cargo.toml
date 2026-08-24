@@ -13,9 +13,6 @@ pedantic = {level = "deny", priority = -1}
 nursery = {level = "deny", priority = -1}
 cargo = {level = "deny", priority = -1}
 
-[lints.rust]
-unsafe_code = "forbid"
-
 [package]
 name = "remove-empty-lines"
 version = "0.1.0"

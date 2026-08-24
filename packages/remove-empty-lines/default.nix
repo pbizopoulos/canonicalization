@@ -6,7 +6,7 @@ pkgs.rustPlatform.buildRustPackage rec {
   doInstallCheck = pkgs.stdenv.isLinux;
   env = {
     RUSTDOCFLAGS = "-D warnings";
-    RUSTFLAGS = "-D warnings";
+    RUSTFLAGS = "-D warnings -F unsafe-code";
   };
   installCheckPhase = ''
     runHook preInstallCheck

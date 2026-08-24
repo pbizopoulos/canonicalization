@@ -22,4 +22,3 @@ executable nix-remove-defaults
     , scientific
     , temporary
     , text
-  ghc-options:   -O2 -Weverything -Werror -threaded

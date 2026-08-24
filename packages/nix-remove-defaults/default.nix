@@ -22,6 +22,12 @@ let
 in
 pkgs.haskellPackages.mkDerivation rec {
   inherit executableHaskellDepends;
+  configureFlags = [
+    "--ghc-option=-O2"
+    "--ghc-option=-Weverything"
+    "--ghc-option=-Werror"
+    "--ghc-option=-threaded"
+  ];
   executableToolDepends = [
     pkgs.makeWrapper
   ];

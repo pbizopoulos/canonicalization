@@ -28,4 +28,3 @@ executable git-canonicalization
     , text
     , toml-reader
     , unix
-  ghc-options:   -O2 -Weverything -Werror -threaded
