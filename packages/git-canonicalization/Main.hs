@@ -4796,11 +4796,6 @@ haskellCoverageCheckBaselineNixSource =
       "    PACKAGE_E2E_EXECUTABLE=\"${packageDrv}/bin/${packageName}\" HPCTIXFILE=\"$workspace/coverage/$packageName.tix\" \\",
       "      \"$workspace/$packageName\"",
       "    hpc markup \"$workspace/coverage/${packageName}.tix\" --hpcdir=\"$workspace/hpc\" --destdir=\"$out/html\"",
-      "    hpc report \"$workspace/coverage/${packageName}.tix\" --hpcdir=\"$workspace/hpc\" | tee \"$out/report.txt\"",
-      "    coverageCounts=\"$(sed -n 's/.*expressions used (\\([0-9][0-9]*\\)\\/\\([0-9][0-9]*\\)).*/\\1 \\2/p' \"$out/report.txt\")\"",
-      "    read -r covered total <<< \"$coverageCounts\"",
-      "    test -n \"$covered\" && test -n \"$total\"",
-      "    printf 'coverage\\texpressions\\t%s\\t%s\\n' \"$covered\" \"$total\" > \"$out/coverage-summary.tsv\"",
       "  ''"
     ]
 pythonCoverageCheckBaselineNixSource :: T.Text
@@ -4834,17 +4829,7 @@ pythonCoverageCheckBaselineNixSource =
       "  ''",
       "    export HOME=\"$(mktemp -d)\"",
       "    mkdir -p \"$out/html\"",
-      "    PACKAGE_E2E_EXECUTABLE=\"${packageDrv}/bin/${packageName}\" python -m pytest -p no:cacheprovider --cov=\"$src\" --cov-report term --cov-report \"json:$out/report.json\" --cov-report \"html:$out/html\" \"$src/main.py\"",
-      "    python - \"$out/report.json\" \"$out/coverage-summary.tsv\" <<'PY'",
-      "    import json",
-      "    import pathlib",
-      "    import sys",
-      "    report_path, coverage_path = map(pathlib.Path, sys.argv[1:])",
-      "    totals = json.loads(report_path.read_text())[\"totals\"]",
-      "    coverage_path.write_text(",
-      "        f\"coverage\\tstatements\\t{totals['covered_lines']}\\t{totals['num_statements']}\\n\"",
-      "    )",
-      "    PY",
+      "    PACKAGE_E2E_EXECUTABLE=\"${packageDrv}/bin/${packageName}\" python -m pytest -p no:cacheprovider --cov=\"$src\" --cov-report term --cov-report \"html:$out/html\" \"$src/main.py\"",
       "  ''"
     ]
 rustCoverageCheckBaselineNixSource :: T.Text
@@ -4866,7 +4851,6 @@ rustCoverageCheckBaselineNixSource =
       "    nativeBuildInputs = packageDrv.passthru.rustCheckNativeBuildInputs ++ [",
       "      pkgs.cargo-llvm-cov",
       "      pkgs.cargo-nextest",
-      "      pkgs.jq",
       "      pkgs.llvmPackages.llvm",
       "    ];",
       "    src = ../.. + \"/packages/${packageName}\";",
@@ -4887,11 +4871,6 @@ rustCoverageCheckBaselineNixSource =
       "    eval \"$(cargo llvm-cov show-env --sh)\"",
       "    cargo llvm-cov clean --profraw-only",
       "    cargo nextest run",
-      "    cargo llvm-cov report --json --summary-only --output-path \"$out/report.json\"",
-      "    covered=\"$(jq -r '.data[0].totals.lines.covered' \"$out/report.json\")\"",
-      "    total=\"$(jq -r '.data[0].totals.lines.count' \"$out/report.json\")\"",
-      "    test \"$covered\" != null && test \"$total\" != null",
-      "    printf 'coverage\\tlines\\t%s\\t%s\\n' \"$covered\" \"$total\" > \"$out/coverage-summary.tsv\"",
       "  ''"
     ]
 cTemplateCheckBaselineNixSource :: T.Text

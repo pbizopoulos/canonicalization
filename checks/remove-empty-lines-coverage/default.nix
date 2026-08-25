@@ -14,7 +14,6 @@ pkgs.runCommand checkName
     nativeBuildInputs = packageDrv.passthru.rustCheckNativeBuildInputs ++ [
       pkgs.cargo-llvm-cov
       pkgs.cargo-nextest
-      pkgs.jq
       pkgs.llvmPackages.llvm
     ];
     src = ../.. + "/packages/${packageName}";
@@ -35,9 +34,4 @@ pkgs.runCommand checkName
     eval "$(cargo llvm-cov show-env --sh)"
     cargo llvm-cov clean --profraw-only
     cargo nextest run
-    cargo llvm-cov report --json --summary-only --output-path "$out/report.json"
-    covered="$(jq -r '.data[0].totals.lines.covered' "$out/report.json")"
-    total="$(jq -r '.data[0].totals.lines.count' "$out/report.json")"
-    test "$covered" != null && test "$total" != null
-    printf 'coverage\tlines\t%s\t%s\n' "$covered" "$total" > "$out/coverage-summary.tsv"
   ''

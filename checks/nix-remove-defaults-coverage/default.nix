@@ -46,9 +46,4 @@ pkgs.runCommand checkName
     PACKAGE_E2E_EXECUTABLE="${packageDrv}/bin/${packageName}" HPCTIXFILE="$workspace/coverage/$packageName.tix" \
       "$workspace/$packageName"
     hpc markup "$workspace/coverage/${packageName}.tix" --hpcdir="$workspace/hpc" --destdir="$out/html"
-    hpc report "$workspace/coverage/${packageName}.tix" --hpcdir="$workspace/hpc" | tee "$out/report.txt"
-    coverageCounts="$(sed -n 's/.*expressions used (\([0-9][0-9]*\)\/\([0-9][0-9]*\)).*/\1 \2/p' "$out/report.txt")"
-    read -r covered total <<< "$coverageCounts"
-    test -n "$covered" && test -n "$total"
-    printf 'coverage\texpressions\t%s\t%s\n' "$covered" "$total" > "$out/coverage-summary.tsv"
   ''
