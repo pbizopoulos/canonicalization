@@ -52,7 +52,7 @@ import Nix.Utils (Path (Path))
 import Options.Applicative qualified as OA
 import Prettyprinter (defaultLayoutOptions, layoutPretty)
 import Prettyprinter.Render.Text (renderStrict)
-import System.Directory (canonicalizePath, createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, doesPathExist, findExecutable, getCurrentDirectory, getTemporaryDirectory, listDirectory, makeAbsolute, pathIsSymbolicLink, removeFile, removePathForcibly, renameFile, withCurrentDirectory)
+import System.Directory (canonicalizePath, createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, doesPathExist, findExecutable, getTemporaryDirectory, listDirectory, makeAbsolute, pathIsSymbolicLink, removeFile, removePathForcibly, renameFile, withCurrentDirectory)
 import System.Environment (getArgs, getEnvironment, lookupEnv)
 import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitFailure, exitSuccess, exitWith)
 import System.FilePath (isAbsolute, (<.>), (</>))
@@ -64,7 +64,6 @@ import System.Posix.Temp (mkdtemp)
 import System.Process (CreateProcess (env), proc, readCreateProcessWithExitCode, readProcessWithExitCode)
 import TOML qualified
 import Test.HUnit (Counts (errors, failures), Test (TestCase, TestLabel, TestList), assertBool, assertEqual, assertFailure, runTestTT)
-import Text.Read (readMaybe)
 import Text.Regex.TDFA ((=~))
 import Prelude
 defaultAllowedNixDifferenceKeys :: Set.Set T.Text
@@ -932,17 +931,7 @@ repositoryCheckPhaseHint = \case
 type RepositoryPackageTestStatus :: Type
 data RepositoryPackageTestStatus
   = RepositoryTestsNotConfigured
-  | RepositoryTestsUnmeasured
-  | RepositoryTestsMeasured CoverageMeasurement
-  deriving stock (Eq, Show)
-type CoverageMeasurement :: Type
-data CoverageMeasurement = CoverageMeasurement CoverageMetric Integer Integer
-  deriving stock (Eq, Show)
-type CoverageMetric :: Type
-data CoverageMetric
-  = ExpressionCoverage
-  | StatementCoverage
-  | LineCoverage
+  | RepositoryTestsConfigured
   deriving stock (Eq, Show)
 type RepositoryComplianceSuccess :: Type
 data RepositoryComplianceSuccess = RepositoryComplianceSuccess
@@ -983,11 +972,9 @@ summarizeRepositoryAt repositoryPath repositoryRoot =
         exitFailure
       Right (RepositoryComplianceSuccess packages checkNames packageTestNames) -> do
         let repositoryCheckNames = Set.fromList checkNames
-            testCheckNames = filter (\checkName -> any (`isSuffixOf` checkName) ["-coverage", "_coverage"]) checkNames
         repositoryReadme <- fmap T.unpack <$> readTextFileIfExists "README"
-        checkOutputPaths <- resolveRepositoryCheckOutputPaths testCheckNames
         packageSummaries <- forM packages $ \(packageName, packageKind) ->
-          summarizeRepositoryPackage checkOutputPaths repositoryCheckNames packageName packageKind (Map.findWithDefault [] packageName packageTestNames)
+          summarizeRepositoryPackage repositoryCheckNames packageName packageKind (Map.findWithDefault [] packageName packageTestNames)
         pure
           RepositorySummary
             { repositorySummaryPath = repositoryPath,
@@ -1028,36 +1015,17 @@ repositoryPackageSummaryJSON packageSummary =
 repositoryPackageTestsJSON :: RepositoryPackageSummary -> Aeson.Value
 repositoryPackageTestsJSON packageSummary =
   Aeson.object
-    ( [ "status" Aeson..= renderRepositoryPackageTestStatus testStatus,
-        "cases" Aeson..= map repositoryPackageTestCaseJSON (repositoryPackageTestNames packageSummary)
-      ]
-        ++ case testStatus of
-          RepositoryTestsMeasured coverage -> ["coverage" Aeson..= coverageMeasurementJSON coverage]
-          _ -> []
-    )
-  where
-    testStatus = repositoryPackageTestStatus packageSummary
+    [ "status" Aeson..= renderRepositoryPackageTestStatus (repositoryPackageTestStatus packageSummary),
+      "cases" Aeson..= map repositoryPackageTestCaseJSON (repositoryPackageTestNames packageSummary)
+    ]
 repositoryPackageTestCaseJSON :: String -> Aeson.Value
 repositoryPackageTestCaseJSON testName = Aeson.object ["name" Aeson..= testName]
 renderRepositoryPackageTestStatus :: RepositoryPackageTestStatus -> String
 renderRepositoryPackageTestStatus = \case
   RepositoryTestsNotConfigured -> "not-configured"
-  RepositoryTestsUnmeasured -> "unmeasured"
-  RepositoryTestsMeasured {} -> "measured"
-coverageMeasurementJSON :: CoverageMeasurement -> Aeson.Value
-coverageMeasurementJSON (CoverageMeasurement metric covered total) =
-  Aeson.object
-    [ "metric" Aeson..= renderCoverageMetric metric,
-      "covered" Aeson..= covered,
-      "total" Aeson..= total
-    ]
-renderCoverageMetric :: CoverageMetric -> String
-renderCoverageMetric = \case
-  ExpressionCoverage -> "expressions"
-  StatementCoverage -> "statements"
-  LineCoverage -> "lines"
-summarizeRepositoryPackage :: Maybe (Map.Map FilePath FilePath) -> Set.Set FilePath -> FilePath -> PackageKind -> [String] -> IO RepositoryPackageSummary
-summarizeRepositoryPackage checkOutputPaths repositoryCheckNames packageName packageKind repositoryPackageTestNamesValue = do
+  RepositoryTestsConfigured -> "configured"
+summarizeRepositoryPackage :: Set.Set FilePath -> FilePath -> PackageKind -> [String] -> IO RepositoryPackageSummary
+summarizeRepositoryPackage repositoryCheckNames packageName packageKind repositoryPackageTestNamesValue = do
   let packageRoot = "packages" </> packageName
   maybeDefaultNixContents <- readTextFileIfExists (packageRoot </> "default.nix")
   maybeDefaultNixDescription <- maybe (pure Nothing) extractDefaultNixPackageDescription maybeDefaultNixContents
@@ -1081,13 +1049,8 @@ summarizeRepositoryPackage checkOutputPaths repositoryCheckNames packageName pac
             if checkName `Set.member` repositoryCheckNames
               then Just checkName
               else Nothing
-      checkOutputPath =
-        configuredRepositoryCheckName
-          >>= \checkName -> checkOutputPaths >>= Map.lookup checkName
-  repositoryPackageTestStatusValue <-
-    case configuredRepositoryCheckName of
-      Nothing -> pure RepositoryTestsNotConfigured
-      Just _ -> summarizeRepositoryPackageTestStatus checkOutputPath
+      repositoryPackageTestStatusValue =
+        maybe RepositoryTestsNotConfigured (const RepositoryTestsConfigured) configuredRepositoryCheckName
   pure
     RepositoryPackageSummary
       { repositoryPackageName = packageName,
@@ -1097,82 +1060,6 @@ summarizeRepositoryPackage checkOutputPaths repositoryCheckNames packageName pac
         repositoryPackageTestNames = repositoryPackageTestNamesValue,
         repositoryPackageTestStatus = repositoryPackageTestStatusValue
       }
-resolveRepositoryCheckOutputPaths :: [FilePath] -> IO (Maybe (Map.Map FilePath FilePath))
-resolveRepositoryCheckOutputPaths [] = pure (Just Map.empty)
-resolveRepositoryCheckOutputPaths resultCheckNames = do
-  repositoryRoot <- getCurrentDirectory
-  let nixExpression =
-        unlines
-          [ "let",
-            "  flake = builtins.getFlake " ++ renderNixString (localGitFlakeReference repositoryRoot) ++ ";",
-            "  checks = flake.checks.${builtins.currentSystem};",
-            "  checkNames = [ " ++ unwords (map renderNixString resultCheckNames) ++ " ];",
-            "in",
-            "builtins.concatStringsSep \"\\n\" (map (checkName: \"${checkName}\\t${checks.${checkName}.outPath}\") checkNames)"
-          ]
-  commandResult <-
-    try
-      ( readProcessWithExitCode
-          "nix"
-          ["eval", "--extra-experimental-features", "nix-command flakes", "--raw", "--impure", "--expr", nixExpression]
-          ""
-      )
-  case commandResult of
-    Right (ExitSuccess, outputPathsText, _) ->
-      case parseRepositoryCheckOutputPaths resultCheckNames (T.pack outputPathsText) of
-        Just outputPaths -> pure (Just outputPaths)
-        Nothing -> hPutStrLn stderr "warning: Nix returned malformed check output paths; test measurements are unavailable" >> pure Nothing
-    Right (_, _, nixStderr) -> do
-      hPutStrLn stderr ("warning: could not evaluate Nix check output paths; test measurements are unavailable" ++ renderDiagnosticSuffix nixStderr)
-      pure Nothing
-    Left (nixException :: IOException) -> do
-      hPutStrLn stderr ("warning: could not evaluate Nix check output paths; test measurements are unavailable: " ++ show nixException)
-      pure Nothing
-  where
-    renderDiagnosticSuffix diagnostic =
-      case unwords (words diagnostic) of
-        "" -> ""
-        message -> ": " ++ message
-localGitFlakeReference :: FilePath -> String
-localGitFlakeReference repositoryRoot = "git+file://" ++ repositoryRoot
-parseRepositoryCheckOutputPaths :: [FilePath] -> T.Text -> Maybe (Map.Map FilePath FilePath)
-parseRepositoryCheckOutputPaths expectedCheckNames outputPathsText = do
-  entries <- mapM parseEntry (T.lines outputPathsText)
-  let outputPaths = Map.fromList entries
-  if Map.keysSet outputPaths == Set.fromList expectedCheckNames && Map.size outputPaths == length expectedCheckNames
-    then Just outputPaths
-    else Nothing
-  where
-    parseEntry outputPathLine =
-      case T.splitOn "\t" outputPathLine of
-        [checkName, outputPath] | not (T.null checkName) && not (T.null outputPath) -> Just (T.unpack checkName, T.unpack outputPath)
-        _ -> Nothing
-summarizeRepositoryPackageTestStatus :: Maybe FilePath -> IO RepositoryPackageTestStatus
-summarizeRepositoryPackageTestStatus Nothing =
-  pure RepositoryTestsUnmeasured
-summarizeRepositoryPackageTestStatus (Just outputPath) = do
-  maybeCoverageText <- readTextFileIfExists (outputPath </> "coverage-summary.tsv")
-  pure $
-    case maybeCoverageText >>= parseRepositoryCoverageSummary of
-      Just coverage -> RepositoryTestsMeasured coverage
-      _ -> RepositoryTestsUnmeasured
-parseRepositoryCoverageSummary :: T.Text -> Maybe CoverageMeasurement
-parseRepositoryCoverageSummary coverageText =
-  case T.splitOn "\t" (T.strip coverageText) of
-    ["coverage", metricText, coveredText, totalText] -> do
-      metric <-
-        lookup
-          metricText
-          [ ("expressions", ExpressionCoverage),
-            ("statements", StatementCoverage),
-            ("lines", LineCoverage)
-          ]
-      covered <- readMaybe (T.unpack coveredText)
-      total <- readMaybe (T.unpack totalText)
-      if covered >= 0 && total > 0 && covered <= total
-        then Just (CoverageMeasurement metric covered total)
-        else Nothing
-    _ -> Nothing
 extractHaskellPackageDescription :: T.Text -> Maybe String
 extractHaskellPackageDescription cabalContents = do
   cabalFields <- either (const Nothing) Just (parseCabalFields cabalContents)
@@ -2880,7 +2767,6 @@ hUnitPackageTests =
       TestLabel "Discovers pytest test methods in conventional test classes." (TestCase pythonClassTestDiscoveryTest),
       TestLabel "Humanizes conventional test identifiers across frameworks." (TestCase testIdentifierSpecificationTest),
       TestLabel "Uses default.nix evidence only for markerless package classification." (TestCase packageDetectionTest),
-      TestLabel "Parses test result summaries strictly." (TestCase repositoryTestResultParsingTest),
       TestLabel "Ignores formatter-only Cargo inline-table spacing." (TestCase cargoTomlFormattingNormalizationTest),
       TestLabel "Requires Rust Nix and Cargo versions to match." (TestCase rustVersionSynchronizationTest),
       TestLabel "Requires allowlisted filesystem entry kinds." (TestCase entryKindStructureTest),
@@ -3129,35 +3015,6 @@ parameterDirectoryStructureTest =
       writeFile (parameterDirectory </> "arbitrary/nested/user.data") ""
     issues <- withCurrentDirectory temporaryRepository (snd <$> inspectRepositoryStructure)
     assertEqual "Parameter directory contents do not participate in repository structure policy." [] issues
-repositoryTestResultParsingTest :: IO ()
-repositoryTestResultParsingTest = do
-  assertEqual
-    "Local flake evaluation uses Git filtering so ignored repository files are excluded."
-    "git+file:///tmp/example-repository"
-    (localGitFlakeReference "/tmp/example-repository")
-  assertEqual
-    "A valid coverage artifact preserves its labeled numerator and denominator."
-    (Just (CoverageMeasurement LineCoverage 91 100))
-    (parseRepositoryCoverageSummary "coverage\tlines\t91\t100\n")
-  forM_
-    [ "unknown\tlines\t91\t100",
-      "coverage\tunknown\t91\t100",
-      "coverage\tlines\t101\t100",
-      "coverage\tlines\t0\t0",
-      "coverage\tlines\tnan\t100"
-    ]
-    (assertEqual "Malformed coverage artifacts are rejected." Nothing . parseRepositoryCoverageSummary)
-  assertEqual
-    "A batched Nix result maps every requested check to its output path."
-    (Just (Map.fromList [("demo-coverage", "/nix/store/demo"), ("sample_coverage", "/nix/store/sample")]))
-    ( parseRepositoryCheckOutputPaths
-        ["demo-coverage", "sample_coverage"]
-        "demo-coverage\t/nix/store/demo\nsample_coverage\t/nix/store/sample"
-    )
-  assertEqual
-    "Incomplete batched Nix results are rejected."
-    Nothing
-    (parseRepositoryCheckOutputPaths ["demo-coverage", "sample_coverage"] "demo-coverage\t/nix/store/demo")
 nixTemplateParameterDifferenceTest :: IO ()
 nixTemplateParameterDifferenceTest = do
   actualParseResult <- parseNixExprFromText "{ pkgs ? import <nixpkgs> {} }: let python = pkgs.python3; in { pname = baseNameOf ./.; }"
@@ -3196,9 +3053,7 @@ repositorySummaryRenderingTest = do
             repositoryPackageDescription = Nothing,
             repositoryPackageDependencies = ["alpha", "demo-two"],
             repositoryPackageTestNames = ["Reports \"quoted\" behavior."],
-            repositoryPackageTestStatus =
-              RepositoryTestsMeasured
-                (CoverageMeasurement StatementCoverage 19 20)
+            repositoryPackageTestStatus = RepositoryTestsConfigured
           }
       repositorySummary =
         RepositorySummary
@@ -3207,12 +3062,11 @@ repositorySummaryRenderingTest = do
             repositorySummaryPackages = [packageSummary]
           }
   assertEqual
-    "Test status vocabulary distinguishes configuration from available measurements."
-    ["not-configured", "unmeasured", "measured"]
+    "Test status vocabulary distinguishes configured tests."
+    ["not-configured", "configured"]
     ( map
         renderRepositoryPackageTestStatus
         [ RepositoryTestsNotConfigured,
-          RepositoryTestsUnmeasured,
           repositoryPackageTestStatus packageSummary
         ]
     )
@@ -3719,7 +3573,7 @@ statusEndToEndTest =
           [RepositorySummary repositoryPath (Just repositoryReadme) [expectedGeneratedPythonPackageSummary]]
       )
       statusStdout
-    assertStatusMeasurementDiagnostics statusStderr
+    assertEqual "Status does not evaluate coverage checks." "" statusStderr
     (emptyExit, emptyStdout, emptyStderr) <- runEndToEndCommandIn temporaryRepository []
     assertEqual "An omitted subcommand uses Git's usage exit status." usageExitCode emptyExit
     assertEqual "An omitted subcommand leaves stdout empty." "" emptyStdout
@@ -3736,12 +3590,7 @@ haskellStatusEndToEndTest =
           [RepositorySummary repositoryPath Nothing [expectedGeneratedHaskellPackageSummary]]
       )
       statusStdout
-    assertStatusMeasurementDiagnostics statusStderr
-assertStatusMeasurementDiagnostics :: String -> IO ()
-assertStatusMeasurementDiagnostics diagnostics =
-  assertBool
-    "Status is quiet when measurements resolve and warns when measurement discovery is unavailable."
-    (null diagnostics || "warning: could not evaluate Nix check output paths; test measurements are unavailable" `isPrefixOf` diagnostics)
+    assertEqual "Status does not evaluate coverage checks." "" statusStderr
 unlabeledHaskellPackageCheckEndToEndTest :: IO ()
 unlabeledHaskellPackageCheckEndToEndTest =
   withGeneratedHaskellPackageRepository "unlabeled-haskell-check-end-to-end" $ \temporaryRepository -> do
@@ -3846,7 +3695,7 @@ expectedGeneratedPythonPackageSummary =
       repositoryPackageDependencies = [],
       repositoryPackageTestNames =
         ["Prints the sample message from the executable."],
-      repositoryPackageTestStatus = RepositoryTestsUnmeasured
+      repositoryPackageTestStatus = RepositoryTestsConfigured
     }
 expectedGeneratedHaskellPackageSummary :: RepositoryPackageSummary
 expectedGeneratedHaskellPackageSummary =
@@ -3856,7 +3705,7 @@ expectedGeneratedHaskellPackageSummary =
       repositoryPackageDescription = Nothing,
       repositoryPackageDependencies = [],
       repositoryPackageTestNames = ["Renders the sample message."],
-      repositoryPackageTestStatus = RepositoryTestsUnmeasured
+      repositoryPackageTestStatus = RepositoryTestsConfigured
     }
 runEndToEndCommandIn :: FilePath -> [String] -> IO (ExitCode, String, String)
 runEndToEndCommandIn workingDirectory arguments =
