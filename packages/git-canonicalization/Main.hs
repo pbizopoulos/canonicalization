@@ -4829,7 +4829,7 @@ pythonCoverageCheckBaselineNixSource =
       "  ''",
       "    export HOME=\"$(mktemp -d)\"",
       "    mkdir -p \"$out/html\"",
-      "    PACKAGE_E2E_EXECUTABLE=\"${packageDrv}/bin/${packageName}\" python -m pytest -p no:cacheprovider --cov=\"$src\" --cov-report term --cov-report \"html:$out/html\" \"$src/main.py\"",
+      "    PACKAGE_E2E_EXECUTABLE=\"${packageDrv}/bin/${packageName}\" python -m pytest -p no:cacheprovider --cov=\"$src\" --cov-report \"html:$out/html\" \"$src/main.py\"",
       "  ''"
     ]
 rustCoverageCheckBaselineNixSource :: T.Text
