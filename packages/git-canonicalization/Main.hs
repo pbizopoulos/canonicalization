@@ -293,9 +293,23 @@ data StatusImport = StatusImport
   }
 type StatusImportResource :: Type
 data StatusImportResource
-  = StatusImportPackage String String (Maybe String) [String]
+  = StatusImportPackage String String (Maybe String) [String] [String]
   | StatusImportHost String
   deriving stock (Eq, Show)
+type StatusImportTests :: Type
+newtype StatusImportTests = StatusImportTests
+  { statusImportTestNames :: [String]
+  }
+instance Aeson.FromJSON StatusImportTests where
+  parseJSON =
+    Aeson.withObject "StatusImportTests" $ \object ->
+      StatusImportTests . map statusImportTestCaseName <$> object Aeson..:? "cases" Aeson..!= []
+type StatusImportTestCase :: Type
+newtype StatusImportTestCase = StatusImportTestCase
+  { statusImportTestCaseName :: String
+  }
+instance Aeson.FromJSON StatusImportTestCase where
+  parseJSON = Aeson.withObject "StatusImportTestCase" (fmap StatusImportTestCase . (Aeson..: "name"))
 instance Aeson.FromJSON StatusImport where
   parseJSON =
     Aeson.withObject "StatusImport" $ \object -> do
@@ -307,7 +321,14 @@ instance Aeson.FromJSON StatusImportResource where
     Aeson.withObject "StatusImportResource" $ \object -> do
       kind <- object Aeson..: "kind"
       case (kind :: String) of
-        "package" -> StatusImportPackage <$> object Aeson..: "name" <*> object Aeson..: "type" <*> object Aeson..: "description" <*> object Aeson..:? "dependencies" Aeson..!= []
+        "package" -> do
+          packageName <- object Aeson..: "name"
+          packageType <- object Aeson..: "type"
+          packageDescription <- object Aeson..: "description"
+          packageDependencies <- object Aeson..:? "dependencies" Aeson..!= []
+          packageTests <- object Aeson..:? "tests"
+          let packageTestNames = maybe [] statusImportTestNames packageTests
+          pure (StatusImportPackage packageName packageType packageDescription packageDependencies packageTestNames)
         "host" -> StatusImportHost <$> object Aeson..: "name"
         _ -> fail ("unsupported resource kind: " ++ kind)
 type RemoveSpec :: Type
@@ -539,7 +560,7 @@ readStatusImport statusFile = do
 validateStatusImport :: StatusImport -> IO ()
 validateStatusImport statusImport =
   forM_ (statusImportResources statusImport) $ \case
-    StatusImportPackage _ packageType _ _
+    StatusImportPackage _ packageType _ _ _
       | isNothing (parseSupportedAddPackageKind packageType) -> hPutStrLn stderr ("error: cannot scaffold package type from status: " ++ packageType) >> exitFailure
     StatusImportHost hostName
       | not (isDelimitedLowercaseName '-' hostName) -> hPutStrLn stderr "error: host name must use kebab-case" >> exitFailure
@@ -547,21 +568,21 @@ validateStatusImport statusImport =
 initializeStatusResources :: StatusImport -> IO ()
 initializeStatusResources statusImport =
   forM_ (statusImportResources statusImport) $ \case
-    StatusImportPackage packageName packageType packageDescription packageDependencies ->
+    StatusImportPackage packageName packageType packageDescription packageDependencies packageTestNames ->
       case parseSupportedAddPackageKind packageType of
         Nothing -> hPutStrLn stderr ("error: cannot scaffold package type from status: " ++ packageType) >> exitFailure
         Just packageKind ->
           addPackageToCurrentRepositoryWithForce True packageKind packageName packageDescription >>= \case
             Left addError -> hPutStrLn stderr ("error: " ++ addError) >> exitFailure
-            Right _ -> applyStatusPackageMetadata packageName packageDescription packageDependencies
+            Right _ -> applyStatusPackageMetadata packageKind packageName packageDescription packageDependencies packageTestNames
     StatusImportHost hostName -> createHostFromStatus hostName
 initializeStatusReadme :: StatusImport -> IO ()
 initializeStatusReadme statusImport =
   forM_ (statusImportReadme statusImport) $ \readmeSource -> do
     readmeExists <- doesPathExist "README"
     unless readmeExists (TIO.writeFile "README" (T.pack readmeSource))
-applyStatusPackageMetadata :: FilePath -> Maybe String -> [String] -> IO ()
-applyStatusPackageMetadata packageName packageDescription packageDependencies = do
+applyStatusPackageMetadata :: PackageKind -> FilePath -> Maybe String -> [String] -> [String] -> IO ()
+applyStatusPackageMetadata packageKind packageName packageDescription packageDependencies packageTestNames = do
   let defaultNixPath = "packages" </> packageName </> "default.nix"
   defaultNixSource <- TIO.readFile defaultNixPath
   let withoutDefaultDescription =
@@ -573,6 +594,7 @@ applyStatusPackageMetadata packageName packageDescription packageDependencies = 
           then withoutDefaultDescription
           else addStatusPackageDependencies packageDependencies (ensureStatusPackageInputsArgument withoutDefaultDescription)
   TIO.writeFile defaultNixPath withDependencies
+  writeStatusPackageTests packageKind packageName packageTestNames
 ensureStatusPackageInputsArgument :: T.Text -> T.Text
 ensureStatusPackageInputsArgument source =
   case T.stripPrefix "{\n" source of
@@ -588,6 +610,91 @@ addStatusPackageDependencies packageDependencies source =
         <> T.concat ["    inputs.self.packages.${pkgs.stdenv.system}." <> T.pack dependency <> "\n" | dependency <- packageDependencies]
         <> "  ];\n}\n"
     _ -> error "generated package default.nix must end with a derivation attribute set"
+writeStatusPackageTests :: PackageKind -> FilePath -> [String] -> IO ()
+writeStatusPackageTests packageKind packageName testNames =
+  case packageKind of
+    HaskellPackage -> TIO.writeFile ("packages" </> packageName </> "Main.hs") (renderStatusHaskellMainSource testNames)
+    RustPackage -> TIO.writeFile ("packages" </> packageName </> "src/main.rs") (renderStatusRustMainSource testNames)
+    PythonPackage -> TIO.writeFile ("packages" </> packageName </> "main.py") (renderStatusPythonMainSource testNames)
+    PythonLaTeXPackage -> TIO.writeFile ("packages" </> packageName </> "main.py") (renderStatusPythonMainSource testNames)
+    _ -> pure ()
+renderStatusPythonMainSource :: [String] -> T.Text
+renderStatusPythonMainSource testNames =
+  T.unlines
+    ( [ "#!/usr/bin/env python3",
+        "\"\"\"Implementation placeholders imported from repository status.\"\"\"",
+        "",
+        "from __future__ import annotations",
+        "",
+        "",
+        "def main() -> None:",
+        "    message = \"implementation pending\"",
+        "    raise NotImplementedError(message)",
+        ""
+      ]
+        ++ concatMap renderPythonStatusTest (zip [1 :: Int ..] testNames)
+        ++ ["", "if __name__ == \"__main__\":", "    main()"]
+    )
+renderPythonStatusTest :: (Int, String) -> [T.Text]
+renderPythonStatusTest (testNumber, testName) =
+  [ "",
+    T.pack ("def test_imported_contract_" ++ show testNumber ++ "() -> None:"),
+    "    " <> T.pack (renderJSON testName),
+    "    message = \"TODO: implement imported contract\"",
+    "    raise AssertionError(message)"
+  ]
+renderStatusHaskellMainSource :: [String] -> T.Text
+renderStatusHaskellMainSource testNames =
+  T.unlines
+    ( [ "{-# LANGUAGE Trustworthy #-}",
+        "{-# OPTIONS_GHC -Wno-unsafe #-}",
+        "module Main (main, runPackageTests) where",
+        "import System.Exit (exitFailure)",
+        "import Test.HUnit (Counts (errors, failures), Test (TestCase, TestLabel, TestList), assertFailure, runTestTT)",
+        "",
+        "runPackageTests :: IO ()",
+        "runPackageTests = do",
+        "  counts <- runTestTT hUnitPackageTests",
+        "  if errors counts == 0 && failures counts == 0 then putStrLn \"test ... ok\" else exitFailure",
+        "",
+        "hUnitPackageTests :: Test",
+        "hUnitPackageTests = TestList"
+      ]
+        ++ renderHaskellStatusTests testNames
+        ++ ["", "main :: IO ()", "main = exitFailure"]
+    )
+renderHaskellStatusTests :: [String] -> [T.Text]
+renderHaskellStatusTests testNames =
+  case testNames of
+    [] -> ["  []"]
+    firstTestName : remainingTestNames ->
+      ("  [ TestLabel " <> T.pack (show firstTestName) <> " (TestCase (assertFailure \"TODO: implement imported contract\"))")
+        : ["  , TestLabel " <> T.pack (show testName) <> " (TestCase (assertFailure \"TODO: implement imported contract\"))" | testName <- remainingTestNames]
+        ++ ["  ]"]
+renderStatusRustMainSource :: [String] -> T.Text
+renderStatusRustMainSource testNames =
+  T.unlines
+    ( [ "fn main() {",
+        "    panic!(\"implementation pending\");",
+        "}",
+        "",
+        "#[cfg(test)]",
+        "mod tests {",
+        "    #[allow(unused_imports)]",
+        "    use super::*;"
+      ]
+        ++ concatMap renderRustStatusTest (zip [1 :: Int ..] testNames)
+        ++ ["}"]
+    )
+renderRustStatusTest :: (Int, String) -> [T.Text]
+renderRustStatusTest (testNumber, testName) =
+  [ "",
+    "    // git-canonicalization-test: " <> T.pack (renderJSON testName),
+    "    #[test]",
+    T.pack ("    fn imported_contract_" ++ show testNumber ++ "() {"),
+    "        panic!(\"TODO: implement imported contract\");",
+    "    }"
+  ]
 createHostFromStatus :: FilePath -> IO ()
 createHostFromStatus hostName
   | not (isDelimitedLowercaseName '-' hostName) = hPutStrLn stderr "error: host name must use kebab-case" >> exitFailure
@@ -2407,19 +2514,30 @@ inspectRustPackageTests packageName = do
       discoverRustUnitTestNamesFromSource mainRustSource
     )
 discoverRustUnitTestNamesFromSource :: String -> [String]
-discoverRustUnitTestNamesFromSource = map testSpecificationFromIdentifier . extractRustUnitTestNames . lines
-extractRustUnitTestNames :: [String] -> [String]
-extractRustUnitTestNames = Set.toAscList . Set.fromList . go False
+discoverRustUnitTestNamesFromSource =
+  Set.toAscList
+    . Set.fromList
+    . map (either testSpecificationFromIdentifier id)
+    . extractRustUnitTestNames
+    . lines
+extractRustUnitTestNames :: [String] -> [Either String String]
+extractRustUnitTestNames = Set.toAscList . Set.fromList . go Nothing False
   where
-    go _ [] = []
-    go awaitingFunctionAfterTestAttribute (line : rest)
-      | "#[test]" `isPrefixOf` trimmed = go True rest
+    go _ _ [] = []
+    go maybeDeclaredTestName awaitingFunctionAfterTestAttribute (line : rest)
+      | Just declaredTestName <- parseRustDeclaredTestName trimmed = go (Just declaredTestName) awaitingFunctionAfterTestAttribute rest
+      | "#[test]" `isPrefixOf` trimmed = go maybeDeclaredTestName True rest
       | awaitingFunctionAfterTestAttribute && "fn " `isPrefixOf` trimmed =
           let functionName = takeWhile (\character -> character /= '(' && character /= ' ') (drop 3 trimmed)
-           in [functionName | not (null functionName)] ++ go False rest
-      | otherwise = go False rest
+              testName = maybe (Left functionName) Right maybeDeclaredTestName
+           in [testName | not (null functionName)] ++ go Nothing False rest
+      | otherwise = go Nothing False rest
       where
         trimmed = dropWhile (== ' ') line
+    parseRustDeclaredTestName :: String -> Maybe String
+    parseRustDeclaredTestName line = do
+      encodedName <- stripPrefix "// git-canonicalization-test: " line
+      either (const Nothing) Just (Aeson.eitherDecodeStrict' (BS8.pack encodedName))
 pythonTestInspectorPythonSource :: String
 pythonTestInspectorPythonSource =
   unlines
@@ -3319,7 +3437,7 @@ statusImportEndToEndTest =
                 "  \"readme\": \"Imported repository README.\\n\",",
                 "  \"resources\": [",
                 "    {\"kind\": \"package\", \"name\": \"dependency\", \"type\": \"c\", \"description\": null, \"dependencies\": []},",
-                "    {\"kind\": \"package\", \"name\": \"demo\", \"type\": \"python\", \"description\": \"Demo package\", \"dependencies\": [\"dependency\"]},",
+                "    {\"kind\": \"package\", \"name\": \"demo\", \"type\": \"python\", \"description\": \"Demo package\", \"dependencies\": [\"dependency\"], \"tests\": {\"status\": \"configured\", \"cases\": [{\"name\": \"Imported behavior must fail until implemented.\"}, {\"name\": \"OpenAPI contract stays explicit.\"}]}},",
                 "    {\"kind\": \"host\", \"name\": \"default\"}",
                 "  ]",
                 "}"
@@ -3341,6 +3459,9 @@ statusImportEndToEndTest =
       assertBool "Status import preserves the README." ("\"readme\":\"Imported repository README.\\n\"" `isInfixOf` statusStdout)
       assertBool "Status import preserves package dependencies." ("\"dependencies\":[\"dependency\"]" `isInfixOf` statusStdout)
       assertBool "Status import preserves absent package descriptions." ("\"name\":\"dependency\",\"type\":\"c\"" `isInfixOf` statusStdout && "\"description\":null" `isInfixOf` statusStdout)
+      assertBool "Status import preserves test case names." ("Imported behavior must fail until implemented." `isInfixOf` statusStdout && "OpenAPI contract stays explicit." `isInfixOf` statusStdout)
+      importedPythonSource <- TIO.readFile (project </> "packages/demo/main.py")
+      assertBool "Imported test placeholders fail instead of using the passing sample test." ("TODO: implement imported contract" `T.isInfixOf` importedPythonSource && not ("Prints the sample message from the executable." `T.isInfixOf` importedPythonSource))
       assertBool "Status includes the imported host." ("\"kind\":\"host\",\"name\":\"default\"" `isInfixOf` statusStdout)
       (stdinInitExit, _stdinInitStdout, stdinInitStderr) <- runEndToEndCommandWithEnvironmentAndInput "/tmp" environment ["init", stdinProject, "--from-status", "-"] (T.unpack statusSource)
       assertEqual "Standard-input status import initializes the explicit target." ExitSuccess stdinInitExit
