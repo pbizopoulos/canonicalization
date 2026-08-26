@@ -85,6 +85,7 @@ import Prelude
     any,
     concat,
     concatMap,
+    div,
     fail,
     fmap,
     fst,
@@ -458,8 +459,36 @@ nixOSConfigurationsForRepository repositoryRoot =
   readJSONFromNix ["eval", "--impure", "--json", "--expr", nixOSConfigurationsExpression repositoryRoot]
 resolveNixOSDefinitionFiles :: FilePath -> [String] -> [NixOSCandidate] -> IO (Either String (Map NixOSCandidate [FilePath]))
 resolveNixOSDefinitionFiles repositoryRoot nixOSConfigurations candidates = do
-  definitionFilesResult <- readNixOSDefinitionFilesFromNix ["eval", "--impure", "--json", "--expr", nixOSDefaultDefinitionFilesExpression repositoryRoot nixOSConfigurations candidates]
-  pure (Map.fromListWith (++) <$> definitionFilesResult)
+  definitionFiles <- resolveGroups nixOSConfigurations candidates
+  pure (Right (Map.fromListWith (++) definitionFiles))
+  where
+    resolveGroups :: [String] -> [NixOSCandidate] -> IO [(NixOSCandidate, [FilePath])]
+    resolveGroups [] _ = pure []
+    resolveGroups _ [] = pure []
+    resolveGroups configurationGroup candidateGroup = do
+      definitionFilesResult <-
+        readNixOSDefinitionFilesFromNix
+          [ "eval",
+            "--impure",
+            "--json",
+            "--expr",
+            nixOSDefaultDefinitionFilesExpression repositoryRoot configurationGroup candidateGroup
+          ]
+      case definitionFilesResult of
+        Right definitionFiles -> pure definitionFiles
+        Left _ ->
+          case candidateGroup of
+            _ : _ : _ ->
+              let (firstCandidates, remainingCandidates) = List.splitAt (length candidateGroup `div` 2) candidateGroup
+               in (++) <$> resolveGroups configurationGroup firstCandidates <*> resolveGroups configurationGroup remainingCandidates
+            [candidate] ->
+              case configurationGroup of
+                _ : _ : _ ->
+                  let (firstConfigurations, remainingConfigurations) = List.splitAt (length configurationGroup `div` 2) configurationGroup
+                   in (++) <$> resolveGroups firstConfigurations candidateGroup <*> resolveGroups remainingConfigurations candidateGroup
+                [configurationName] -> do
+                  hPutStrLn stderr ("warning: skipping an unevaluable default for " ++ show (fst candidate) ++ " in NixOS configuration " ++ configurationName)
+                  pure []
 resolveNixOSDefaults :: FilePath -> [NixOSCandidate] -> IO (Either String (Maybe (FilePath, Map NixOSCandidate [FilePath])))
 resolveNixOSDefaults _ [] = pure (Right Nothing)
 resolveNixOSDefaults repositoryRoot candidates = do
@@ -502,7 +531,7 @@ nixOSDefaultDefinitionFilesExpression repositoryRoot configurationNames candidat
     ++ renderStringList configurationNames
     ++ "; candidates = "
     ++ renderNixOSCandidateList candidates
-    ++ "; optionAt = value: path: if path == [] then { success = true; inherit value; } else let key = builtins.head path; remainingPath = builtins.tail path; in if builtins.isAttrs value && builtins.hasAttr key value then optionAt value.${key} remainingPath else { success = false; }; literalEquals = expected: actual: if builtins.isNull expected then builtins.isNull actual else if builtins.isBool expected then builtins.isBool actual && actual == expected else if builtins.isInt expected then builtins.isInt actual && actual == expected else if builtins.isFloat expected then builtins.isFloat actual && actual == expected else if builtins.isString expected then builtins.isString actual && actual == expected else if builtins.isList expected then builtins.isList actual && builtins.length actual == builtins.length expected && builtins.all (index: literalEquals (builtins.elemAt expected index) (builtins.elemAt actual index)) (builtins.genList (index: index) (builtins.length expected)) else if builtins.isAttrs expected then builtins.isAttrs actual && builtins.attrNames expected == builtins.attrNames actual && builtins.all (name: literalEquals expected.${name} actual.${name}) (builtins.attrNames expected) else false; filesFor = configurationName: candidate: let evaluated = builtins.getAttr configurationName configurations; optionAttempt = optionAt evaluated.options candidate.path; raw = if optionAttempt.success && builtins.isAttrs optionAttempt.value && optionAttempt.value ? default && literalEquals candidate.value optionAttempt.value.default then builtins.map (definition: definition.file) (optionAttempt.value.definitionsWithLocations or []) else []; attempted = builtins.tryEval (builtins.deepSeq raw raw); in if attempted.success then attempted.value else []; candidateFiles = candidate: { inherit (candidate) path value; files = builtins.concatMap (configurationName: filesFor configurationName candidate) configurationNames; }; in builtins.map candidateFiles candidates"
+    ++ "; optionAt = value: path: if path == [] then { success = true; inherit value; } else let key = builtins.head path; remainingPath = builtins.tail path; in if builtins.isAttrs value && builtins.hasAttr key value then optionAt value.${key} remainingPath else { success = false; }; literalEquals = expected: actual: if builtins.isNull expected then builtins.isNull actual else if builtins.isBool expected then builtins.isBool actual && actual == expected else if builtins.isInt expected then builtins.isInt actual && actual == expected else if builtins.isFloat expected then builtins.isFloat actual && actual == expected else if builtins.isString expected then builtins.isString actual && actual == expected else if builtins.isList expected then builtins.isList actual && builtins.length actual == builtins.length expected && builtins.all (index: literalEquals (builtins.elemAt expected index) (builtins.elemAt actual index)) (builtins.genList (index: index) (builtins.length expected)) else if builtins.isAttrs expected then builtins.isAttrs actual && builtins.attrNames expected == builtins.attrNames actual && builtins.all (name: literalEquals expected.${name} actual.${name}) (builtins.attrNames expected) else false; filesFor = configurationName: candidate: let evaluated = builtins.getAttr configurationName configurations; optionAttempt = optionAt evaluated.options candidate.path; definitionFiles = if optionAttempt.success && builtins.isAttrs optionAttempt.value then builtins.concatMap (definition: if builtins.isAttrs definition && definition ? file then [ definition.file ] else []) (optionAttempt.value.definitionsWithLocations or []) else []; definitionFilesAttempt = builtins.tryEval (builtins.deepSeq definitionFiles definitionFiles); raw = if definitionFilesAttempt.success && definitionFilesAttempt.value != [] && optionAttempt.value ? default && literalEquals candidate.value optionAttempt.value.default then definitionFilesAttempt.value else []; attempted = builtins.tryEval (builtins.deepSeq raw raw); in if attempted.success then attempted.value else []; candidateFiles = candidate: { inherit (candidate) path value; files = builtins.concatMap (configurationName: filesFor configurationName candidate) configurationNames; }; in builtins.map candidateFiles candidates"
 treefmtDefaultsExpression :: FilePath -> [OptionPath] -> String
 treefmtDefaultsExpression repositoryRoot optionPaths =
   "let flake = builtins.getFlake (toString (/. + "
@@ -712,7 +741,13 @@ hUnitPackageTests =
           ("literalEquals = expected: actual:" `isInfixOf` expression)
         assertBool
           "candidate result"
-          ("candidateFiles = candidate: { inherit (candidate) path value; files =" `isInfixOf` expression),
+          ("candidateFiles = candidate: { inherit (candidate) path value; files =" `isInfixOf` expression)
+        assertBool
+          "defaults are only forced for configurations that define the candidate"
+          ("definitionFilesAttempt.success && definitionFilesAttempt.value != [] && optionAttempt.value ? default" `isInfixOf` expression)
+        assertBool
+          "malformed definition entries are ignored"
+          ("builtins.isAttrs definition && definition ? file" `isInfixOf` expression),
       TestLabel "Rejects empty option paths from Nix JSON." $
         TestCase $
           case (eitherDecodeStrict' (Text.encodeUtf8 "[]") :: Either String OptionPath) of
