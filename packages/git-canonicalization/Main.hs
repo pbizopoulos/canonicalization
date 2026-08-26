@@ -632,13 +632,13 @@ renderStatusPythonMainSource testNames =
         "    raise NotImplementedError(message)",
         ""
       ]
-        ++ concatMap renderPythonStatusTest (zip [1 :: Int ..] testNames)
+        ++ concatMap renderPythonStatusTest (zip (statusTestIdentifiers "test" testNames) testNames)
         ++ ["", "if __name__ == \"__main__\":", "    main()"]
     )
-renderPythonStatusTest :: (Int, String) -> [T.Text]
-renderPythonStatusTest (testNumber, testName) =
+renderPythonStatusTest :: (String, String) -> [T.Text]
+renderPythonStatusTest (testIdentifier, testName) =
   [ "",
-    T.pack ("def test_imported_contract_" ++ show testNumber ++ "() -> None:"),
+    T.pack ("def " ++ testIdentifier ++ "() -> None:"),
     "    " <> T.pack (renderJSON testName),
     "    message = \"TODO: implement imported contract\"",
     "    raise AssertionError(message)"
@@ -683,18 +683,57 @@ renderStatusRustMainSource testNames =
         "    #[allow(unused_imports)]",
         "    use super::*;"
       ]
-        ++ concatMap renderRustStatusTest (zip [1 :: Int ..] testNames)
+        ++ concatMap renderRustStatusTest (zip (statusTestIdentifiers "" testNames) testNames)
         ++ ["}"]
     )
-renderRustStatusTest :: (Int, String) -> [T.Text]
-renderRustStatusTest (testNumber, testName) =
+renderRustStatusTest :: (String, String) -> [T.Text]
+renderRustStatusTest (testIdentifier, testName) =
   [ "",
     "    // git-canonicalization-test: " <> T.pack (renderJSON testName),
     "    #[test]",
-    T.pack ("    fn imported_contract_" ++ show testNumber ++ "() {"),
+    T.pack ("    fn " ++ testIdentifier ++ "() {"),
     "        panic!(\"TODO: implement imported contract\");",
     "    }"
   ]
+statusTestIdentifiers :: String -> [String] -> [String]
+statusTestIdentifiers prefix = go Map.empty
+  where
+    go :: Map.Map String Int -> [String] -> [String]
+    go _ [] = []
+    go counts (testName : remainingTestNames) =
+      let baseIdentifier = intercalate "_" (filter (not . null) (prefix : wordsFromTestSpecification testName))
+          occurrence = Map.findWithDefault 0 baseIdentifier counts
+          identifier = if occurrence == 0 then baseIdentifier else baseIdentifier ++ "_" ++ show (occurrence + 1)
+       in identifier : go (Map.insert baseIdentifier (occurrence + 1) counts) remainingTestNames
+wordsFromTestSpecification :: String -> [String]
+wordsFromTestSpecification = concatMap splitCamelCaseWord . splitTestSpecificationTokens
+splitTestSpecificationTokens :: String -> [String]
+splitTestSpecificationTokens = reverse . go [] []
+  where
+    go :: [String] -> String -> String -> [String]
+    go completed reversedWord [] = finishWord completed reversedWord
+    go completed reversedWord (character : remainingCharacters)
+      | isAlphaNum character = go completed (character : reversedWord) remainingCharacters
+      | otherwise = go (finishWord completed reversedWord) [] remainingCharacters
+    finishWord :: [String] -> String -> [String]
+    finishWord completed [] = completed
+    finishWord completed reversedWord = reverse reversedWord : completed
+splitCamelCaseWord :: String -> [String]
+splitCamelCaseWord = map (map toLower) . reverse . go [] []
+  where
+    go :: [String] -> String -> String -> [String]
+    go completed reversedWord [] = finishWord completed reversedWord
+    go completed reversedWord (character : remainingCharacters)
+      | startsNewWord reversedWord character remainingCharacters = go (finishWord completed reversedWord) [character] remainingCharacters
+      | otherwise = go completed (character : reversedWord) remainingCharacters
+    finishWord :: [String] -> String -> [String]
+    finishWord completed [] = completed
+    finishWord completed reversedWord = reverse reversedWord : completed
+    startsNewWord :: String -> Char -> String -> Bool
+    startsNewWord [] _ _ = False
+    startsNewWord (previousCharacter : _) character remainingCharacters =
+      isUpper character
+        && (isLower previousCharacter || (isUpper previousCharacter && maybe False isLower (listToMaybe remainingCharacters)))
 createHostFromStatus :: FilePath -> IO ()
 createHostFromStatus hostName
   | not (isDelimitedLowercaseName '-' hostName) = hPutStrLn stderr "error: host name must use kebab-case" >> exitFailure
@@ -3143,7 +3182,7 @@ pythonClassTestDiscoveryTest = do
       discoveredTests <- inspectPythonTests pythonSourcePath
       assertEqual "Python AST inspection includes pytest test methods in Test classes." (Right ["Reports class behavior."]) discoveredTests
 testIdentifierSpecificationTest :: IO ()
-testIdentifierSpecificationTest =
+testIdentifierSpecificationTest = do
   assertEqual
     "Framework prefixes, snake case, and camel case do not leak into specifications."
     ["Canonicalization is idempotent.", "Removing empty lines matches filtered sequence.", "Attribute sets canonicalize by key order.", "Parses URLs with CLI and preserves UTF-8.", "Rejects a non-regular top-level value."]
@@ -3156,6 +3195,10 @@ testIdentifierSpecificationTest =
           "rejects_a_non_regular_top_level_value"
         ]
     )
+  assertEqual
+    "Status test sentences become conventional, stable language identifiers."
+    ["test_open_api_contract_stays_explicit", "test_imported_behavior_must_fail_until_implemented", "test_imported_behavior_must_fail_until_implemented_2"]
+    (statusTestIdentifiers "test" ["OpenAPI contract stays explicit.", "Imported behavior must fail until implemented.", "Imported behavior must fail until implemented!"])
 packageDetectionTest :: IO ()
 packageDetectionTest =
   assertEqual
@@ -3461,7 +3504,7 @@ statusImportEndToEndTest =
       assertBool "Status import preserves absent package descriptions." ("\"name\":\"dependency\",\"type\":\"c\"" `isInfixOf` statusStdout && "\"description\":null" `isInfixOf` statusStdout)
       assertBool "Status import preserves test case names." ("Imported behavior must fail until implemented." `isInfixOf` statusStdout && "OpenAPI contract stays explicit." `isInfixOf` statusStdout)
       importedPythonSource <- TIO.readFile (project </> "packages/demo/main.py")
-      assertBool "Imported test placeholders fail instead of using the passing sample test." ("TODO: implement imported contract" `T.isInfixOf` importedPythonSource && not ("Prints the sample message from the executable." `T.isInfixOf` importedPythonSource))
+      assertBool "Imported test placeholders fail instead of using the passing sample test." ("TODO: implement imported contract" `T.isInfixOf` importedPythonSource && "def test_imported_behavior_must_fail_until_implemented()" `T.isInfixOf` importedPythonSource && "def test_open_api_contract_stays_explicit()" `T.isInfixOf` importedPythonSource && not ("Prints the sample message from the executable." `T.isInfixOf` importedPythonSource))
       assertBool "Status includes the imported host." ("\"kind\":\"host\",\"name\":\"default\"" `isInfixOf` statusStdout)
       (stdinInitExit, _stdinInitStdout, stdinInitStderr) <- runEndToEndCommandWithEnvironmentAndInput "/tmp" environment ["init", stdinProject, "--from-status", "-"] (T.unpack statusSource)
       assertEqual "Standard-input status import initializes the explicit target." ExitSuccess stdinInitExit
