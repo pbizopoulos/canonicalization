@@ -280,14 +280,14 @@ data Command
   | RemovePackageCommand RemoveSpec
   deriving stock (Eq, Show)
 type InitSpec :: Type
-newtype InitSpec = InitSpec
-  { initLocalPath :: FilePath
+data InitSpec = InitSpec
+  { initLocalPath :: FilePath,
+    initStatusSource :: Maybe FilePath
   }
   deriving stock (Eq, Show)
 type StatusImport :: Type
-data StatusImport = StatusImport
-  { statusImportRoot :: FilePath,
-    statusImportResources :: [StatusImportResource]
+newtype StatusImport = StatusImport
+  { statusImportResources :: [StatusImportResource]
   }
 type StatusImportResource :: Type
 data StatusImportResource
@@ -299,7 +299,7 @@ instance Aeson.FromJSON StatusImport where
     Aeson.withObject "StatusImport" $ \object -> do
       repositoryType <- object Aeson..: "repositoryType"
       when (repositoryType /= ("flake" :: String)) (fail "repositoryType must be flake")
-      StatusImport <$> object Aeson..: "root" <*> object Aeson..: "resources"
+      StatusImport <$> object Aeson..: "resources"
 instance Aeson.FromJSON StatusImportResource where
   parseJSON =
     Aeson.withObject "StatusImportResource" $ \object -> do
@@ -402,13 +402,22 @@ commandParser =
     command name description parser = OA.command name (OA.info parser (OA.progDesc description))
 initCommandParser :: OA.Parser Command
 initCommandParser =
-  InitCommand . InitSpec
-    <$> OA.strArgument
-      ( OA.metavar "DIRECTORY_OR_STATUS_FILE"
-          <> OA.value "."
-          <> OA.showDefault
-          <> OA.help "Flake repository directory, or a status JSON file."
-      )
+  InitCommand
+    <$> ( InitSpec
+            <$> OA.strArgument
+              ( OA.metavar "DIRECTORY"
+                  <> OA.value "."
+                  <> OA.showDefault
+                  <> OA.help "Flake repository directory."
+              )
+            <*> OA.optional
+              ( OA.strOption
+                  ( OA.long "from-status"
+                      <> OA.metavar "FILE|-"
+                      <> OA.help "Initialize resources from status JSON; - reads standard input."
+                  )
+              )
+        )
 addCommandParser :: OA.Parser Command
 addCommandParser =
   AddPackageCommand
@@ -500,19 +509,14 @@ minimalProjectFlakeSource =
 initializeCanonicalization :: InitSpec -> IO ()
 initializeCanonicalization initSpec = do
   let specifiedPath = initLocalPath initSpec
-  statusFileExists <- doesFileExist specifiedPath
-  importedStatus <- if statusFileExists then Just <$> readStatusImport specifiedPath else pure Nothing
+  importedStatus <- traverse readStatusImport (initStatusSource initSpec)
   home <- homeDirectory
-  localPath <-
-    case importedStatus of
-      Nothing -> pure specifiedPath
-      Just statusImport -> expandHomeRelativePath home (statusImportRoot statusImport)
-  targetExists <- doesPathExist localPath
-  targetIsDirectory <- doesDirectoryExist localPath
+  targetExists <- doesPathExist specifiedPath
+  targetIsDirectory <- doesDirectoryExist specifiedPath
   when (targetExists && not targetIsDirectory) $ do
-    hPutStrLn stderr ("error: initialization target exists and is not a directory: " ++ localPath)
+    hPutStrLn stderr ("error: initialization target exists and is not a directory: " ++ specifiedPath)
     exitFailure
-  target <- if targetExists then canonicalizePath localPath else makeAbsolute localPath
+  target <- if targetExists then canonicalizePath specifiedPath else makeAbsolute specifiedPath
   when (target == home) $ do
     hPutStrLn stderr "error: cannot initialize the home directory as a flake repository"
     hPutStrLn stderr "hint: initialize the home repository with Git as documented in README"
@@ -521,18 +525,10 @@ initializeCanonicalization initSpec = do
   forM_ importedStatus $ \statusImport -> withCurrentDirectory target (initializeStatusResources statusImport)
 readStatusImport :: FilePath -> IO StatusImport
 readStatusImport statusFile = do
-  source <- readFile statusFile
+  source <- if statusFile == "-" then getContents else readFile statusFile
   case Aeson.eitherDecodeStrict' (TE.encodeUtf8 (T.pack source)) of
     Left decodeError -> hPutStrLn stderr ("error: invalid status JSON: " ++ decodeError) >> exitFailure
     Right statusImport -> pure statusImport
-expandHomeRelativePath :: FilePath -> FilePath -> IO FilePath
-expandHomeRelativePath home path =
-  case path of
-    "~" -> pure home
-    '~' : '/' : relativePath -> pure (home </> relativePath)
-    _
-      | isAbsolute path -> pure path
-      | otherwise -> hPutStrLn stderr "error: status root must be an absolute path or start with ~/" >> exitFailure
 initializeStatusResources :: StatusImport -> IO ()
 initializeStatusResources statusImport =
   forM_ (statusImportResources statusImport) $ \case
@@ -740,20 +736,13 @@ checkHomeProfile repositoryRoot fix = do
 renderHomeProfileStatus :: FilePath -> IO ()
 renderHomeProfileStatus repositoryRoot = do
   checkHomeProfile repositoryRoot False
-  home <- homeDirectory
   readHomeRepositories repositoryRoot >>= \case
     Left issues -> reportHomeCheckIssues issues
-    Right repositories -> putStrLn (renderJSON (homeStatusJSON (renderHomeRelativePath home repositoryRoot) repositories))
-renderHomeRelativePath :: FilePath -> FilePath -> FilePath
-renderHomeRelativePath home path
-  | path == home = "~"
-  | isStrictDescendantOf home path = "~/" ++ makeRelative home path
-  | otherwise = path
-homeStatusJSON :: FilePath -> [HomeRepository] -> Aeson.Value
-homeStatusJSON repositoryRoot repositories =
+    Right repositories -> putStrLn (renderJSON (homeStatusJSON repositories))
+homeStatusJSON :: [HomeRepository] -> Aeson.Value
+homeStatusJSON repositories =
   Aeson.object
     [ "repositoryType" Aeson..= ("home" :: String),
-      "root" Aeson..= repositoryRoot,
       "resources" Aeson..= map homeRepositoryJSON repositories
     ]
 homeRepositoryJSON :: HomeRepository -> Aeson.Value
@@ -1037,8 +1026,7 @@ data RepositoryPackageSummary = RepositoryPackageSummary
   deriving stock (Eq, Show)
 type RepositorySummary :: Type
 data RepositorySummary = RepositorySummary
-  { repositorySummaryPath :: FilePath,
-    repositorySummaryReadme :: Maybe String,
+  { repositorySummaryReadme :: Maybe String,
     repositorySummaryPackages :: [RepositoryPackageSummary],
     repositorySummaryHosts :: [FilePath]
   }
@@ -1047,8 +1035,7 @@ summarizeRepositoryLocation :: ([RepositorySummary] -> String) -> FilePath -> IO
 summarizeRepositoryLocation render repositoryRoot = do
   repositoryPath <- canonicalizePath repositoryRoot
   repositorySummary <- summarizeRepositoryAt repositoryPath repositoryRoot
-  home <- homeDirectory
-  putStr (render [repositorySummary {repositorySummaryPath = renderHomeRelativePath home repositoryPath}])
+  putStr (render [repositorySummary])
 summarizeRepositoryAt :: FilePath -> FilePath -> IO RepositorySummary
 summarizeRepositoryAt repositoryPath repositoryRoot =
   withCurrentDirectory repositoryRoot $
@@ -1065,8 +1052,7 @@ summarizeRepositoryAt repositoryPath repositoryRoot =
         hostNames <- listFilesystemChildDirectories "hosts"
         pure
           RepositorySummary
-            { repositorySummaryPath = repositoryPath,
-              repositorySummaryReadme = repositoryReadme,
+            { repositorySummaryReadme = repositoryReadme,
               repositorySummaryPackages = packageSummaries,
               repositorySummaryHosts = hostNames
             }
@@ -1075,20 +1061,18 @@ renderRepositorySummariesJSON summaries = renderJSON (repositoryStatusJSON summa
 repositoryStatusJSON :: [RepositorySummary] -> Aeson.Value
 repositoryStatusJSON summaries =
   case summaries of
-    [] -> statusObject Nothing Nothing []
+    [] -> statusObject Nothing []
     repositorySummary : _ ->
       statusObject
-        (Just (repositorySummaryPath repositorySummary))
         (repositorySummaryReadme repositorySummary)
         ( map repositoryPackageSummaryJSON (repositorySummaryPackages repositorySummary)
             ++ map repositoryHostSummaryJSON (repositorySummaryHosts repositorySummary)
         )
   where
-    statusObject :: Maybe FilePath -> Maybe String -> [Aeson.Value] -> Aeson.Value
-    statusObject repositoryRoot repositoryReadme resources =
+    statusObject :: Maybe String -> [Aeson.Value] -> Aeson.Value
+    statusObject repositoryReadme resources =
       Aeson.object
         [ "repositoryType" Aeson..= ("flake" :: String),
-          "root" Aeson..= repositoryRoot,
           "readme" Aeson..= repositoryReadme,
           "resources" Aeson..= resources
         ]
@@ -2880,7 +2864,7 @@ hUnitPackageTests =
       TestLabel "Accepts python_template without inputs or shellHook." (TestCase pythonTemplateOptionalInputsAndShellHookTest),
       TestLabel "Documents help and invokes it consistently." (TestCase commandLineHelpEndToEndTest),
       TestLabel "Initializes flake repositories and rejects home initialization." (TestCase initializationEndToEndTest),
-      TestLabel "Initializes packages and hosts from status JSON." (TestCase statusImportEndToEndTest),
+      TestLabel "Initializes packages and hosts from file and stdin status JSON." (TestCase statusImportEndToEndTest),
       TestLabel "Validates canonical project locations against origin." (TestCase initializationLocationEndToEndTest),
       TestLabel "Preserves existing initialization files and rejects inconsistent state." (TestCase initializationExistingFilesEndToEndTest),
       TestLabel "Disambiguates repository URLs and package additions." (TestCase addCommandParsingTest),
@@ -3157,8 +3141,7 @@ repositorySummaryRenderingTest = do
           }
       repositorySummary =
         RepositorySummary
-          { repositorySummaryPath = "example.test/owner/demo",
-            repositorySummaryReadme = Just "Demo repository.\n\nIts intent is visible.",
+          { repositorySummaryReadme = Just "Demo repository.\n\nIts intent is visible.",
             repositorySummaryPackages = [packageSummary],
             repositorySummaryHosts = ["default"]
           }
@@ -3214,7 +3197,7 @@ commandLineHelpEndToEndTest =
     assertEqual "A command-specific help request leaves stderr empty." "" commandHelpStderr
     (initHelpExit, initHelpStdout, initHelpStderr) <- runEndToEndCommandIn temporaryDirectory ["init", "--help"]
     assertEqual "Init help succeeds." ExitSuccess initHelpExit
-    assertBool "Init help documents its path-or-status-file argument." ("Usage:" `isInfixOf` initHelpStdout && "DIRECTORY_OR_STATUS_FILE" `isInfixOf` initHelpStdout)
+    assertBool "Init help documents its directory and status-import option." ("Usage:" `isInfixOf` initHelpStdout && "DIRECTORY" `isInfixOf` initHelpStdout && "--from-status FILE|-" `isInfixOf` initHelpStdout)
     assertEqual "Init help leaves stderr empty." "" initHelpStderr
 initializationEndToEndTest :: IO ()
 initializationEndToEndTest =
@@ -3270,21 +3253,22 @@ statusImportEndToEndTest =
       environment <- initializationTestEnvironment temporaryHome temporaryTools
       let statusFile = temporaryTools </> "status.json"
           project = temporaryHome </> "projects/demo"
+          stdinProject = temporaryHome </> "projects/stdin-demo"
+          statusSource =
+            T.unlines
+              [ "{",
+                "  \"repositoryType\": \"flake\",",
+                "  \"readme\": null,",
+                "  \"resources\": [",
+                "    {\"kind\": \"package\", \"name\": \"demo\", \"type\": \"python\", \"description\": \"Demo package\", \"dependencies\": []},",
+                "    {\"kind\": \"host\", \"name\": \"default\"}",
+                "  ]",
+                "}"
+              ]
       TIO.writeFile
         statusFile
-        ( T.unlines
-            [ "{",
-              "  \"repositoryType\": \"flake\",",
-              "  \"root\": \"~/projects/demo\",",
-              "  \"readme\": null,",
-              "  \"resources\": [",
-              "    {\"kind\": \"package\", \"name\": \"demo\", \"type\": \"python\", \"description\": \"Demo package\", \"dependencies\": []},",
-              "    {\"kind\": \"host\", \"name\": \"default\"}",
-              "  ]",
-              "}"
-            ]
-        )
-      (initExit, _initStdout, initStderr) <- runEndToEndCommandWithEnvironment "/tmp" environment ["init", statusFile]
+        statusSource
+      (initExit, _initStdout, initStderr) <- runEndToEndCommandWithEnvironment "/tmp" environment ["init", project, "--from-status", statusFile]
       assertEqual "Status import initializes the target repository." ExitSuccess initExit
       assertBool "Status import reports lock generation." ("Locking flake inputs..." `isInfixOf` initStderr)
       packageExists <- doesFileExist (project </> "packages/demo/main.py")
@@ -3294,8 +3278,15 @@ statusImportEndToEndTest =
       (statusExit, statusStdout, statusStderr) <- runEndToEndCommandWithEnvironment project environment ["status"]
       assertEqual "Imported repository status succeeds." ExitSuccess statusExit
       assertEqual "Imported repository status emits no diagnostics." "" statusStderr
-      assertBool "Status roots use a home-relative path." ("\"root\":\"~/projects/demo\"" `isInfixOf` statusStdout)
+      assertBool "Status omits location-specific roots." (not ("\"root\"" `isInfixOf` statusStdout))
       assertBool "Status includes the imported host." ("\"kind\":\"host\",\"name\":\"default\"" `isInfixOf` statusStdout)
+      (stdinInitExit, _stdinInitStdout, stdinInitStderr) <- runEndToEndCommandWithEnvironmentAndInput "/tmp" environment ["init", stdinProject, "--from-status", "-"] (T.unpack statusSource)
+      assertEqual "Standard-input status import initializes the explicit target." ExitSuccess stdinInitExit
+      assertBool "Standard-input import reports lock generation." ("Locking flake inputs..." `isInfixOf` stdinInitStderr)
+      stdinPackageExists <- doesFileExist (stdinProject </> "packages/demo/main.py")
+      stdinHostExists <- doesFileExist (stdinProject </> "hosts/default/configuration.nix")
+      assertBool "Standard-input import creates each package scaffold." stdinPackageExists
+      assertBool "Standard-input import creates each host scaffold." stdinHostExists
 initializationLocationEndToEndTest :: IO ()
 initializationLocationEndToEndTest =
   withTemporaryPackageRepository "initialization-location-home" $ \temporaryHome ->
@@ -3348,8 +3339,9 @@ initializationExistingFilesEndToEndTest =
       assertEqual "An existing whitelist is preserved byte-for-byte." "not canonical\n" preservedGitignore
 addCommandParsingTest :: IO ()
 addCommandParsingTest = do
-  assertEqual "Init accepts exactly one local path." (Just (InitCommand (InitSpec "project"))) (parseCommandForTest ["init", "project"])
-  assertEqual "Init without a path defaults to the current directory." (Just (InitCommand (InitSpec "."))) (parseCommandForTest ["init"])
+  assertEqual "Init accepts exactly one local path." (Just (InitCommand (InitSpec "project" Nothing))) (parseCommandForTest ["init", "project"])
+  assertEqual "Init accepts an explicit status source." (Just (InitCommand (InitSpec "project" (Just "-")))) (parseCommandForTest ["init", "project", "--from-status", "-"])
+  assertEqual "Init without a path defaults to the current directory." (Just (InitCommand (InitSpec "." Nothing))) (parseCommandForTest ["init"])
   assertEqual "A single add argument is rejected." Nothing (parseCommandForTest ["add", "python"])
   assertEqual
     "The option terminator permits a description beginning with a dash."
@@ -3436,13 +3428,11 @@ homeProfileEndToEndTest =
       "Fixing a home whitelist preserves user entries and adds only missing structural entries."
       "*\n!/.custom/\n!/.gitmodules\n!/.gitignore\n"
       fixedGitignoreSource
-    repositoryRoot <- canonicalizePath temporaryDirectory
-    home <- homeDirectory
     (statusExit, statusStdout, statusStderr) <- runEndToEndCommandIn temporaryDirectory ["status"]
     assertEqual "An empty home status succeeds." ExitSuccess statusExit
     assertEqual
       "An empty home status uses the common profile envelope."
-      (Right (homeStatusJSON (renderHomeRelativePath home repositoryRoot) []))
+      (Right (homeStatusJSON []))
       (Aeson.eitherDecodeStrict' (TE.encodeUtf8 (T.pack statusStdout)))
     assertEqual "An empty home status emits no stderr." "" statusStderr
 addPackageEndToEndTest :: IO ()
@@ -3699,14 +3689,12 @@ statusEndToEndTest =
     assertEqual "Fixing the whitelist discovers the valid untracked README." ExitSuccess fixExit
     assertEqual "A successful README whitelist fix leaves stdout empty." "" fixStdout
     assertEqual "A successful README whitelist fix leaves stderr empty." "" fixStderr
-    repositoryPath <- canonicalizePath temporaryRepository
-    home <- homeDirectory
     (statusExit, statusStdout, statusStderr) <- runEndToEndCommandIn temporaryRepository ["status"]
     assertEqual "JSON status succeeds for the generated repository." ExitSuccess statusExit
     assertEqual
       "JSON status exactly reports generated metadata, checks, and discovered tests."
       ( renderRepositorySummariesJSON
-          [RepositorySummary (renderHomeRelativePath home repositoryPath) (Just repositoryReadme) [expectedGeneratedPythonPackageSummary] []]
+          [RepositorySummary (Just repositoryReadme) [expectedGeneratedPythonPackageSummary] []]
       )
       statusStdout
     assertEqual "Status does not evaluate coverage checks." "" statusStderr
@@ -3717,14 +3705,12 @@ statusEndToEndTest =
 haskellStatusEndToEndTest :: IO ()
 haskellStatusEndToEndTest =
   withGeneratedHaskellPackageRepository "haskell-status-end-to-end" $ \temporaryRepository -> do
-    repositoryPath <- canonicalizePath temporaryRepository
-    home <- homeDirectory
     (statusExit, statusStdout, statusStderr) <- runEndToEndCommandIn temporaryRepository ["status"]
     assertEqual "A generated Haskell package status succeeds." ExitSuccess statusExit
     assertEqual
       "The status reports its conventional HUnit label."
       ( renderRepositorySummariesJSON
-          [RepositorySummary (renderHomeRelativePath home repositoryPath) Nothing [expectedGeneratedHaskellPackageSummary] []]
+          [RepositorySummary Nothing [expectedGeneratedHaskellPackageSummary] []]
       )
       statusStdout
     assertEqual "Status does not evaluate coverage checks." "" statusStderr
@@ -3850,8 +3836,11 @@ runEndToEndCommandIn workingDirectory arguments =
     readProcessWithExitCode "git-canonicalization" arguments ""
 runEndToEndCommandWithEnvironment :: FilePath -> [(String, String)] -> [String] -> IO (ExitCode, String, String)
 runEndToEndCommandWithEnvironment workingDirectory environment arguments =
+  runEndToEndCommandWithEnvironmentAndInput workingDirectory environment arguments ""
+runEndToEndCommandWithEnvironmentAndInput :: FilePath -> [(String, String)] -> [String] -> String -> IO (ExitCode, String, String)
+runEndToEndCommandWithEnvironmentAndInput workingDirectory environment arguments input =
   withCurrentDirectory workingDirectory $
-    readCreateProcessWithExitCode (proc "git-canonicalization" arguments) {env = Just environment} ""
+    readCreateProcessWithExitCode (proc "git-canonicalization" arguments) {env = Just environment} input
 initializationTestEnvironment :: FilePath -> FilePath -> IO [(String, String)]
 initializationTestEnvironment home toolsDirectory = do
   let fakeNixPath = toolsDirectory </> "nix"
