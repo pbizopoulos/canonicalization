@@ -59,7 +59,6 @@ import System.FilePath (isAbsolute, (<.>), (</>))
 import System.FilePath.Posix (makeRelative, splitDirectories, takeBaseName, takeDirectory, takeFileName)
 import System.IO (hClose, hPutStr, hPutStrLn, openTempFile, stderr)
 import System.Posix.Files qualified as Posix
-import System.Posix.Process (executeFile)
 import System.Posix.Temp (mkdtemp)
 import System.Process (CreateProcess (env), proc, readCreateProcessWithExitCode, readProcessWithExitCode)
 import TOML qualified
@@ -374,7 +373,7 @@ runCommand = \case
             hPutStrLn stderr ("hint: supported package types: " ++ intercalate ", " (map fst supportedAddPackageKinds))
             exitFailure
           Just scaffoldPackageKind -> do
-            addResult <- addPackageToCurrentRepository scaffoldPackageKind packageName packageDescription
+            addResult <- addPackageToCurrentRepositoryDetailed False scaffoldPackageKind packageName packageDescription
             stageGeneratedPathsOrExit addResult
   RemovePackageCommand removeSpec ->
     withRequiredProfile FlakeProfile "package" $ \repositoryRoot ->
@@ -383,12 +382,22 @@ runCommand = \case
         case removeResult of
           Left removeError -> hPutStrLn stderr ("error: " ++ removeError) >> exitFailure
           Right () -> exitSuccess
-stageGeneratedPathsOrExit :: Either String [FilePath] -> IO a
+stageGeneratedPathsOrExit :: Either String AddedPackage -> IO ()
 stageGeneratedPathsOrExit = \case
   Left addError -> do
     hPutStrLn stderr ("error: " ++ addError)
     exitFailure
-  Right generatedPaths -> delegateToGit (["add", "--"] ++ generatedPaths)
+  Right addedPackage -> do
+    let generatedPaths = addedPackageGeneratedPaths addedPackage
+    (stageExit, stageStdout, stageStderr) <- readGitProcess (["add", "--"] ++ generatedPaths) ""
+    case stageExit of
+      ExitSuccess -> pure ()
+      _ -> do
+        rollbackError <- rollbackAddedPackage addedPackage
+        putStr stageStdout
+        hPutStr stderr stageStderr
+        forM_ rollbackError (hPutStrLn stderr . ("error: could not roll back failed package add: " ++))
+        exitWith stageExit
 usageExitCode :: ExitCode
 usageExitCode = ExitFailure 129
 normalizeHelpArguments :: [String] -> [String]
@@ -1096,8 +1105,6 @@ runProcessOrExit successfulOutput executable arguments = do
       putStr processStdout
       hPutStr stderr processStderr
       exitWith processExit
-delegateToGit :: [String] -> IO a
-delegateToGit gitArguments = executeFile "git" True gitArguments Nothing
 checkRepositoryLocation :: FilePath -> IO ()
 checkRepositoryLocation repositoryRoot =
   withCurrentDirectory repositoryRoot $
@@ -1432,10 +1439,17 @@ data ScaffoldFile = ScaffoldFile
   { scaffoldFilePath :: FilePath,
     scaffoldFileContents :: T.Text
   }
-addPackageToCurrentRepository :: PackageKind -> FilePath -> Maybe String -> IO (Either String [FilePath])
-addPackageToCurrentRepository = addPackageToCurrentRepositoryWithForce False
+type AddedPackage :: Type
+data AddedPackage = AddedPackage
+  { addedPackageGeneratedPaths :: [FilePath],
+    addedPackageScaffoldRoots :: [FilePath],
+    addedPackageOriginalGitignore :: Maybe T.Text
+  }
 addPackageToCurrentRepositoryWithForce :: Bool -> PackageKind -> FilePath -> Maybe String -> IO (Either String [FilePath])
 addPackageToCurrentRepositoryWithForce force packageKind packageName packageDescription =
+  fmap (fmap addedPackageGeneratedPaths) (addPackageToCurrentRepositoryDetailed force packageKind packageName packageDescription)
+addPackageToCurrentRepositoryDetailed :: Bool -> PackageKind -> FilePath -> Maybe String -> IO (Either String AddedPackage)
+addPackageToCurrentRepositoryDetailed force packageKind packageName packageDescription =
   case validatePackageNameForKind packageKind packageName of
     Just validationError -> pure (Left validationError)
     Nothing -> do
@@ -1451,19 +1465,62 @@ addPackageToCurrentRepositoryWithForce force packageKind packageName packageDesc
                   checkScaffoldFiles = maybeToList (renderRepositoryCheckScaffoldFile packageName <$> checkTemplateSpecForPackageKind packageKind)
                   scaffoldFiles = packageScaffoldFiles ++ checkScaffoldFiles
                   scaffoldRoots = packageRootDirectory : map (takeDirectory . scaffoldFilePath) checkScaffoldFiles
-              existingScaffoldRoots <- filterM doesPathExist scaffoldRoots
-              case existingScaffoldRoots of
-                existingScaffoldRoot : _ -> pure (Left ("path already exists: " ++ existingScaffoldRoot))
-                [] ->
-                  createScaffoldFiles scaffoldRoots scaffoldFiles >>= \case
-                    Left scaffoldError -> pure (Left scaffoldError)
-                    Right scaffoldPaths -> do
-                      rootGitignoreSource <- renderRootGitignoreFromCurrentRepositoryWith scaffoldPaths
-                      writeTextFileAtomically ".gitignore" rootGitignoreSource >>= \case
-                        Left writeError -> do
-                          removeScaffoldRoots scaffoldRoots
-                          pure (Left ("could not update .gitignore: " ++ writeError))
-                        Right () -> pure (Right (".gitignore" : scaffoldPaths))
+              ensureScaffoldRootsAreSafe scaffoldRoots >>= \case
+                Left safetyError -> pure (Left safetyError)
+                Right () -> do
+                  existingScaffoldRoots <- filterM doesPathExist scaffoldRoots
+                  case existingScaffoldRoots of
+                    existingScaffoldRoot : _ -> pure (Left ("path already exists: " ++ existingScaffoldRoot))
+                    [] -> do
+                      originalGitignore <- readTextFileIfExists ".gitignore"
+                      createScaffoldFiles scaffoldRoots scaffoldFiles >>= \case
+                        Left scaffoldError -> pure (Left scaffoldError)
+                        Right scaffoldPaths -> do
+                          rootGitignoreSource <- renderRootGitignoreFromCurrentRepositoryWith scaffoldPaths
+                          writeTextFileAtomically ".gitignore" rootGitignoreSource >>= \case
+                            Left writeError -> do
+                              removeScaffoldRoots scaffoldRoots
+                              pure (Left ("could not update .gitignore: " ++ writeError))
+                            Right () ->
+                              pure
+                                ( Right
+                                    AddedPackage
+                                      { addedPackageGeneratedPaths = ".gitignore" : scaffoldPaths,
+                                        addedPackageScaffoldRoots = scaffoldRoots,
+                                        addedPackageOriginalGitignore = originalGitignore
+                                      }
+                                )
+ensureScaffoldRootsAreSafe :: [FilePath] -> IO (Either String ())
+ensureScaffoldRootsAreSafe scaffoldRoots = do
+  unsafePaths <- catMaybes <$> mapM firstUnsafeScaffoldAncestor scaffoldRoots
+  pure $
+    case unsafePaths of
+      unsafePath : _ -> Left (unsafePath ++ ": managed scaffold paths must use real directories, not symbolic links or files")
+      [] -> Right ()
+firstUnsafeScaffoldAncestor :: FilePath -> IO (Maybe FilePath)
+firstUnsafeScaffoldAncestor path = do
+  statusResult <- try (Posix.getSymbolicLinkStatus path) :: IO (Either IOException Posix.FileStatus)
+  case statusResult of
+    Left _ ->
+      let parentPath = takeDirectory path
+       in if parentPath == path then pure Nothing else firstUnsafeScaffoldAncestor parentPath
+    Right status
+      | Posix.isDirectory status ->
+          let parentPath = takeDirectory path
+           in if parentPath == path then pure Nothing else firstUnsafeScaffoldAncestor parentPath
+      | otherwise -> pure (Just path)
+rollbackAddedPackage :: AddedPackage -> IO (Maybe String)
+rollbackAddedPackage addedPackage = do
+  rollbackResult <- try $ do
+    removeScaffoldRoots (addedPackageScaffoldRoots addedPackage)
+    case addedPackageOriginalGitignore addedPackage of
+      Just originalGitignore -> do
+        writeResult <- writeTextFileAtomically ".gitignore" originalGitignore
+        either (ioError . userError) pure writeResult
+      Nothing -> do
+        gitignoreExists <- doesPathExist ".gitignore"
+        when gitignoreExists (removeFile ".gitignore")
+  pure (either (Just . show) (const Nothing) (rollbackResult :: Either IOException ()))
 ensureRootGitignoreClean :: Bool -> IO (Either String ())
 ensureRootGitignoreClean force
   | force = pure (Right ())
@@ -3059,6 +3116,8 @@ hUnitPackageTests =
       TestLabel "Requires allowlisted filesystem entry kinds." (TestCase entryKindStructureTest),
       TestLabel "Refuses to repair a non-regular root Git ignore entry." (TestCase rootGitignoreRepairSafetyTest),
       TestLabel "Rolls back scaffold files when generation fails." (TestCase scaffoldCreationRollbackTest),
+      TestLabel "Rejects symbolic links in managed scaffold paths." (TestCase scaffoldSymlinkSafetyEndToEndTest),
+      TestLabel "Rolls back package creation when staging fails." (TestCase addStagingRollbackEndToEndTest),
       TestLabel "Uses standard Git ignore semantics for repository entries." (TestCase gitIgnoredRepositoryEntryTest),
       TestLabel "Renders only supplied repository whitelist paths." (TestCase minimalRootGitignoreRenderingTest),
       TestLabel "Treats parameter directories as opaque user data." (TestCase parameterDirectoryStructureTest),
@@ -3254,6 +3313,31 @@ scaffoldCreationRollbackTest =
       assertBool "A scaffold write failure is returned as an error." (either (const True) (const False) creationResult)
       packageDirectoryExists <- doesPathExist "packages/demo"
       assertBool "A scaffold write failure removes files created earlier in the operation." (not packageDirectoryExists)
+scaffoldSymlinkSafetyEndToEndTest :: IO ()
+scaffoldSymlinkSafetyEndToEndTest =
+  withEmptyCanonicalRepository "scaffold-symlink-safety" $ \temporaryRepository -> do
+    let outsideDirectory = temporaryRepository </> "outside"
+    createDirectoryIfMissing True outsideDirectory
+    createFileLink outsideDirectory (temporaryRepository </> "packages")
+    (addExit, _addStdout, addStderr) <- runEndToEndCommandIn temporaryRepository ["add", "python", "escape_probe"]
+    assertEqual "Adding through a symbolic packages directory fails." (ExitFailure 1) addExit
+    assertBool "The failure identifies the unsafe managed path." ("packages: managed scaffold paths must use real directories" `isInfixOf` addStderr)
+    outsidePackageExists <- doesPathExist (outsideDirectory </> "escape_probe")
+    assertBool "Adding through a symbolic packages directory does not write outside the repository." (not outsidePackageExists)
+    gitignoreExists <- doesPathExist (temporaryRepository </> ".gitignore")
+    assertBool "Rejecting a symbolic packages directory does not modify .gitignore." (not gitignoreExists)
+addStagingRollbackEndToEndTest :: IO ()
+addStagingRollbackEndToEndTest =
+  withEmptyCanonicalRepository "add-staging-rollback" $ \temporaryRepository -> do
+    writeFile (temporaryRepository </> ".git/index.lock") ""
+    (addExit, _addStdout, _addStderr) <- runEndToEndCommandIn temporaryRepository ["add", "python", "partial_probe"]
+    assertEqual "Adding while the Git index is locked fails." (ExitFailure 128) addExit
+    packageDirectoryExists <- doesPathExist (temporaryRepository </> "packages/partial_probe")
+    checkDirectoryExists <- doesPathExist (temporaryRepository </> "checks/partial_probe_coverage")
+    gitignoreExists <- doesPathExist (temporaryRepository </> ".gitignore")
+    assertBool "A staging failure removes the generated package." (not packageDirectoryExists)
+    assertBool "A staging failure removes the generated check." (not checkDirectoryExists)
+    assertBool "A staging failure restores the original missing .gitignore." (not gitignoreExists)
 gitIgnoredRepositoryEntryTest :: IO ()
 gitIgnoredRepositoryEntryTest =
   withTemporaryPackageRepository "git-ignored-repository-entry" $ \temporaryRepository -> do
