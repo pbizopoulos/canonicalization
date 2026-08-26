@@ -77,6 +77,7 @@ defaultAllowedNixDifferenceKeys =
       "nativeBuildInputs",
       "nativeCheckInputs",
       "nativeInstallCheckInputs",
+      "passthru.canonicalizationDependencies",
       "postInstall",
       "passthru.rustCheckNativeBuildInputs",
       "meta",
@@ -126,31 +127,31 @@ templateSpecs =
     TemplateSpec
       { templateName = "python_latex_template",
         templateMatches = matchesPythonLaTeXTemplate,
-        templateAllowedDifferenceKeys = Set.fromList ["meta", "propagatedBuildInputs", "pythonDeps", "version"],
+        templateAllowedDifferenceKeys = Set.insert "passthru.canonicalizationDependencies" (Set.fromList ["meta", "propagatedBuildInputs", "pythonDeps", "version"]),
         templateBaselineSource = pythonLaTeXTemplateBaselineNixSource
       },
     TemplateSpec
       { templateName = "python_pypi_application_template",
         templateMatches = matchesPythonPyPIApplicationTemplate,
-        templateAllowedDifferenceKeys = Set.fromList ["installCheckPhase", "meta", "nativeBuildInputs", "propagatedBuildInputs", "python", "src", "version"],
+        templateAllowedDifferenceKeys = Set.insert "passthru.canonicalizationDependencies" (Set.fromList ["installCheckPhase", "meta", "nativeBuildInputs", "propagatedBuildInputs", "python", "src", "version"]),
         templateBaselineSource = pythonPyPIApplicationTemplateBaselineNixSource
       },
     TemplateSpec
       { templateName = "python_pypi_template",
         templateMatches = matchesPythonPyPITemplate,
-        templateAllowedDifferenceKeys = Set.fromList ["format", "installCheckPhase", "meta", "nativeBuildInputs", "propagatedBuildInputs", "python", "src", "version"],
+        templateAllowedDifferenceKeys = Set.insert "passthru.canonicalizationDependencies" (Set.fromList ["format", "installCheckPhase", "meta", "nativeBuildInputs", "propagatedBuildInputs", "python", "src", "version"]),
         templateBaselineSource = pythonPyPITemplateBaselineNixSource
       },
     TemplateSpec
       { templateName = "binary_release_template",
         templateMatches = matchesBinaryReleaseTemplate,
-        templateAllowedDifferenceKeys = Set.fromList ["installCheckPhase", "src", "version"],
+        templateAllowedDifferenceKeys = Set.insert "passthru.canonicalizationDependencies" (Set.fromList ["installCheckPhase", "src", "version"]),
         templateBaselineSource = binaryReleaseTemplateBaselineNixSource
       },
     TemplateSpec
       { templateName = "python_template",
         templateMatches = \_ nixSource -> "buildPythonPackage" `isInfixOf` nixSource,
-        templateAllowedDifferenceKeys = Set.fromList ["meta", "propagatedBuildInputs", "python", "shellHook", "version"],
+        templateAllowedDifferenceKeys = Set.insert "passthru.canonicalizationDependencies" (Set.fromList ["meta", "propagatedBuildInputs", "python", "shellHook", "version"]),
         templateBaselineSource = pythonTemplateBaselineNixSource
       },
     TemplateSpec
@@ -286,12 +287,13 @@ data InitSpec = InitSpec
   }
   deriving stock (Eq, Show)
 type StatusImport :: Type
-newtype StatusImport = StatusImport
-  { statusImportResources :: [StatusImportResource]
+data StatusImport = StatusImport
+  { statusImportReadme :: Maybe String,
+    statusImportResources :: [StatusImportResource]
   }
 type StatusImportResource :: Type
 data StatusImportResource
-  = StatusImportPackage String String (Maybe String)
+  = StatusImportPackage String String (Maybe String) [String]
   | StatusImportHost String
   deriving stock (Eq, Show)
 instance Aeson.FromJSON StatusImport where
@@ -299,13 +301,13 @@ instance Aeson.FromJSON StatusImport where
     Aeson.withObject "StatusImport" $ \object -> do
       repositoryType <- object Aeson..: "repositoryType"
       when (repositoryType /= ("flake" :: String)) (fail "repositoryType must be flake")
-      StatusImport <$> object Aeson..: "resources"
+      StatusImport <$> object Aeson..: "readme" <*> object Aeson..: "resources"
 instance Aeson.FromJSON StatusImportResource where
   parseJSON =
     Aeson.withObject "StatusImportResource" $ \object -> do
       kind <- object Aeson..: "kind"
       case (kind :: String) of
-        "package" -> StatusImportPackage <$> object Aeson..: "name" <*> object Aeson..: "type" <*> object Aeson..:? "description"
+        "package" -> StatusImportPackage <$> object Aeson..: "name" <*> object Aeson..: "type" <*> object Aeson..: "description" <*> object Aeson..:? "dependencies" Aeson..!= []
         "host" -> StatusImportHost <$> object Aeson..: "name"
         _ -> fail ("unsupported resource kind: " ++ kind)
 type RemoveSpec :: Type
@@ -522,24 +524,70 @@ initializeCanonicalization initSpec = do
     hPutStrLn stderr "hint: initialize the home repository with Git as documented in README"
     exitFailure
   initializeProjectRepository targetExists home target
-  forM_ importedStatus $ \statusImport -> withCurrentDirectory target (initializeStatusResources statusImport)
+  forM_ importedStatus $ \statusImport -> withCurrentDirectory target $ do
+    initializeStatusReadme statusImport
+    initializeStatusResources statusImport
+    renderRootGitignoreFromCurrentRepository >>= writeTextFileAtomically ".gitignore" >>= \case
+      Left writeError -> hPutStrLn stderr ("error: could not update .gitignore: " ++ writeError) >> exitFailure
+      Right () -> pure ()
 readStatusImport :: FilePath -> IO StatusImport
 readStatusImport statusFile = do
   source <- if statusFile == "-" then getContents else readFile statusFile
   case Aeson.eitherDecodeStrict' (TE.encodeUtf8 (T.pack source)) of
     Left decodeError -> hPutStrLn stderr ("error: invalid status JSON: " ++ decodeError) >> exitFailure
-    Right statusImport -> pure statusImport
+    Right statusImport -> validateStatusImport statusImport >> pure statusImport
+validateStatusImport :: StatusImport -> IO ()
+validateStatusImport statusImport =
+  forM_ (statusImportResources statusImport) $ \case
+    StatusImportPackage _ packageType _ _
+      | isNothing (parseSupportedAddPackageKind packageType) -> hPutStrLn stderr ("error: cannot scaffold package type from status: " ++ packageType) >> exitFailure
+    StatusImportHost hostName
+      | not (isDelimitedLowercaseName '-' hostName) -> hPutStrLn stderr "error: host name must use kebab-case" >> exitFailure
+    _ -> pure ()
 initializeStatusResources :: StatusImport -> IO ()
 initializeStatusResources statusImport =
   forM_ (statusImportResources statusImport) $ \case
-    StatusImportPackage packageName packageType packageDescription ->
+    StatusImportPackage packageName packageType packageDescription packageDependencies ->
       case parseSupportedAddPackageKind packageType of
         Nothing -> hPutStrLn stderr ("error: cannot scaffold package type from status: " ++ packageType) >> exitFailure
         Just packageKind ->
           addPackageToCurrentRepositoryWithForce True packageKind packageName packageDescription >>= \case
             Left addError -> hPutStrLn stderr ("error: " ++ addError) >> exitFailure
-            Right _ -> pure ()
+            Right _ -> applyStatusPackageMetadata packageName packageDescription packageDependencies
     StatusImportHost hostName -> createHostFromStatus hostName
+initializeStatusReadme :: StatusImport -> IO ()
+initializeStatusReadme statusImport =
+  forM_ (statusImportReadme statusImport) $ \readmeSource -> do
+    readmeExists <- doesPathExist "README"
+    unless readmeExists (TIO.writeFile "README" (T.pack readmeSource))
+applyStatusPackageMetadata :: FilePath -> Maybe String -> [String] -> IO ()
+applyStatusPackageMetadata packageName packageDescription packageDependencies = do
+  let defaultNixPath = "packages" </> packageName </> "default.nix"
+  defaultNixSource <- TIO.readFile defaultNixPath
+  let withoutDefaultDescription =
+        if isNothing packageDescription
+          then T.unlines (filter (not . T.isInfixOf "description =") (T.lines defaultNixSource))
+          else defaultNixSource
+      withDependencies =
+        if null packageDependencies
+          then withoutDefaultDescription
+          else addStatusPackageDependencies packageDependencies (ensureStatusPackageInputsArgument withoutDefaultDescription)
+  TIO.writeFile defaultNixPath withDependencies
+ensureStatusPackageInputsArgument :: T.Text -> T.Text
+ensureStatusPackageInputsArgument source =
+  case T.stripPrefix "{\n" source of
+    Just remainingSource
+      | not ("  inputs," `T.isPrefixOf` remainingSource) -> "{\n  inputs,\n" <> remainingSource
+    _ -> source
+addStatusPackageDependencies :: [String] -> T.Text -> T.Text
+addStatusPackageDependencies packageDependencies source =
+  case T.unsnoc (T.stripEnd source) of
+    Just (sourceWithoutFinalBrace, '}') ->
+      sourceWithoutFinalBrace
+        <> "  passthru.canonicalizationDependencies = [\n"
+        <> T.concat ["    inputs.self.packages.${pkgs.stdenv.system}." <> T.pack dependency <> "\n" | dependency <- packageDependencies]
+        <> "  ];\n}\n"
+    _ -> error "generated package default.nix must end with a derivation attribute set"
 createHostFromStatus :: FilePath -> IO ()
 createHostFromStatus hostName
   | not (isDelimitedLowercaseName '-' hostName) = hPutStrLn stderr "error: host name must use kebab-case" >> exitFailure
@@ -1363,9 +1411,16 @@ renderScaffoldFiles packageKind packageName packageDescription =
         [ ScaffoldFile "default.nix" (renderPythonTemplateNixSource (scaffoldDescription defaultPythonTemplateDescription packageDescription)),
           ScaffoldFile "main.py" pythonMainSource
         ]
+      PythonPyPIPackage ->
+        [ ScaffoldFile "default.nix" pythonPyPITemplateBaselineNixSource
+        ]
       CPackage ->
         [ ScaffoldFile "default.nix" (renderNixTemplateDescription defaultCTemplateDescription packageDescription cTemplateBaselineNixSource),
           ScaffoldFile "main.c" cMainSource
+        ]
+      TerraformPackage ->
+        [ ScaffoldFile "default.nix" (renderNixTemplateDescription defaultTerraformTemplateDescription packageDescription deployHostTemplateBaselineNixSource),
+          ScaffoldFile "main.tf" "terraform { }\n"
         ]
       LaTeXPackage ->
         [ ScaffoldFile "default.nix" (renderNixTemplateDescription defaultLaTeXTemplateDescription packageDescription latexTemplateBaselineNixSource),
@@ -1518,6 +1573,8 @@ defaultPythonLaTeXTemplateDescription :: String
 defaultPythonLaTeXTemplateDescription = "A Python and LaTeX template package."
 defaultCTemplateDescription :: String
 defaultCTemplateDescription = "A C template package."
+defaultTerraformTemplateDescription :: String
+defaultTerraformTemplateDescription = "A Terraform template package for deploying a host."
 defaultLaTeXTemplateDescription :: String
 defaultLaTeXTemplateDescription = "A LaTeX template package."
 scaffoldDescription :: String -> Maybe String -> String
@@ -1733,9 +1790,9 @@ packageKindSpec = \case
   HTMLPackage -> PackageKindSpec "html" "snake_case" '_' True
   PythonLaTeXPackage -> PackageKindSpec "python-latex" "snake_case" '_' True
   PythonPackage -> PackageKindSpec "python" "snake_case" '_' True
-  PythonPyPIPackage -> PackageKindSpec "python-pypi" "snake_case" '_' False
+  PythonPyPIPackage -> PackageKindSpec "python-pypi" "snake_case" '_' True
   CPackage -> PackageKindSpec "c" "snake_case" '_' True
-  TerraformPackage -> PackageKindSpec "terraform" "snake_case" '_' False
+  TerraformPackage -> PackageKindSpec "terraform" "snake_case" '_' True
   LaTeXPackage -> PackageKindSpec "latex" "snake_case" '_' True
   BinaryReleasePackage -> PackageKindSpec "binary-release" "kebab-case" '-' False
 renderPackageKind :: PackageKind -> String
@@ -3254,13 +3311,15 @@ statusImportEndToEndTest =
       let statusFile = temporaryTools </> "status.json"
           project = temporaryHome </> "projects/demo"
           stdinProject = temporaryHome </> "projects/stdin-demo"
+          unsupportedProject = temporaryHome </> "projects/unsupported"
           statusSource =
             T.unlines
               [ "{",
                 "  \"repositoryType\": \"flake\",",
-                "  \"readme\": null,",
+                "  \"readme\": \"Imported repository README.\\n\",",
                 "  \"resources\": [",
-                "    {\"kind\": \"package\", \"name\": \"demo\", \"type\": \"python\", \"description\": \"Demo package\", \"dependencies\": []},",
+                "    {\"kind\": \"package\", \"name\": \"dependency\", \"type\": \"c\", \"description\": null, \"dependencies\": []},",
+                "    {\"kind\": \"package\", \"name\": \"demo\", \"type\": \"python\", \"description\": \"Demo package\", \"dependencies\": [\"dependency\"]},",
                 "    {\"kind\": \"host\", \"name\": \"default\"}",
                 "  ]",
                 "}"
@@ -3279,14 +3338,25 @@ statusImportEndToEndTest =
       assertEqual "Imported repository status succeeds." ExitSuccess statusExit
       assertEqual "Imported repository status emits no diagnostics." "" statusStderr
       assertBool "Status omits location-specific roots." (not ("\"root\"" `isInfixOf` statusStdout))
+      assertBool "Status import preserves the README." ("\"readme\":\"Imported repository README.\\n\"" `isInfixOf` statusStdout)
+      assertBool "Status import preserves package dependencies." ("\"dependencies\":[\"dependency\"]" `isInfixOf` statusStdout)
+      assertBool "Status import preserves absent package descriptions." ("\"name\":\"dependency\",\"type\":\"c\"" `isInfixOf` statusStdout && "\"description\":null" `isInfixOf` statusStdout)
       assertBool "Status includes the imported host." ("\"kind\":\"host\",\"name\":\"default\"" `isInfixOf` statusStdout)
       (stdinInitExit, _stdinInitStdout, stdinInitStderr) <- runEndToEndCommandWithEnvironmentAndInput "/tmp" environment ["init", stdinProject, "--from-status", "-"] (T.unpack statusSource)
       assertEqual "Standard-input status import initializes the explicit target." ExitSuccess stdinInitExit
       assertBool "Standard-input import reports lock generation." ("Locking flake inputs..." `isInfixOf` stdinInitStderr)
       stdinPackageExists <- doesFileExist (stdinProject </> "packages/demo/main.py")
       stdinHostExists <- doesFileExist (stdinProject </> "hosts/default/configuration.nix")
+      stdinReadmeExists <- doesFileExist (stdinProject </> "README")
       assertBool "Standard-input import creates each package scaffold." stdinPackageExists
       assertBool "Standard-input import creates each host scaffold." stdinHostExists
+      assertBool "Standard-input import creates the README." stdinReadmeExists
+      TIO.writeFile statusFile "{\"repositoryType\":\"flake\",\"readme\":null,\"resources\":[{\"kind\":\"package\",\"name\":\"external\",\"type\":\"binary-release\",\"description\":null,\"dependencies\":[]}]}"
+      (unsupportedExit, _unsupportedStdout, unsupportedStderr) <- runEndToEndCommandWithEnvironment "/tmp" environment ["init", unsupportedProject, "--from-status", statusFile]
+      assertEqual "Unsupported status resources fail before initialization." (ExitFailure 1) unsupportedExit
+      assertBool "Unsupported status resources identify their type." ("cannot scaffold package type from status: binary-release" `isInfixOf` unsupportedStderr)
+      unsupportedProjectExists <- doesPathExist unsupportedProject
+      assertBool "Unsupported status resources leave no partial target." (not unsupportedProjectExists)
 initializationLocationEndToEndTest :: IO ()
 initializationLocationEndToEndTest =
   withTemporaryPackageRepository "initialization-location-home" $ \temporaryHome ->
@@ -3639,7 +3709,9 @@ allPackageKindsEndToEndTest =
         ("html", "demo_html", "index.html", Nothing),
         ("python", "demo_python", "main.py", Just "demo_python_coverage"),
         ("python-latex", "demo_python_latex", "main.py", Just "demo_python_latex_coverage"),
+        ("python-pypi", "demo_pypi", "default.nix", Nothing),
         ("c", "demo_c", "main.c", Nothing),
+        ("terraform", "demo_terraform", "main.tf", Nothing),
         ("latex", "demo_latex", "ms.tex", Nothing)
       ]
       $ \(packageKindName, packageName, markerFile, maybeCheckName) -> do
