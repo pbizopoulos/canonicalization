@@ -687,9 +687,8 @@ renderStatusRustMainSource testNames =
         ++ ["}"]
     )
 renderRustStatusTest :: (String, String) -> [T.Text]
-renderRustStatusTest (testIdentifier, testName) =
+renderRustStatusTest (testIdentifier, _) =
   [ "",
-    "    // git-canonicalization-test: " <> T.pack (renderJSON testName),
     "    #[test]",
     T.pack ("    fn " ++ testIdentifier ++ "() {"),
     "        panic!(\"TODO: implement imported contract\");",
@@ -2358,16 +2357,13 @@ inspectPythonPackageTests packageName =
           Left inspectionError -> (["packages/" ++ packageName ++ "/main.py: " ++ inspectionError], [])
           Right testNames -> ([], testNames)
 type PythonTestInspection :: Type
-data PythonTestInspection = PythonTestInspection
-  { inspectedPythonTestName :: String,
-    inspectedPythonTestDocstring :: Maybe String
+newtype PythonTestInspection = PythonTestInspection
+  { inspectedPythonTestName :: String
   }
 instance Aeson.FromJSON PythonTestInspection where
   parseJSON =
     Aeson.withObject "PythonTestInspection" $ \object ->
-      PythonTestInspection
-        <$> object Aeson..: "name"
-        <*> object Aeson..: "docstring"
+      PythonTestInspection <$> object Aeson..: "name"
 type PythonInspectionResult :: Type
 newtype PythonInspectionResult = PythonInspectionResult [PythonTestInspection]
 instance Aeson.FromJSON PythonInspectionResult where
@@ -2390,7 +2386,7 @@ inspectPythonTests pythonSourcePath = do
                 Right
                   ( Set.toAscList
                       ( Set.fromList
-                          [ fromMaybe (testSpecificationFromIdentifier testName) (inspectedPythonTestDocstring test)
+                          [ testSpecificationFromIdentifier testName
                           | test <- tests,
                             let testName = inspectedPythonTestName test
                           ]
@@ -2556,27 +2552,21 @@ discoverRustUnitTestNamesFromSource :: String -> [String]
 discoverRustUnitTestNamesFromSource =
   Set.toAscList
     . Set.fromList
-    . map (either testSpecificationFromIdentifier id)
+    . map testSpecificationFromIdentifier
     . extractRustUnitTestNames
     . lines
-extractRustUnitTestNames :: [String] -> [Either String String]
-extractRustUnitTestNames = Set.toAscList . Set.fromList . go Nothing False
+extractRustUnitTestNames :: [String] -> [String]
+extractRustUnitTestNames = Set.toAscList . Set.fromList . go False
   where
-    go _ _ [] = []
-    go maybeDeclaredTestName awaitingFunctionAfterTestAttribute (line : rest)
-      | Just declaredTestName <- parseRustDeclaredTestName trimmed = go (Just declaredTestName) awaitingFunctionAfterTestAttribute rest
-      | "#[test]" `isPrefixOf` trimmed = go maybeDeclaredTestName True rest
+    go _ [] = []
+    go awaitingFunctionAfterTestAttribute (line : rest)
+      | "#[test]" `isPrefixOf` trimmed = go True rest
       | awaitingFunctionAfterTestAttribute && "fn " `isPrefixOf` trimmed =
           let functionName = takeWhile (\character -> character /= '(' && character /= ' ') (drop 3 trimmed)
-              testName = maybe (Left functionName) Right maybeDeclaredTestName
-           in [testName | not (null functionName)] ++ go Nothing False rest
-      | otherwise = go Nothing False rest
+           in [functionName | not (null functionName)] ++ go False rest
+      | otherwise = go False rest
       where
         trimmed = dropWhile (== ' ') line
-    parseRustDeclaredTestName :: String -> Maybe String
-    parseRustDeclaredTestName line = do
-      encodedName <- stripPrefix "// git-canonicalization-test: " line
-      either (const Nothing) Just (Aeson.eitherDecodeStrict' (BS8.pack encodedName))
 pythonTestInspectorPythonSource :: String
 pythonTestInspectorPythonSource =
   unlines
@@ -2596,7 +2586,7 @@ pythonTestInspectorPythonSource =
       "        if isinstance(node, ast.ClassDef) and node.name.startswith('Test')",
       "    ]",
       "    tests = [",
-      "        {'name': node.name, 'docstring': ast.get_docstring(node)}",
+      "        {'name': node.name}",
       "        for container in test_containers",
       "        for node in container.body",
       "        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))",
@@ -3060,7 +3050,7 @@ hUnitPackageTests =
   TestList
     [ TestLabel "Discovers conventional Haskell tests as behavioral specifications." (TestCase haskellTestDiscoveryTest),
       TestLabel "Ignores non-test Haskell strings and comments during discovery." (TestCase haskellTestDiscoveryFalsePositiveTest),
-      TestLabel "Uses Python test docstrings as behavioral specifications." (TestCase pythonTestDiscoveryTest),
+      TestLabel "Uses Python test identifiers as behavioral specifications." (TestCase pythonTestDiscoveryTest),
       TestLabel "Discovers pytest test methods in conventional test classes." (TestCase pythonClassTestDiscoveryTest),
       TestLabel "Humanizes conventional test identifiers across frameworks." (TestCase testIdentifierSpecificationTest),
       TestLabel "Uses default.nix evidence only for markerless package classification." (TestCase packageDetectionTest),
@@ -3169,8 +3159,8 @@ pythonTestDiscoveryTest = do
         )
       discoveredTests <- inspectPythonTests pythonSourcePath
       assertEqual
-        "Python AST inspection handles async multiline definitions, docstrings, and identifier fallback."
-        (Right ["Handles a multiline definition.", "Handles a test class.", "Undocumented behavior."])
+        "Python AST inspection derives specifications from async, multiline, and class test identifiers."
+        (Right ["Class behavior.", "Multiline definition.", "Undocumented behavior."])
         discoveredTests
 pythonClassTestDiscoveryTest :: IO ()
 pythonClassTestDiscoveryTest = do
@@ -3180,7 +3170,7 @@ pythonClassTestDiscoveryTest = do
       let pythonSourcePath = temporaryDirectory </> "main.py"
       TIO.writeFile pythonSourcePath "class TestExample:\n  def test_behavior(self):\n    \"\"\"Reports class behavior.\"\"\"\n"
       discoveredTests <- inspectPythonTests pythonSourcePath
-      assertEqual "Python AST inspection includes pytest test methods in Test classes." (Right ["Reports class behavior."]) discoveredTests
+      assertEqual "Python AST inspection includes pytest test methods in Test classes." (Right ["Behavior."]) discoveredTests
 testIdentifierSpecificationTest :: IO ()
 testIdentifierSpecificationTest = do
   assertEqual
@@ -3198,7 +3188,7 @@ testIdentifierSpecificationTest = do
   assertEqual
     "Status test sentences become conventional, stable language identifiers."
     ["test_open_api_contract_stays_explicit", "test_imported_behavior_must_fail_until_implemented", "test_imported_behavior_must_fail_until_implemented_2"]
-    (statusTestIdentifiers "test" ["OpenAPI contract stays explicit.", "Imported behavior must fail until implemented.", "Imported behavior must fail until implemented!"])
+    (statusTestIdentifiers "test" ["Open api contract stays explicit.", "Imported behavior must fail until implemented.", "Imported behavior must fail until implemented!"])
 packageDetectionTest :: IO ()
 packageDetectionTest =
   assertEqual
@@ -3480,7 +3470,7 @@ statusImportEndToEndTest =
                 "  \"readme\": \"Imported repository README.\\n\",",
                 "  \"resources\": [",
                 "    {\"kind\": \"package\", \"name\": \"dependency\", \"type\": \"c\", \"description\": null, \"dependencies\": []},",
-                "    {\"kind\": \"package\", \"name\": \"demo\", \"type\": \"python\", \"description\": \"Demo package\", \"dependencies\": [\"dependency\"], \"tests\": {\"status\": \"configured\", \"cases\": [{\"name\": \"Imported behavior must fail until implemented.\"}, {\"name\": \"OpenAPI contract stays explicit.\"}]}},",
+                "    {\"kind\": \"package\", \"name\": \"demo\", \"type\": \"python\", \"description\": \"Demo package\", \"dependencies\": [\"dependency\"], \"tests\": {\"status\": \"configured\", \"cases\": [{\"name\": \"Imported behavior must fail until implemented.\"}, {\"name\": \"Open api contract stays explicit.\"}]}},",
                 "    {\"kind\": \"host\", \"name\": \"default\"}",
                 "  ]",
                 "}"
@@ -3502,7 +3492,7 @@ statusImportEndToEndTest =
       assertBool "Status import preserves the README." ("\"readme\":\"Imported repository README.\\n\"" `isInfixOf` statusStdout)
       assertBool "Status import preserves package dependencies." ("\"dependencies\":[\"dependency\"]" `isInfixOf` statusStdout)
       assertBool "Status import preserves absent package descriptions." ("\"name\":\"dependency\",\"type\":\"c\"" `isInfixOf` statusStdout && "\"description\":null" `isInfixOf` statusStdout)
-      assertBool "Status import preserves test case names." ("Imported behavior must fail until implemented." `isInfixOf` statusStdout && "OpenAPI contract stays explicit." `isInfixOf` statusStdout)
+      assertBool "Status import preserves test case names." ("Imported behavior must fail until implemented." `isInfixOf` statusStdout && "Open api contract stays explicit." `isInfixOf` statusStdout)
       importedPythonSource <- TIO.readFile (project </> "packages/demo/main.py")
       assertBool "Imported test placeholders fail instead of using the passing sample test." ("TODO: implement imported contract" `T.isInfixOf` importedPythonSource && "def test_imported_behavior_must_fail_until_implemented()" `T.isInfixOf` importedPythonSource && "def test_open_api_contract_stays_explicit()" `T.isInfixOf` importedPythonSource && not ("Prints the sample message from the executable." `T.isInfixOf` importedPythonSource))
       assertBool "Status includes the imported host." ("\"kind\":\"host\",\"name\":\"default\"" `isInfixOf` statusStdout)
@@ -4053,7 +4043,7 @@ expectedGeneratedPythonPackageSummary =
       repositoryPackageDescription = Just "Demo package",
       repositoryPackageDependencies = [],
       repositoryPackageTestNames =
-        ["Prints the sample message from the executable."],
+        ["Main prints sample message."],
       repositoryPackageTestStatus = RepositoryTestsConfigured
     }
 expectedGeneratedHaskellPackageSummary :: RepositoryPackageSummary
