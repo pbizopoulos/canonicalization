@@ -3,7 +3,7 @@ Canonicalization
 A Nix flake that selects and enforces consistent forms for NixOS systems, home Git layouts, and repositories while making intent and expected behavior easy to inspect.
 
 OS: NixOS with a temporary root filesystem and explicitly preserved state.
-Git: `git canonicalization` detects either a home or flake repository layout and provides common `check` and `status` operations.
+Git: `git canonicalization` enforces canonical home and flake repository layouts.
 Home repository:
 
 ```sh
