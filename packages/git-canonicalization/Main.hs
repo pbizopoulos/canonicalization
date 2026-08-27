@@ -553,6 +553,7 @@ initializeCanonicalization initSpec = do
     hPutStrLn stderr "error: cannot initialize the home directory as a flake repository"
     hPutStrLn stderr "hint: initialize the home repository with Git as documented in README"
     exitFailure
+  forM_ importedStatus (validateStatusImportTarget target)
   initializeProjectRepository targetExists home target
   forM_ importedStatus $ \statusImport -> withCurrentDirectory target $ do
     initializeStatusReadme statusImport
@@ -567,13 +568,49 @@ readStatusImport statusFile = do
     Left decodeError -> hPutStrLn stderr ("error: invalid status JSON: " ++ decodeError) >> exitFailure
     Right statusImport -> validateStatusImport statusImport >> pure statusImport
 validateStatusImport :: StatusImport -> IO ()
-validateStatusImport statusImport =
-  forM_ (statusImportResources statusImport) $ \case
-    StatusImportPackage _ packageType _ _ _
-      | isNothing (parseSupportedAddPackageKind packageType) -> hPutStrLn stderr ("error: cannot scaffold package type from status: " ++ packageType) >> exitFailure
-    StatusImportHost hostName
-      | not (isDelimitedLowercaseName '-' hostName) -> hPutStrLn stderr "error: host name must use kebab-case" >> exitFailure
-    _ -> pure ()
+validateStatusImport statusImport = do
+  let resources = statusImportResources statusImport
+      packageNames = [packageName | StatusImportPackage packageName _ _ _ _ <- resources]
+      hostNames = [hostName | StatusImportHost hostName <- resources]
+      validationIssues = concatMap validateStatusImportResource resources
+      duplicateIssues =
+        map ("duplicate package resource: " ++) (duplicateStatusImportNames packageNames)
+          ++ map ("duplicate host resource: " ++) (duplicateStatusImportNames hostNames)
+  case validationIssues ++ duplicateIssues of
+    [] -> pure ()
+    issues -> do
+      forM_ issues (hPutStrLn stderr . ("error: " ++))
+      exitFailure
+validateStatusImportResource :: StatusImportResource -> [String]
+validateStatusImportResource = \case
+  StatusImportPackage packageName packageType _ _ _ ->
+    case parseSupportedAddPackageKind packageType of
+      Nothing -> ["cannot scaffold package type from status: " ++ packageType]
+      Just packageKind -> maybeToList (validatePackageNameForKind packageKind packageName)
+  StatusImportHost hostName
+    | not (isDelimitedLowercaseName '-' hostName) -> ["host name must use kebab-case"]
+    | otherwise -> []
+duplicateStatusImportNames :: [String] -> [String]
+duplicateStatusImportNames names =
+  Map.keys (Map.filter (> (1 :: Int)) (Map.fromListWith (+) [(name, 1 :: Int) | name <- names]))
+validateStatusImportTarget :: FilePath -> StatusImport -> IO ()
+validateStatusImportTarget target statusImport = do
+  let managedPaths =
+        concatMap
+          ( \case
+              StatusImportPackage packageName packageType _ _ _ ->
+                case parseSupportedAddPackageKind packageType of
+                  Nothing -> []
+                  Just packageKind ->
+                    (target </> "packages" </> packageName)
+                      : map (\checkName -> target </> "checks" </> checkName) (maybeToList (repositoryCheckNameForPackage packageKind packageName))
+              StatusImportHost hostName -> [target </> "hosts" </> hostName]
+          )
+          (statusImportResources statusImport)
+  existingPaths <- filterM doesPathExist managedPaths
+  unless (null existingPaths) $ do
+    forM_ existingPaths (hPutStrLn stderr . ("error: status import path already exists: " ++))
+    exitFailure
 initializeStatusResources :: StatusImport -> IO ()
 initializeStatusResources statusImport =
   forM_ (statusImportResources statusImport) $ \case
@@ -3128,6 +3165,7 @@ hUnitPackageTests =
       TestLabel "Documents help and invokes it consistently." (TestCase commandLineHelpEndToEndTest),
       TestLabel "Initializes flake repositories and rejects home initialization." (TestCase initializationEndToEndTest),
       TestLabel "Initializes packages and hosts from file and stdin status JSON." (TestCase statusImportEndToEndTest),
+      TestLabel "Rejects invalid and conflicting status imports before initialization." (TestCase statusImportPreflightEndToEndTest),
       TestLabel "Validates canonical project locations against origin." (TestCase initializationLocationEndToEndTest),
       TestLabel "Preserves existing initialization files and rejects inconsistent state." (TestCase initializationExistingFilesEndToEndTest),
       TestLabel "Disambiguates repository URLs and package additions." (TestCase addCommandParsingTest),
@@ -3595,6 +3633,55 @@ statusImportEndToEndTest =
       assertBool "Unsupported status resources identify their type." ("cannot scaffold package type from status: binary-release" `isInfixOf` unsupportedStderr)
       unsupportedProjectExists <- doesPathExist unsupportedProject
       assertBool "Unsupported status resources leave no partial target." (not unsupportedProjectExists)
+statusImportPreflightEndToEndTest :: IO ()
+statusImportPreflightEndToEndTest =
+  withTemporaryPackageRepository "status-import-preflight-home" $ \temporaryHome ->
+    withTemporaryPackageRepository "status-import-preflight-tools" $ \temporaryTools -> do
+      environment <- initializationTestEnvironment temporaryHome temporaryTools
+      let statusFile = temporaryTools </> "status.json"
+          duplicateProject = temporaryHome </> "projects/duplicate"
+          duplicateHostProject = temporaryHome </> "projects/duplicate-host"
+          invalidNameProject = temporaryHome </> "projects/invalid-name"
+          collisionProject = temporaryHome </> "projects/collision"
+          checkCollisionProject = temporaryHome </> "projects/check-collision"
+          writeStatus = TIO.writeFile statusFile
+          runImport project = runEndToEndCommandWithEnvironment "/tmp" environment ["init", project, "--from-status", statusFile]
+      writeStatus
+        "{\"repositoryType\":\"flake\",\"readme\":null,\"resources\":[{\"kind\":\"package\",\"name\":\"demo\",\"type\":\"python\",\"description\":null,\"dependencies\":[]},{\"kind\":\"package\",\"name\":\"demo\",\"type\":\"python\",\"description\":null,\"dependencies\":[]}]}"
+      (duplicateExit, _duplicateStdout, duplicateStderr) <- runImport duplicateProject
+      assertEqual "Duplicate package resources fail before initialization." (ExitFailure 1) duplicateExit
+      assertBool "Duplicate package resources identify the conflict." ("duplicate package resource: demo" `isInfixOf` duplicateStderr)
+      duplicateProjectExists <- doesPathExist duplicateProject
+      assertBool "Duplicate package resources leave no target." (not duplicateProjectExists)
+      writeStatus
+        "{\"repositoryType\":\"flake\",\"readme\":null,\"resources\":[{\"kind\":\"host\",\"name\":\"default\"},{\"kind\":\"host\",\"name\":\"default\"}]}"
+      (duplicateHostExit, _duplicateHostStdout, duplicateHostStderr) <- runImport duplicateHostProject
+      assertEqual "Duplicate host resources fail before initialization." (ExitFailure 1) duplicateHostExit
+      assertBool "Duplicate host resources identify the conflict." ("duplicate host resource: default" `isInfixOf` duplicateHostStderr)
+      duplicateHostProjectExists <- doesPathExist duplicateHostProject
+      assertBool "Duplicate host resources leave no target." (not duplicateHostProjectExists)
+      writeStatus
+        "{\"repositoryType\":\"flake\",\"readme\":null,\"resources\":[{\"kind\":\"package\",\"name\":\"demo-python\",\"type\":\"python\",\"description\":null,\"dependencies\":[]}]}"
+      (invalidNameExit, _invalidNameStdout, invalidNameStderr) <- runImport invalidNameProject
+      assertEqual "Invalid package names fail before initialization." (ExitFailure 1) invalidNameExit
+      assertBool "Invalid package names identify their convention." ("package name must use snake_case" `isInfixOf` invalidNameStderr)
+      invalidNameProjectExists <- doesPathExist invalidNameProject
+      assertBool "Invalid package names leave no target." (not invalidNameProjectExists)
+      createDirectoryIfMissing True (collisionProject </> "packages/demo")
+      writeStatus
+        "{\"repositoryType\":\"flake\",\"readme\":null,\"resources\":[{\"kind\":\"package\",\"name\":\"demo\",\"type\":\"python\",\"description\":null,\"dependencies\":[]}]}"
+      (collisionExit, _collisionStdout, collisionStderr) <- runImport collisionProject
+      assertEqual "Existing managed paths fail before initialization." (ExitFailure 1) collisionExit
+      assertBool "Existing managed paths identify the collision." ("status import path already exists:" `isInfixOf` collisionStderr)
+      collisionFlakeExists <- doesPathExist (collisionProject </> "flake.nix")
+      collisionPackageExists <- doesDirectoryExist (collisionProject </> "packages/demo")
+      assertBool "A path collision preserves the existing target without initializing it." (not collisionFlakeExists && collisionPackageExists)
+      createDirectoryIfMissing True (checkCollisionProject </> "checks/demo_coverage")
+      (checkCollisionExit, _checkCollisionStdout, checkCollisionStderr) <- runImport checkCollisionProject
+      assertEqual "Existing generated checks fail before initialization." (ExitFailure 1) checkCollisionExit
+      assertBool "Existing generated checks identify the collision." ("checks/demo_coverage" `isInfixOf` checkCollisionStderr)
+      checkCollisionFlakeExists <- doesPathExist (checkCollisionProject </> "flake.nix")
+      assertBool "A generated-check collision preserves the existing target without initializing it." (not checkCollisionFlakeExists)
 initializationLocationEndToEndTest :: IO ()
 initializationLocationEndToEndTest =
   withTemporaryPackageRepository "initialization-location-home" $ \temporaryHome ->

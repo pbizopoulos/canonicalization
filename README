@@ -1,4 +1,4 @@
-Canonicalization
+# Canonicalization
 
 Canonicalization selects one declared state from the system states that meet the same requirements and makes it the required state. Its purpose is to minimize the ongoing effort required to maintain the system. A canonical declarative system declares all state that must persist, so it can be rebuilt from its declarations instead of tracing past changes.
 
