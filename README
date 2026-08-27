@@ -1,27 +1,27 @@
 Canonicalization
 
-A canonicalized system is declaratively defined with NixOS, uses an ephemeral root filesystem with explicitly preserved state, and has a home directory managed as a Git repository with a whitelist `.gitignore`. The home repository organizes projects in a Go-style path layout (for example, `github.com/owner/project`). Each project is a Git submodule and a Nix flake with its own whitelist `.gitignore`. Flake repositories follow a small, purpose-built subset of the https://github.com/numtide/blueprint directory layout: a README explains the repository's intent, packages contain a single source file, tests describe the expected behavior, and code implements that behavior. Conventional formatters and strict linters are applied.
+A canonicalized system is declaratively defined with NixOS, uses an ephemeral root filesystem with explicitly preserved state, and has a home directory managed as a Git repository with a whitelist `.gitignore`. The home repository organizes projects in a Go-style path layout (for example, `github.com/owner/project`). Each project is a Git submodule and a Nix flake with its own whitelist `.gitignore`. Flake repositories follow a purpose-built subset of the https://github.com/numtide/blueprint directory layout: a README explains the repository's intent, packages contain a single source file, tests describe expected behavior, and code implements it.
 
-This repository provides tools for creating and maintaining that state.
+`git canonicalization` helps in creating and maintaining these home and flake repository conventions.
 
-Home repository:
+Initialize the home repository:
 
 ```sh
 cd
 git init
-printf '*\n!/.gitignore\n!/.gitmodules\n' > .gitignore # also add other required files/directories like .ssh
+printf '*\n!/.gitignore\n!/.gitmodules\n' > .gitignore # add other required paths, such as .ssh, to the whitelist
 git add .gitignore
 git commit -m 'Initialize home repository'
 ```
 
-Project submodule:
+Add and initialize a project submodule:
 
 ```sh
 # Create the empty remote before starting this workflow.
 git submodule add --force git@github.com:owner/demo.git ~/github.com/owner/demo
 cd ~/github.com/owner/demo
 git canonicalization init . # initializes a flake repository with these conventions
-git canonicalization add <type> <name> # scaffolds a package in the selected flake repository
+git canonicalization add <type> <name> # scaffolds a package in the current flake repository
 nix fmt # runs conventional formatters and strict linters
 nix flake check # verifies the canonical structure and runs builds and tests
 ```
