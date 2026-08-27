@@ -7,7 +7,7 @@
 module Main (main, runPackageTests) where
 import Control.Applicative ((<*>))
 import Control.Exception (IOException, try)
-import Control.Monad (mapM_, unless, when)
+import Control.Monad (filterM, mapM_, unless, when)
 import Data.Aeson
   ( FromJSON (parseJSON),
     Value (Array, Bool, Null, Number, Object, String),
@@ -55,10 +55,11 @@ import Nix.Pretty (prettyNix)
 import Nix.Utils (Path (Path))
 import Prettyprinter (defaultLayoutOptions, layoutPretty)
 import Prettyprinter.Render.Text (renderStrict)
-import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory, makeAbsolute, pathIsSymbolicLink, withCurrentDirectory)
+import System.Directory (createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, makeAbsolute, pathIsSymbolicLink, withCurrentDirectory)
+import System.Directory.Recursive (getDirFiltered)
 import System.Environment (getArgs, lookupEnv, setEnv)
 import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitFailure)
-import System.FilePath (normalise, pathSeparator, takeDirectory, takeExtension, (</>))
+import System.FilePath (normalise, pathSeparator, takeDirectory, takeExtension, takeFileName, (</>))
 import System.IO (hClose, hPutStrLn, stderr)
 import System.IO.Temp (withSystemTempDirectory, withSystemTempFile)
 import System.Process (readProcessWithExitCode)
@@ -83,7 +84,6 @@ import Prelude
     Show,
     String,
     any,
-    concat,
     concatMap,
     div,
     fail,
@@ -251,29 +251,18 @@ findFlakeRootFrom directoryPath = do
             else findFlakeRootFrom parentDirectory
 findNixFiles :: FilePath -> IO [FilePath]
 findNixFiles directoryPath = do
-  entries <- sort <$> listDirectory directoryPath
-  nestedFiles <-
-    mapM
-      ( \entryName -> do
-          let entryPath = directoryPath </> entryName
-          entryIsSymbolicLink <- pathIsSymbolicLink entryPath
-          if entryIsSymbolicLink
-            then pure []
-            else do
-              entryIsDirectory <- doesDirectoryExist entryPath
-              if entryIsDirectory
-                then
-                  if shouldSkipDirectory entryName
-                    then pure []
-                    else findNixFiles entryPath
-                else
-                  pure
-                    [ entryPath
-                    | takeExtension entryName == ".nix"
-                    ]
-      )
-      entries
-  pure (concat nestedFiles)
+  paths <- getDirFiltered shouldTraverseOrSelect directoryPath
+  sort <$> filterM isNixFile paths
+  where
+    shouldTraverseOrSelect path = do
+      isSymbolicLink <- pathIsSymbolicLink path
+      isDirectory <- doesDirectoryExist path
+      pure $
+        not isSymbolicLink
+          && (isDirectory && not (shouldSkipDirectory (takeFileName path)) || not isDirectory && takeExtension path == ".nix")
+    isNixFile path = do
+      isDirectory <- doesDirectoryExist path
+      pure (not isDirectory && takeExtension path == ".nix")
 shouldSkipDirectory :: FilePath -> Bool
 shouldSkipDirectory directoryName =
   directoryName `List.elem` [".agents", ".codex", ".git", "prm", "result", "target", "tmp"]
@@ -722,6 +711,23 @@ hUnitPackageTests =
       TestLabel "Skips Nix evaluation when no literal candidates exist." $ TestCase $ do
         succeeded <- processParsedRepository "/path/that/does/not/exist" []
         assertBool "empty repository processing" succeeded,
+      TestLabel "Discovers Nix files without traversing ignored directories or symbolic links." $
+        TestCase $
+          withSystemTempDirectory "nix-remove-defaults-files" $ \temporaryDirectory -> do
+            let nestedDirectory = temporaryDirectory </> "nested"
+                skippedDirectory = temporaryDirectory </> "tmp"
+                rootNixPath = temporaryDirectory </> "root.nix"
+                nestedNixPath = nestedDirectory </> "module.nix"
+                skippedNixPath = skippedDirectory </> "ignored.nix"
+                linkedNixPath = temporaryDirectory </> "linked.nix"
+            createDirectoryIfMissing True nestedDirectory
+            createDirectoryIfMissing True skippedDirectory
+            TIO.writeFile rootNixPath "{ }"
+            TIO.writeFile nestedNixPath "{ }"
+            TIO.writeFile skippedNixPath "{ }"
+            createFileLink rootNixPath linkedNixPath
+            discoveredPaths <- findNixFiles temporaryDirectory
+            assertEqual "discovered Nix files" [nestedNixPath, rootNixPath] discoveredPaths,
       TestLabel "Removes defaults inside a treefmt evalModule argument." $
         makeTreefmtRemovalTest
           (Map.singleton (OptionPath ("programs" :| ["shfmt", "simplify"])) (LiteralBool True))
