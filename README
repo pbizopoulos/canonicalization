@@ -9,7 +9,7 @@ The home repository organizes projects in a Go-style path layout (for example, `
 Home repository:
 
 ```sh
-cd "$HOME"
+cd
 git init
 printf '*\n!/.gitignore\n!/.gitmodules\n' > .gitignore # also add other required files/directories like .ssh
 git add .gitignore
@@ -18,15 +18,9 @@ git commit -m 'Initialize home repository'
 
 ```sh
 # Create the empty remote before starting this workflow.
-cd "$HOME"
-git submodule add --force git@github.com:owner/demo.git github.com/owner/demo
-cd github.com/owner/demo
+git submodule add --force git@github.com:owner/demo.git ~/github.com/owner/demo
+cd ~/github.com/owner/demo
 git canonicalization init .
-git add flake.nix flake.lock .gitignore
-git commit -m 'Initialize flake repository'
-cd "$HOME"
-git add .gitmodules github.com/owner/demo
-git commit -m 'Add demo repository'
 ```
 
 Flake repositories: `git canonicalization add <type> <name>` targets the selected repository, follows a restricted subset of the numtide/blueprint layout, and maintains its root `.gitignore` whitelist.
