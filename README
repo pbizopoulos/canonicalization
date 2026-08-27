@@ -2,7 +2,13 @@ Canonicalization
 
 The purpose of canonicalization is to minimize the ongoing effort required to maintain a system. A canonicalized system declares all state that must persist, making recovery a reconstruction from declared inputs rather than tracing past changes. Where multiple representations preserve specified behavior, its conventions select one, avoiding arbitrary variation that must otherwise be remembered and checked.
 
-It is declaratively defined with NixOS, uses an ephemeral root filesystem with declared persistent state, and has a home directory managed as a Git repository with a whitelist `.gitignore`. The home repository organizes projects in a Go-style path layout (for example, `github.com/owner/project`). Each project is a Git submodule and a Nix flake with its own whitelist `.gitignore`. Flake repositories follow a purpose-built subset of the https://github.com/numtide/blueprint directory layout: a README explains the repository's intent, packages contain a single source file, tests describe expected behavior, and code implements it.
+A canonicalized system:
+
+- Is declaratively defined with NixOS and uses an ephemeral root filesystem, so the machine can be reconstructed from declarations and only declared state persists.
+- Keeps its home directory in a Git repository with a whitelist `.gitignore`, making its versioned state explicit and reviewable.
+- Organizes projects at paths derived from their Git remotes (for example, `github.com/owner/project`), so their locations can be discovered and checked without per-project configuration.
+- Treats each project as a Git submodule and a Nix flake, allowing it to be versioned, initialized, rebuilt, and checked independently.
+- Uses a restricted subset of the https://github.com/numtide/blueprint directory layout to make scaffolding and checking mechanical: each flake repository has a README explaining its purpose, packages with a single source file, and tests named for expected behavior.
 
 `git canonicalization` helps in creating and maintaining these home and flake repository conventions.
 
