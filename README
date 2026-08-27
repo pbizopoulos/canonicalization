@@ -1,6 +1,6 @@
 Canonicalization
 
-The purpose of canonicalization is to minimize the ongoing effort required to maintain a system. It does so by declaring all state that must persist, turning recovery into reconstruction from declared inputs rather than tracing past changes.
+The purpose of canonicalization is to minimize the ongoing effort required to maintain a system. It does so by replacing incidental choices with declared, mechanically enforced conventions. Declaring all state that must persist turns recovery into reconstruction from declared inputs rather than tracing past changes.
 
 A canonicalized system is declaratively defined with NixOS, uses an ephemeral root filesystem with declared persistent state, and has a home directory managed as a Git repository with a whitelist `.gitignore`. The home repository organizes projects in a Go-style path layout (for example, `github.com/owner/project`). Each project is a Git submodule and a Nix flake with its own whitelist `.gitignore`. Flake repositories follow a purpose-built subset of the https://github.com/numtide/blueprint directory layout: a README explains the repository's intent, packages contain a single source file, tests describe expected behavior, and code implements it.
 
