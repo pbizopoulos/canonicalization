@@ -1,9 +1,11 @@
 Canonicalization
 
-A Nix flake that selects and enforces consistent forms for NixOS systems, home Git layouts, and repositories while making intent and expected behavior easy to inspect.
+Canonicalization is a set of tools for bringing a system into a canonicalized state: a declaratively defined NixOS system, with an ephemeral root filesystem and explicitly preserved state; and a home directory managed as a Git repository with a whitelist `.gitignore`.
 
-OS: NixOS with a temporary root filesystem and explicitly preserved state.
-Git: `git canonicalization` enforces canonical home and flake repository layouts.
+The home repository organizes projects in a Go-style path layout (for example, `github.com/owner/project`). Projects are Git submodules whose own repositories use whitelist `.gitignore` files, are Nix flakes, and follow a small, purpose-built subset of the https://github.com/numtide/blueprint directory layout. Packages contain a single source file. Conventional formatters and strict linters are applied.
+
+`git canonicalization` creates and enforces these home and flake repository conventions.
+
 Home repository:
 
 ```sh
