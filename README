@@ -1,6 +1,6 @@
 Canonicalization
 
-The purpose of canonicalization is to minimize the ongoing effort required to maintain a system. A canonicalized system declares all state that must persist, making recovery a reconstruction from declared inputs rather than tracing past changes. Where multiple representations preserve specified behavior, its conventions select one, avoiding arbitrary variation that must otherwise be remembered and checked.
+The purpose of canonicalization is to minimize the ongoing effort required to maintain a system. A canonicalized system declares all state that must persist, making recovery a reconstruction from declared inputs rather than tracing past changes. Where multiple representations preserve specified behavior, one is selected, avoiding arbitrary variation that must otherwise be remembered and checked.
 
 A canonicalized system:
 
@@ -10,7 +10,7 @@ A canonicalized system:
 - Treats each project as a Git submodule and a Nix flake, allowing it to be versioned, initialized, rebuilt, and checked independently.
 - Uses a restricted subset of the https://github.com/numtide/blueprint directory layout to make scaffolding and checking mechanical: each flake repository has a README explaining its purpose, packages with a single source file, and tests named for expected behavior.
 
-`git canonicalization` helps in creating and maintaining these home and flake repository conventions.
+`git canonicalization` helps create and maintain canonicalized home and flake repositories.
 
 Initialize the home repository:
 
@@ -28,7 +28,7 @@ Add and initialize a project submodule:
 # Create the empty remote before starting this workflow.
 git submodule add --force git@github.com:owner/demo.git ~/github.com/owner/demo
 cd ~/github.com/owner/demo
-git canonicalization init . # initializes a flake repository with these conventions
+git canonicalization init . # initializes a canonical flake repository
 git canonicalization add <type> <name> # scaffolds a package in the current flake repository
 nix fmt # runs conventional formatters and strict linters
 nix flake check # verifies the canonical structure and runs builds and tests
