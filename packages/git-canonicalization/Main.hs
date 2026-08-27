@@ -2238,56 +2238,28 @@ escapeRegexLiteral = concatMap escapeCharacter
       | otherwise = [character]
 collectRepositoryEntries :: FilePath -> IO [RepositoryEntry]
 collectRepositoryEntries rootPath = do
-  trackedDirectories <- collectTrackedRepositoryDirectories
-  repositoryEntries <- collectUnfilteredRepositoryEntries trackedDirectories rootPath
-  filterGitIgnoredRepositoryEntries repositoryEntries
-collectTrackedRepositoryDirectories :: IO (Set.Set FilePath)
-collectTrackedRepositoryDirectories = do
-  (gitLsFilesExit, trackedPathsOutput, gitLsFilesStderr) <- readGitProcess ["ls-files", "-z"] ""
+  (gitLsFilesExit, visiblePathsOutput, gitLsFilesStderr) <-
+    readGitProcess ["ls-files", "--cached", "--others", "--exclude-standard", "-z"] ""
   case gitLsFilesExit of
-    ExitSuccess -> pure (Set.fromList (concatMap parentDirectoryPaths (splitNullTerminated trackedPathsOutput)))
+    ExitSuccess -> do
+      let visiblePaths =
+            Set.toAscList
+              . Set.fromList
+              . map collapseOpaquePath
+              . filter (isPathWithinRoot rootPath)
+              $ splitNullTerminated visiblePathsOutput
+      catMaybes <$> mapM collectExistingRepositoryEntry visiblePaths
     _ -> ioError (userError ("git ls-files failed: " ++ T.unpack (T.strip (T.pack gitLsFilesStderr))))
   where
-    parentDirectoryPaths path =
-      case takeDirectory path of
-        "." -> []
-        parentDirectory -> parentDirectory : parentDirectoryPaths parentDirectory
-collectUnfilteredRepositoryEntries :: Set.Set FilePath -> FilePath -> IO [RepositoryEntry]
-collectUnfilteredRepositoryEntries trackedDirectories rootPath = do
-  childNames <- listDirectory rootPath
-  let childPaths = sort [rootPath </> childName | childName <- childNames]
-  concat <$> mapM (collectUnfilteredRepositoryEntry trackedDirectories) childPaths
-collectUnfilteredRepositoryEntry :: Set.Set FilePath -> FilePath -> IO [RepositoryEntry]
-collectUnfilteredRepositoryEntry trackedDirectories path = do
-  status <- Posix.getSymbolicLinkStatus path
-  let relativePath = makeRelative "." path
-      collectDirectoryDescendants = do
-        descendants <- collectUnfilteredRepositoryEntries trackedDirectories path
-        pure (if null descendants then [(relativePath, status)] else descendants)
-  case () of
-    _
-      | relativePath == ".git" -> pure []
-      | not (Posix.isDirectory status) -> pure [(relativePath, status)]
-      | isOpaqueDirectory relativePath -> pure [(relativePath, status)]
-      | Set.notMember relativePath trackedDirectories -> do
-          visibleEntries <- filterGitIgnoredRepositoryEntries [(relativePath, status)]
-          case visibleEntries of
-            [] -> pure []
-            _ -> collectDirectoryDescendants
-      | otherwise -> do
-          collectDirectoryDescendants
-filterGitIgnoredRepositoryEntries :: [RepositoryEntry] -> IO [RepositoryEntry]
-filterGitIgnoredRepositoryEntries [] = pure []
-filterGitIgnoredRepositoryEntries repositoryEntries = do
-  let gitCheckIgnoreInput = concatMap ((++ "\0") . fst) repositoryEntries
-  (checkIgnoreExit, ignoredPathsOutput, checkIgnoreStderr) <-
-    readGitProcess ["check-ignore", "--stdin", "-z"] gitCheckIgnoreInput
-  case checkIgnoreExit of
-    ExitSuccess -> do
-      let ignoredPaths = Set.fromList (splitNullTerminated ignoredPathsOutput)
-      pure (filter ((`Set.notMember` ignoredPaths) . fst) repositoryEntries)
-    ExitFailure 1 -> pure repositoryEntries
-    _ -> ioError (userError ("git check-ignore failed: " ++ T.unpack (T.strip (T.pack checkIgnoreStderr))))
+    collapseOpaquePath path =
+      case trackableTreeRoot path of
+        Just treeRoot | isOpaqueDirectory treeRoot -> treeRoot
+        _ -> path
+isPathWithinRoot :: FilePath -> FilePath -> Bool
+isPathWithinRoot rootPath path =
+  rootPath == "."
+    || path == rootPath
+    || (rootPath ++ "/") `isPrefixOf` path
 splitNullTerminated :: String -> [String]
 splitNullTerminated = map T.unpack . filter (not . T.null) . T.split (== '\0') . T.pack
 isOpaqueDirectory :: FilePath -> Bool
