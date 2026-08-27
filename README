@@ -1,10 +1,8 @@
 Canonicalization
 
-Canonicalization is a set of tools for bringing a system into a canonicalized state: a declaratively defined NixOS system, with an ephemeral root filesystem and explicitly preserved state; and a home directory managed as a Git repository with a whitelist `.gitignore`.
+A canonicalized system is declaratively defined with NixOS, uses an ephemeral root filesystem with explicitly preserved state, and has a home directory managed as a Git repository with a whitelist `.gitignore`. The home repository organizes projects in a Go-style path layout (for example, `github.com/owner/project`). Each project is a Git submodule and a Nix flake with its own whitelist `.gitignore`. Flake repositories follow a small, purpose-built subset of the https://github.com/numtide/blueprint directory layout: a README explains the repository's intent, packages contain a single source file, tests describe the expected behavior, and code implements that behavior. Conventional formatters and strict linters are applied.
 
-The home repository organizes projects in a Go-style path layout (for example, `github.com/owner/project`). Projects are Git submodules whose own repositories use whitelist `.gitignore` files, are Nix flakes, and follow a small, purpose-built subset of the https://github.com/numtide/blueprint directory layout. Packages contain a single source file. Conventional formatters and strict linters are applied.
-
-`git canonicalization` creates and enforces these home and flake repository conventions.
+This repository provides tools for creating and maintaining that state.
 
 Home repository:
 
@@ -16,14 +14,14 @@ git add .gitignore
 git commit -m 'Initialize home repository'
 ```
 
+Project submodule:
+
 ```sh
 # Create the empty remote before starting this workflow.
 git submodule add --force git@github.com:owner/demo.git ~/github.com/owner/demo
 cd ~/github.com/owner/demo
-git canonicalization init .
+git canonicalization init . # initializes a flake repository with these conventions
+git canonicalization add <type> <name> # scaffolds a package in the selected flake repository
+nix fmt # runs conventional formatters and strict linters
+nix flake check # verifies the canonical structure and runs builds and tests
 ```
-
-Flake repositories: `git canonicalization add <type> <name>` targets the selected repository, follows a restricted subset of the numtide/blueprint layout, and maintains its root `.gitignore` whitelist.
-README: explains the repository's intent.
-Test names: describe the expected behavior.
-Code: implements the expected behavior. `nix fmt` runs conventional formatters and strict linters; `nix flake check` verifies the canonical structure and runs builds and tests.
