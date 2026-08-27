@@ -1,16 +1,16 @@
 Canonicalization
 
-The purpose of canonicalization is to minimize the ongoing effort required to maintain a system. A canonicalized system declares all state that must persist, making recovery a reconstruction from declared inputs rather than tracing past changes. Where multiple representations preserve specified behavior, one is selected, avoiding arbitrary variation that must otherwise be remembered and checked.
+Canonicalization selects one declared state from the system states that meet the same requirements and makes it the required state. Its purpose is to minimize the ongoing effort required to maintain the system. A canonical declarative system declares all state that must persist, so it can be rebuilt from its declarations instead of tracing past changes.
 
-A canonicalized system:
+A canonical declarative system:
 
-- Is declaratively defined with NixOS and uses an ephemeral root filesystem, so the machine can be reconstructed from declarations and only declared state persists.
-- Keeps its home directory in a Git repository with a whitelist `.gitignore`, making its versioned state explicit and reviewable.
-- Organizes projects at paths derived from their Git remotes (for example, `github.com/owner/project`), so their locations can be discovered and checked without per-project configuration.
+- Is defined with NixOS and uses an ephemeral root filesystem, so the machine can be rebuilt from declarations and only declared state persists.
+- Keeps its home directory in a Git repository with a whitelist `.gitignore`, making the files kept in Git explicit and reviewable.
+- Organizes projects at paths based on their Git remotes (for example, `github.com/owner/project`), so their locations can be discovered and checked without configuration for each project.
 - Treats each project as a Git submodule and a Nix flake, allowing it to be versioned, initialized, rebuilt, and checked independently.
-- Uses a restricted subset of the https://github.com/numtide/blueprint directory layout to make scaffolding and checking mechanical: each flake repository has a README explaining its purpose, packages with a single source file, and tests named for expected behavior.
+- Uses a defined subset of the https://github.com/numtide/blueprint directory layout so tools can create and check flake repositories: each has a README explaining its purpose, packages with a single source file, and tests named for expected behavior.
 
-`git canonicalization` helps create and maintain canonicalized home and flake repositories.
+`git canonicalization` initializes flake repositories, creates their packages, and checks home and flake repositories.
 
 Initialize the home repository:
 
@@ -29,7 +29,7 @@ Add and initialize a project submodule:
 git submodule add --force git@github.com:owner/demo.git ~/github.com/owner/demo
 cd ~/github.com/owner/demo
 git canonicalization init . # initializes a canonical flake repository
-git canonicalization add <type> <name> # scaffolds a package in the current flake repository
-nix fmt # runs conventional formatters and strict linters
-nix flake check # verifies the canonical structure and runs builds and tests
+git canonicalization add <type> <name> # creates a package in the current flake repository
+nix fmt # runs standard formatters and strict linters
+nix flake check # checks the layout and runs builds and tests
 ```
