@@ -69,7 +69,6 @@ defaultAllowedNixDifferenceKeys :: Set.Set T.Text
 defaultAllowedNixDifferenceKeys =
   Set.fromList
     [ "buildInputs",
-      "cargoHash",
       "executableHaskellDepends",
       "executableToolDepends",
       "installCheckPhase",
@@ -78,7 +77,6 @@ defaultAllowedNixDifferenceKeys =
       "nativeInstallCheckInputs",
       "passthru.canonicalizationDependencies",
       "postInstall",
-      "passthru.rustCheckNativeBuildInputs",
       "meta",
       "propagatedBuildInputs",
       "runtimeInputs",
@@ -110,12 +108,6 @@ templateSpecs =
         templateMatches = \_ nixSource -> "stdenv.mkDerivation" `isInfixOf` nixSource && "ghcWithPackages" `isInfixOf` nixSource,
         templateAllowedDifferenceKeys = Set.insert "passthru" defaultAllowedNixDifferenceKeys,
         templateBaselineSource = haskellTemplateBaselineNixSource
-      },
-    TemplateSpec
-      { templateName = "rust_package_baseline",
-        templateMatches = \_ nixSource -> "rustPlatform.buildRustPackage" `isInfixOf` nixSource,
-        templateAllowedDifferenceKeys = Set.fromList ["cargoToml", "cargoTomlFormat", "passthru", "pname", "postPatch"] `Set.union` defaultAllowedNixDifferenceKeys,
-        templateBaselineSource = rustTemplateBaselineNixSource
       },
     TemplateSpec
       { templateName = "html_template",
@@ -225,13 +217,6 @@ checkTemplateSpecs =
         checkTemplatePackageAssociation = Just ("_coverage", [PythonPackage, PythonLaTeXPackage])
       },
     CheckTemplateSpec
-      { checkTemplateName = "rust_coverage_check",
-        checkTemplateMatches = matchesRustCoverageCheck,
-        checkTemplateBaselineSource = rustCoverageCheckBaselineNixSource,
-        checkTemplateComparisonMode = ExactCheckTemplate,
-        checkTemplatePackageAssociation = Just ("-coverage", [RustPackage])
-      },
-    CheckTemplateSpec
       { checkTemplateName = "c_package_vm_check",
         checkTemplateMatches = matchesCPackageVmCheck,
         checkTemplateBaselineSource = cTemplateCheckBaselineNixSource,
@@ -257,8 +242,6 @@ matchesHaskellCoverageCheck :: Map.Map FilePath PackageKind -> FilePath -> Strin
 matchesHaskellCoverageCheck = matchesCheckNameSuffixAndSourceContains "-coverage" ["ghcWithPackages", "-fhpc"]
 matchesPythonCoverageCheck :: Map.Map FilePath PackageKind -> FilePath -> String -> Bool
 matchesPythonCoverageCheck = matchesCheckNameSuffixAndSourceContains "_coverage" ["--cov=\"$src\""]
-matchesRustCoverageCheck :: Map.Map FilePath PackageKind -> FilePath -> String -> Bool
-matchesRustCoverageCheck = matchesCheckNameSuffixAndSourceContains "-coverage" ["cargo llvm-cov"]
 matchesCPackageVmCheck :: Map.Map FilePath PackageKind -> FilePath -> String -> Bool
 matchesCPackageVmCheck packageKinds checkName nixSource =
   maybe False (`isCPackageVmCheckShape` nixSource) (Map.lookup checkName packageKinds)
@@ -660,7 +643,6 @@ writeStatusPackageTests :: PackageKind -> FilePath -> [String] -> IO ()
 writeStatusPackageTests packageKind packageName testNames =
   case packageKind of
     HaskellPackage -> TIO.writeFile ("packages" </> packageName </> "Main.hs") (renderStatusHaskellMainSource testNames)
-    RustPackage -> TIO.writeFile ("packages" </> packageName </> "src/main.rs") (renderStatusRustMainSource testNames)
     PythonPackage -> TIO.writeFile ("packages" </> packageName </> "main.py") (renderStatusPythonMainSource testNames)
     PythonLaTeXPackage -> TIO.writeFile ("packages" </> packageName </> "main.py") (renderStatusPythonMainSource testNames)
     _ -> pure ()
@@ -717,29 +699,6 @@ renderHaskellStatusTests testNames =
       ("  [ TestLabel " <> T.pack (show firstTestName) <> " (TestCase (assertFailure \"TODO: implement imported contract\"))")
         : ["  , TestLabel " <> T.pack (show testName) <> " (TestCase (assertFailure \"TODO: implement imported contract\"))" | testName <- remainingTestNames]
         ++ ["  ]"]
-renderStatusRustMainSource :: [String] -> T.Text
-renderStatusRustMainSource testNames =
-  T.unlines
-    ( [ "fn main() {",
-        "    panic!(\"implementation pending\");",
-        "}",
-        "",
-        "#[cfg(test)]",
-        "mod tests {",
-        "    #[allow(unused_imports)]",
-        "    use super::*;"
-      ]
-        ++ concatMap renderRustStatusTest (zip (statusTestIdentifiers "" testNames) testNames)
-        ++ ["}"]
-    )
-renderRustStatusTest :: (String, String) -> [T.Text]
-renderRustStatusTest (testIdentifier, _) =
-  [ "",
-    "    #[test]",
-    T.pack ("    fn " ++ testIdentifier ++ "() {"),
-    "        panic!(\"TODO: implement imported contract\");",
-    "    }"
-  ]
 statusTestIdentifiers :: String -> [String] -> [String]
 statusTestIdentifiers prefix = go Map.empty
   where
@@ -1353,8 +1312,6 @@ summarizeRepositoryPackage repositoryCheckNames packageName packageKind reposito
       HaskellPackage -> do
         maybeCabalContents <- readTextFileIfExists (packageRoot </> (packageName <.> "cabal"))
         pure ((maybeCabalContents >>= extractHaskellPackageDescription) <|> maybeDefaultNixDescription)
-      RustPackage -> do
-        pure maybeDefaultNixDescription
       _
         | packageKind `elem` [PythonPackage, PythonLaTeXPackage, PythonPyPIPackage] -> do
             maybePyprojectTomlContents <- readTextFileIfExists (packageRoot </> "pyproject.toml")
@@ -1390,14 +1347,6 @@ extractDefaultNixPackageDescription :: T.Text -> IO (Maybe String)
 extractDefaultNixPackageDescription defaultNixContents = do
   parseResult <- parseNixExprFromText defaultNixContents
   pure (either (const Nothing) (fmap T.unpack . findNixStringAtPath ["meta", "description"]) parseResult)
-extractDefaultNixPackageVersion :: T.Text -> IO (Maybe T.Text)
-extractDefaultNixPackageVersion defaultNixContents = do
-  parseResult <- parseNixExprFromText defaultNixContents
-  pure (either (const Nothing) (findNixStringAtPath ["version"]) parseResult)
-extractDefaultNixRustFlags :: T.Text -> IO (Maybe T.Text)
-extractDefaultNixRustFlags defaultNixContents = do
-  parseResult <- parseNixExprFromText defaultNixContents
-  pure (either (const Nothing) (findNixStringAtPath ["env", "RUSTFLAGS"]) parseResult)
 findNixStringAtPath :: [T.Text] -> NExprLoc -> Maybe T.Text
 findNixStringAtPath targetPath (Fix (Compose (AnnUnit _ expressionFunctor))) =
   case expressionFunctor of
@@ -1628,11 +1577,6 @@ renderScaffoldFiles packageKind packageName packageDescription =
       HaskellPackage ->
         [ ScaffoldFile "default.nix" (renderNixTemplateDescription defaultHaskellTemplateDescription packageDescription haskellTemplateBaselineNixSource),
           ScaffoldFile "Main.hs" haskellMainSource
-        ]
-      RustPackage ->
-        [ ScaffoldFile "default.nix" rustTemplateBaselineNixSource,
-          ScaffoldFile "Cargo.lock" (renderScaffoldCargoLock packageName),
-          ScaffoldFile "src/main.rs" rustMainSource
         ]
       HTMLPackage ->
         [ ScaffoldFile "default.nix" (renderNixTemplateDescription defaultHtmlTemplateDescription packageDescription htmlTemplateBaselineNixSource),
@@ -1875,18 +1819,6 @@ renderPythonTemplateNixSource packageDescription =
     ]
 pythonTemplateBaselineNixSource :: T.Text
 pythonTemplateBaselineNixSource = renderPythonTemplateNixSource defaultPythonTemplateDescription
-renderScaffoldCargoLock :: FilePath -> T.Text
-renderScaffoldCargoLock packageName =
-  T.unlines
-    [ "# This file is automatically @generated by Cargo.",
-      "# It is not intended for manual editing.",
-      "version = 4",
-      "",
-      "[[package]]",
-      T.pack ("name = \"" ++ packageName ++ "\""),
-      "version = \"0.1.0\"",
-      ""
-    ]
 inspectRepositoryStructure :: IO ([(FilePath, PackageKind)], [String])
 inspectRepositoryStructure = do
   repositoryEntries <- collectRepositoryEntries "."
@@ -1992,7 +1924,6 @@ opaqueDirectoryRegexes =
 type PackageKind :: Type
 data PackageKind
   = HaskellPackage
-  | RustPackage
   | HTMLPackage
   | PythonLaTeXPackage
   | PythonPackage
@@ -2012,7 +1943,6 @@ data PackageKindSpec = PackageKindSpec
 allPackageKinds :: [PackageKind]
 allPackageKinds =
   [ HaskellPackage,
-    RustPackage,
     HTMLPackage,
     PythonLaTeXPackage,
     PythonPackage,
@@ -2025,7 +1955,6 @@ allPackageKinds =
 packageKindSpec :: PackageKind -> PackageKindSpec
 packageKindSpec = \case
   HaskellPackage -> PackageKindSpec "haskell" "kebab-case" '-' True
-  RustPackage -> PackageKindSpec "rust" "kebab-case" '-' True
   HTMLPackage -> PackageKindSpec "html" "snake_case" '_' True
   PythonLaTeXPackage -> PackageKindSpec "python-latex" "snake_case" '_' True
   PythonPackage -> PackageKindSpec "python" "snake_case" '_' True
@@ -2065,7 +1994,6 @@ detectPackageMarkers packageRelativeLeafPaths =
    in [ marker
       | (markerExists, marker) <-
           [ (hasLeafPath "Main.hs", ("Main.hs", HaskellPackage)),
-            (hasLeafPath "Cargo.lock" && hasLeafPath "src/main.rs", ("Cargo.lock+src/main.rs", RustPackage)),
             (hasLeafPath "index.html", ("index.html", HTMLPackage)),
             (hasLeafPath "main.py" && hasLeafPath "ms.tex", ("main.py+ms.tex", PythonLaTeXPackage)),
             (hasLeafPath "main.py" && not (hasLeafPath "ms.tex"), ("main.py", PythonPackage)),
@@ -2117,7 +2045,6 @@ packagePathPolicy packageRootDirectory _packageDirectoryName maybePackageKind =
       basePaths = [packagePath "default.nix"]
       kindFiles = case maybePackageKind of
         Just HaskellPackage -> [packagePath "Main.hs"]
-        Just RustPackage -> map packagePath ["Cargo.lock", "src/main.rs"]
         Just HTMLPackage -> map packagePath ["index.html", "script.js", "style.css"]
         Just PythonLaTeXPackage -> map packagePath ["main.py", "ms.tex", "ms.bib", "refs.bib"]
         Just PythonPackage -> [packagePath "main.py"]
@@ -2167,7 +2094,7 @@ discoverPackageInfosFromFilesystem = do
     let packageRootDirectory = "packages" </> packageName
         markerPaths =
           [ packageRootDirectory </> markerPath
-          | markerPath <- ["Main.hs", "Cargo.lock", "src/main.rs", "index.html", "main.py", "main.c", "main.tf", "ms.tex"]
+          | markerPath <- ["Main.hs", "index.html", "main.py", "main.c", "main.tf", "ms.tex"]
           ]
     markerEntries <- collectExistingRepositoryEntries markerPaths
     buildPackageInfo (Set.fromList (map fst markerEntries)) packageRootDirectory
@@ -2306,14 +2233,12 @@ checkPackage packageName packageKind = do
                     else templateAllowedDifferenceKeys templateSpec
                 ignoredTopLevelFunctionParams = optionalTemplateFunctionParams packageKind ("packages" </> matchedTemplateName </> "default.nix")
             compareNixFileWithTemplate ignoredTopLevelFunctionParams packageDefaultNixPath ("packages" </> matchedTemplateName </> "default.nix") allowedNixDifferenceKeysForPackage (templateBaselineSource templateSpec)
-  cargoTomlIssues <- checkCargoToml packageName
   cabalFileIssues <- checkCabalFile packageName
   defaultNixConventionIssues <- checkDefaultNixConventions packageName packageKind
   (testConventionIssues, packageTestNames) <- inspectPackageTests packageName packageKind
   pure
     ( templateIssues
         ++ defaultNixConventionIssues
-        ++ cargoTomlIssues
         ++ cabalFileIssues
         ++ testConventionIssues,
       packageTestNames
@@ -2391,7 +2316,7 @@ checkDefaultNixConventions packageName packageKind = do
           hasPlaceholderVersion = "version = \"0.0.0\";" `isInfixOf` defaultNixSource
           hasVersionAssignment = "version = \"" `isInfixOf` defaultNixSource
           expectsMetaMainProgram =
-            packageKind `elem` [RustPackage, PythonLaTeXPackage, PythonPackage, CPackage]
+            packageKind `elem` [PythonLaTeXPackage, PythonPackage, CPackage]
        in pure $
             catMaybes
               [ if expectsMetaMainProgram && not hasMetaMainProgram
@@ -2400,7 +2325,7 @@ checkDefaultNixConventions packageName packageKind = do
                 if hasExternalFetchUrlSource && hasPlaceholderVersion
                   then Just ("packages/" ++ packageName ++ "/default.nix: fetchurl-based packages must use a non-placeholder version")
                   else Nothing,
-                if packageKind /= RustPackage && hasLocalSource && hasVersionAssignment && not hasPlaceholderVersion
+                if hasLocalSource && hasVersionAssignment && not hasPlaceholderVersion
                   then Just ("packages/" ++ packageName ++ "/default.nix: src = ./.; packages must use version = \"0.0.0\";")
                   else Nothing
               ]
@@ -2408,7 +2333,6 @@ inspectPackageTests :: FilePath -> PackageKind -> IO ([String], [String])
 inspectPackageTests packageName packageKind
   | packageKind `elem` [PythonPackage, PythonLaTeXPackage] = inspectPythonPackageTests packageName
   | packageKind == HaskellPackage = inspectHaskellPackageTests packageName
-  | packageKind == RustPackage = inspectRustPackageTests packageName
   | otherwise = pure ([], [])
 inspectPythonPackageTests :: FilePath -> IO ([String], [String])
 inspectPythonPackageTests packageName =
@@ -2597,42 +2521,6 @@ inspectHaskellSource source = case HS.parseModuleWithMode haskellParseMode (norm
 haskellNameText :: HS.Name annotation -> String
 haskellNameText (HS.Ident _ name) = name
 haskellNameText (HS.Symbol _ name) = name
-inspectRustPackageTests :: FilePath -> IO ([String], [String])
-inspectRustPackageTests packageName = do
-  let mainRustPath = "packages" </> packageName </> "src/main.rs"
-  mainRustSource <- maybe "" T.unpack <$> readTextFileIfExists mainRustPath
-  let hasRustTestModule = "#[cfg(test)]" `isInfixOf` mainRustSource && "mod tests" `isInfixOf` mainRustSource
-      hasRustTestCases = "#[test]" `isInfixOf` mainRustSource
-  pure
-    ( catMaybes
-        [ if hasRustTestModule
-            then Nothing
-            else Just ("packages/" ++ packageName ++ "/src/main.rs: missing #[cfg(test)] mod tests"),
-          if hasRustTestCases
-            then Nothing
-            else Just ("packages/" ++ packageName ++ "/src/main.rs: missing #[test] test cases")
-        ],
-      discoverRustUnitTestNamesFromSource mainRustSource
-    )
-discoverRustUnitTestNamesFromSource :: String -> [String]
-discoverRustUnitTestNamesFromSource =
-  Set.toAscList
-    . Set.fromList
-    . map testSpecificationFromIdentifier
-    . extractRustUnitTestNames
-    . lines
-extractRustUnitTestNames :: [String] -> [String]
-extractRustUnitTestNames = Set.toAscList . Set.fromList . go False
-  where
-    go _ [] = []
-    go awaitingFunctionAfterTestAttribute (line : rest)
-      | "#[test]" `isPrefixOf` trimmed = go True rest
-      | awaitingFunctionAfterTestAttribute && "fn " `isPrefixOf` trimmed =
-          let functionName = takeWhile (\character -> character /= '(' && character /= ' ') (drop 3 trimmed)
-           in [functionName | not (null functionName)] ++ go False rest
-      | otherwise = go False rest
-      where
-        trimmed = dropWhile (== ' ') line
 pythonTestInspectorPythonSource :: String
 pythonTestInspectorPythonSource =
   unlines
@@ -2664,69 +2552,6 @@ pythonTestInspectorPythonSource =
       "if __name__ == '__main__':",
       "    main()"
     ]
-checkCargoToml :: FilePath -> IO [String]
-checkCargoToml packageName = do
-  let cargoTomlPath = "packages" </> packageName </> "Cargo.toml"
-      defaultNixPath = "packages" </> packageName </> "default.nix"
-  maybeCargoTomlContents <- readTextFileIfExists cargoTomlPath
-  case maybeCargoTomlContents of
-    Nothing -> pure []
-    Just cargoTomlContents ->
-      case parseToml cargoTomlContents of
-        Left parseError -> pure [cargoTomlPath ++ ": parse error: " ++ T.unpack parseError]
-        Right cargoToml -> do
-          let cargoPackageName = lookupTomlStringAt ["package", "name"] cargoToml
-              cargoPackageVersion = lookupTomlStringAt ["package", "version"] cargoToml
-              normalizedCargoToml = normalizeCargoTomlForBaselineComparison packageName cargoToml
-              normalizedBaselineCargoToml = parseToml rustCargoTomlBaseline >>= Right . normalizeCargoTomlForBaselineComparison packageName
-          maybeDefaultNixContents <- readTextFileIfExists defaultNixPath
-          maybeDefaultNixVersion <- maybe (pure Nothing) extractDefaultNixPackageVersion maybeDefaultNixContents
-          maybeDefaultNixRustFlags <- maybe (pure Nothing) extractDefaultNixRustFlags maybeDefaultNixContents
-          pure $
-            catMaybes
-              [ case cargoPackageName of
-                  Nothing ->
-                    Just ("packages/" ++ packageName ++ "/Cargo.toml: missing [package].name")
-                  Just actualPackageName ->
-                    if actualPackageName == T.pack packageName
-                      then Nothing
-                      else
-                        Just
-                          ( "packages/"
-                              ++ packageName
-                              ++ "/Cargo.toml: [package].name must match directory name (expected \""
-                              ++ packageName
-                              ++ "\", got \""
-                              ++ T.unpack actualPackageName
-                              ++ "\")"
-                          ),
-                case (cargoPackageVersion, maybeDefaultNixVersion) of
-                  (Just cargoVersion, Just defaultNixVersion)
-                    | cargoVersion == defaultNixVersion -> Nothing
-                    | otherwise ->
-                        Just
-                          ( "packages/"
-                              ++ packageName
-                              ++ "/default.nix: version must match Cargo.toml [package].version (expected \""
-                              ++ T.unpack cargoVersion
-                              ++ "\", got \""
-                              ++ T.unpack defaultNixVersion
-                              ++ "\")"
-                          )
-                  (Nothing, _) -> Just ("packages/" ++ packageName ++ "/Cargo.toml: missing [package].version")
-                  (_, Nothing) -> Just ("packages/" ++ packageName ++ "/default.nix: missing a literal version"),
-                if maybe False (T.isInfixOf "-F unsafe-code") maybeDefaultNixRustFlags
-                  then Nothing
-                  else Just ("packages/" ++ packageName ++ "/default.nix: RUSTFLAGS must forbid unsafe-code"),
-                if Right normalizedCargoToml == normalizedBaselineCargoToml
-                  then Nothing
-                  else
-                    Just
-                      ( "packages/"
-                          ++ packageName
-                          ++ "/Cargo.toml: only dependency sections may differ from the internal Rust Cargo baseline"
-                      )
-              ]
 parseToml :: T.Text -> Either T.Text TOML.Value
 parseToml source = case TOML.decode source of
   Left parseError -> Left (TOML.renderTOMLError parseError)
@@ -2739,24 +2564,6 @@ lookupTomlStringAt :: [T.Text] -> TOML.Value -> Maybe T.Text
 lookupTomlStringAt path value = case lookupTomlValueAt path value of
   Just (TOML.String textValue) -> Just textValue
   _ -> Nothing
-normalizeCargoTomlForBaselineComparison :: FilePath -> TOML.Value -> TOML.Value
-normalizeCargoTomlForBaselineComparison packageName = normalize []
-  where
-    normalize path (TOML.Table table) =
-      TOML.Table
-        ( Map.mapWithKey
-            (\key -> normalize (path ++ [key]))
-            (foldr Map.delete table (ignoredKeys path))
-        )
-    normalize path (TOML.Array values) = TOML.Array (map (normalize path) values)
-    normalize path (TOML.String _)
-      | path == ["package", "name"] || path == ["bin", "name"] = TOML.String (T.pack packageName)
-    normalize _ value = value
-    ignoredKeys :: [T.Text] -> [T.Text]
-    ignoredKeys ("target" : _) = ["dependencies", "dev-dependencies", "build-dependencies"]
-    ignoredKeys path
-      | null path = ["dependencies", "dev-dependencies", "build-dependencies"]
-      | otherwise = []
 checkCabalFile :: FilePath -> IO [String]
 checkCabalFile packageName = do
   let cabalFilePath = "packages" </> packageName </> packageName <.> "cabal"
@@ -3120,8 +2927,6 @@ hUnitPackageTests =
       TestLabel "Discovers pytest test methods in conventional test classes." (TestCase pythonClassTestDiscoveryTest),
       TestLabel "Humanizes conventional test identifiers across frameworks." (TestCase testIdentifierSpecificationTest),
       TestLabel "Uses default.nix evidence only for markerless package classification." (TestCase packageDetectionTest),
-      TestLabel "Ignores formatter-only Cargo inline-table spacing." (TestCase cargoTomlFormattingNormalizationTest),
-      TestLabel "Requires Rust Nix and Cargo versions to match." (TestCase rustVersionSynchronizationTest),
       TestLabel "Requires allowlisted filesystem entry kinds." (TestCase entryKindStructureTest),
       TestLabel "Refuses to repair a non-regular root Git ignore entry." (TestCase rootGitignoreRepairSafetyTest),
       TestLabel "Rolls back scaffold files when generation fails." (TestCase scaffoldCreationRollbackTest),
@@ -3262,33 +3067,8 @@ packageDetectionTest :: IO ()
 packageDetectionTest =
   assertEqual
     "External Python source evidence refines markerless packages without hiding conflicting markers."
-    [ DetectedPackageKind PythonPyPIPackage,
-      AmbiguousPackageMarkers ("Main.hs" :| ["Cargo.lock+src/main.rs"])
-    ]
-    [ detectPackageFromEvidence [] (Just "{ buildPythonPackage = true; src = fetchPypi {}; }"),
-      detectPackageFromEvidence (detectPackageMarkers ["Main.hs", "Cargo.lock", "src/main.rs"]) (Just "{ buildPythonPackage = true; src = fetchPypi {}; }")
-    ]
-cargoTomlFormattingNormalizationTest :: IO ()
-cargoTomlFormattingNormalizationTest = case (parseToml rustCargoTomlBaseline, parseToml removeEmptyLinesCargoTomlFixture) of
-  (Right baseline, Right fixture) ->
-    assertEqual
-      "Taplo's inline-table spacing does not change Cargo policy compliance."
-      (normalizeCargoTomlForBaselineComparison "remove-empty-lines" baseline)
-      (normalizeCargoTomlForBaselineComparison "remove-empty-lines" fixture)
-  _ -> assertFailure "Cargo TOML fixtures must parse."
-rustVersionSynchronizationTest :: IO ()
-rustVersionSynchronizationTest =
-  withTemporaryPackageRepository "rust-version-synchronization" $ \temporaryRepository -> do
-    let packageRoot = temporaryRepository </> "packages/demo"
-    createDirectoryIfMissing True packageRoot
-    TIO.writeFile (packageRoot </> "Cargo.toml") (T.replace "remove-empty-lines" "demo" removeEmptyLinesCargoTomlFixture)
-    TIO.writeFile (packageRoot </> "default.nix") "{ pkgs ? import <nixpkgs> { }, }: { version = \"0.0.0\"; }"
-    issues <- withCurrentDirectory temporaryRepository (checkCargoToml "demo")
-    assertBool
-      "A Rust package must synchronize its Cargo and Nix versions."
-      ( "packages/demo/default.nix: version must match Cargo.toml [package].version (expected \"0.1.0\", got \"0.0.0\")"
-          `elem` issues
-      )
+    [DetectedPackageKind PythonPyPIPackage]
+    [detectPackageFromEvidence [] (Just "{ buildPythonPackage = true; src = fetchPypi {}; }")]
 entryKindStructureTest :: IO ()
 entryKindStructureTest =
   withTemporaryPackageRepository "symbolic-link-structure" $ \temporaryRepository -> do
@@ -4002,7 +3782,6 @@ allPackageKindsEndToEndTest =
     runGitFixtureCommand ["-C", temporaryRepository, "config", "user.email", "canonicalization@example.test"]
     forM_
       [ ("haskell", "demo-haskell", "Main.hs", Just "demo-haskell-coverage"),
-        ("rust", "demo-rust", "Cargo.lock", Just "demo-rust-coverage"),
         ("html", "demo_html", "index.html", Nothing),
         ("python", "demo_python", "main.py", Just "demo_python_coverage"),
         ("python-latex", "demo_python_latex", "main.py", Just "demo_python_latex_coverage"),
@@ -4021,13 +3800,6 @@ allPackageKindsEndToEndTest =
         assertEqual ("Scaffolding " ++ packageKindName ++ " leaves stderr empty.") "" addStderr
         markerExists <- doesFileExist (temporaryRepository </> "packages" </> packageName </> markerFile)
         assertBool ("Scaffolding " ++ packageKindName ++ " creates its marker file.") markerExists
-        when (packageKindName == "rust") $ do
-          generatedRustSource <- TIO.readFile (temporaryRepository </> "packages" </> packageName </> "src/main.rs")
-          assertBool
-            "Generated Rust executable tests isolate their working directory in a child process."
-            ( "Command::new(executable).current_dir(root).output()?" `T.isInfixOf` generatedRustSource
-                && not ("env::set_current_dir" `T.isInfixOf` generatedRustSource)
-            )
         forM_ maybeCheckName $ \checkName -> do
           checkExists <- doesFileExist (temporaryRepository </> "checks" </> checkName </> "default.nix")
           assertBool ("Scaffolding " ++ packageKindName ++ " creates its combined check.") checkExists
@@ -4521,142 +4293,6 @@ haskellMainSource =
       "main :: IO ()",
       "main = putStrLn renderMessage"
     ]
-rustMainSource :: T.Text
-rustMainSource =
-  T.unlines
-    [ "#![allow(clippy::multiple_crate_versions)]",
-      "use anyhow::{Context as _, Result};",
-      "use ignore::WalkBuilder;",
-      "use std::env;",
-      "use std::fs;",
-      "use std::path::Path;",
-      "fn main() -> Result<()> {",
-      "    let mut paths = env::args_os().skip(1);",
-      "    if let Some(path) = paths.next() {",
-      "        process_path(Path::new(&path))?;",
-      "        for path in paths {",
-      "            process_path(Path::new(&path))?;",
-      "        }",
-      "    } else {",
-      "        process_path(Path::new(\".\"))?;",
-      "    }",
-      "    Ok(())",
-      "}",
-      "fn process_path(path: &Path) -> Result<()> {",
-      "    for result in WalkBuilder::new(path).require_git(false).build() {",
-      "        let entry = result.with_context(|| format!(\"Failed to walk path: {}\", path.display()))?;",
-      "        if entry.file_type().is_some_and(|file_type| file_type.is_file()) {",
-      "            process_file(entry.path())?;",
-      "        }",
-      "    }",
-      "    Ok(())",
-      "}",
-      "fn process_file(path: &Path) -> Result<()> {",
-      "    let path_display = path.display();",
-      "    let contents = fs::read(path).with_context(|| format!(\"Failed to read file: {path_display}\"))?;",
-      "    if content_inspector::inspect(&contents).is_binary() {",
-      "        return Ok(());",
-      "    }",
-      "    let updated_contents = remove_empty_lines(&contents);",
-      "    if updated_contents != contents {",
-      "        fs::write(path, updated_contents).with_context(|| format!(\"Failed to write file: {path_display}\"))?;",
-      "    }",
-      "    Ok(())",
-      "}",
-      "fn remove_empty_lines(contents: &[u8]) -> Vec<u8> {",
-      "    let mut updated_contents = Vec::with_capacity(contents.len());",
-      "    for line in contents.split_inclusive(|byte| *byte == b'\\n') {",
-      "        let without_newline = line.strip_suffix(b\"\\n\").unwrap_or(line);",
-      "        let line_contents = without_newline.strip_suffix(b\"\\r\").unwrap_or(without_newline);",
-      "        if !core::str::from_utf8(line_contents).is_ok_and(|text| text.trim().is_empty()) {",
-      "            updated_contents.extend_from_slice(line);",
-      "        }",
-      "    }",
-      "    updated_contents",
-      "}",
-      "#[cfg(test)]",
-      "mod tests {",
-      "    use super::*;",
-      "    use quickcheck::{Arbitrary, Gen, QuickCheck, TestResult};",
-      "    use std::process::Command;",
-      "    use tempfile::tempdir;",
-      "    #[derive(Clone, Debug)]",
-      "    struct LogicalLine(String);",
-      "    impl Arbitrary for LogicalLine {",
-      "        fn arbitrary(g: &mut Gen) -> Self {",
-      "            let line = String::arbitrary(g)",
-      "                .chars()",
-      "                .filter(|character| *character != '\\n' && *character != '\\r')",
-      "                .collect();",
-      "            Self(line)",
-      "        }",
-      "    }",
-      "    fn render_lines(lines: &[LogicalLine]) -> Vec<u8> {",
-      "        let mut rendered = Vec::new();",
-      "        for line in lines {",
-      "            rendered.extend_from_slice(line.0.as_bytes());",
-      "            rendered.push(b'\\n');",
-      "        }",
-      "        rendered",
-      "    }",
-      "    fn expected_non_empty_lines(lines: &[LogicalLine]) -> Vec<u8> {",
-      "        let mut rendered = Vec::new();",
-      "        for line in lines {",
-      "            if !line.0.trim().is_empty() {",
-      "                rendered.extend_from_slice(line.0.as_bytes());",
-      "                rendered.push(b'\\n');",
-      "            }",
-      "        }",
-      "        rendered",
-      "    }",
-      "    #[test]",
-      "    fn respects_gitignore_and_skips_binary_files() -> Result<()> {",
-      "        let directory = tempdir()?;",
-      "        let root = directory.path();",
-      "        let gitignore_path = root.join(\".gitignore\");",
-      "        fs::write(&gitignore_path, \"ignored.txt\\n\")?;",
-      "        let ignored_path = root.join(\"ignored.txt\");",
-      "        fs::write(&ignored_path, \"should be ignored\\n\\n\")?;",
-      "        let binary_path = root.join(\"binary.bin\");",
-      "        fs::write(&binary_path, [0, 15, 255, 0, 1, 2, 3])?;",
-      "        process_path(root)?;",
-      "        let content_ignored = fs::read_to_string(&ignored_path)?;",
-      "        assert_eq!(content_ignored, \"should be ignored\\n\\n\");",
-      "        let content_binary = fs::read(&binary_path)?;",
-      "        assert_eq!(content_binary, vec![0, 15, 255, 0, 1, 2, 3]);",
-      "        Ok(())",
-      "    }",
-      "    #[test]",
-      "    fn processes_current_directory_when_no_arguments() -> Result<()> {",
-      "        let Some(executable) = env::var_os(\"PACKAGE_E2E_EXECUTABLE\") else {",
-      "            return Ok(());",
-      "        };",
-      "        let directory = tempdir()?;",
-      "        let root = directory.path();",
-      "        let file_path = root.join(\"test.txt\");",
-      "        fs::write(&file_path, \"line1\\n\\nline2\\n   \\nline3\\n\")?;",
-      "        let output = Command::new(executable).current_dir(root).output()?;",
-      "        assert!(output.status.success());",
-      "        assert!(output.stdout.is_empty());",
-      "        assert!(output.stderr.is_empty());",
-      "        let content = fs::read_to_string(&file_path)?;",
-      "        assert_eq!(content, \"line1\\nline2\\nline3\\n\");",
-      "        Ok(())",
-      "    }",
-      "    #[test]",
-      "    fn quickcheck_removing_empty_lines_matches_filtered_sequence() {",
-      "        #[expect(clippy::needless_pass_by_value)]",
-      "        fn property(lines: Vec<LogicalLine>) -> TestResult {",
-      "            let input = render_lines(&lines);",
-      "            let actual = remove_empty_lines(&input);",
-      "            TestResult::from_bool(actual == expected_non_empty_lines(&lines))",
-      "        }",
-      "        QuickCheck::new()",
-      "            .tests(100)",
-      "            .quickcheck(property as fn(Vec<LogicalLine>) -> TestResult);",
-      "    }",
-      "}"
-    ]
 htmlIndexSource :: T.Text
 htmlIndexSource =
   T.unlines
@@ -4748,35 +4384,6 @@ latexMsBibSource =
       "  year = {2026}",
       "}"
     ]
-removeEmptyLinesCargoTomlFixture :: T.Text
-removeEmptyLinesCargoTomlFixture =
-  T.unlines
-    [ "[dependencies]",
-      "ignore = \"0.4\"",
-      "anyhow = \"1.0\"",
-      "content_inspector = \"0.2\"",
-      "tempfile = \"3.8\"",
-      "",
-      "",
-      "[package]",
-      "name = \"remove-empty-lines\"",
-      "version = \"0.1.0\"",
-      "edition = \"2021\"",
-      ""
-    ]
-rustCargoTomlBaseline :: T.Text
-rustCargoTomlBaseline =
-  T.unlines
-    [ "[dependencies]",
-      "colored = \"2.1.0\"",
-      "",
-      "",
-      "[package]",
-      "name = \"rust-template\"",
-      "version = \"0.1.0\"",
-      "edition = \"2021\"",
-      ""
-    ]
 haskellCabalBaseline :: T.Text
 haskellCabalBaseline =
   T.unlines
@@ -4832,47 +4439,6 @@ haskellTemplateBaselineNixSource =
       "  '';",
       "  src = ./.;",
       "  version = \"0.0.0\";",
-      "}",
-      ""
-    ]
-rustTemplateBaselineNixSource :: T.Text
-rustTemplateBaselineNixSource =
-  T.unlines
-    [ "{",
-      "  pkgs ? import <nixpkgs> { },",
-      "}:",
-      "let",
-      "  pname = baseNameOf ./.;",
-      "  version = \"0.1.0\";",
-      "  cargoTomlFormat = pkgs.formats.toml { };",
-      "  cargoToml = cargoTomlFormat.generate \"Cargo.toml\" {",
-      "    package = { name = pname; inherit version; edition = \"2021\"; };",
-      "    dependencies = { };",
-      "  };",
-      "in",
-      "pkgs.rustPlatform.buildRustPackage {",
-      "  cargoLock.lockFile = ./Cargo.lock;",
-      "  doInstallCheck = pkgs.stdenv.isLinux;",
-      "  env = {",
-      "    RUSTDOCFLAGS = \"-D warnings\";",
-      "    RUSTFLAGS = \"-D warnings -F unsafe-code\";",
-      "  };",
-      "  installCheckPhase = ''",
-      "    runHook preInstallCheck",
-      "    test -x \"$out/bin/${pname}\"",
-      "    workspace=\"$PWD/installcheck\"",
-      "    mkdir -p \"$workspace\"",
-      "    \"$out/bin/${pname}\" \"$workspace\"",
-      "    runHook postInstallCheck",
-      "  '';",
-      "  meta.mainProgram = pname;",
-      "  pname = pname;",
-      "  version = version;",
-      "  postPatch = ''",
-      "    cp ${cargoToml} Cargo.toml",
-      "  '';",
-      "  src = ./.;",
-      "  strictDeps = true;",
       "}",
       ""
     ]
@@ -5327,47 +4893,6 @@ pythonCoverageCheckBaselineNixSource =
       "    PACKAGE_E2E_EXECUTABLE=\"${packageDrv}/bin/${packageName}\" python -m pytest -p no:cacheprovider --cov=\"$src\" --cov-report \"html:$out/html\" \"$src/main.py\"",
       "  ''"
     ]
-rustCoverageCheckBaselineNixSource :: T.Text
-rustCoverageCheckBaselineNixSource =
-  T.unlines
-    [ "{",
-      "  inputs,",
-      "  pkgs,",
-      "  ...",
-      "}:",
-      "let",
-      "  inherit (packageDrv) cargoDeps;",
-      "  checkName = baseNameOf ./.;",
-      "  packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${packageName};",
-      "  packageName = pkgs.lib.removeSuffix \"-coverage\" checkName;",
-      "in",
-      "pkgs.runCommand checkName",
-      "  {",
-      "    nativeBuildInputs = packageDrv.passthru.rustCheckNativeBuildInputs ++ [",
-      "      pkgs.cargo-llvm-cov",
-      "      pkgs.cargo-nextest",
-      "      pkgs.llvmPackages.llvm",
-      "    ];",
-      "    src = ../.. + \"/packages/${packageName}\";",
-      "  }",
-      "  ''",
-      "    export LLVM_COV='${pkgs.lib.getExe' pkgs.llvmPackages.llvm \"llvm-cov\"}'",
-      "    export LLVM_PROFDATA='${pkgs.lib.getExe' pkgs.llvmPackages.llvm \"llvm-profdata\"}'",
-      "    workspace=\"$PWD/workspace\"",
-      "    cp -R --no-preserve=mode \"$src\" \"$workspace\"",
-      "    cp \"${packageDrv.passthru.cargoToml}\" \"$workspace/Cargo.toml\"",
-      "    ln -s \"${cargoDeps}\" \"$workspace/cargo-vendor-dir\"",
-      "    install -Dm644 \"${cargoDeps}/.cargo/config.toml\" \"$workspace/.cargo/config.toml\"",
-      "    substituteInPlace \"$workspace/.cargo/config.toml\" \\",
-      "      --replace-warn \"@vendor@\" \"${cargoDeps}\"",
-      "    mkdir -p \"$out\"",
-      "    export PACKAGE_E2E_EXECUTABLE=\"${packageDrv}/bin/${packageName}\"",
-      "    cd \"$workspace\"",
-      "    eval \"$(cargo llvm-cov show-env --sh)\"",
-      "    cargo llvm-cov clean --profraw-only",
-      "    cargo nextest run",
-      "  ''"
-    ]
 cTemplateCheckBaselineNixSource :: T.Text
 cTemplateCheckBaselineNixSource =
   T.unlines
@@ -5453,7 +4978,7 @@ uncommentTemplateBaselineNixSource =
       "    runHook postInstall",
       "  '';",
       "  meta = {",
-      "    description = \"A fast Rust-based CLI tool for removing comments from source code.\";",
+      "    description = \"A fast CLI tool for removing comments from source code.\";",
       "    mainProgram = pname;",
       "  };",
       "  nativeBuildInputs = [",
