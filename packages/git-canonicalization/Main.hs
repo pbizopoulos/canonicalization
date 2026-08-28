@@ -100,7 +100,6 @@ data CheckTemplateSpec = CheckTemplateSpec
 type CheckTemplateComparisonMode :: Type
 data CheckTemplateComparisonMode
   = ExactCheckTemplate
-  | StructuralCPackageVm
 templateSpecs :: [TemplateSpec]
 templateSpecs =
   [ TemplateSpec
@@ -162,14 +161,6 @@ templateSpecs =
         templateBaselineSource = latexTemplateBaselineNixSource
       },
     TemplateSpec
-      { templateName = "c_template",
-        templateMatches = \_ nixSource ->
-          "stdenv.mkDerivation" `isInfixOf` nixSource
-            && "cc -o ${pname} main.c -std=c89" `isInfixOf` nixSource,
-        templateAllowedDifferenceKeys = Set.union defaultAllowedNixDifferenceKeys (Set.fromList ["buildPhase", "checkPhase"]),
-        templateBaselineSource = cTemplateBaselineNixSource
-      },
-    TemplateSpec
       { templateName = "uncomment_template",
         templateMatches = \_ nixSource ->
           "stdenv.mkDerivation" `isInfixOf` nixSource
@@ -217,13 +208,6 @@ checkTemplateSpecs =
         checkTemplatePackageAssociation = Just ("_coverage", [PythonPackage, PythonLaTeXPackage])
       },
     CheckTemplateSpec
-      { checkTemplateName = "c_package_vm_check",
-        checkTemplateMatches = matchesCPackageVmCheck,
-        checkTemplateBaselineSource = cTemplateCheckBaselineNixSource,
-        checkTemplateComparisonMode = StructuralCPackageVm,
-        checkTemplatePackageAssociation = Nothing
-      },
-    CheckTemplateSpec
       { checkTemplateName = "default_vm_with_disko_check",
         checkTemplateMatches = matchesDefaultVmWithDiskoCheck,
         checkTemplateBaselineSource = defaultVmWithDiskoCheckBaselineNixSource,
@@ -242,17 +226,8 @@ matchesHaskellCoverageCheck :: Map.Map FilePath PackageKind -> FilePath -> Strin
 matchesHaskellCoverageCheck = matchesCheckNameSuffixAndSourceContains "-coverage" ["ghcWithPackages", "-fhpc"]
 matchesPythonCoverageCheck :: Map.Map FilePath PackageKind -> FilePath -> String -> Bool
 matchesPythonCoverageCheck = matchesCheckNameSuffixAndSourceContains "_coverage" ["--cov=\"$src\""]
-matchesCPackageVmCheck :: Map.Map FilePath PackageKind -> FilePath -> String -> Bool
-matchesCPackageVmCheck packageKinds checkName nixSource =
-  maybe False (`isCPackageVmCheckShape` nixSource) (Map.lookup checkName packageKinds)
 matchesDefaultVmWithDiskoCheck :: Map.Map FilePath PackageKind -> FilePath -> String -> Bool
 matchesDefaultVmWithDiskoCheck = matchesCheckNameSuffixAndSourceContains "VmWithDisko" ["pkgs.runCommand", "config.system.build.vmWithDisko"]
-isCPackageVmCheckShape :: PackageKind -> String -> Bool
-isCPackageVmCheckShape packageKind nixSource =
-  packageKind == CPackage
-    && "pkgs.testers.runNixOSTest" `isInfixOf` nixSource
-    && "nodes.machine" `isInfixOf` nixSource
-    && "testScript = ''" `isInfixOf` nixSource
 type Command :: Type
 data Command
   = CheckCommand
@@ -1597,10 +1572,6 @@ renderScaffoldFiles packageKind packageName packageDescription =
       PythonPyPIPackage ->
         [ ScaffoldFile "default.nix" pythonPyPITemplateBaselineNixSource
         ]
-      CPackage ->
-        [ ScaffoldFile "default.nix" (renderNixTemplateDescription defaultCTemplateDescription packageDescription cTemplateBaselineNixSource),
-          ScaffoldFile "main.c" cMainSource
-        ]
       TerraformPackage ->
         [ ScaffoldFile "default.nix" (renderNixTemplateDescription defaultTerraformTemplateDescription packageDescription deployHostTemplateBaselineNixSource),
           ScaffoldFile "main.tf" "terraform { }\n"
@@ -1754,8 +1725,6 @@ defaultHtmlTemplateDescription :: String
 defaultHtmlTemplateDescription = "An HTML, CSS, and JavaScript template package."
 defaultPythonLaTeXTemplateDescription :: String
 defaultPythonLaTeXTemplateDescription = "A Python and LaTeX template package."
-defaultCTemplateDescription :: String
-defaultCTemplateDescription = "A C template package."
 defaultTerraformTemplateDescription :: String
 defaultTerraformTemplateDescription = "A Terraform template package for deploying a host."
 defaultLaTeXTemplateDescription :: String
@@ -1928,7 +1897,6 @@ data PackageKind
   | PythonLaTeXPackage
   | PythonPackage
   | PythonPyPIPackage
-  | CPackage
   | TerraformPackage
   | LaTeXPackage
   | BinaryReleasePackage
@@ -1947,7 +1915,6 @@ allPackageKinds =
     PythonLaTeXPackage,
     PythonPackage,
     PythonPyPIPackage,
-    CPackage,
     TerraformPackage,
     LaTeXPackage,
     BinaryReleasePackage
@@ -1959,7 +1926,6 @@ packageKindSpec = \case
   PythonLaTeXPackage -> PackageKindSpec "python-latex" "snake_case" '_' True
   PythonPackage -> PackageKindSpec "python" "snake_case" '_' True
   PythonPyPIPackage -> PackageKindSpec "python-pypi" "snake_case" '_' True
-  CPackage -> PackageKindSpec "c" "snake_case" '_' True
   TerraformPackage -> PackageKindSpec "terraform" "snake_case" '_' True
   LaTeXPackage -> PackageKindSpec "latex" "snake_case" '_' True
   BinaryReleasePackage -> PackageKindSpec "binary-release" "kebab-case" '-' False
@@ -1997,7 +1963,6 @@ detectPackageMarkers packageRelativeLeafPaths =
             (hasLeafPath "index.html", ("index.html", HTMLPackage)),
             (hasLeafPath "main.py" && hasLeafPath "ms.tex", ("main.py+ms.tex", PythonLaTeXPackage)),
             (hasLeafPath "main.py" && not (hasLeafPath "ms.tex"), ("main.py", PythonPackage)),
-            (hasLeafPath "main.c", ("main.c", CPackage)),
             (hasLeafPath "main.tf", ("main.tf", TerraformPackage)),
             (hasLeafPath "ms.tex" && not (hasLeafPath "main.py"), ("ms.tex", LaTeXPackage))
           ],
@@ -2049,7 +2014,6 @@ packagePathPolicy packageRootDirectory _packageDirectoryName maybePackageKind =
         Just PythonLaTeXPackage -> map packagePath ["main.py", "ms.tex", "ms.bib", "refs.bib"]
         Just PythonPackage -> [packagePath "main.py"]
         Just PythonPyPIPackage -> []
-        Just CPackage -> [packagePath "main.c"]
         Just TerraformPackage -> map packagePath ["main.tf", ".terraform.lock.hcl"]
         Just LaTeXPackage -> map packagePath ["ms.tex", "ms.bib"]
         Just BinaryReleasePackage -> []
@@ -2094,7 +2058,7 @@ discoverPackageInfosFromFilesystem = do
     let packageRootDirectory = "packages" </> packageName
         markerPaths =
           [ packageRootDirectory </> markerPath
-          | markerPath <- ["Main.hs", "index.html", "main.py", "main.c", "main.tf", "ms.tex"]
+          | markerPath <- ["Main.hs", "index.html", "main.py", "main.tf", "ms.tex"]
           ]
     markerEntries <- collectExistingRepositoryEntries markerPaths
     buildPackageInfo (Set.fromList (map fst markerEntries)) packageRootDirectory
@@ -2227,11 +2191,8 @@ checkPackage packageName packageKind = do
             pure ["packages/" ++ packageName ++ "/default.nix: could not infer corresponding template"]
           Just templateSpec -> do
             let matchedTemplateName = templateName templateSpec
-                allowedNixDifferenceKeysForPackage =
-                  if packageName == "c_template" && matchedTemplateName == "c_template"
-                    then defaultAllowedNixDifferenceKeys
-                    else templateAllowedDifferenceKeys templateSpec
-                ignoredTopLevelFunctionParams = optionalTemplateFunctionParams packageKind ("packages" </> matchedTemplateName </> "default.nix")
+                allowedNixDifferenceKeysForPackage = templateAllowedDifferenceKeys templateSpec
+                ignoredTopLevelFunctionParams = optionalTemplateFunctionParams ("packages" </> matchedTemplateName </> "default.nix")
             compareNixFileWithTemplate ignoredTopLevelFunctionParams packageDefaultNixPath ("packages" </> matchedTemplateName </> "default.nix") allowedNixDifferenceKeysForPackage (templateBaselineSource templateSpec)
   cabalFileIssues <- checkCabalFile packageName
   defaultNixConventionIssues <- checkDefaultNixConventions packageName packageKind
@@ -2257,7 +2218,7 @@ checkTemplateWith packageKinds checkName = do
             ]
         Just checkTemplateSpec -> do
           let packageAssociationIssues = validateCheckPackageAssociation packageKinds checkName checkTemplatePath checkTemplateSpec
-          templateIssues <- validateCheckTemplate packageKinds checkName checkTemplatePath checkTemplateSpec
+          templateIssues <- validateCheckTemplate checkTemplatePath checkTemplateSpec
           pure (packageAssociationIssues ++ templateIssues)
 validateCheckPackageAssociation :: Map.Map FilePath PackageKind -> FilePath -> FilePath -> CheckTemplateSpec -> [String]
 validateCheckPackageAssociation packageKinds checkName checkTemplatePath checkTemplateSpec =
@@ -2316,7 +2277,7 @@ checkDefaultNixConventions packageName packageKind = do
           hasPlaceholderVersion = "version = \"0.0.0\";" `isInfixOf` defaultNixSource
           hasVersionAssignment = "version = \"" `isInfixOf` defaultNixSource
           expectsMetaMainProgram =
-            packageKind `elem` [PythonLaTeXPackage, PythonPackage, CPackage]
+            packageKind `elem` [PythonLaTeXPackage, PythonPackage]
        in pure $
             catMaybes
               [ if expectsMetaMainProgram && not hasMetaMainProgram
@@ -2621,9 +2582,9 @@ lookupCabalField requestedName fields = do
 stripCabalQuotedValue :: T.Text -> T.Text
 stripCabalQuotedValue quotedValue =
   fromMaybe quotedValue (T.stripPrefix "\"" quotedValue >>= T.stripSuffix "\"")
-optionalTemplateFunctionParams :: PackageKind -> FilePath -> Set.Set T.Text
-optionalTemplateFunctionParams packageKind templateBaselineNixPath =
-  if packageKind == CPackage || takeBaseName (takeDirectory templateBaselineNixPath) == "python_template"
+optionalTemplateFunctionParams :: FilePath -> Set.Set T.Text
+optionalTemplateFunctionParams templateBaselineNixPath =
+  if takeBaseName (takeDirectory templateBaselineNixPath) == "python_template"
     then Set.singleton "inputs"
     else Set.empty
 compareCheckTemplateWithBaseline :: FilePath -> T.Text -> IO [String]
@@ -2652,49 +2613,11 @@ compareCheckTemplateWithBaseline checkTemplatePath templateBaselineText = do
                 ++ ": differs from embedded check template\n"
                 ++ intercalate "\n" mismatchDetails
             ]
-validateCheckTemplate :: Map.Map FilePath PackageKind -> FilePath -> FilePath -> CheckTemplateSpec -> IO [String]
-validateCheckTemplate packageKinds checkName checkTemplatePath checkTemplateSpec =
+validateCheckTemplate :: FilePath -> CheckTemplateSpec -> IO [String]
+validateCheckTemplate checkTemplatePath checkTemplateSpec =
   case checkTemplateComparisonMode checkTemplateSpec of
     ExactCheckTemplate ->
       compareCheckTemplateWithBaseline checkTemplatePath (checkTemplateBaselineSource checkTemplateSpec)
-    StructuralCPackageVm ->
-      validateCPackageVmCheck packageKinds checkName checkTemplatePath
-validateCPackageVmCheck :: Map.Map FilePath PackageKind -> FilePath -> FilePath -> IO [String]
-validateCPackageVmCheck packageKinds checkName checkTemplatePath = do
-  maybeCheckTemplateText <- readTextFileIfExists checkTemplatePath
-  case maybeCheckTemplateText of
-    Nothing -> pure []
-    Just checkTemplateText ->
-      pure (validateCPackageVmCheckSource (Map.lookup checkName packageKinds) checkName checkTemplatePath (T.unpack checkTemplateText))
-validateCPackageVmCheckSource :: Maybe PackageKind -> FilePath -> FilePath -> String -> [String]
-validateCPackageVmCheckSource packageKind checkName checkTemplatePath checkTemplateSource =
-  let hasCanonicalNameBinding = "name = baseNameOf ./.;" `isInfixOf` checkTemplateSource
-      hasRunNixOSTest = "pkgs.testers.runNixOSTest" `isInfixOf` checkTemplateSource
-      hasMachineNode = "nodes.machine" `isInfixOf` checkTemplateSource
-      hasTestScript = "testScript = ''" `isInfixOf` checkTemplateSource
-      hasSameNamePackageReference =
-        "inputs.self.packages.${pkgs.stdenv.system}.${name}" `isInfixOf` checkTemplateSource
-          || ("inputs.self.packages.${pkgs.stdenv.system}." ++ checkName) `isInfixOf` checkTemplateSource
-   in catMaybes
-        [ if packageKind == Just CPackage
-            then Nothing
-            else Just (checkTemplatePath ++ ": generic C VM checks require a same-name C package under packages/"),
-          if hasRunNixOSTest
-            then Nothing
-            else Just (checkTemplatePath ++ ": generic C VM checks must use pkgs.testers.runNixOSTest"),
-          if hasCanonicalNameBinding
-            then Nothing
-            else Just (checkTemplatePath ++ ": generic C VM checks must bind name from ./."),
-          if hasMachineNode
-            then Nothing
-            else Just (checkTemplatePath ++ ": generic C VM checks must define nodes.machine"),
-          if hasTestScript
-            then Nothing
-            else Just (checkTemplatePath ++ ": generic C VM checks must define testScript"),
-          if hasSameNamePackageReference
-            then Nothing
-            else Just (checkTemplatePath ++ ": generic C VM checks must install or override the same-name package from inputs.self.packages")
-        ]
 compareNixFileWithTemplate :: Set.Set T.Text -> FilePath -> FilePath -> Set.Set T.Text -> T.Text -> IO [String]
 compareNixFileWithTemplate ignoredTopLevelFunctionParams subjectNixPath templateBaselineNixPath allowedNixDifferenceKeys templateBaselineSourceText = do
   subjectNixParseResult <- parseNixExprFromFile subjectNixPath
@@ -3209,7 +3132,7 @@ pythonTemplateOptionalInputsAndShellHookTest = do
         )
     _ -> assertFailure "The optional python-template fixtures must parse."
   where
-    optionalFunctionParams = optionalTemplateFunctionParams PythonPackage "packages/python_template/default.nix"
+    optionalFunctionParams = optionalTemplateFunctionParams "packages/python_template/default.nix"
 repositorySummaryRenderingTest :: IO ()
 repositorySummaryRenderingTest = do
   let packageSummary =
@@ -3343,7 +3266,7 @@ statusImportEndToEndTest =
                 "  \"repositoryType\": \"flake\",",
                 "  \"readme\": \"Imported repository README.\\n\",",
                 "  \"resources\": [",
-                "    {\"kind\": \"package\", \"name\": \"dependency\", \"type\": \"c\", \"description\": null, \"dependencies\": []},",
+                "    {\"kind\": \"package\", \"name\": \"dependency\", \"type\": \"html\", \"description\": null, \"dependencies\": []},",
                 "    {\"kind\": \"package\", \"name\": \"demo\", \"type\": \"python\", \"description\": \"Demo package\", \"dependencies\": [\"dependency\"], \"tests\": {\"status\": \"configured\", \"cases\": [{\"name\": \"Imported behavior must fail until implemented.\"}, {\"name\": \"Open api contract stays explicit.\"}]}},",
                 "    {\"kind\": \"host\", \"name\": \"default\"}",
                 "  ]",
@@ -3365,7 +3288,7 @@ statusImportEndToEndTest =
       assertBool "Status omits location-specific roots." (not ("\"root\"" `isInfixOf` statusStdout))
       assertBool "Status import preserves the README." ("\"readme\":\"Imported repository README.\\n\"" `isInfixOf` statusStdout)
       assertBool "Status import preserves package dependencies." ("\"dependencies\":[\"dependency\"]" `isInfixOf` statusStdout)
-      assertBool "Status import preserves absent package descriptions." ("\"name\":\"dependency\",\"type\":\"c\"" `isInfixOf` statusStdout && "\"description\":null" `isInfixOf` statusStdout)
+      assertBool "Status import preserves absent package descriptions." ("\"name\":\"dependency\",\"type\":\"html\"" `isInfixOf` statusStdout && "\"description\":null" `isInfixOf` statusStdout)
       assertBool "Status import preserves test case names." ("Imported behavior must fail until implemented." `isInfixOf` statusStdout && "Open api contract stays explicit." `isInfixOf` statusStdout)
       importedPythonSource <- TIO.readFile (project </> "packages/demo/main.py")
       assertBool "Imported test placeholders fail instead of using the passing sample test." ("TODO: implement imported contract" `T.isInfixOf` importedPythonSource && "def test_imported_behavior_must_fail_until_implemented()" `T.isInfixOf` importedPythonSource && "def test_open_api_contract_stays_explicit()" `T.isInfixOf` importedPythonSource && not ("Prints the sample message from the executable." `T.isInfixOf` importedPythonSource))
@@ -3649,10 +3572,10 @@ removeChangedPackageTypeEndToEndTest :: IO ()
 removeChangedPackageTypeEndToEndTest =
   withGeneratedPythonPackageRepository "remove-changed-package-type-end-to-end" $ \temporaryRepository -> do
     let pythonSourcePath = temporaryRepository </> "packages/demo/main.py"
-        cSourcePath = temporaryRepository </> "packages/demo/main.c"
-    renameFile pythonSourcePath cSourcePath
+        terraformSourcePath = temporaryRepository </> "packages/demo/main.tf"
+    renameFile pythonSourcePath terraformSourcePath
     runGitFixtureCommand ["-C", temporaryRepository, "add", "--update", "--", "packages/demo"]
-    runGitFixtureCommand ["-C", temporaryRepository, "add", "--force", "--", "packages/demo/main.c"]
+    runGitFixtureCommand ["-C", temporaryRepository, "add", "--force", "--", "packages/demo/main.tf"]
     runGitFixtureCommand ["-C", temporaryRepository, "commit", "--quiet", "-m", "Change generated package type"]
     (removeExit, removeStdout, removeStderr) <- runEndToEndCommandIn temporaryRepository ["rm", "demo"]
     assertEqual "Removing a package with changed markers succeeds." ExitSuccess removeExit
@@ -3786,7 +3709,6 @@ allPackageKindsEndToEndTest =
         ("python", "demo_python", "main.py", Just "demo_python_coverage"),
         ("python-latex", "demo_python_latex", "main.py", Just "demo_python_latex_coverage"),
         ("python-pypi", "demo_pypi", "default.nix", Nothing),
-        ("c", "demo_c", "main.c", Nothing),
         ("terraform", "demo_terraform", "main.tf", Nothing),
         ("latex", "demo_latex", "ms.tex", Nothing)
       ]
@@ -4320,15 +4242,6 @@ htmlStyleSource =
       "  padding-top: 50px;",
       "}"
     ]
-cMainSource :: T.Text
-cMainSource =
-  T.unlines
-    [ "#include <stdio.h>",
-      "int main(void) {",
-      "  puts(\"Hello World\");",
-      "  return 0;",
-      "}"
-    ]
 pythonLaTeXMsTexSource :: T.Text
 pythonLaTeXMsTexSource =
   T.unlines
@@ -4457,155 +4370,6 @@ htmlTemplateBaselineNixSource =
       "  text = ''",
       "    exec ${pkgs.http-server}/bin/http-server ${./.} \"$@\"",
       "  '';",
-      "}",
-      ""
-    ]
-cTemplateBaselineNixSource :: T.Text
-cTemplateBaselineNixSource =
-  T.unlines
-    [ "{",
-      "  pkgs ? import <nixpkgs> { },",
-      "}:",
-      "pkgs.stdenv.mkDerivation rec {",
-      "  buildPhase = ''",
-      "    cc -o ${pname} main.c -std=c89 \\",
-      "    -O3 \\",
-      "    -Waggregate-return \\",
-      "    -Waggressive-loop-optimizations \\",
-      "    -Wall \\",
-      "    -Walloc-zero \\",
-      "    -Walloca \\",
-      "    -Warith-conversion \\",
-      "    -Warray-bounds=2 \\",
-      "    -Wattribute-alias \\",
-      "    -Wattributes \\",
-      "    -Wbad-function-cast \\",
-      "    -Wbidi-chars=any \\",
-      "    -Wbuiltin-declaration-mismatch \\",
-      "    -Wbuiltin-macro-redefined \\",
-      "    -Wc90-c99-compat \\",
-      "    -Wc99-c11-compat \\",
-      "    -Wcast-align \\",
-      "    -Wcast-align=strict \\",
-      "    -Wcast-qual \\",
-      "    -Wconversion \\",
-      "    -Wcoverage-mismatch \\",
-      "    -Wcpp \\",
-      "    -Wdate-time \\",
-      "    -Wdeclaration-after-statement \\",
-      "    -Wdeprecated \\",
-      "    -Wdeprecated-declarations \\",
-      "    -Wdesignated-init \\",
-      "    -Wdisabled-optimization \\",
-      "    -Wdiscarded-array-qualifiers \\",
-      "    -Wdiscarded-qualifiers \\",
-      "    -Wdiv-by-zero \\",
-      "    -Wdouble-promotion \\",
-      "    -Wduplicated-branches \\",
-      "    -Wduplicated-cond \\",
-      "    -Werror \\",
-      "    -Wextra \\",
-      "    -Wfloat-equal \\",
-      "    -Wformat=2 \\",
-      "    -Wformat-overflow=2 \\",
-      "    -Wformat-signedness \\",
-      "    -Wformat-truncation=2 \\",
-      "    -Wfree-nonheap-object \\",
-      "    -Whsa \\",
-      "    -Wif-not-aligned \\",
-      "    -Wignored-attributes \\",
-      "    -Wimport \\",
-      "    -Wincompatible-pointer-types \\",
-      "    -Winline \\",
-      "    -Wint-conversion \\",
-      "    -Wint-to-pointer-cast \\",
-      "    -Winvalid-memory-model \\",
-      "    -Winvalid-pch \\",
-      "    -Wjump-misses-init \\",
-      "    -Wlogical-op \\",
-      "    -Wlto-type-mismatch \\",
-      "    -Wmissing-declarations \\",
-      "    -Wmissing-include-dirs \\",
-      "    -Wmissing-prototypes \\",
-      "    -Wmultichar \\",
-      "    -Wnested-externs \\",
-      "    -Wnull-dereference \\",
-      "    -Wodr \\",
-      "    -Wold-style-definition \\",
-      "    -Woverflow \\",
-      "    -Woverride-init-side-effects \\",
-      "    -Wpacked \\",
-      "    -Wpacked-bitfield-compat \\",
-      "    -Wpedantic \\",
-      "    -Wpointer-compare \\",
-      "    -Wpointer-to-int-cast \\",
-      "    -Wpragmas \\",
-      "    -Wreturn-local-addr \\",
-      "    -Wscalar-storage-order \\",
-      "    -Wshadow \\",
-      "    -Wshift-count-negative \\",
-      "    -Wshift-count-overflow \\",
-      "    -Wshift-negative-value \\",
-      "    -Wsizeof-array-argument \\",
-      "    -Wstack-protector \\",
-      "    -Wstrict-aliasing \\",
-      "    -Wstrict-overflow \\",
-      "    -Wstrict-prototypes \\",
-      "    -Wstringop-overflow=4 \\",
-      "    -Wsuggest-attribute=const \\",
-      "    -Wsuggest-attribute=format \\",
-      "    -Wsuggest-attribute=malloc \\",
-      "    -Wsuggest-attribute=noreturn \\",
-      "    -Wsuggest-attribute=pure \\",
-      "    -Wsuggest-attribute=returns_nonnull \\",
-      "    -Wsuggest-final-methods \\",
-      "    -Wsuggest-final-types \\",
-      "    -Wswitch-bool \\",
-      "    -Wswitch-default \\",
-      "    -Wswitch-enum \\",
-      "    -Wswitch-unreachable \\",
-      "    -Wsync-nand \\",
-      "    -Wtraditional-conversion \\",
-      "    -Wtrampolines \\",
-      "    -Wundef \\",
-      "    -Wunreachable-code \\",
-      "    -Wunsafe-loop-optimizations \\",
-      "    -Wunsuffixed-float-constants \\",
-      "    -Wunused-macros \\",
-      "    -Wunused-result \\",
-      "    -Wvarargs \\",
-      "    -Wvector-operation-performance \\",
-      "    -Wvla \\",
-      "    -Wwrite-strings \\",
-      "    -fanalyzer \\",
-      "    -fstrict-flex-arrays=3 \\",
-      "    -fstack-protector-strong \\",
-      "    -fstack-clash-protection \\",
-      "    -D_FORTIFY_SOURCE=3 \\",
-      "    -Wl,-z,relro,-z,now \\",
-      "    -Wl,-z,noexecstack",
-      "  '';",
-      "  checkPhase = ''",
-      "    clang-tidy main.c -- -std=c89 -I${pkgs.stdenv.cc.libc.dev}/include -I${pkgs.lib.getDev pkgs.stdenv.cc.cc}/include",
-      "    cppcheck --enable=all --error-exitcode=1 --inconclusive --force --std=c89 --suppress=missingIncludeSystem .",
-      "    ./${pname}",
-      "  '';",
-      "  doCheck = pkgs.stdenv.isLinux;",
-      "  installPhase = ''",
-      "    install -Dm755 ${pname} \"$out/bin/${pname}\"",
-      "  '';",
-      "  meta = {",
-      "    description = \"A C template package.\";",
-      "    mainProgram = pname;",
-      "  };",
-      "  nativeCheckInputs = [",
-      "    pkgs.clang-tools",
-      "    pkgs.cppcheck",
-      "  ];",
-      "  pname = baseNameOf ./.;",
-      "  src = ./.;",
-      "  strictDeps = true;",
-      "  version = \"0.0.0\";",
       "}",
       ""
     ]
@@ -4892,31 +4656,6 @@ pythonCoverageCheckBaselineNixSource =
       "    mkdir -p \"$out/html\"",
       "    PACKAGE_E2E_EXECUTABLE=\"${packageDrv}/bin/${packageName}\" python -m pytest -p no:cacheprovider --cov=\"$src\" --cov-report \"html:$out/html\" \"$src/main.py\"",
       "  ''"
-    ]
-cTemplateCheckBaselineNixSource :: T.Text
-cTemplateCheckBaselineNixSource =
-  T.unlines
-    [ "{",
-      "  inputs,",
-      "  pkgs,",
-      "  ...",
-      "}:",
-      "let",
-      "  name = baseNameOf ./.;",
-      "  packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${name};",
-      "in",
-      "pkgs.testers.runNixOSTest {",
-      "  inherit name;",
-      "  nodes.machine = _: {",
-      "    environment.systemPackages = [",
-      "      packageDrv",
-      "    ]",
-      "    ++ (packageDrv.runtimeInputs or [ ]);",
-      "  };",
-      "  testScript = ''",
-      "    machine.succeed(\"${name}\")",
-      "  '';",
-      "}"
     ]
 hostDefaultCheckBaselineNixSource :: T.Text
 hostDefaultCheckBaselineNixSource =

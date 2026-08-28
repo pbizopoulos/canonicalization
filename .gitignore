@@ -31,9 +31,6 @@
 !/hosts/default/
 !/hosts/default/configuration.nix
 !/packages/
-!/packages/c_template/
-!/packages/c_template/default.nix
-!/packages/c_template/main.c
 !/packages/deploy_host_template/
 !/packages/deploy_host_template/default.nix
 !/packages/deploy_host_template/main.tf
