@@ -1190,7 +1190,6 @@ data RepositoryPackageSummary = RepositoryPackageSummary
   { repositoryPackageName :: FilePath,
     repositoryPackageKind :: PackageKind,
     repositoryPackageDescription :: Maybe String,
-    repositoryPackageDependencies :: [String],
     repositoryPackageTestNames :: [String],
     repositoryPackageTestStatus :: RepositoryPackageTestStatus
   }
@@ -1253,8 +1252,7 @@ repositoryPackageSummaryJSON packageSummary =
     ( [ "kind" Aeson..= ("package" :: String),
         "name" Aeson..= repositoryPackageName packageSummary,
         "type" Aeson..= renderPackageKind (repositoryPackageKind packageSummary),
-        "description" Aeson..= repositoryPackageDescription packageSummary,
-        "dependencies" Aeson..= repositoryPackageDependencies packageSummary
+        "description" Aeson..= repositoryPackageDescription packageSummary
       ]
         ++ ["tests" Aeson..= repositoryPackageTestsJSON packageSummary | not (null (repositoryPackageTestNames packageSummary))]
     )
@@ -1281,7 +1279,6 @@ summarizeRepositoryPackage repositoryCheckNames packageName packageKind reposito
   let packageRoot = "packages" </> packageName
   maybeDefaultNixContents <- readTextFileIfExists (packageRoot </> "default.nix")
   maybeDefaultNixDescription <- maybe (pure Nothing) extractDefaultNixPackageDescription maybeDefaultNixContents
-  let repositoryPackageDependenciesValue = maybe [] extractLocalPackageDependencies maybeDefaultNixContents
   repositoryPackageDescriptionValue <-
     case packageKind of
       HaskellPackage -> do
@@ -1306,7 +1303,6 @@ summarizeRepositoryPackage repositoryCheckNames packageName packageKind reposito
       { repositoryPackageName = packageName,
         repositoryPackageKind = packageKind,
         repositoryPackageDescription = repositoryPackageDescriptionValue,
-        repositoryPackageDependencies = repositoryPackageDependenciesValue,
         repositoryPackageTestNames = repositoryPackageTestNamesValue,
         repositoryPackageTestStatus = repositoryPackageTestStatusValue
       }
@@ -1342,18 +1338,6 @@ findNixStringAtPath targetPath (Fix (Compose (AnnUnit _ expressionFunctor))) =
       suffix <- stripPrefix staticPath remainingPath
       findNixStringAtPath suffix value
     findInBinding _ Inherit {} = Nothing
-extractLocalPackageDependencies :: T.Text -> [String]
-extractLocalPackageDependencies defaultNixContents =
-  Set.toAscList . Set.fromList $
-    [ T.unpack dependencyName
-    | dependencyReference <- drop 1 (T.splitOn localPackagePrefix defaultNixContents),
-      let dependencyName = T.takeWhile isInputNameCharacter dependencyReference,
-      not (T.null dependencyName)
-    ]
-  where
-    localPackagePrefix :: T.Text
-    localPackagePrefix = "inputs.self.packages.${pkgs.stdenv.system}."
-    isInputNameCharacter character = isAlphaNum character || character `elem` ("_-" :: String)
 renderJSON :: (Aeson.ToJSON value) => value -> String
 renderJSON = T.unpack . TE.decodeUtf8 . BL.toStrict . Aeson.encode
 renderNixString :: String -> String
@@ -2859,7 +2843,6 @@ hUnitPackageTests =
       TestLabel "Renders only supplied repository whitelist paths." (TestCase minimalRootGitignoreRenderingTest),
       TestLabel "Treats parameter directories as opaque user data." (TestCase parameterDirectoryStructureTest),
       TestLabel "Renders stable text and JSON repository summaries." (TestCase repositorySummaryRenderingTest),
-      TestLabel "Extracts local package dependencies." (TestCase localPackageDependencyExtractionTest),
       TestLabel "Reports concise Nix template parameter differences." (TestCase nixTemplateParameterDifferenceTest),
       TestLabel "Accepts python_template without inputs or shellHook." (TestCase pythonTemplateOptionalInputsAndShellHookTest),
       TestLabel "Documents help and invokes it consistently." (TestCase commandLineHelpEndToEndTest),
@@ -3140,7 +3123,6 @@ repositorySummaryRenderingTest = do
           { repositoryPackageName = "demo",
             repositoryPackageKind = PythonPackage,
             repositoryPackageDescription = Nothing,
-            repositoryPackageDependencies = ["alpha", "demo-two"],
             repositoryPackageTestNames = ["Reports \"quoted\" behavior."],
             repositoryPackageTestStatus = RepositoryTestsConfigured
           }
@@ -3171,21 +3153,6 @@ repositorySummaryRenderingTest = do
     "Nix string rendering prevents interpolation and preserves control characters."
     "(builtins.fromJSON \"\\\"\\${name}\\\\u0001\\\"\")"
     (renderNixString "${name}\1")
-localPackageDependencyExtractionTest :: IO ()
-localPackageDependencyExtractionTest =
-  assertEqual
-    "Only unique, sorted local package references are reported."
-    ["alpha", "demo-two"]
-    ( extractLocalPackageDependencies
-        ( T.unwords
-            [ "inputs.self.packages.${pkgs.stdenv.system}.demo-two",
-              "inputs.self.packages.${pkgs.system}.ignored",
-              "inputs.agenix-shell.lib",
-              "inputs.self.packages.${pkgs.stdenv.system}.alpha",
-              "inputs.self.packages.${pkgs.stdenv.system}.alpha"
-            ]
-        )
-    )
 commandLineHelpEndToEndTest :: IO ()
 commandLineHelpEndToEndTest =
   withTemporaryPackageRepository "command-line-help" $ \temporaryDirectory -> do
@@ -3287,7 +3254,7 @@ statusImportEndToEndTest =
       assertEqual "Imported repository status emits no diagnostics." "" statusStderr
       assertBool "Status omits location-specific roots." (not ("\"root\"" `isInfixOf` statusStdout))
       assertBool "Status import preserves the README." ("\"readme\":\"Imported repository README.\\n\"" `isInfixOf` statusStdout)
-      assertBool "Status import preserves package dependencies." ("\"dependencies\":[\"dependency\"]" `isInfixOf` statusStdout)
+      assertBool "Status omits package dependencies." (not ("\"dependencies\"" `isInfixOf` statusStdout))
       assertBool "Status import preserves absent package descriptions." ("\"name\":\"dependency\",\"type\":\"html\"" `isInfixOf` statusStdout && "\"description\":null" `isInfixOf` statusStdout)
       assertBool "Status import preserves test case names." ("Imported behavior must fail until implemented." `isInfixOf` statusStdout && "Open api contract stays explicit." `isInfixOf` statusStdout)
       importedPythonSource <- TIO.readFile (project </> "packages/demo/main.py")
@@ -3878,7 +3845,6 @@ expectedGeneratedPythonPackageSummary =
     { repositoryPackageName = "demo",
       repositoryPackageKind = PythonPackage,
       repositoryPackageDescription = Just "Demo package",
-      repositoryPackageDependencies = [],
       repositoryPackageTestNames =
         ["Main prints sample message."],
       repositoryPackageTestStatus = RepositoryTestsConfigured
@@ -3889,7 +3855,6 @@ expectedGeneratedHaskellPackageSummary =
     { repositoryPackageName = "demo",
       repositoryPackageKind = HaskellPackage,
       repositoryPackageDescription = Nothing,
-      repositoryPackageDependencies = [],
       repositoryPackageTestNames = ["Renders the sample message."],
       repositoryPackageTestStatus = RepositoryTestsConfigured
     }
