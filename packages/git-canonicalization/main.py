@@ -671,9 +671,6 @@ def initialize(directory: Path, status_path: str | None) -> None:
             else Path(status_path).read_text(encoding="utf-8")
         )
         imported = json.loads(source)
-        if imported.get("repositoryType") != "flake":
-            msg = "repositoryType must be flake"
-            raise CommandError(msg)
         for item in imported.get("packages", []):
             kind = item["type"]
             if kind not in PACKAGE_KINDS:
@@ -706,11 +703,10 @@ def status(root: Path) -> dict[str, Any]:
     """Build the stable repository status payload."""
     current_profile = profile(root)
     if current_profile == "home":
-        repositories = check_home(root, False)
-        return {"repositoryType": "home", "repositories": repositories}
+        msg = "home repositories are not compatible with status"
+        raise CommandError(msg)
     packages = check_flake(root, False)
     return {
-        "repositoryType": "flake",
         "readme": _read_regular(root / "README"),
         "packages": [
             {
