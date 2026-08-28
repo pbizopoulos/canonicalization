@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026- Paschalis Bizopoulos
-# ruff: noqa: C901, D101, E501, FBT001, FBT003, PERF401, PLR2004, S101, S603, S607, TRY301
+# ruff: noqa: C901, D101, E501, FBT001, FBT003, PLR2004, S101, S603, S607, TRY301
 """Check canonical home repositories and manage canonical flake repositories."""
 
 from __future__ import annotations
@@ -384,20 +384,13 @@ def allowed_paths(root: Path, packages: list[Package]) -> set[Path]:
 
 def render_gitignore(paths: set[Path]) -> str:
     """Render a minimal whitelist Git ignore file."""
-    lines = ["*"]
     directories: set[Path] = set()
     for path in paths:
         directories.update(path.parents)
     directories.discard(Path())
-    for directory in sorted(directories, key=lambda item: (len(item.parts), str(item))):
-        lines.append(f"!/{directory.as_posix()}/")
-    lines.extend(f"!/{path.as_posix()}" for path in sorted(paths))
-    for opaque in (Path("prm"), Path("secrets")):
-        if any(path == opaque or opaque in path.parents for path in paths) or (
-            opaque == Path("prm") and False
-        ):
-            lines.extend((f"!/{opaque}/", f"!/{opaque}/**"))
-    return "\n".join(dict.fromkeys(lines)) + "\n"
+    patterns = {f"!/{directory.as_posix()}/" for directory in directories}
+    patterns.update(f"!/{path.as_posix()}" for path in paths)
+    return "\n".join(["*", *sorted(patterns)]) + "\n"
 
 
 def inspect_structure(root: Path) -> tuple[list[Package], list[str]]:
@@ -803,6 +796,11 @@ def test_remote_paths_and_test_names() -> None:
         "github.com/owner/demo",
     )
     assert _humanize("test_cli_handles_utf8_url") == "CLI handles UTF-8 URL."
+
+
+def test_gitignore_patterns_are_globally_sorted() -> None:
+    """Sort directory and file whitelist patterns together."""
+    assert render_gitignore({Path("z/file"), Path("a")}) == ("*\n!/a\n!/z/\n!/z/file\n")
 
 
 if __name__ == "__main__":
