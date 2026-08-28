@@ -2,16 +2,31 @@
   inputs,
   pkgs,
   ...
-}: let
+}:
+let
   checkName = baseNameOf ./.;
   packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${packageName};
   packageName = pkgs.lib.removeSuffix "_coverage" checkName;
-  pythonEnv = packageDrv.python.withPackages (_: packageDrv.propagatedBuildInputs ++ [packageDrv.python.pkgs.pytest packageDrv.python.pkgs.pytest-cov]);
+  pythonEnv = packageDrv.python.withPackages (
+    _:
+    packageDrv.propagatedBuildInputs
+    ++ [
+      packageDrv.python.pkgs.pytest
+      packageDrv.python.pkgs.pytest-cov
+    ]
+  );
 in
-  pkgs.runCommand checkName {
-    nativeBuildInputs = [packageDrv pkgs.alejandra pkgs.nix pythonEnv];
+pkgs.runCommand checkName
+  {
+    nativeBuildInputs = [
+      packageDrv
+      pkgs.alejandra
+      pkgs.nix
+      pythonEnv
+    ];
     src = ../../packages/nix-remove-defaults;
-  } ''
+  }
+  ''
     export HOME="$(mktemp -d)"
     mkdir -p "$out/html"
     PACKAGE_E2E_EXECUTABLE="${packageDrv}/bin/${packageName}" python -m pytest -p no:cacheprovider --cov="$src" --cov-report "html:$out/html" "$src/main.py"

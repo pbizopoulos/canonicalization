@@ -1,6 +1,8 @@
-{pkgs ? import <nixpkgs> {}}:
+{
+  pkgs ? import <nixpkgs> { },
+}:
 pkgs.stdenv.mkDerivation rec {
-  buildInputs = [pkgs.stdenv.cc.cc.lib];
+  buildInputs = [ pkgs.stdenv.cc.cc.lib ];
   doInstallCheck = pkgs.stdenv.isLinux;
   installCheckPhase = ''
     runHook preInstallCheck
@@ -18,7 +20,7 @@ pkgs.stdenv.mkDerivation rec {
     description = "A fast Rust-based CLI tool for removing comments from source code.";
     mainProgram = pname;
   };
-  nativeBuildInputs = [pkgs.autoPatchelfHook];
+  nativeBuildInputs = [ pkgs.autoPatchelfHook ];
   pname = baseNameOf ./.;
   sourceRoot = ".";
   src = pkgs.fetchurl {
