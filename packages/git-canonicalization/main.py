@@ -382,14 +382,31 @@ def allowed_paths(root: Path, packages: list[Package]) -> set[Path]:
     return allowed
 
 
-def render_gitignore(paths: set[Path]) -> str:
+def opaque_trees(root: Path) -> set[Path]:
+    """Return existing repository trees whose contents are unrestricted."""
+    candidates = {Path("prm")}
+    for parent, names in (("hosts", ("prm",)), ("packages", ("prm", "figures"))):
+        base = root / parent
+        if base.is_dir():
+            for child in base.iterdir():
+                if child.is_dir():
+                    candidates.update(
+                        Path(parent) / child.name / name for name in names
+                    )
+    return {path for path in candidates if (root / path).is_dir()}
+
+
+def render_gitignore(paths: set[Path], trees: set[Path] | None = None) -> str:
     """Render a minimal whitelist Git ignore file."""
+    trees = trees or set()
     directories: set[Path] = set()
-    for path in paths:
+    for path in paths | trees:
         directories.update(path.parents)
     directories.discard(Path())
     patterns = {f"!/{directory.as_posix()}/" for directory in directories}
     patterns.update(f"!/{path.as_posix()}" for path in paths)
+    for tree in trees:
+        patterns.update((f"!/{tree.as_posix()}/", f"!/{tree.as_posix()}/**"))
     return "\n".join(["*", *sorted(patterns)]) + "\n"
 
 
@@ -496,7 +513,7 @@ def check_flake(root: Path, fix: bool) -> list[Package]:
     packages, issues = inspect_structure(root)
     if issues:
         raise CommandError("directory structure: " + "\nerror: ".join(issues))
-    expected = render_gitignore(allowed_paths(root, packages))
+    expected = render_gitignore(allowed_paths(root, packages), opaque_trees(root))
     actual = _read_regular(root / ".gitignore")
     if actual != expected:
         if not fix:
@@ -578,7 +595,7 @@ def add_package(root: Path, kind: str, name: str, description: str | None) -> No
         packages = detect_packages(root)
         nix_syntax.write_if_changed(
             root / ".gitignore",
-            render_gitignore(allowed_paths(root, packages)),
+            render_gitignore(allowed_paths(root, packages), opaque_trees(root)),
         )
         generated = [str(path.relative_to(root)) for path in created] + [".gitignore"]
         completed = git(root, ["add", "--", *generated], check=False)
@@ -626,7 +643,7 @@ def remove_package(root: Path, name: str, dry_run: bool, force: bool) -> None:
     packages = detect_packages(root)
     nix_syntax.write_if_changed(
         root / ".gitignore",
-        render_gitignore(allowed_paths(root, packages)),
+        render_gitignore(allowed_paths(root, packages), opaque_trees(root)),
     )
 
 
@@ -677,7 +694,10 @@ def initialize(directory: Path, status_path: str | None) -> None:
     gitignore = directory / ".gitignore"
     if not gitignore.exists():
         gitignore.write_text(
-            render_gitignore(allowed_paths(directory, packages)),
+            render_gitignore(
+                allowed_paths(directory, packages),
+                opaque_trees(directory),
+            ),
             encoding="utf-8",
         )
 
@@ -800,7 +820,10 @@ def test_remote_paths_and_test_names() -> None:
 
 def test_gitignore_patterns_are_globally_sorted() -> None:
     """Sort directory and file whitelist patterns together."""
-    assert render_gitignore({Path("z/file"), Path("a")}) == ("*\n!/a\n!/z/\n!/z/file\n")
+    assert render_gitignore(
+        {Path("z/file"), Path("a")},
+        {Path("prm")},
+    ) == ("*\n!/a\n!/prm/\n!/prm/**\n!/z/\n!/z/file\n")
 
 
 if __name__ == "__main__":

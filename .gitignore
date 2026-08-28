@@ -36,6 +36,8 @@
 !/packages/deploy_host_template/
 !/packages/deploy_host_template/default.nix
 !/packages/deploy_host_template/main.tf
+!/packages/deploy_host_template/prm/
+!/packages/deploy_host_template/prm/**
 !/packages/git-canonicalization/
 !/packages/git-canonicalization/default.nix
 !/packages/git-canonicalization/main.py
@@ -73,6 +75,8 @@
 !/packages/remove_new_lines/main.py
 !/packages/uncomment/
 !/packages/uncomment/default.nix
+!/prm/
+!/prm/**
 !/secrets/
 !/secrets/secrets.age
 !/secrets/secrets.env.example
