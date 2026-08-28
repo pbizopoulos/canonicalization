@@ -121,24 +121,6 @@ templateSpecs =
         templateBaselineSource = pythonLaTeXTemplateBaselineNixSource
       },
     TemplateSpec
-      { templateName = "python_pypi_application_template",
-        templateMatches = matchesPythonPyPIApplicationTemplate,
-        templateAllowedDifferenceKeys = Set.insert "passthru.canonicalizationDependencies" (Set.fromList ["installCheckPhase", "meta", "nativeBuildInputs", "propagatedBuildInputs", "python", "src", "version"]),
-        templateBaselineSource = pythonPyPIApplicationTemplateBaselineNixSource
-      },
-    TemplateSpec
-      { templateName = "python_pypi_template",
-        templateMatches = matchesPythonPyPITemplate,
-        templateAllowedDifferenceKeys = Set.insert "passthru.canonicalizationDependencies" (Set.fromList ["format", "installCheckPhase", "meta", "nativeBuildInputs", "propagatedBuildInputs", "python", "src", "version"]),
-        templateBaselineSource = pythonPyPITemplateBaselineNixSource
-      },
-    TemplateSpec
-      { templateName = "binary_release_template",
-        templateMatches = matchesBinaryReleaseTemplate,
-        templateAllowedDifferenceKeys = Set.insert "passthru.canonicalizationDependencies" (Set.fromList ["installCheckPhase", "src", "version"]),
-        templateBaselineSource = binaryReleaseTemplateBaselineNixSource
-      },
-    TemplateSpec
       { templateName = "python_template",
         templateMatches = \_ nixSource -> "buildPythonPackage" `isInfixOf` nixSource,
         templateAllowedDifferenceKeys = Set.insert "passthru.canonicalizationDependencies" (Set.fromList ["meta", "propagatedBuildInputs", "python", "shellHook", "version"]),
@@ -159,34 +141,11 @@ templateSpecs =
             && "latexmk -pdf ms.tex" `isInfixOf` nixSource,
         templateAllowedDifferenceKeys = defaultAllowedNixDifferenceKeys,
         templateBaselineSource = latexTemplateBaselineNixSource
-      },
-    TemplateSpec
-      { templateName = "uncomment_template",
-        templateMatches = \_ nixSource ->
-          "stdenv.mkDerivation" `isInfixOf` nixSource
-            && "autoPatchelfHook" `isInfixOf` nixSource
-            && "Goldziher" `isInfixOf` nixSource,
-        templateAllowedDifferenceKeys = Set.union defaultAllowedNixDifferenceKeys (Set.fromList ["pname", "src"]),
-        templateBaselineSource = uncommentTemplateBaselineNixSource
       }
   ]
 matchesPythonLaTeXTemplate :: PackageKind -> String -> Bool
 matchesPythonLaTeXTemplate packageKind nixSource =
   packageKind == PythonLaTeXPackage && "buildPythonPackage" `isInfixOf` nixSource
-matchesPythonPyPITemplateLike :: String -> PackageKind -> String -> Bool
-matchesPythonPyPITemplateLike buildFunction _ nixSource =
-  buildFunction `isInfixOf` nixSource
-    && isExternalPythonPackageSource (T.pack nixSource)
-matchesPythonPyPIApplicationTemplate :: PackageKind -> String -> Bool
-matchesPythonPyPIApplicationTemplate = matchesPythonPyPITemplateLike "buildPythonApplication"
-matchesPythonPyPITemplate :: PackageKind -> String -> Bool
-matchesPythonPyPITemplate = matchesPythonPyPITemplateLike "buildPythonPackage"
-matchesBinaryReleaseTemplate :: PackageKind -> String -> Bool
-matchesBinaryReleaseTemplate _ nixSource =
-  "stdenv.mkDerivation" `isInfixOf` nixSource
-    && "src = pkgs.fetchurl" `isInfixOf` nixSource
-    && "sourceRoot = \".\";" `isInfixOf` nixSource
-    && "install -Dm755 ${pname}-v${version}-x86_64-unknown-linux-musl/${pname}" `isInfixOf` nixSource
 matchesCheckNameSuffixAndSourceContains :: String -> [String] -> Map.Map FilePath PackageKind -> FilePath -> String -> Bool
 matchesCheckNameSuffixAndSourceContains suffix requiredNeedles _ checkName nixSource =
   suffix `isSuffixOf` checkName
@@ -250,23 +209,9 @@ data StatusImport = StatusImport
   }
 type StatusImportResource :: Type
 data StatusImportResource
-  = StatusImportPackage String String (Maybe String) [String] [String]
+  = StatusImportPackage String String (Maybe String) [String]
   | StatusImportHost String
   deriving stock (Eq, Show)
-type StatusImportTests :: Type
-newtype StatusImportTests = StatusImportTests
-  { statusImportTestNames :: [String]
-  }
-instance Aeson.FromJSON StatusImportTests where
-  parseJSON =
-    Aeson.withObject "StatusImportTests" $ \object ->
-      StatusImportTests . map statusImportTestCaseName <$> object Aeson..:? "cases" Aeson..!= []
-type StatusImportTestCase :: Type
-newtype StatusImportTestCase = StatusImportTestCase
-  { statusImportTestCaseName :: String
-  }
-instance Aeson.FromJSON StatusImportTestCase where
-  parseJSON = Aeson.withObject "StatusImportTestCase" (fmap StatusImportTestCase . (Aeson..: "name"))
 instance Aeson.FromJSON StatusImport where
   parseJSON =
     Aeson.withObject "StatusImport" $ \object -> do
@@ -282,10 +227,8 @@ instance Aeson.FromJSON StatusImportResource where
           packageName <- object Aeson..: "name"
           packageType <- object Aeson..: "type"
           packageDescription <- object Aeson..: "description"
-          packageDependencies <- object Aeson..:? "dependencies" Aeson..!= []
-          packageTests <- object Aeson..:? "tests"
-          let packageTestNames = maybe [] statusImportTestNames packageTests
-          pure (StatusImportPackage packageName packageType packageDescription packageDependencies packageTestNames)
+          packageTestNames <- object Aeson..:? "tests" Aeson..!= []
+          pure (StatusImportPackage packageName packageType packageDescription packageTestNames)
         "host" -> StatusImportHost <$> object Aeson..: "name"
         _ -> fail ("unsupported resource kind: " ++ kind)
 type RemoveSpec :: Type
@@ -528,7 +471,7 @@ readStatusImport statusFile = do
 validateStatusImport :: StatusImport -> IO ()
 validateStatusImport statusImport = do
   let resources = statusImportResources statusImport
-      packageNames = [packageName | StatusImportPackage packageName _ _ _ _ <- resources]
+      packageNames = [packageName | StatusImportPackage packageName _ _ _ <- resources]
       hostNames = [hostName | StatusImportHost hostName <- resources]
       validationIssues = concatMap validateStatusImportResource resources
       duplicateIssues =
@@ -541,7 +484,7 @@ validateStatusImport statusImport = do
       exitFailure
 validateStatusImportResource :: StatusImportResource -> [String]
 validateStatusImportResource = \case
-  StatusImportPackage packageName packageType _ _ _ ->
+  StatusImportPackage packageName packageType _ _ ->
     case parseSupportedAddPackageKind packageType of
       Nothing -> ["cannot scaffold package type from status: " ++ packageType]
       Just packageKind -> maybeToList (validatePackageNameForKind packageKind packageName)
@@ -556,7 +499,7 @@ validateStatusImportTarget target statusImport = do
   let managedPaths =
         concatMap
           ( \case
-              StatusImportPackage packageName packageType _ _ _ ->
+              StatusImportPackage packageName packageType _ _ ->
                 case parseSupportedAddPackageKind packageType of
                   Nothing -> []
                   Just packageKind ->
@@ -572,48 +515,29 @@ validateStatusImportTarget target statusImport = do
 initializeStatusResources :: StatusImport -> IO ()
 initializeStatusResources statusImport =
   forM_ (statusImportResources statusImport) $ \case
-    StatusImportPackage packageName packageType packageDescription packageDependencies packageTestNames ->
+    StatusImportPackage packageName packageType packageDescription packageTestNames ->
       case parseSupportedAddPackageKind packageType of
         Nothing -> hPutStrLn stderr ("error: cannot scaffold package type from status: " ++ packageType) >> exitFailure
         Just packageKind ->
           addPackageToCurrentRepositoryWithForce True packageKind packageName packageDescription >>= \case
             Left addError -> hPutStrLn stderr ("error: " ++ addError) >> exitFailure
-            Right _ -> applyStatusPackageMetadata packageKind packageName packageDescription packageDependencies packageTestNames
+            Right _ -> applyStatusPackageMetadata packageKind packageName packageDescription packageTestNames
     StatusImportHost hostName -> createHostFromStatus hostName
 initializeStatusReadme :: StatusImport -> IO ()
 initializeStatusReadme statusImport =
   forM_ (statusImportReadme statusImport) $ \readmeSource -> do
     readmeExists <- doesPathExist "README"
     unless readmeExists (TIO.writeFile "README" (T.pack readmeSource))
-applyStatusPackageMetadata :: PackageKind -> FilePath -> Maybe String -> [String] -> [String] -> IO ()
-applyStatusPackageMetadata packageKind packageName packageDescription packageDependencies packageTestNames = do
+applyStatusPackageMetadata :: PackageKind -> FilePath -> Maybe String -> [String] -> IO ()
+applyStatusPackageMetadata packageKind packageName packageDescription packageTestNames = do
   let defaultNixPath = "packages" </> packageName </> "default.nix"
   defaultNixSource <- TIO.readFile defaultNixPath
   let withoutDefaultDescription =
         if isNothing packageDescription
           then T.unlines (filter (not . T.isInfixOf "description =") (T.lines defaultNixSource))
           else defaultNixSource
-      withDependencies =
-        if null packageDependencies
-          then withoutDefaultDescription
-          else addStatusPackageDependencies packageDependencies (ensureStatusPackageInputsArgument withoutDefaultDescription)
-  TIO.writeFile defaultNixPath withDependencies
+  TIO.writeFile defaultNixPath withoutDefaultDescription
   writeStatusPackageTests packageKind packageName packageTestNames
-ensureStatusPackageInputsArgument :: T.Text -> T.Text
-ensureStatusPackageInputsArgument source =
-  case T.stripPrefix "{\n" source of
-    Just remainingSource
-      | not ("  inputs," `T.isPrefixOf` remainingSource) -> "{\n  inputs,\n" <> remainingSource
-    _ -> source
-addStatusPackageDependencies :: [String] -> T.Text -> T.Text
-addStatusPackageDependencies packageDependencies source =
-  case T.unsnoc (T.stripEnd source) of
-    Just (sourceWithoutFinalBrace, '}') ->
-      sourceWithoutFinalBrace
-        <> "  passthru.canonicalizationDependencies = [\n"
-        <> T.concat ["    inputs.self.packages.${pkgs.stdenv.system}." <> T.pack dependency <> "\n" | dependency <- packageDependencies]
-        <> "  ];\n}\n"
-    _ -> error "generated package default.nix must end with a derivation attribute set"
 writeStatusPackageTests :: PackageKind -> FilePath -> [String] -> IO ()
 writeStatusPackageTests packageKind packageName testNames =
   case packageKind of
@@ -1143,7 +1067,6 @@ collectRepositoryContentCompliance = do
             ( Right
                 RepositoryComplianceSuccess
                   { repositoryCompliancePackages = packages,
-                    repositoryComplianceCheckNames = checkNames,
                     repositoryCompliancePackageTestNames = packageTestNames
                   }
             )
@@ -1173,15 +1096,9 @@ repositoryCheckPhaseHint = \case
   RequiredRootFilesPhase -> "add flake.nix and run 'nix flake update' to create or update flake.lock."
   DirectoryStructurePhase -> "fix directory and required-file layout under packages/, hosts/, checks/, and repository root."
   FileCompliancePhase -> "align package files with the expected internal templates and language-specific policy checks."
-type RepositoryPackageTestStatus :: Type
-data RepositoryPackageTestStatus
-  = RepositoryTestsNotConfigured
-  | RepositoryTestsConfigured
-  deriving stock (Eq, Show)
 type RepositoryComplianceSuccess :: Type
 data RepositoryComplianceSuccess = RepositoryComplianceSuccess
   { repositoryCompliancePackages :: [(FilePath, PackageKind)],
-    repositoryComplianceCheckNames :: [FilePath],
     repositoryCompliancePackageTestNames :: Map.Map FilePath [String]
   }
   deriving stock (Eq, Show)
@@ -1190,8 +1107,7 @@ data RepositoryPackageSummary = RepositoryPackageSummary
   { repositoryPackageName :: FilePath,
     repositoryPackageKind :: PackageKind,
     repositoryPackageDescription :: Maybe String,
-    repositoryPackageTestNames :: [String],
-    repositoryPackageTestStatus :: RepositoryPackageTestStatus
+    repositoryPackageTestNames :: [String]
   }
   deriving stock (Eq, Show)
 type RepositorySummary :: Type
@@ -1214,11 +1130,10 @@ summarizeRepositoryAt repositoryPath repositoryRoot =
         hPutStrLn stderr ("error: repository: " ++ repositoryPath)
         reportCheckRepositoryFailure repositoryComplianceFailure
         exitFailure
-      Right (RepositoryComplianceSuccess packages checkNames packageTestNames) -> do
-        let repositoryCheckNames = Set.fromList checkNames
+      Right (RepositoryComplianceSuccess packages packageTestNames) -> do
         repositoryReadme <- fmap T.unpack <$> readTextFileIfExists "README"
         packageSummaries <- forM packages $ \(packageName, packageKind) ->
-          summarizeRepositoryPackage repositoryCheckNames packageName packageKind (Map.findWithDefault [] packageName packageTestNames)
+          summarizeRepositoryPackage packageName packageKind (Map.findWithDefault [] packageName packageTestNames)
         hostNames <- listFilesystemChildDirectories "hosts"
         pure
           RepositorySummary
@@ -1258,24 +1173,15 @@ repositoryPackageSummaryJSON packageSummary =
     )
 repositoryPackageTestsJSON :: RepositoryPackageSummary -> Aeson.Value
 repositoryPackageTestsJSON packageSummary =
-  Aeson.object
-    [ "status" Aeson..= renderRepositoryPackageTestStatus (repositoryPackageTestStatus packageSummary),
-      "cases" Aeson..= map repositoryPackageTestCaseJSON (repositoryPackageTestNames packageSummary)
-    ]
+  Aeson.toJSON (repositoryPackageTestNames packageSummary)
 repositoryHostSummaryJSON :: FilePath -> Aeson.Value
 repositoryHostSummaryJSON hostName =
   Aeson.object
     [ "kind" Aeson..= ("host" :: String),
       "name" Aeson..= hostName
     ]
-repositoryPackageTestCaseJSON :: String -> Aeson.Value
-repositoryPackageTestCaseJSON testName = Aeson.object ["name" Aeson..= testName]
-renderRepositoryPackageTestStatus :: RepositoryPackageTestStatus -> String
-renderRepositoryPackageTestStatus = \case
-  RepositoryTestsNotConfigured -> "not-configured"
-  RepositoryTestsConfigured -> "configured"
-summarizeRepositoryPackage :: Set.Set FilePath -> FilePath -> PackageKind -> [String] -> IO RepositoryPackageSummary
-summarizeRepositoryPackage repositoryCheckNames packageName packageKind repositoryPackageTestNamesValue = do
+summarizeRepositoryPackage :: FilePath -> PackageKind -> [String] -> IO RepositoryPackageSummary
+summarizeRepositoryPackage packageName packageKind repositoryPackageTestNamesValue = do
   let packageRoot = "packages" </> packageName
   maybeDefaultNixContents <- readTextFileIfExists (packageRoot </> "default.nix")
   maybeDefaultNixDescription <- maybe (pure Nothing) extractDefaultNixPackageDescription maybeDefaultNixContents
@@ -1285,26 +1191,17 @@ summarizeRepositoryPackage repositoryCheckNames packageName packageKind reposito
         maybeCabalContents <- readTextFileIfExists (packageRoot </> (packageName <.> "cabal"))
         pure ((maybeCabalContents >>= extractHaskellPackageDescription) <|> maybeDefaultNixDescription)
       _
-        | packageKind `elem` [PythonPackage, PythonLaTeXPackage, PythonPyPIPackage] -> do
+        | packageKind `elem` [PythonPackage, PythonLaTeXPackage] -> do
             maybePyprojectTomlContents <- readTextFileIfExists (packageRoot </> "pyproject.toml")
             let maybePyprojectDescription = maybePyprojectTomlContents >>= extractPythonPackageDescriptionFromPyprojectToml
             pure (maybePyprojectDescription <|> maybeDefaultNixDescription)
       _ -> pure maybeDefaultNixDescription
-  let configuredRepositoryCheckName =
-        repositoryCheckNameForPackage packageKind packageName
-          >>= \checkName ->
-            if checkName `Set.member` repositoryCheckNames
-              then Just checkName
-              else Nothing
-      repositoryPackageTestStatusValue =
-        maybe RepositoryTestsNotConfigured (const RepositoryTestsConfigured) configuredRepositoryCheckName
   pure
     RepositoryPackageSummary
       { repositoryPackageName = packageName,
         repositoryPackageKind = packageKind,
         repositoryPackageDescription = repositoryPackageDescriptionValue,
-        repositoryPackageTestNames = repositoryPackageTestNamesValue,
-        repositoryPackageTestStatus = repositoryPackageTestStatusValue
+        repositoryPackageTestNames = repositoryPackageTestNamesValue
       }
 extractHaskellPackageDescription :: T.Text -> Maybe String
 extractHaskellPackageDescription cabalContents = do
@@ -1351,8 +1248,7 @@ renderNixString value =
 supportedAddPackageKinds :: [(String, PackageKind)]
 supportedAddPackageKinds =
   [ (renderPackageKind packageKind, packageKind)
-  | packageKind <- allPackageKinds,
-    packageKindSupportsScaffold (packageKindSpec packageKind)
+  | packageKind <- allPackageKinds
   ]
 parseSupportedAddPackageKind :: String -> Maybe PackageKind
 parseSupportedAddPackageKind packageKindName = lookup packageKindName supportedAddPackageKinds
@@ -1553,10 +1449,7 @@ renderScaffoldFiles packageKind packageName packageDescription =
         [ ScaffoldFile "default.nix" (renderPythonTemplateNixSource (scaffoldDescription defaultPythonTemplateDescription packageDescription)),
           ScaffoldFile "main.py" pythonMainSource
         ]
-      PythonPyPIPackage ->
-        [ ScaffoldFile "default.nix" pythonPyPITemplateBaselineNixSource
-        ]
-      TerraformPackage ->
+      OpenTofuPackage ->
         [ ScaffoldFile "default.nix" (renderNixTemplateDescription defaultTerraformTemplateDescription packageDescription deployHostTemplateBaselineNixSource),
           ScaffoldFile "main.tf" "terraform { }\n"
         ]
@@ -1565,7 +1458,9 @@ renderScaffoldFiles packageKind packageName packageDescription =
           ScaffoldFile "ms.tex" latexMsTexSource,
           ScaffoldFile "ms.bib" latexMsBibSource
         ]
-      unsupportedPackageKind -> error ("unsupported scaffold package kind: " ++ renderPackageKind unsupportedPackageKind)
+      OtherPackage ->
+        [ ScaffoldFile "default.nix" "{ pkgs ? import <nixpkgs> { } }:\npkgs.emptyDirectory\n"
+        ]
   where
     prefixPackagePath scaffoldFile =
       scaffoldFile
@@ -1880,39 +1775,35 @@ data PackageKind
   | HTMLPackage
   | PythonLaTeXPackage
   | PythonPackage
-  | PythonPyPIPackage
-  | TerraformPackage
+  | OpenTofuPackage
   | LaTeXPackage
-  | BinaryReleasePackage
+  | OtherPackage
   deriving stock (Eq, Ord, Show)
 type PackageKindSpec :: Type
 data PackageKindSpec = PackageKindSpec
   { packageKindRenderedName :: String,
     packageKindNameConvention :: String,
-    packageKindNameSeparator :: Char,
-    packageKindSupportsScaffold :: Bool
+    packageKindNameSeparator :: Char
   }
 allPackageKinds :: [PackageKind]
 allPackageKinds =
-  [ HaskellPackage,
-    HTMLPackage,
+  [ PythonPackage,
     PythonLaTeXPackage,
-    PythonPackage,
-    PythonPyPIPackage,
-    TerraformPackage,
     LaTeXPackage,
-    BinaryReleasePackage
+    HaskellPackage,
+    HTMLPackage,
+    OpenTofuPackage,
+    OtherPackage
   ]
 packageKindSpec :: PackageKind -> PackageKindSpec
 packageKindSpec = \case
-  HaskellPackage -> PackageKindSpec "haskell" "kebab-case" '-' True
-  HTMLPackage -> PackageKindSpec "html" "snake_case" '_' True
-  PythonLaTeXPackage -> PackageKindSpec "python-latex" "snake_case" '_' True
-  PythonPackage -> PackageKindSpec "python" "snake_case" '_' True
-  PythonPyPIPackage -> PackageKindSpec "python-pypi" "snake_case" '_' True
-  TerraformPackage -> PackageKindSpec "terraform" "snake_case" '_' True
-  LaTeXPackage -> PackageKindSpec "latex" "snake_case" '_' True
-  BinaryReleasePackage -> PackageKindSpec "binary-release" "kebab-case" '-' False
+  HaskellPackage -> PackageKindSpec "haskell" "kebab-case" '-'
+  HTMLPackage -> PackageKindSpec "html" "snake_case" '_'
+  PythonLaTeXPackage -> PackageKindSpec "python-latex" "snake_case" '_'
+  PythonPackage -> PackageKindSpec "python" "snake_case" '_'
+  OpenTofuPackage -> PackageKindSpec "opentofu" "snake_case" '_'
+  LaTeXPackage -> PackageKindSpec "latex" "snake_case" '_'
+  OtherPackage -> PackageKindSpec "other" "snake_case" '_'
 renderPackageKind :: PackageKind -> String
 renderPackageKind = packageKindRenderedName . packageKindSpec
 type PackageInfo :: Type
@@ -1928,7 +1819,6 @@ data PackageDetection
   deriving stock (Eq, Show)
 buildPackageInfo :: Set.Set FilePath -> FilePath -> IO PackageInfo
 buildPackageInfo leafPaths packageRootDirectory = do
-  maybeDefaultNixSource <- readTextFileIfExists (packageRootDirectory </> "default.nix")
   let packageDirectoryName = takeBaseName packageRootDirectory
       packageRelativeLeafPaths = mapMaybe (stripPrefix (packageRootDirectory ++ "/")) (Set.toAscList leafPaths)
       markers = detectPackageMarkers packageRelativeLeafPaths
@@ -1936,7 +1826,7 @@ buildPackageInfo leafPaths packageRootDirectory = do
     PackageInfo
       { packageRootPath = packageRootDirectory,
         packageRootDirectoryName = packageDirectoryName,
-        packageDetection = detectPackageFromEvidence markers maybeDefaultNixSource
+        packageDetection = detectPackageFromEvidence markers
       }
 detectPackageMarkers :: [FilePath] -> [(String, PackageKind)]
 detectPackageMarkers packageRelativeLeafPaths =
@@ -1947,18 +1837,15 @@ detectPackageMarkers packageRelativeLeafPaths =
             (hasLeafPath "index.html", ("index.html", HTMLPackage)),
             (hasLeafPath "main.py" && hasLeafPath "ms.tex", ("main.py+ms.tex", PythonLaTeXPackage)),
             (hasLeafPath "main.py" && not (hasLeafPath "ms.tex"), ("main.py", PythonPackage)),
-            (hasLeafPath "main.tf", ("main.tf", TerraformPackage)),
+            (hasLeafPath "main.tf", ("main.tf", OpenTofuPackage)),
             (hasLeafPath "ms.tex" && not (hasLeafPath "main.py"), ("ms.tex", LaTeXPackage))
           ],
         markerExists
       ]
-detectPackageFromEvidence :: [(String, PackageKind)] -> Maybe T.Text -> PackageDetection
-detectPackageFromEvidence markers maybeDefaultNixSource =
+detectPackageFromEvidence :: [(String, PackageKind)] -> PackageDetection
+detectPackageFromEvidence markers =
   case markers of
-    []
-      | maybe False isExternalPythonPackageSource maybeDefaultNixSource ->
-          DetectedPackageKind PythonPyPIPackage
-      | otherwise -> DetectedPackageKind BinaryReleasePackage
+    [] -> DetectedPackageKind OtherPackage
     [(_, markerKind)] -> DetectedPackageKind markerKind
     firstMarker : remainingMarkers ->
       AmbiguousPackageMarkers (fst firstMarker :| map fst remainingMarkers)
@@ -1997,14 +1884,13 @@ packagePathPolicy packageRootDirectory _packageDirectoryName maybePackageKind =
         Just HTMLPackage -> map packagePath ["index.html", "script.js", "style.css"]
         Just PythonLaTeXPackage -> map packagePath ["main.py", "ms.tex", "ms.bib", "refs.bib"]
         Just PythonPackage -> [packagePath "main.py"]
-        Just PythonPyPIPackage -> []
-        Just TerraformPackage -> map packagePath ["main.tf", ".terraform.lock.hcl"]
+        Just OpenTofuPackage -> map packagePath ["main.tf", ".terraform.lock.hcl"]
         Just LaTeXPackage -> map packagePath ["ms.tex", "ms.bib"]
-        Just BinaryReleasePackage -> []
+        Just OtherPackage -> []
         Nothing -> []
       traversedTrees = case maybePackageKind of
         Just PythonLaTeXPackage -> [packagePath "figures"]
-        Just TerraformPackage -> [packagePath ".terraform"]
+        Just OpenTofuPackage -> [packagePath ".terraform"]
         _ -> []
    in PackagePathPolicy (basePaths ++ kindFiles) traversedTrees
 treePathRegex :: FilePath -> String
@@ -2163,6 +2049,7 @@ listGitVisibleChildNames parentDirectory = do
         )
     )
 checkPackage :: FilePath -> PackageKind -> IO ([String], [String])
+checkPackage _ OtherPackage = pure ([], [])
 checkPackage packageName packageKind = do
   let packageDefaultNixPath = "packages" </> packageName </> "default.nix"
   maybePackageDefaultNixSource <- readTextFileIfExists packageDefaultNixPath
@@ -2228,12 +2115,6 @@ checkPackageAssociation checkTemplateSpec checkName =
     withSuffix checkNameSuffix expectedPackageKinds =
       (\packageName -> (T.unpack packageName, expectedPackageKinds))
         <$> T.stripSuffix (T.pack checkNameSuffix) (T.pack checkName)
-isExternalPythonPackageSource :: T.Text -> Bool
-isExternalPythonPackageSource packageDefaultNixSource =
-  let source = T.unpack packageDefaultNixSource
-   in ("buildPythonPackage" `isInfixOf` source || "buildPythonApplication" `isInfixOf` source)
-        && not ("src = ./.;" `isInfixOf` source)
-        && ("fetchPypi" `isInfixOf` source || "fetchurl" `isInfixOf` source)
 readTextFileIfExists :: FilePath -> IO (Maybe T.Text)
 readTextFileIfExists filePath = do
   pathExists <- doesPathExist filePath
@@ -2972,9 +2853,9 @@ testIdentifierSpecificationTest = do
 packageDetectionTest :: IO ()
 packageDetectionTest =
   assertEqual
-    "External Python source evidence refines markerless packages without hiding conflicting markers."
-    [DetectedPackageKind PythonPyPIPackage]
-    [detectPackageFromEvidence [] (Just "{ buildPythonPackage = true; src = fetchPypi {}; }")]
+    "A package without a type-specific marker is classified as other."
+    [DetectedPackageKind OtherPackage]
+    [detectPackageFromEvidence []]
 entryKindStructureTest :: IO ()
 entryKindStructureTest =
   withTemporaryPackageRepository "symbolic-link-structure" $ \temporaryRepository -> do
@@ -3123,8 +3004,7 @@ repositorySummaryRenderingTest = do
           { repositoryPackageName = "demo",
             repositoryPackageKind = PythonPackage,
             repositoryPackageDescription = Nothing,
-            repositoryPackageTestNames = ["Reports \"quoted\" behavior."],
-            repositoryPackageTestStatus = RepositoryTestsConfigured
+            repositoryPackageTestNames = ["Reports \"quoted\" behavior."]
           }
       repositorySummary =
         RepositorySummary
@@ -3132,19 +3012,14 @@ repositorySummaryRenderingTest = do
             repositorySummaryPackages = [packageSummary],
             repositorySummaryHosts = ["default"]
           }
-  assertEqual
-    "Test status vocabulary distinguishes configured tests."
-    ["not-configured", "configured"]
-    ( map
-        renderRepositoryPackageTestStatus
-        [ RepositoryTestsNotConfigured,
-          repositoryPackageTestStatus packageSummary
-        ]
-    )
+      renderedRepositorySummary = renderRepositorySummariesJSON [repositorySummary]
   assertEqual
     "JSON rendering preserves the schema and escapes strings."
     (Right (repositoryStatusJSON [repositorySummary]))
-    (Aeson.eitherDecodeStrict' (TE.encodeUtf8 (T.pack (renderRepositorySummariesJSON [repositorySummary]))))
+    (Aeson.eitherDecodeStrict' (TE.encodeUtf8 (T.pack renderedRepositorySummary)))
+  assertBool
+    "Tests are rendered directly as an array of names without redundant wrappers."
+    ("\"tests\":[\"Reports \\\"quoted\\\" behavior.\"]" `isInfixOf` renderedRepositorySummary && not ("\"cases\"" `isInfixOf` renderedRepositorySummary) && not ("\"status\"" `isInfixOf` renderedRepositorySummary))
   assertEqual
     "JSON string rendering escapes control characters."
     "\"line one\\nline two\\u0001\""
@@ -3233,8 +3108,8 @@ statusImportEndToEndTest =
                 "  \"repositoryType\": \"flake\",",
                 "  \"readme\": \"Imported repository README.\\n\",",
                 "  \"resources\": [",
-                "    {\"kind\": \"package\", \"name\": \"dependency\", \"type\": \"html\", \"description\": null, \"dependencies\": []},",
-                "    {\"kind\": \"package\", \"name\": \"demo\", \"type\": \"python\", \"description\": \"Demo package\", \"dependencies\": [\"dependency\"], \"tests\": {\"status\": \"configured\", \"cases\": [{\"name\": \"Imported behavior must fail until implemented.\"}, {\"name\": \"Open api contract stays explicit.\"}]}},",
+                "    {\"kind\": \"package\", \"name\": \"dependency\", \"type\": \"html\", \"description\": null},",
+                "    {\"kind\": \"package\", \"name\": \"demo\", \"type\": \"python\", \"description\": \"Demo package\", \"tests\": [\"Imported behavior must fail until implemented.\", \"Open api contract stays explicit.\"]},",
                 "    {\"kind\": \"host\", \"name\": \"default\"}",
                 "  ]",
                 "}"
@@ -3254,7 +3129,6 @@ statusImportEndToEndTest =
       assertEqual "Imported repository status emits no diagnostics." "" statusStderr
       assertBool "Status omits location-specific roots." (not ("\"root\"" `isInfixOf` statusStdout))
       assertBool "Status import preserves the README." ("\"readme\":\"Imported repository README.\\n\"" `isInfixOf` statusStdout)
-      assertBool "Status omits package dependencies." (not ("\"dependencies\"" `isInfixOf` statusStdout))
       assertBool "Status import preserves absent package descriptions." ("\"name\":\"dependency\",\"type\":\"html\"" `isInfixOf` statusStdout && "\"description\":null" `isInfixOf` statusStdout)
       assertBool "Status import preserves test case names." ("Imported behavior must fail until implemented." `isInfixOf` statusStdout && "Open api contract stays explicit." `isInfixOf` statusStdout)
       importedPythonSource <- TIO.readFile (project </> "packages/demo/main.py")
@@ -3269,10 +3143,10 @@ statusImportEndToEndTest =
       assertBool "Standard-input import creates each package scaffold." stdinPackageExists
       assertBool "Standard-input import creates each host scaffold." stdinHostExists
       assertBool "Standard-input import creates the README." stdinReadmeExists
-      TIO.writeFile statusFile "{\"repositoryType\":\"flake\",\"readme\":null,\"resources\":[{\"kind\":\"package\",\"name\":\"external\",\"type\":\"binary-release\",\"description\":null,\"dependencies\":[]}]}"
+      TIO.writeFile statusFile "{\"repositoryType\":\"flake\",\"readme\":null,\"resources\":[{\"kind\":\"package\",\"name\":\"external\",\"type\":\"unsupported\",\"description\":null}]}"
       (unsupportedExit, _unsupportedStdout, unsupportedStderr) <- runEndToEndCommandWithEnvironment "/tmp" environment ["init", unsupportedProject, "--from-status", statusFile]
       assertEqual "Unsupported status resources fail before initialization." (ExitFailure 1) unsupportedExit
-      assertBool "Unsupported status resources identify their type." ("cannot scaffold package type from status: binary-release" `isInfixOf` unsupportedStderr)
+      assertBool "Unsupported status resources identify their type." ("cannot scaffold package type from status: unsupported" `isInfixOf` unsupportedStderr)
       unsupportedProjectExists <- doesPathExist unsupportedProject
       assertBool "Unsupported status resources leave no partial target." (not unsupportedProjectExists)
 statusImportPreflightEndToEndTest :: IO ()
@@ -3289,7 +3163,7 @@ statusImportPreflightEndToEndTest =
           writeStatus = TIO.writeFile statusFile
           runImport project = runEndToEndCommandWithEnvironment "/tmp" environment ["init", project, "--from-status", statusFile]
       writeStatus
-        "{\"repositoryType\":\"flake\",\"readme\":null,\"resources\":[{\"kind\":\"package\",\"name\":\"demo\",\"type\":\"python\",\"description\":null,\"dependencies\":[]},{\"kind\":\"package\",\"name\":\"demo\",\"type\":\"python\",\"description\":null,\"dependencies\":[]}]}"
+        "{\"repositoryType\":\"flake\",\"readme\":null,\"resources\":[{\"kind\":\"package\",\"name\":\"demo\",\"type\":\"python\",\"description\":null},{\"kind\":\"package\",\"name\":\"demo\",\"type\":\"python\",\"description\":null}]}"
       (duplicateExit, _duplicateStdout, duplicateStderr) <- runImport duplicateProject
       assertEqual "Duplicate package resources fail before initialization." (ExitFailure 1) duplicateExit
       assertBool "Duplicate package resources identify the conflict." ("duplicate package resource: demo" `isInfixOf` duplicateStderr)
@@ -3303,7 +3177,7 @@ statusImportPreflightEndToEndTest =
       duplicateHostProjectExists <- doesPathExist duplicateHostProject
       assertBool "Duplicate host resources leave no target." (not duplicateHostProjectExists)
       writeStatus
-        "{\"repositoryType\":\"flake\",\"readme\":null,\"resources\":[{\"kind\":\"package\",\"name\":\"demo-python\",\"type\":\"python\",\"description\":null,\"dependencies\":[]}]}"
+        "{\"repositoryType\":\"flake\",\"readme\":null,\"resources\":[{\"kind\":\"package\",\"name\":\"demo-python\",\"type\":\"python\",\"description\":null}]}"
       (invalidNameExit, _invalidNameStdout, invalidNameStderr) <- runImport invalidNameProject
       assertEqual "Invalid package names fail before initialization." (ExitFailure 1) invalidNameExit
       assertBool "Invalid package names identify their convention." ("package name must use snake_case" `isInfixOf` invalidNameStderr)
@@ -3311,7 +3185,7 @@ statusImportPreflightEndToEndTest =
       assertBool "Invalid package names leave no target." (not invalidNameProjectExists)
       createDirectoryIfMissing True (collisionProject </> "packages/demo")
       writeStatus
-        "{\"repositoryType\":\"flake\",\"readme\":null,\"resources\":[{\"kind\":\"package\",\"name\":\"demo\",\"type\":\"python\",\"description\":null,\"dependencies\":[]}]}"
+        "{\"repositoryType\":\"flake\",\"readme\":null,\"resources\":[{\"kind\":\"package\",\"name\":\"demo\",\"type\":\"python\",\"description\":null}]}"
       (collisionExit, _collisionStdout, collisionStderr) <- runImport collisionProject
       assertEqual "Existing managed paths fail before initialization." (ExitFailure 1) collisionExit
       assertBool "Existing managed paths identify the collision." ("status import path already exists:" `isInfixOf` collisionStderr)
@@ -3666,18 +3540,22 @@ gitFileRootGitignoreFixEndToEndTest =
           assertEqual "A successful Gitfile repository check leaves stderr empty." "" checkStderr
     testGitFileRepository `finally` removeSeparateGitDirectory
 allPackageKindsEndToEndTest :: IO ()
-allPackageKindsEndToEndTest =
+allPackageKindsEndToEndTest = do
+  assertEqual
+    "The public package types are exact and ordered."
+    ["python", "python-latex", "latex", "haskell", "html", "opentofu", "other"]
+    (map fst supportedAddPackageKinds)
   withEmptyCanonicalRepository "all-package-kinds-end-to-end" $ \temporaryRepository -> do
     runGitFixtureCommand ["-C", temporaryRepository, "config", "user.name", "Canonicalization Tests"]
     runGitFixtureCommand ["-C", temporaryRepository, "config", "user.email", "canonicalization@example.test"]
     forM_
-      [ ("haskell", "demo-haskell", "Main.hs", Just "demo-haskell-coverage"),
-        ("html", "demo_html", "index.html", Nothing),
-        ("python", "demo_python", "main.py", Just "demo_python_coverage"),
+      [ ("python", "demo_python", "main.py", Just "demo_python_coverage"),
         ("python-latex", "demo_python_latex", "main.py", Just "demo_python_latex_coverage"),
-        ("python-pypi", "demo_pypi", "default.nix", Nothing),
-        ("terraform", "demo_terraform", "main.tf", Nothing),
-        ("latex", "demo_latex", "ms.tex", Nothing)
+        ("latex", "demo_latex", "ms.tex", Nothing),
+        ("haskell", "demo-haskell", "Main.hs", Just "demo-haskell-coverage"),
+        ("html", "demo_html", "index.html", Nothing),
+        ("opentofu", "demo_opentofu", "main.tf", Nothing),
+        ("other", "demo_other", "default.nix", Nothing)
       ]
       $ \(packageKindName, packageName, markerFile, maybeCheckName) -> do
         (addExit, addStdout, addStderr) <-
@@ -3689,6 +3567,8 @@ allPackageKindsEndToEndTest =
         assertEqual ("Scaffolding " ++ packageKindName ++ " leaves stderr empty.") "" addStderr
         markerExists <- doesFileExist (temporaryRepository </> "packages" </> packageName </> markerFile)
         assertBool ("Scaffolding " ++ packageKindName ++ " creates its marker file.") markerExists
+        when (packageKindName == "other") $
+          TIO.writeFile (temporaryRepository </> "packages" </> packageName </> "default.nix") "this need not be valid Nix\n"
         forM_ maybeCheckName $ \checkName -> do
           checkExists <- doesFileExist (temporaryRepository </> "checks" </> checkName </> "default.nix")
           assertBool ("Scaffolding " ++ packageKindName ++ " creates its combined check.") checkExists
@@ -3846,8 +3726,7 @@ expectedGeneratedPythonPackageSummary =
       repositoryPackageKind = PythonPackage,
       repositoryPackageDescription = Just "Demo package",
       repositoryPackageTestNames =
-        ["Main prints sample message."],
-      repositoryPackageTestStatus = RepositoryTestsConfigured
+        ["Main prints sample message."]
     }
 expectedGeneratedHaskellPackageSummary :: RepositoryPackageSummary
 expectedGeneratedHaskellPackageSummary =
@@ -3855,8 +3734,7 @@ expectedGeneratedHaskellPackageSummary =
     { repositoryPackageName = "demo",
       repositoryPackageKind = HaskellPackage,
       repositoryPackageDescription = Nothing,
-      repositoryPackageTestNames = ["Renders the sample message."],
-      repositoryPackageTestStatus = RepositoryTestsConfigured
+      repositoryPackageTestNames = ["Renders the sample message."]
     }
 runEndToEndCommandIn :: FilePath -> [String] -> IO (ExitCode, String, String)
 runEndToEndCommandIn workingDirectory arguments =
@@ -4403,97 +4281,6 @@ deployHostTemplateBaselineNixSource =
       "}",
       ""
     ]
-pythonPyPITemplateBaselineNixSource :: T.Text
-pythonPyPITemplateBaselineNixSource =
-  T.unlines
-    [ "{",
-      "  pkgs ? import <nixpkgs> { },",
-      "}:",
-      "let",
-      "  python = pkgs.python3;",
-      "in",
-      "python.pkgs.buildPythonPackage rec {",
-      "  format = \"wheel\";",
-      "  pname = baseNameOf ./.;",
-      "  propagatedBuildInputs = [];",
-      "  pythonImportsCheck = [",
-      "    pname",
-      "  ];",
-      "  src = python.pkgs.fetchPypi rec {",
-      "    inherit",
-      "      format",
-      "      pname",
-      "      version",
-      "      ;",
-      "    dist = python;",
-      "    python = \"py3\";",
-      "    sha256 = \"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\";",
-      "  };",
-      "  version = \"0.0.0\";",
-      "}"
-    ]
-pythonPyPIApplicationTemplateBaselineNixSource :: T.Text
-pythonPyPIApplicationTemplateBaselineNixSource =
-  T.unlines
-    [ "{",
-      "  inputs,",
-      "  pkgs ? import <nixpkgs> { },",
-      "}:",
-      "let",
-      "  python = pkgs.python3;",
-      "in",
-      "python.pkgs.buildPythonApplication rec {",
-      "  format = \"wheel\";",
-      "  meta.mainProgram = pname;",
-      "  pname = baseNameOf ./.;",
-      "  propagatedBuildInputs = [];",
-      "  pythonImportsCheck = [",
-      "    pname",
-      "  ];",
-      "  src = python.pkgs.fetchPypi rec {",
-      "    inherit",
-      "      format",
-      "      pname",
-      "      version",
-      "      ;",
-      "    dist = python;",
-      "    python = \"py3\";",
-      "    sha256 = \"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\";",
-      "  };",
-      "  version = \"0.0.0\";",
-      "}"
-    ]
-binaryReleaseTemplateBaselineNixSource :: T.Text
-binaryReleaseTemplateBaselineNixSource =
-  T.unlines
-    [ "{",
-      "  pkgs ? import <nixpkgs> { },",
-      "}:",
-      "pkgs.stdenv.mkDerivation rec {",
-      "  doInstallCheck = pkgs.stdenv.isLinux;",
-      "  installCheckPhase = ''",
-      "    runHook preInstallCheck",
-      "    test -x \"$out/bin/${pname}\"",
-      "    set -o pipefail",
-      "    \"$out/bin/${pname}\" --help 2>&1 | grep -F \"${pname}\"",
-      "    runHook postInstallCheck",
-      "  '';",
-      "  installPhase = ''",
-      "    runHook preInstall",
-      "    install -Dm755 ${pname}-v${version}-x86_64-unknown-linux-musl/${pname} \"$out/bin/${pname}\"",
-      "    runHook postInstall",
-      "  '';",
-      "  meta.mainProgram = pname;",
-      "  pname = baseNameOf ./.;",
-      "  sourceRoot = \".\";",
-      "  src = pkgs.fetchurl {",
-      "    sha256 = \"4yOzM6f8Rdsw2YxsqSpIhHCNuRZRf8j3AAcK2T5VZlU=\";",
-      "    url = \"https://github.com/asamarts/${pname}/releases/download/v${version}/${pname}-v${version}-x86_64-unknown-linux-musl.tar.gz\";",
-      "  };",
-      "  strictDeps = true;",
-      "  version = \"0.9.23\";",
-      "}"
-    ]
 pythonLaTeXTemplateBaselineNixSource :: T.Text
 pythonLaTeXTemplateBaselineNixSource =
   T.unlines
@@ -4660,41 +4447,4 @@ defaultVmWithDiskoCheckBaselineNixSource =
       "  ''",
       "    touch \"$out\"",
       "  ''"
-    ]
-uncommentTemplateBaselineNixSource :: T.Text
-uncommentTemplateBaselineNixSource =
-  T.unlines
-    [ "{",
-      "  pkgs ? import <nixpkgs> { },",
-      "}:",
-      "pkgs.stdenv.mkDerivation rec {",
-      "  doInstallCheck = pkgs.stdenv.isLinux;",
-      "  installCheckPhase = ''",
-      "    runHook preInstallCheck",
-      "    test -x \"$out/bin/${pname}\"",
-      "    set -o pipefail",
-      "    \"$out/bin/${pname}\" --help 2>&1 | grep -F \"${pname}\"",
-      "    runHook postInstallCheck",
-      "  '';",
-      "  installPhase = ''",
-      "    runHook preInstall",
-      "    install -Dm755 ${pname} \"$out/bin/${pname}\"",
-      "    runHook postInstall",
-      "  '';",
-      "  meta = {",
-      "    description = \"A fast CLI tool for removing comments from source code.\";",
-      "    mainProgram = pname;",
-      "  };",
-      "  nativeBuildInputs = [",
-      "    pkgs.autoPatchelfHook",
-      "  ];",
-      "  pname = baseNameOf ./.;",
-      "  sourceRoot = \".\";",
-      "  src = pkgs.fetchurl {",
-      "    sha256 = \"6jUmVZ5SIKRgaF6V6gy2aFu4ZgcKbhl1O7g16UcnIQQ=\";",
-      "    url = \"https://github.com/Goldziher/${pname}/releases/download/v${version}/${pname}-x86_64-unknown-linux-gnu.tar.gz\";",
-      "  };",
-      "  strictDeps = true;",
-      "  version = \"3.0.2\";",
-      "}"
     ]
