@@ -92,14 +92,10 @@ data TemplateSpec = TemplateSpec
 type CheckTemplateSpec :: Type
 data CheckTemplateSpec = CheckTemplateSpec
   { checkTemplateName :: FilePath,
-    checkTemplateMatches :: Map.Map FilePath PackageKind -> FilePath -> String -> Bool,
+    checkTemplateMatches :: FilePath -> String -> Bool,
     checkTemplateBaselineSource :: T.Text,
-    checkTemplateComparisonMode :: CheckTemplateComparisonMode,
     checkTemplatePackageAssociation :: Maybe (String, [PackageKind])
   }
-type CheckTemplateComparisonMode :: Type
-data CheckTemplateComparisonMode
-  = ExactCheckTemplate
 templateSpecs :: [TemplateSpec]
 templateSpecs =
   [ TemplateSpec
@@ -146,8 +142,8 @@ templateSpecs =
 matchesPythonLaTeXTemplate :: PackageKind -> String -> Bool
 matchesPythonLaTeXTemplate packageKind nixSource =
   packageKind == PythonLaTeXPackage && "buildPythonPackage" `isInfixOf` nixSource
-matchesCheckNameSuffixAndSourceContains :: String -> [String] -> Map.Map FilePath PackageKind -> FilePath -> String -> Bool
-matchesCheckNameSuffixAndSourceContains suffix requiredNeedles _ checkName nixSource =
+matchesCheckNameSuffixAndSourceContains :: String -> [String] -> FilePath -> String -> Bool
+matchesCheckNameSuffixAndSourceContains suffix requiredNeedles checkName nixSource =
   suffix `isSuffixOf` checkName
     && all (`isInfixOf` nixSource) requiredNeedles
 checkTemplateSpecs :: [CheckTemplateSpec]
@@ -156,36 +152,32 @@ checkTemplateSpecs =
       { checkTemplateName = "haskell_coverage_check",
         checkTemplateMatches = matchesHaskellCoverageCheck,
         checkTemplateBaselineSource = haskellCoverageCheckBaselineNixSource,
-        checkTemplateComparisonMode = ExactCheckTemplate,
         checkTemplatePackageAssociation = Just ("-coverage", [HaskellPackage])
       },
     CheckTemplateSpec
       { checkTemplateName = "python_coverage_check",
         checkTemplateMatches = matchesPythonCoverageCheck,
         checkTemplateBaselineSource = pythonCoverageCheckBaselineNixSource,
-        checkTemplateComparisonMode = ExactCheckTemplate,
         checkTemplatePackageAssociation = Just ("_coverage", [PythonPackage, PythonLaTeXPackage])
       },
     CheckTemplateSpec
       { checkTemplateName = "default_vm_with_disko_check",
         checkTemplateMatches = matchesDefaultVmWithDiskoCheck,
         checkTemplateBaselineSource = defaultVmWithDiskoCheckBaselineNixSource,
-        checkTemplateComparisonMode = ExactCheckTemplate,
         checkTemplatePackageAssociation = Nothing
       },
     CheckTemplateSpec
       { checkTemplateName = "host_default_check",
-        checkTemplateMatches = \_ checkName _ -> checkName == "host_default",
+        checkTemplateMatches = \checkName _ -> checkName == "host_default",
         checkTemplateBaselineSource = hostDefaultCheckBaselineNixSource,
-        checkTemplateComparisonMode = ExactCheckTemplate,
         checkTemplatePackageAssociation = Nothing
       }
   ]
-matchesHaskellCoverageCheck :: Map.Map FilePath PackageKind -> FilePath -> String -> Bool
+matchesHaskellCoverageCheck :: FilePath -> String -> Bool
 matchesHaskellCoverageCheck = matchesCheckNameSuffixAndSourceContains "-coverage" ["ghcWithPackages", "-fhpc"]
-matchesPythonCoverageCheck :: Map.Map FilePath PackageKind -> FilePath -> String -> Bool
+matchesPythonCoverageCheck :: FilePath -> String -> Bool
 matchesPythonCoverageCheck = matchesCheckNameSuffixAndSourceContains "_coverage" ["--cov=\"$src\""]
-matchesDefaultVmWithDiskoCheck :: Map.Map FilePath PackageKind -> FilePath -> String -> Bool
+matchesDefaultVmWithDiskoCheck :: FilePath -> String -> Bool
 matchesDefaultVmWithDiskoCheck = matchesCheckNameSuffixAndSourceContains "VmWithDisko" ["pkgs.runCommand", "config.system.build.vmWithDisko"]
 type Command :: Type
 data Command
@@ -2064,7 +2056,7 @@ checkTemplateWith packageKinds checkName = do
   case maybeCheckTemplateText of
     Nothing -> pure []
     Just checkTemplateText ->
-      case inferCheckTemplateSpec packageKinds checkName (T.unpack checkTemplateText) of
+      case inferCheckTemplateSpec checkName (T.unpack checkTemplateText) of
         Nothing ->
           pure
             [ "checks/" ++ checkName ++ "/default.nix: could not infer corresponding check template"
@@ -2462,9 +2454,7 @@ compareCheckTemplateWithBaseline checkTemplatePath templateBaselineText = do
             ]
 validateCheckTemplate :: FilePath -> CheckTemplateSpec -> IO [String]
 validateCheckTemplate checkTemplatePath checkTemplateSpec =
-  case checkTemplateComparisonMode checkTemplateSpec of
-    ExactCheckTemplate ->
-      compareCheckTemplateWithBaseline checkTemplatePath (checkTemplateBaselineSource checkTemplateSpec)
+  compareCheckTemplateWithBaseline checkTemplatePath (checkTemplateBaselineSource checkTemplateSpec)
 compareNixFileWithTemplate :: Set.Set T.Text -> FilePath -> FilePath -> Set.Set T.Text -> T.Text -> IO [String]
 compareNixFileWithTemplate ignoredTopLevelFunctionParams subjectNixPath templateBaselineNixPath allowedNixDifferenceKeys templateBaselineSourceText = do
   subjectNixParseResult <- parseNixExprFromFile subjectNixPath
@@ -2497,9 +2487,9 @@ parseNixExprFromFile nixFilePath =
 inferTemplateSpec :: PackageKind -> String -> Maybe TemplateSpec
 inferTemplateSpec packageKind nixSource =
   find (\templateSpec -> templateMatches templateSpec packageKind nixSource) templateSpecs
-inferCheckTemplateSpec :: Map.Map FilePath PackageKind -> FilePath -> String -> Maybe CheckTemplateSpec
-inferCheckTemplateSpec packageKinds checkName nixSource =
-  find (\checkTemplateSpec -> checkTemplateMatches checkTemplateSpec packageKinds checkName nixSource) checkTemplateSpecs
+inferCheckTemplateSpec :: FilePath -> String -> Maybe CheckTemplateSpec
+inferCheckTemplateSpec checkName nixSource =
+  find (\checkTemplateSpec -> checkTemplateMatches checkTemplateSpec checkName nixSource) checkTemplateSpecs
 normalizeNixExpr :: Set.Set T.Text -> Set.Set T.Text -> NExprLoc -> NExprLoc
 normalizeNixExpr = normalizeNixExprAt []
 normalizeNixExprAt :: [T.Text] -> Set.Set T.Text -> Set.Set T.Text -> NExprLoc -> NExprLoc
