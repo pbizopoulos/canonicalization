@@ -205,32 +205,26 @@ data InitSpec = InitSpec
 type StatusImport :: Type
 data StatusImport = StatusImport
   { statusImportReadme :: Maybe String,
-    statusImportResources :: [StatusImportResource]
+    statusImportPackages :: [StatusImportPackage],
+    statusImportHosts :: [String]
   }
-type StatusImportResource :: Type
-data StatusImportResource
-  = StatusImportPackage String String (Maybe String) [String]
-  | StatusImportHost String
+type StatusImportPackage :: Type
+data StatusImportPackage = StatusImportPackage String String (Maybe String) [String]
   deriving stock (Eq, Show)
 instance Aeson.FromJSON StatusImport where
   parseJSON =
     Aeson.withObject "StatusImport" $ \object -> do
       repositoryType <- object Aeson..: "repositoryType"
       when (repositoryType /= ("flake" :: String)) (fail "repositoryType must be flake")
-      StatusImport <$> object Aeson..: "readme" <*> object Aeson..: "resources"
-instance Aeson.FromJSON StatusImportResource where
+      StatusImport <$> object Aeson..: "readme" <*> object Aeson..: "packages" <*> object Aeson..: "hosts"
+instance Aeson.FromJSON StatusImportPackage where
   parseJSON =
-    Aeson.withObject "StatusImportResource" $ \object -> do
-      kind <- object Aeson..: "kind"
-      case (kind :: String) of
-        "package" -> do
-          packageName <- object Aeson..: "name"
-          packageType <- object Aeson..: "type"
-          packageDescription <- object Aeson..: "description"
-          packageTestNames <- object Aeson..:? "tests" Aeson..!= []
-          pure (StatusImportPackage packageName packageType packageDescription packageTestNames)
-        "host" -> StatusImportHost <$> object Aeson..: "name"
-        _ -> fail ("unsupported resource kind: " ++ kind)
+    Aeson.withObject "StatusImportPackage" $ \object ->
+      StatusImportPackage
+        <$> object Aeson..: "name"
+        <*> object Aeson..: "type"
+        <*> object Aeson..: "description"
+        <*> object Aeson..:? "tests" Aeson..!= []
 type RemoveSpec :: Type
 data RemoveSpec = RemoveSpec
   { removePackageName :: FilePath,
@@ -470,10 +464,10 @@ readStatusImport statusFile = do
     Right statusImport -> validateStatusImport statusImport >> pure statusImport
 validateStatusImport :: StatusImport -> IO ()
 validateStatusImport statusImport = do
-  let resources = statusImportResources statusImport
-      packageNames = [packageName | StatusImportPackage packageName _ _ _ <- resources]
-      hostNames = [hostName | StatusImportHost hostName <- resources]
-      validationIssues = concatMap validateStatusImportResource resources
+  let packages = statusImportPackages statusImport
+      hostNames = statusImportHosts statusImport
+      packageNames = [packageName | StatusImportPackage packageName _ _ _ <- packages]
+      validationIssues = concatMap validateStatusImportPackage packages ++ concatMap validateStatusImportHost hostNames
       duplicateIssues =
         map ("duplicate package resource: " ++) (duplicateStatusImportNames packageNames)
           ++ map ("duplicate host resource: " ++) (duplicateStatusImportNames hostNames)
@@ -482,47 +476,43 @@ validateStatusImport statusImport = do
     issues -> do
       forM_ issues (hPutStrLn stderr . ("error: " ++))
       exitFailure
-validateStatusImportResource :: StatusImportResource -> [String]
-validateStatusImportResource = \case
-  StatusImportPackage packageName packageType _ _ ->
-    case parseSupportedAddPackageKind packageType of
-      Nothing -> ["cannot scaffold package type from status: " ++ packageType]
-      Just packageKind -> maybeToList (validatePackageNameForKind packageKind packageName)
-  StatusImportHost hostName
-    | not (isDelimitedLowercaseName '-' hostName) -> ["host name must use kebab-case"]
-    | otherwise -> []
+validateStatusImportPackage :: StatusImportPackage -> [String]
+validateStatusImportPackage (StatusImportPackage packageName packageType _ _) =
+  case parseSupportedAddPackageKind packageType of
+    Nothing -> ["cannot scaffold package type from status: " ++ packageType]
+    Just packageKind -> maybeToList (validatePackageNameForKind packageKind packageName)
+validateStatusImportHost :: String -> [String]
+validateStatusImportHost hostName
+  | not (isDelimitedLowercaseName '-' hostName) = ["host name must use kebab-case"]
+  | otherwise = []
 duplicateStatusImportNames :: [String] -> [String]
 duplicateStatusImportNames names =
   Map.keys (Map.filter (> (1 :: Int)) (Map.fromListWith (+) [(name, 1 :: Int) | name <- names]))
 validateStatusImportTarget :: FilePath -> StatusImport -> IO ()
 validateStatusImportTarget target statusImport = do
-  let managedPaths =
-        concatMap
-          ( \case
-              StatusImportPackage packageName packageType _ _ ->
-                case parseSupportedAddPackageKind packageType of
-                  Nothing -> []
-                  Just packageKind ->
-                    (target </> "packages" </> packageName)
-                      : map (\checkName -> target </> "checks" </> checkName) (maybeToList (repositoryCheckNameForPackage packageKind packageName))
-              StatusImportHost hostName -> [target </> "hosts" </> hostName]
-          )
-          (statusImportResources statusImport)
+  let packagePaths = concatMap statusImportPackagePaths (statusImportPackages statusImport)
+      hostPaths = [target </> ("hosts" </> hostName) | hostName <- statusImportHosts statusImport]
+      managedPaths = packagePaths ++ hostPaths
+      statusImportPackagePaths (StatusImportPackage packageName packageType _ _) =
+        case parseSupportedAddPackageKind packageType of
+          Nothing -> []
+          Just packageKind ->
+            (target </> "packages" </> packageName)
+              : map (\checkName -> target </> "checks" </> checkName) (maybeToList (repositoryCheckNameForPackage packageKind packageName))
   existingPaths <- filterM doesPathExist managedPaths
   unless (null existingPaths) $ do
     forM_ existingPaths (hPutStrLn stderr . ("error: status import path already exists: " ++))
     exitFailure
 initializeStatusResources :: StatusImport -> IO ()
-initializeStatusResources statusImport =
-  forM_ (statusImportResources statusImport) $ \case
-    StatusImportPackage packageName packageType packageDescription packageTestNames ->
-      case parseSupportedAddPackageKind packageType of
-        Nothing -> hPutStrLn stderr ("error: cannot scaffold package type from status: " ++ packageType) >> exitFailure
-        Just packageKind ->
-          addPackageToCurrentRepositoryWithForce True packageKind packageName packageDescription >>= \case
-            Left addError -> hPutStrLn stderr ("error: " ++ addError) >> exitFailure
-            Right _ -> applyStatusPackageMetadata packageKind packageName packageDescription packageTestNames
-    StatusImportHost hostName -> createHostFromStatus hostName
+initializeStatusResources statusImport = do
+  forM_ (statusImportPackages statusImport) $ \(StatusImportPackage packageName packageType packageDescription packageTestNames) ->
+    case parseSupportedAddPackageKind packageType of
+      Nothing -> hPutStrLn stderr ("error: cannot scaffold package type from status: " ++ packageType) >> exitFailure
+      Just packageKind ->
+        addPackageToCurrentRepositoryWithForce True packageKind packageName packageDescription >>= \case
+          Left addError -> hPutStrLn stderr ("error: " ++ addError) >> exitFailure
+          Right _ -> applyStatusPackageMetadata packageKind packageName packageDescription packageTestNames
+  forM_ (statusImportHosts statusImport) createHostFromStatus
 initializeStatusReadme :: StatusImport -> IO ()
 initializeStatusReadme statusImport =
   forM_ (statusImportReadme statusImport) $ \readmeSource -> do
@@ -840,13 +830,12 @@ homeStatusJSON :: [HomeRepository] -> Aeson.Value
 homeStatusJSON repositories =
   Aeson.object
     [ "repositoryType" Aeson..= ("home" :: String),
-      "resources" Aeson..= map homeRepositoryJSON repositories
+      "repositories" Aeson..= map homeRepositoryJSON repositories
     ]
 homeRepositoryJSON :: HomeRepository -> Aeson.Value
 homeRepositoryJSON repository =
   Aeson.object
-    [ "kind" Aeson..= ("repository" :: String),
-      "name" Aeson..= homeRepositoryName repository,
+    [ "name" Aeson..= homeRepositoryName repository,
       "path" Aeson..= homeRepositoryPath repository,
       "url" Aeson..= homeRepositoryUrl repository
     ]
@@ -1146,26 +1135,25 @@ renderRepositorySummariesJSON summaries = renderJSON (repositoryStatusJSON summa
 repositoryStatusJSON :: [RepositorySummary] -> Aeson.Value
 repositoryStatusJSON summaries =
   case summaries of
-    [] -> statusObject Nothing []
+    [] -> statusObject Nothing [] []
     repositorySummary : _ ->
       statusObject
         (repositorySummaryReadme repositorySummary)
-        ( map repositoryPackageSummaryJSON (repositorySummaryPackages repositorySummary)
-            ++ map repositoryHostSummaryJSON (repositorySummaryHosts repositorySummary)
-        )
+        (map repositoryPackageSummaryJSON (repositorySummaryPackages repositorySummary))
+        (repositorySummaryHosts repositorySummary)
   where
-    statusObject :: Maybe String -> [Aeson.Value] -> Aeson.Value
-    statusObject repositoryReadme resources =
+    statusObject :: Maybe String -> [Aeson.Value] -> [FilePath] -> Aeson.Value
+    statusObject repositoryReadme packages hosts =
       Aeson.object
         [ "repositoryType" Aeson..= ("flake" :: String),
           "readme" Aeson..= repositoryReadme,
-          "resources" Aeson..= resources
+          "packages" Aeson..= packages,
+          "hosts" Aeson..= hosts
         ]
 repositoryPackageSummaryJSON :: RepositoryPackageSummary -> Aeson.Value
 repositoryPackageSummaryJSON packageSummary =
   Aeson.object
-    ( [ "kind" Aeson..= ("package" :: String),
-        "name" Aeson..= repositoryPackageName packageSummary,
+    ( [ "name" Aeson..= repositoryPackageName packageSummary,
         "type" Aeson..= renderPackageKind (repositoryPackageKind packageSummary),
         "description" Aeson..= repositoryPackageDescription packageSummary
       ]
@@ -1174,12 +1162,6 @@ repositoryPackageSummaryJSON packageSummary =
 repositoryPackageTestsJSON :: RepositoryPackageSummary -> Aeson.Value
 repositoryPackageTestsJSON packageSummary =
   Aeson.toJSON (repositoryPackageTestNames packageSummary)
-repositoryHostSummaryJSON :: FilePath -> Aeson.Value
-repositoryHostSummaryJSON hostName =
-  Aeson.object
-    [ "kind" Aeson..= ("host" :: String),
-      "name" Aeson..= hostName
-    ]
 summarizeRepositoryPackage :: FilePath -> PackageKind -> [String] -> IO RepositoryPackageSummary
 summarizeRepositoryPackage packageName packageKind repositoryPackageTestNamesValue = do
   let packageRoot = "packages" </> packageName
@@ -3020,6 +3002,9 @@ repositorySummaryRenderingTest = do
   assertBool
     "Tests are rendered directly as an array of names without redundant wrappers."
     ("\"tests\":[\"Reports \\\"quoted\\\" behavior.\"]" `isInfixOf` renderedRepositorySummary && not ("\"cases\"" `isInfixOf` renderedRepositorySummary) && not ("\"status\"" `isInfixOf` renderedRepositorySummary))
+  assertBool
+    "Packages and hosts have separate collections without resource-kind tags."
+    ("\"hosts\":[\"default\"]" `isInfixOf` renderedRepositorySummary && "\"packages\":[" `isInfixOf` renderedRepositorySummary && not ("\"resources\"" `isInfixOf` renderedRepositorySummary) && not ("\"kind\"" `isInfixOf` renderedRepositorySummary))
   assertEqual
     "JSON string rendering escapes control characters."
     "\"line one\\nline two\\u0001\""
@@ -3107,11 +3092,11 @@ statusImportEndToEndTest =
               [ "{",
                 "  \"repositoryType\": \"flake\",",
                 "  \"readme\": \"Imported repository README.\\n\",",
-                "  \"resources\": [",
-                "    {\"kind\": \"package\", \"name\": \"dependency\", \"type\": \"html\", \"description\": null},",
-                "    {\"kind\": \"package\", \"name\": \"demo\", \"type\": \"python\", \"description\": \"Demo package\", \"tests\": [\"Imported behavior must fail until implemented.\", \"Open api contract stays explicit.\"]},",
-                "    {\"kind\": \"host\", \"name\": \"default\"}",
-                "  ]",
+                "  \"packages\": [",
+                "    {\"name\": \"dependency\", \"type\": \"html\", \"description\": null},",
+                "    {\"name\": \"demo\", \"type\": \"python\", \"description\": \"Demo package\", \"tests\": [\"Imported behavior must fail until implemented.\", \"Open api contract stays explicit.\"]}",
+                "  ],",
+                "  \"hosts\": [\"default\"]",
                 "}"
               ]
       TIO.writeFile
@@ -3133,7 +3118,7 @@ statusImportEndToEndTest =
       assertBool "Status import preserves test case names." ("Imported behavior must fail until implemented." `isInfixOf` statusStdout && "Open api contract stays explicit." `isInfixOf` statusStdout)
       importedPythonSource <- TIO.readFile (project </> "packages/demo/main.py")
       assertBool "Imported test placeholders fail instead of using the passing sample test." ("TODO: implement imported contract" `T.isInfixOf` importedPythonSource && "def test_imported_behavior_must_fail_until_implemented()" `T.isInfixOf` importedPythonSource && "def test_open_api_contract_stays_explicit()" `T.isInfixOf` importedPythonSource && not ("Prints the sample message from the executable." `T.isInfixOf` importedPythonSource))
-      assertBool "Status includes the imported host." ("\"kind\":\"host\",\"name\":\"default\"" `isInfixOf` statusStdout)
+      assertBool "Status includes the imported host." ("\"hosts\":[\"default\"]" `isInfixOf` statusStdout)
       (stdinInitExit, _stdinInitStdout, stdinInitStderr) <- runEndToEndCommandWithEnvironmentAndInput "/tmp" environment ["init", stdinProject, "--from-status", "-"] (T.unpack statusSource)
       assertEqual "Standard-input status import initializes the explicit target." ExitSuccess stdinInitExit
       assertBool "Standard-input import reports lock generation." ("Locking flake inputs..." `isInfixOf` stdinInitStderr)
@@ -3143,7 +3128,7 @@ statusImportEndToEndTest =
       assertBool "Standard-input import creates each package scaffold." stdinPackageExists
       assertBool "Standard-input import creates each host scaffold." stdinHostExists
       assertBool "Standard-input import creates the README." stdinReadmeExists
-      TIO.writeFile statusFile "{\"repositoryType\":\"flake\",\"readme\":null,\"resources\":[{\"kind\":\"package\",\"name\":\"external\",\"type\":\"unsupported\",\"description\":null}]}"
+      TIO.writeFile statusFile "{\"repositoryType\":\"flake\",\"readme\":null,\"packages\":[{\"name\":\"external\",\"type\":\"unsupported\",\"description\":null}],\"hosts\":[]}"
       (unsupportedExit, _unsupportedStdout, unsupportedStderr) <- runEndToEndCommandWithEnvironment "/tmp" environment ["init", unsupportedProject, "--from-status", statusFile]
       assertEqual "Unsupported status resources fail before initialization." (ExitFailure 1) unsupportedExit
       assertBool "Unsupported status resources identify their type." ("cannot scaffold package type from status: unsupported" `isInfixOf` unsupportedStderr)
@@ -3163,21 +3148,21 @@ statusImportPreflightEndToEndTest =
           writeStatus = TIO.writeFile statusFile
           runImport project = runEndToEndCommandWithEnvironment "/tmp" environment ["init", project, "--from-status", statusFile]
       writeStatus
-        "{\"repositoryType\":\"flake\",\"readme\":null,\"resources\":[{\"kind\":\"package\",\"name\":\"demo\",\"type\":\"python\",\"description\":null},{\"kind\":\"package\",\"name\":\"demo\",\"type\":\"python\",\"description\":null}]}"
+        "{\"repositoryType\":\"flake\",\"readme\":null,\"packages\":[{\"name\":\"demo\",\"type\":\"python\",\"description\":null},{\"name\":\"demo\",\"type\":\"python\",\"description\":null}],\"hosts\":[]}"
       (duplicateExit, _duplicateStdout, duplicateStderr) <- runImport duplicateProject
       assertEqual "Duplicate package resources fail before initialization." (ExitFailure 1) duplicateExit
       assertBool "Duplicate package resources identify the conflict." ("duplicate package resource: demo" `isInfixOf` duplicateStderr)
       duplicateProjectExists <- doesPathExist duplicateProject
       assertBool "Duplicate package resources leave no target." (not duplicateProjectExists)
       writeStatus
-        "{\"repositoryType\":\"flake\",\"readme\":null,\"resources\":[{\"kind\":\"host\",\"name\":\"default\"},{\"kind\":\"host\",\"name\":\"default\"}]}"
+        "{\"repositoryType\":\"flake\",\"readme\":null,\"packages\":[],\"hosts\":[\"default\",\"default\"]}"
       (duplicateHostExit, _duplicateHostStdout, duplicateHostStderr) <- runImport duplicateHostProject
       assertEqual "Duplicate host resources fail before initialization." (ExitFailure 1) duplicateHostExit
       assertBool "Duplicate host resources identify the conflict." ("duplicate host resource: default" `isInfixOf` duplicateHostStderr)
       duplicateHostProjectExists <- doesPathExist duplicateHostProject
       assertBool "Duplicate host resources leave no target." (not duplicateHostProjectExists)
       writeStatus
-        "{\"repositoryType\":\"flake\",\"readme\":null,\"resources\":[{\"kind\":\"package\",\"name\":\"demo-python\",\"type\":\"python\",\"description\":null}]}"
+        "{\"repositoryType\":\"flake\",\"readme\":null,\"packages\":[{\"name\":\"demo-python\",\"type\":\"python\",\"description\":null}],\"hosts\":[]}"
       (invalidNameExit, _invalidNameStdout, invalidNameStderr) <- runImport invalidNameProject
       assertEqual "Invalid package names fail before initialization." (ExitFailure 1) invalidNameExit
       assertBool "Invalid package names identify their convention." ("package name must use snake_case" `isInfixOf` invalidNameStderr)
@@ -3185,7 +3170,7 @@ statusImportPreflightEndToEndTest =
       assertBool "Invalid package names leave no target." (not invalidNameProjectExists)
       createDirectoryIfMissing True (collisionProject </> "packages/demo")
       writeStatus
-        "{\"repositoryType\":\"flake\",\"readme\":null,\"resources\":[{\"kind\":\"package\",\"name\":\"demo\",\"type\":\"python\",\"description\":null}]}"
+        "{\"repositoryType\":\"flake\",\"readme\":null,\"packages\":[{\"name\":\"demo\",\"type\":\"python\",\"description\":null}],\"hosts\":[]}"
       (collisionExit, _collisionStdout, collisionStderr) <- runImport collisionProject
       assertEqual "Existing managed paths fail before initialization." (ExitFailure 1) collisionExit
       assertBool "Existing managed paths identify the collision." ("status import path already exists:" `isInfixOf` collisionStderr)
