@@ -1,20 +1,11 @@
 {
   inputs,
-  pkgs ? import <nixpkgs> { },
+  pkgs ? import <nixpkgs> {},
 }:
 pkgs.writeShellApplication rec {
   meta.description = "A Terraform template package for deploying a host.";
   name = baseNameOf ./.;
-  runtimeInputs = [
-    pkgs.jq
-    pkgs.openssh
-    (pkgs.opentofu.withPlugins (p: [
-      p.hashicorp_external
-      p.hashicorp_local
-      p.hashicorp_null
-      p.hetznercloud_hcloud
-    ]))
-  ];
+  runtimeInputs = [(pkgs.opentofu.withPlugins (p: [p.hashicorp_external p.hashicorp_local p.hashicorp_null p.hetznercloud_hcloud])) pkgs.jq pkgs.openssh];
   text = ''
     # shellcheck disable=SC1091
     source ${

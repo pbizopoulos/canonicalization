@@ -3,13 +3,9 @@
   modulesPath,
   pkgs,
   ...
-}:
-let
-  opensshAuthorizedKeyFiles = [
-    ../../prm/developer.pub
-  ];
-in
-{
+}: let
+  opensshAuthorizedKeyFiles = [../../prm/developer.pub];
+in {
   boot.loader.systemd-boot.enable = true;
   disko.devices = {
     disk.main = {
@@ -51,27 +47,15 @@ in
     };
     nodev."/" = {
       fsType = "tmpfs";
-      mountOptions = [
-        "defaults"
-        "mode=755"
-      ];
+      mountOptions = ["defaults" "mode=755"];
     };
   };
   fileSystems."/persistent".neededForBoot = true;
-  imports = [
-    inputs.agenix.nixosModules.age
-    inputs.disko.nixosModules.disko
-    inputs.preservation.nixosModules.default
-    (modulesPath + "/installer/scan/not-detected.nix")
-    (modulesPath + "/profiles/qemu-guest.nix")
-  ];
+  imports = [(modulesPath + "/installer/scan/not-detected.nix") (modulesPath + "/profiles/qemu-guest.nix") inputs.agenix.nixosModules.age inputs.disko.nixosModules.disko inputs.preservation.nixosModules.default];
   networking.hostName = baseNameOf ./.;
   nix = {
     gc.automatic = true;
-    settings.experimental-features = [
-      "flakes"
-      "nix-command"
-    ];
+    settings.experimental-features = ["flakes" "nix-command"];
   };
   nixpkgs = {
     hostPlatform = "x86_64-linux";
@@ -114,15 +98,11 @@ in
     };
   };
   system.stateVersion = "25.11";
-  systemd.suppressedSystemUnits = [
-    "systemd-machine-id-commit.service"
-  ];
+  systemd.suppressedSystemUnits = ["systemd-machine-id-commit.service"];
   users = {
     mutableUsers = false;
     users.nixos = {
-      extraGroups = [
-        "wheel"
-      ];
+      extraGroups = ["wheel"];
       isNormalUser = true;
       openssh.authorizedKeys.keyFiles = opensshAuthorizedKeyFiles;
     };

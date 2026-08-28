@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+# Copyright (c) 2026- Paschalis Bizopoulos
+# ruff: noqa: PERF203, PTH101, PTH105, PTH108, S101, S603
+"""Shared, lossless-enough Nix parsing and rewriting helpers."""
+
+from __future__ import annotations
+
+import contextlib
+import os
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from tree_sitter_language_pack import get_parser
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from tree_sitter import Node, Tree
+_PARSER = get_parser("nix")
+
+
+class NixSyntaxError(ValueError):
+    """A Nix source file could not be parsed."""
+
+
+@dataclass(frozen=True)
+class Document:
+    """Parsed Nix source and its concrete syntax tree."""
+
+    source: bytes
+    tree: Tree
+    path: str = "<expression>"
+
+    @property
+    def root(self) -> Node:
+        """Return the source expression rather than the source-code wrapper."""
+        expression = self.tree.root_node.child_by_field_name("expression")
+        return expression if expression is not None else self.tree.root_node
+
+    def text(self, node: Node) -> str:
+        """Decode the exact source covered by a node."""
+        return self.source[node.start_byte : node.end_byte].decode("utf-8")
+
+
+def parse(source: str | bytes, path: str = "<expression>") -> Document:
+    """Parse valid UTF-8 Nix source or raise a stable syntax error."""
+    encoded = source.encode() if isinstance(source, str) else source
+    try:
+        encoded.decode("utf-8")
+    except UnicodeDecodeError as error:
+        msg = f"{path}: source is not UTF-8"
+        raise NixSyntaxError(msg) from error
+    tree = _PARSER.parse(encoded)
+    if tree.root_node.has_error:
+        parse_error = _first_error(tree.root_node)
+        row, column = parse_error.start_point
+        msg = f"{path}:{row + 1}:{column + 1}: parse error"
+        raise NixSyntaxError(msg)
+    return Document(encoded, tree, path)
+
+
+def _first_error(node: Node) -> Node:
+    if node.is_error or node.is_missing:
+        return node
+    for child in node.children:
+        if child.has_error or child.is_error or child.is_missing:
+            return _first_error(child)
+    return node
+
+
+def node_text(document: Document, node: Node) -> str:
+    """Return a node's source text."""
+    return document.text(node)
+
+
+def field(node: Node, name: str) -> Node | None:
+    """Return a named grammar field."""
+    return node.child_by_field_name(name)
+
+
+def named(node: Node, node_type: str | None = None) -> list[Node]:
+    """Return direct named children, optionally filtered by type."""
+    children = list(node.named_children)
+    return (
+        children
+        if node_type is None
+        else [child for child in children if child.type == node_type]
+    )
+
+
+def walk(node: Node) -> Iterable[Node]:
+    """Walk a syntax tree depth first."""
+    yield node
+    for child in node.named_children:
+        yield from walk(child)
+
+
+def static_attrpath(document: Document, attrpath: Node) -> tuple[str, ...] | None:
+    """Extract an attribute path when every component is statically named."""
+    parts: list[str] = []
+    for child in attrpath.named_children:
+        text = document.text(child)
+        if child.type == "identifier":
+            parts.append(text)
+        elif child.type == "string_expression" and "${" not in text:
+            parts.append(text[1:-1])
+        else:
+            return None
+    return tuple(parts) if parts else None
+
+
+def compact(text: str) -> str:
+    """Render diagnostic source on one whitespace-normalized line."""
+    return " ".join(text.split())
+
+
+def apply_edits(source: bytes, edits: Iterable[tuple[int, int, bytes]]) -> bytes:
+    """Apply non-overlapping edits in source-coordinate order."""
+    result = source
+    previous_start = len(source) + 1
+    for start, end, replacement in sorted(edits, reverse=True):
+        if not (0 <= start <= end <= len(source)) or end > previous_start:
+            msg = "overlapping or invalid source edits"
+            raise ValueError(msg)
+        result = result[:start] + replacement + result[end:]
+        previous_start = start
+    return result
+
+
+def format_source(source: str, path: str = "<expression>") -> str:
+    """Format valid Nix source with the non-Haskell Alejandra formatter."""
+    parse(source, path)
+    completed = subprocess.run(
+        [os.environ.get("NIX_SYNTAX_FORMATTER", "alejandra"), "-q"],
+        input=source,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if completed.returncode != 0:
+        diagnostic = compact(completed.stderr) or "formatter failed"
+        msg = f"{path}: {diagnostic}"
+        raise NixSyntaxError(msg)
+    parse(completed.stdout, path)
+    return completed.stdout
+
+
+def write_if_changed(path: Path, contents: str) -> None:
+    """Atomically replace a regular file only when its contents changed."""
+    original = path.read_text(encoding="utf-8")
+    if original == contents:
+        return
+    if path.is_symlink() or not path.is_file():
+        msg = f"{path}: must be a regular file"
+        raise OSError(msg)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        dir=path.parent,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(contents)
+        os.chmod(temporary_name, path.stat().st_mode)
+        os.replace(temporary_name, path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary_name)
+
+
+def main() -> None:
+    """Validate explicitly supplied Nix files."""
+    failed = False
+    for argument in sys.argv[1:]:
+        try:
+            parse(Path(argument).read_bytes(), argument)
+        except (OSError, NixSyntaxError) as error:
+            print(f"error: {error}", file=sys.stderr)  # noqa: T201
+            failed = True
+    if failed:
+        raise SystemExit(1)
+
+
+def test_parse_extracts_static_paths_and_rejects_errors() -> None:
+    """Parses bindings and rejects malformed source."""
+    document = parse('{ "a".b = 1; }')
+    attrpath = next(node for node in walk(document.root) if node.type == "attrpath")
+    assert static_attrpath(document, attrpath) == ("a", "b")
+    try:
+        parse("{ invalid = ; }")
+    except NixSyntaxError:
+        pass
+    else:
+        msg = "malformed source parsed successfully"
+        raise AssertionError(msg)
+
+
+if __name__ == "__main__":
+    main()

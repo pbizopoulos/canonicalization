@@ -3,8 +3,7 @@
   inputs,
   pkgs,
   ...
-}:
-let
+}: let
   formatter = treefmtEval.config.build.wrapper;
   git-canonicalization-script = pkgs.writeShellScriptBin "git-canonicalization-check" ''
     ${
@@ -20,23 +19,17 @@ let
         formatUnsafe = true;
         priority = 1;
       };
-      cabal-fmt.enable = true;
       clang-format.enable = true;
       deadnix.enable = true;
       dos2unix.enable = true;
       hclfmt.enable = true;
-      hlint.enable = true;
-      nixfmt.enable = true;
-      ormolu.enable = true;
       oxfmt = {
         enable = true;
         priority = 1;
       };
       ruff-check = {
         enable = true;
-        extendSelect = [
-          "ALL"
-        ];
+        extendSelect = ["ALL"];
       };
       ruff-format.enable = true;
       rustfmt.enable = true;
@@ -54,121 +47,63 @@ let
       formatter = {
         bibtex-tidy = {
           command = pkgs.bibtex-tidy;
-          includes = [
-            "*.bib"
-          ];
-          options = [
-            "--duplicates"
-            "--no-align"
-            "--no-wrap"
-            "--sort"
-            "--sort-fields"
-            "--v2"
-          ];
+          includes = ["*.bib"];
+          options = ["--duplicates" "--no-align" "--no-wrap" "--sort" "--sort-fields" "--v2"];
         };
-        biome.options = [
-          "--max-diagnostics=none"
-        ];
+        biome.options = ["--max-diagnostics=none"];
         git-canonicalization = {
           command = "${git-canonicalization-script}/bin/git-canonicalization-check";
-          includes = [
-            "*.nix"
-          ];
+          includes = ["*.nix"];
           priority = 1;
         };
         html-tidy = {
           command = pkgs.html-tidy;
-          includes = [
-            "*.html"
-          ];
-          options = [
-            "--quiet"
-            "yes"
-            "--tidy-mark"
-            "no"
-            "--wrap"
-            "0"
-            "--write-back"
-            "yes"
-          ];
+          includes = ["*.html"];
+          options = ["--quiet" "yes" "--tidy-mark" "no" "--wrap" "0" "--write-back" "yes"];
         };
         mypy = {
           command = pkgs.mypy;
-          includes = [
-            "*.py"
-          ];
-          options = [
-            "--cache-dir=/tmp/.mypy_cache"
-            "--explicit-package-bases"
-            "--ignore-missing-imports"
-            "--strict"
-          ];
+          excludes = ["packages/git-canonicalization/main.py" "packages/nix-alphabetize/main.py" "packages/nix-remove-defaults/main.py"];
+          includes = ["*.py"];
+          options = ["--cache-dir=/tmp/.mypy_cache" "--explicit-package-bases" "--ignore-missing-imports" "--strict"];
         };
         nix-alphabetize = {
           command = inputs.self.packages.${pkgs.stdenv.system}.nix-alphabetize;
-          includes = [
-            "*.nix"
-          ];
+          includes = ["*.nix"];
         };
         oxlint = {
           command = pkgs.oxlint;
-          includes = [
-            "*.js"
-          ];
-          options = [
-            "-A"
-            "all"
-          ];
+          includes = ["*.js"];
+          options = ["-A" "all"];
           priority = 1;
         };
         remove-empty-lines = {
           command = inputs.self.packages.${pkgs.stdenv.system}.remove_empty_lines;
-          excludes = [
-            "README"
-          ];
-          includes = [
-            "*"
-          ];
+          excludes = ["README"];
+          includes = ["*"];
         };
         remove-new-lines = {
           command = inputs.self.packages.${pkgs.stdenv.system}.remove_new_lines;
-          includes = [
-            "*.css"
-            "*.html"
-            "*.js"
-            "*.rs"
-          ];
+          includes = ["*.css" "*.html" "*.js" "*.rs"];
         };
-        ruff-check.options = [
-          "--cache-dir=/tmp/.ruff_cache"
-          "--unsafe-fixes"
-        ];
-        ruff-format.options = [
-          "--cache-dir=/tmp/.ruff_cache"
-        ];
-        shfmt.options = [
-          "--posix"
-        ];
-        texfmt.options = [
-          "--nowrap"
-        ];
+        ruff-check.options = ["--cache-dir=/tmp/.ruff_cache" "--unsafe-fixes"];
+        ruff-format.options = ["--cache-dir=/tmp/.ruff_cache"];
+        shfmt.options = ["--posix"];
+        texfmt.options = ["--nowrap"];
         uncomment = {
           command = inputs.self.packages.${pkgs.stdenv.system}.uncomment;
-          includes = [
-            "*"
-          ];
+          includes = ["*"];
         };
       };
-      global.excludes = [
-        "*/prm/**"
-        "*/tmp/**"
-      ];
+      global.excludes = ["*/prm/**" "*/tmp/**"];
     };
   };
 in
-formatter
-// {
-  passthru = formatter.passthru // {
-    tests.check = treefmtEval.config.build.check flake;
-  };
-}
+  formatter
+  // {
+    passthru =
+      formatter.passthru
+      // {
+        tests.check = treefmtEval.config.build.check flake;
+      };
+  }

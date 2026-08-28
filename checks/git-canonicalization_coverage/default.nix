@@ -12,12 +12,10 @@
       ++ [packageDrv.python.pkgs.pytest packageDrv.python.pkgs.pytest-cov]
   );
 in
-  pkgs.runCommand checkName
-  {
+  pkgs.runCommand checkName {
     nativeBuildInputs = [pythonEnv];
-    src = ../.. + "/packages/${packageName}";
-  }
-  ''
+    src = ../../packages/git-canonicalization;
+  } ''
     export HOME="$(mktemp -d)"
     mkdir -p "$out/html"
     PACKAGE_E2E_EXECUTABLE="${packageDrv}/bin/${packageName}" python -m pytest -p no:cacheprovider --cov="$src" --cov-report "html:$out/html" "$src/main.py"

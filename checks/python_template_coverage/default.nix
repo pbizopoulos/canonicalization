@@ -2,25 +2,19 @@
   inputs,
   pkgs,
   ...
-}:
-let
+}: let
   checkName = baseNameOf ./.;
   packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${packageName};
   packageName = pkgs.lib.removeSuffix "_coverage" checkName;
   pythonEnv = packageDrv.python.withPackages (
     _:
-    packageDrv.propagatedBuildInputs
-    ++ [
-      packageDrv.python.pkgs.pytest
-      packageDrv.python.pkgs.pytest-cov
-    ]
+      packageDrv.propagatedBuildInputs
+      ++ [packageDrv.python.pkgs.pytest packageDrv.python.pkgs.pytest-cov]
   );
 in
-pkgs.runCommand checkName
+  pkgs.runCommand checkName
   {
-    nativeBuildInputs = [
-      pythonEnv
-    ];
+    nativeBuildInputs = [pythonEnv];
     src = ../.. + "/packages/${packageName}";
   }
   ''

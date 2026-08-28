@@ -1,61 +1,23 @@
-{
-  pkgs ? import <nixpkgs> { },
-}:
-let
-  executableHaskellDepends = [
-    pkgs.haskellPackages.HUnit
-    pkgs.haskellPackages.aeson
-    pkgs.haskellPackages.base
-    pkgs.haskellPackages.bytestring
-    pkgs.haskellPackages.containers
-    pkgs.haskellPackages.data-fix
-    pkgs.haskellPackages.directory
-    pkgs.haskellPackages.filepath
-    pkgs.haskellPackages.haskell-src-exts
-    pkgs.haskellPackages.hnix
-    pkgs.haskellPackages.network-uri
-    pkgs.haskellPackages.optparse-applicative
-    pkgs.haskellPackages.prettyprinter
-    pkgs.haskellPackages.process
-    pkgs.haskellPackages.regex-tdfa
-    pkgs.haskellPackages.syb
-    pkgs.haskellPackages.text
-    pkgs.haskellPackages.toml-reader
-    pkgs.haskellPackages.unix
-  ];
-  ghc = pkgs.haskellPackages.ghcWithPackages (_: executableHaskellDepends);
+{pkgs ? import <nixpkgs> {}}: let
+  nixSyntax = import ../nix_syntax/default.nix {inherit pkgs;};
+  python = pkgs.python3;
+  pythonDeps = [nixSyntax];
 in
-pkgs.stdenv.mkDerivation rec {
-  buildPhase = ''
-    runHook preBuild
-    ${ghc}/bin/ghc -O2 -Weverything -Werror -threaded -i. -o "$pname" Main.hs
-    runHook postBuild
-  '';
-  installPhase = ''
-    runHook preInstall
-    install -Dm755 "$pname" "$out/bin/$pname"
-    runHook postInstall
-  '';
-  meta.mainProgram = pname;
-  nativeBuildInputs = [
-    ghc
-    pkgs.git
-    pkgs.makeWrapper
-    pkgs.nix
-    pkgs.python3
-  ];
-  passthru.haskellExecutableDepends = executableHaskellDepends;
-  pname = baseNameOf ./.;
-  postInstall = ''
-    wrapProgram "$out/bin/${pname}" --prefix PATH : ${
-      pkgs.lib.makeBinPath [
-        pkgs.git
-        pkgs.nix
-        pkgs.python3
-      ]
-    } --run "rm -f tmp/${pname}.tix" --set-default HPCTIXFILE tmp/${pname}.tix
-    PATH="$out/bin:$PATH" ${ghc}/bin/ghc -i. -e 'Main.runPackageTests' Main.hs
-  '';
-  src = ./.;
-  version = "0.0.0";
-}
+  python.pkgs.buildPythonPackage rec {
+    installPhase = ''
+      install -Dm644 main.py "$out/${python.sitePackages}/git_canonicalization.py"
+      install -Dm755 main.py "$out/bin/$pname"
+    '';
+    meta.mainProgram = pname;
+    nativeBuildInputs = [pkgs.makeWrapper];
+    passthru.python = python;
+    pname = baseNameOf ./.;
+    postFixup = ''
+      wrapProgram "$out/bin/$pname" --prefix PATH : ${pkgs.lib.makeBinPath [pkgs.alejandra pkgs.git pkgs.nix]}
+    '';
+    propagatedBuildInputs = pythonDeps;
+    pyproject = false;
+    src = ./.;
+    strictDeps = true;
+    version = "0.0.0";
+  }
