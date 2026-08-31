@@ -498,6 +498,87 @@ def package_description(package: Package) -> str | None:
     )
 
 
+def _compact_nix(source: str) -> str:
+    """Normalize insignificant whitespace for template comparisons."""
+    return " ".join(source.split())
+
+
+def _without_python_deps(source: str) -> str:
+    """Replace the user-defined Python dependency binding with its empty form."""
+    replaced, count = re.subn(
+        r"(?s)(\bpythonDeps\s*=\s*)\[.*?\](\s*;)",
+        r"\1[ ]\2",
+        source,
+        count=1,
+    )
+    if count != 1:
+        msg = "Python package default.nix must declare exactly one pythonDeps list"
+        raise CommandError(msg)
+    return replaced
+
+
+def _check_python_default(package: Package) -> None:
+    """Ensure generated Python package definitions only customize dependencies."""
+    actual = _read_regular(package.root / "default.nix")
+    if actual is None:
+        return
+    expected = scaffold("python", package.name, None)[
+        Path("packages") / package.name / "default.nix"
+    ]
+    if _compact_nix(_without_python_deps(actual)) != _compact_nix(expected):
+        msg = (
+            f"packages/{package.name}/default.nix: differs from the canonical "
+            "Python package template outside pythonDeps"
+        )
+        raise CommandError(msg)
+
+
+def _check_coverage_default(root: Path, package: Package) -> None:
+    """Ensure generated Python coverage checks retain their static definition."""
+    check = root / "checks" / f"{package.name}_coverage" / "default.nix"
+    if not check.is_file():
+        return
+    actual = _read_regular(check)
+    assert actual is not None
+    expected = _python_coverage_source(package.name)
+    current = _current_python_coverage_source()
+    if _compact_nix(actual) not in {_compact_nix(expected), _compact_nix(current)}:
+        msg = (
+            f"{check.relative_to(root)}: differs from the canonical coverage "
+            "check template"
+        )
+        raise CommandError(msg)
+
+
+def _current_python_coverage_source() -> str:
+    """Render the current canonical coverage-check definition."""
+    return """{ inputs, pkgs, ... }:
+let
+  checkName = baseNameOf ./.;
+  packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${packageName};
+  packageName = pkgs.lib.removeSuffix "_coverage" checkName;
+  pythonEnv = packageDrv.python.withPackages (
+    _:
+    packageDrv.propagatedBuildInputs
+    ++ [
+      packageDrv.python.pkgs.pytest
+      packageDrv.python.pkgs.pytest-cov
+    ]
+  );
+in
+pkgs.runCommand checkName
+  {
+    nativeBuildInputs = packageDrv.nativeBuildInputs ++ [ pythonEnv ];
+    src = ../.. + "/packages/${packageName}";
+  }
+  ''
+    export HOME="$(mktemp -d)"
+    mkdir -p "$out/html"
+    PACKAGE_E2E_EXECUTABLE="${packageDrv}/bin/${packageName}" python -m pytest -p no:cacheprovider --cov="$src" --cov-report "html:$out/html" "$src/main.py"
+  ''
+"""
+
+
 def check_flake(root: Path, fix: bool) -> list[Package]:
     """Check required files, structure, templates, and root whitelist."""
     missing = [
@@ -521,6 +602,15 @@ def check_flake(root: Path, fix: bool) -> list[Package]:
         default = package.root / "default.nix"
         if default.is_file():
             nix_syntax.parse(default.read_bytes(), str(default))
+        if package.kind == "python":
+            _check_python_default(package)
+            _check_coverage_default(root, package)
+    checks_root = root / "checks"
+    if checks_root.is_dir():
+        for check in checks_root.iterdir():
+            default = check / "default.nix"
+            if default.is_file():
+                nix_syntax.parse(default.read_bytes(), str(default))
     return packages
 
 
@@ -849,6 +939,46 @@ def test_python_scaffold_installs_optional_prm_resources() -> None:
     assert "pythonDeps = [ ];" in default
     assert "<nixpkgs>" not in default
     assert "passthru.python = python;" in default
+
+
+def test_python_default_allows_only_dependency_customization() -> None:
+    """Permit dependency changes but reject changes to immutable template fields."""
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        root = Path(temporary_directory)
+        package_root = root / "packages" / "report"
+        package_root.mkdir(parents=True)
+        source = scaffold("python", "report", None)[Path("packages/report/default.nix")]
+        source = source.replace(
+            "pythonDeps = [ ];",
+            "pythonDeps = [ pkgs.some_dependency ];",
+        )
+        package = Package("report", "python", package_root)
+        (package_root / "default.nix").write_text(source, encoding="utf-8")
+        _check_python_default(package)
+        (package_root / "default.nix").write_text(
+            source.replace('version = "0.0.0";', 'version = "1.0.0";'),
+            encoding="utf-8",
+        )
+        try:
+            _check_python_default(package)
+        except CommandError:
+            pass
+        else:
+            msg = "static Python package template drift was not detected"
+            raise AssertionError(msg)
+
+
+def test_coverage_default_matches_current_template() -> None:
+    """Recognize the canonical generated coverage check definition."""
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        root = Path(temporary_directory)
+        check = root / "checks" / "report_coverage"
+        check.mkdir(parents=True)
+        (check / "default.nix").write_text(
+            _current_python_coverage_source(),
+            encoding="utf-8",
+        )
+        _check_coverage_default(root, Package("report", "python", root / "report"))
 
 
 def test_remote_paths_and_test_names() -> None:
