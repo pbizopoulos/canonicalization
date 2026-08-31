@@ -14,7 +14,7 @@ let
 in
 pkgs.runCommand checkName
   {
-    nativeBuildInputs = [ pythonEnv ];
+    nativeBuildInputs = packageDrv.nativeBuildInputs ++ [ pythonEnv ];
     src = ../.. + "/packages/${packageName}";
   }
   ''
