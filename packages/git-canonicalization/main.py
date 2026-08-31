@@ -503,18 +503,19 @@ def _compact_nix(source: str) -> str:
     return " ".join(source.split())
 
 
-def _without_python_deps(source: str) -> str:
-    """Replace the user-defined Python dependency binding with its empty form."""
-    replaced, count = re.subn(
-        r"(?s)(\bpythonDeps\s*=\s*)\[.*?\](\s*;)",
-        r"\1[ ]\2",
-        source,
-        count=1,
-    )
-    if count != 1:
-        msg = "Python package default.nix must declare exactly one pythonDeps list"
-        raise CommandError(msg)
-    return replaced
+def _without_dependency_lists(source: str) -> str:
+    """Replace native and Python dependency bindings with empty lists."""
+    for dependency_name in ("nativeDeps", "pythonDeps"):
+        source, count = re.subn(
+            rf"(?s)(\b{dependency_name}\s*=\s*)\[.*?\](\s*;)",
+            r"\1[ ]\2",
+            source,
+            count=1,
+        )
+        if count != 1:
+            msg = f"Python package default.nix must declare exactly one {dependency_name} list"
+            raise CommandError(msg)
+    return source
 
 
 def _check_python_default(package: Package) -> None:
@@ -525,7 +526,7 @@ def _check_python_default(package: Package) -> None:
     expected = scaffold("python", package.name, None)[
         Path("packages") / package.name / "default.nix"
     ]
-    if _compact_nix(_without_python_deps(actual)) != _compact_nix(expected):
+    if _compact_nix(_without_dependency_lists(actual)) != _compact_nix(expected):
         msg = (
             f"packages/{package.name}/default.nix: differs from the canonical "
             "Python package template outside pythonDeps"
@@ -630,6 +631,7 @@ def scaffold(kind: str, name: str, description: str | None) -> dict[Path, str]:
     default = """{ inputs, pkgs, ... }:
 let
   moduleName = builtins.replaceStrings [ "-" ] [ "_" ] pname;
+  nativeDeps = [ ];
   pname = baseNameOf ./.;
   python = pkgs.python3;
   pythonDeps = [ ];
@@ -645,6 +647,7 @@ python.pkgs.buildPythonPackage {
     fi
   '';
   meta.mainProgram = pname;
+  nativeBuildInputs = nativeDeps;
   passthru.python = python;
   propagatedBuildInputs = pythonDeps;
   pyproject = false;
@@ -937,13 +940,14 @@ def test_python_scaffold_installs_optional_prm_resources() -> None:
     assert "if [ -d prm ]; then" in default
     assert 'cp -R prm/ "$out/bin/"' in default
     assert 'builtins.replaceStrings [ "-" ] [ "_" ] pname' in default
+    assert "nativeDeps = [ ];" in default
     assert "pythonDeps = [ ];" in default
     assert "<nixpkgs>" not in default
     assert "passthru.python = python;" in default
 
 
 def test_python_default_allows_only_dependency_customization() -> None:
-    """Permit dependency changes but reject changes to immutable template fields."""
+    """Permit native and Python dependency changes but reject template changes."""
     with tempfile.TemporaryDirectory() as temporary_directory:
         root = Path(temporary_directory)
         package_root = root / "packages" / "report"
@@ -952,6 +956,10 @@ def test_python_default_allows_only_dependency_customization() -> None:
         source = source.replace(
             "pythonDeps = [ ];",
             "pythonDeps = [ pkgs.some_dependency ];",
+        )
+        source = source.replace(
+            "nativeDeps = [ ];",
+            "nativeDeps = [ pkgs.some_native_dependency ];",
         )
         package = Package("report", "python", package_root)
         (package_root / "default.nix").write_text(source, encoding="utf-8")

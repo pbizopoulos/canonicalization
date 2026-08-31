@@ -1,6 +1,7 @@
 { inputs, pkgs, ... }:
 let
   moduleName = builtins.replaceStrings [ "-" ] [ "_" ] pname;
+  nativeDeps = [ ];
   pname = baseNameOf ./.;
   python = pkgs.python3;
   pythonDeps = [ inputs.self.packages.${pkgs.stdenv.system}.nix_syntax ];
@@ -16,6 +17,7 @@ python.pkgs.buildPythonPackage {
     fi
   '';
   meta.mainProgram = pname;
+  nativeBuildInputs = nativeDeps;
   passthru.python = python;
   propagatedBuildInputs = pythonDeps;
   pyproject = false;
