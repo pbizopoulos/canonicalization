@@ -1,8 +1,4 @@
-{
-  inputs,
-  pkgs,
-  ...
-}:
+{ inputs, pkgs, ... }:
 let
   host = pkgs.lib.removeSuffix "VmWithDisko" (baseNameOf ./.);
 in

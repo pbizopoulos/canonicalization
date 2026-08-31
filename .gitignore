@@ -18,8 +18,6 @@
 !/checks/nix-remove-defaults_coverage/default.nix
 !/checks/nix_syntax_coverage/
 !/checks/nix_syntax_coverage/default.nix
-!/checks/python_latex_template_coverage/
-!/checks/python_latex_template_coverage/default.nix
 !/checks/remove_empty_lines_coverage/
 !/checks/remove_empty_lines_coverage/default.nix
 !/checks/remove_new_lines_coverage/
@@ -57,11 +55,6 @@
 !/packages/nix_syntax/
 !/packages/nix_syntax/default.nix
 !/packages/nix_syntax/main.py
-!/packages/python_latex_template/
-!/packages/python_latex_template/default.nix
-!/packages/python_latex_template/main.py
-!/packages/python_latex_template/ms.bib
-!/packages/python_latex_template/ms.tex
 !/packages/remove_empty_lines/
 !/packages/remove_empty_lines/default.nix
 !/packages/remove_empty_lines/main.py

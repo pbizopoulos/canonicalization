@@ -1,25 +1,25 @@
-{
-  pkgs ? import <nixpkgs> { },
-}:
+{ inputs, pkgs, ... }:
 let
+  moduleName = builtins.replaceStrings [ "-" ] [ "_" ] pname;
+  pname = baseNameOf ./.;
   python = pkgs.python3;
   pythonDeps = [ python.pkgs.tree-sitter-language-pack ];
 in
-python.pkgs.buildPythonPackage rec {
+python.pkgs.buildPythonPackage {
+  inherit pname;
   installPhase = ''
-    install -Dm644 main.py "$out/${python.sitePackages}/${pname}.py"
-    install -Dm755 main.py "$out/bin/${pname}"
+    install -Dm644 main.py "$out/${python.sitePackages}/${moduleName}.py"
+    install -Dm755 main.py "$out/bin/$pname"
+    if [ -d prm ]; then
+      cp -R prm/ "$out/${python.sitePackages}/"
+      cp -R prm/ "$out/bin/"
+    fi
   '';
   meta.mainProgram = pname;
-  nativeBuildInputs = [ pkgs.makeWrapper ];
   passthru.python = python;
-  pname = baseNameOf ./.;
-  postFixup = ''
-    wrapProgram "$out/bin/${pname}" --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.alejandra ]}
-  '';
   propagatedBuildInputs = pythonDeps;
   pyproject = false;
-  src = ./.;
+  src = inputs.self + "/packages/${pname}";
   strictDeps = true;
   version = "0.0.0";
 }

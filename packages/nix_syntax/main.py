@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026- Paschalis Bizopoulos
-# ruff: noqa: PERF203, PTH101, PTH105, PTH108, S101, S603
+# ruff: noqa: PERF203, PTH101, PTH105, PTH108, S101
 """Shared, lossless-enough Nix parsing and rewriting helpers."""
 
 from __future__ import annotations
 
 import contextlib
 import os
-import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -129,24 +128,6 @@ def apply_edits(source: bytes, edits: Iterable[tuple[int, int, bytes]]) -> bytes
         result = result[:start] + replacement + result[end:]
         previous_start = start
     return result
-
-
-def format_source(source: str, path: str = "<expression>") -> str:
-    """Format valid Nix source with the non-Haskell Alejandra formatter."""
-    parse(source, path)
-    completed = subprocess.run(
-        [os.environ.get("NIX_SYNTAX_FORMATTER", "alejandra"), "-q"],
-        input=source,
-        capture_output=True,
-        check=False,
-        text=True,
-    )
-    if completed.returncode != 0:
-        diagnostic = compact(completed.stderr) or "formatter failed"
-        msg = f"{path}: {diagnostic}"
-        raise NixSyntaxError(msg)
-    parse(completed.stdout, path)
-    return completed.stdout
 
 
 def write_if_changed(path: Path, contents: str) -> None:

@@ -185,7 +185,8 @@ def format_text(source: str, path: str = "<expression>") -> str:
     """Sort a Nix expression and apply deterministic formatting."""
     document = nix_syntax.parse(source, path)
     transformed = render_node(document, document.root)
-    return nix_syntax.format_source(transformed, path)
+    nix_syntax.parse(transformed, path)
+    return transformed
 
 
 def format_file(path: Path) -> bool:

@@ -15,6 +15,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -23,9 +24,8 @@ from urllib.parse import urlparse
 import nix_syntax
 import tomllib
 
-PACKAGE_KINDS = ("python", "python-latex", "html", "opentofu", "latex")
+PACKAGE_KINDS = ("python", "html", "opentofu", "latex")
 KIND_MARKERS = {
-    "python-latex": ("main.py", "ms.tex"),
     "python": ("main.py",),
     "html": ("index.html",),
     "opentofu": ("main.tf",),
@@ -315,8 +315,6 @@ def detect_packages(root: Path) -> list[Package]:
             for kind, markers in KIND_MARKERS.items()
             if all((package_root / marker).is_file() for marker in markers)
         ]
-        if (package_root / "main.py").exists() and (package_root / "ms.tex").exists():
-            matches = [kind for kind in matches if kind != "python"]
         if (package_root / "main.py").exists():
             matches = [kind for kind in matches if kind != "latex"]
         if len(matches) > 1:
@@ -349,7 +347,6 @@ def package_files(package: Package) -> set[Path]:
     relative = Path("packages") / package.name
     kind_files = {
         "python": {"main.py"},
-        "python-latex": {"main.py", "ms.tex", "ms.bib", "refs.bib"},
         "html": {"index.html", "script.js", "style.css"},
         "opentofu": {"main.tf", ".terraform.lock.hcl"},
         "latex": {"ms.tex", "ms.bib"},
@@ -533,16 +530,40 @@ def scaffold(kind: str, name: str, description: str | None) -> dict[Path, str]:
         description
         or {
             "python": "A Python package.",
-            "python-latex": "A Python LaTeX package.",
             "html": "An HTML package.",
             "opentofu": "An OpenTofu package.",
             "latex": "A LaTeX package.",
         }[kind]
     )
     root = Path("packages") / name
-    default = f"""{{ pkgs ? import <nixpkgs> {{ }} }}:\nlet python = pkgs.python3; in python.pkgs.buildPythonPackage rec {{\n  installPhase = ''\n    install -Dm755 main.py "$out/bin/$pname"\n  '';\n  meta = {{ description = {json.dumps(description)}; mainProgram = pname; }};\n  pname = baseNameOf ./.;\n  pyproject = false;\n  src = ./.;\n  version = "0.0.0";\n}}\n"""
+    default = """{ inputs, pkgs, ... }:
+let
+  moduleName = builtins.replaceStrings [ "-" ] [ "_" ] pname;
+  pname = baseNameOf ./.;
+  python = pkgs.python3;
+  pythonDeps = [ ];
+in
+python.pkgs.buildPythonPackage {
+  inherit pname;
+  installPhase = ''
+    install -Dm644 main.py "$out/${python.sitePackages}/${moduleName}.py"
+    install -Dm755 main.py "$out/bin/$pname"
+    if [ -d prm ]; then
+      cp -R prm/ "$out/${python.sitePackages}/"
+      cp -R prm/ "$out/bin/"
+    fi
+  '';
+  meta.mainProgram = pname;
+  passthru.python = python;
+  propagatedBuildInputs = pythonDeps;
+  pyproject = false;
+  src = inputs.self + "/packages/${pname}";
+  strictDeps = true;
+  version = "0.0.0";
+}
+"""
     files: dict[Path, str] = {root / "default.nix": default}
-    if kind in {"python", "python-latex"}:
+    if kind == "python":
         files[root / "main.py"] = (
             f'''#!/usr/bin/env python3\n"""{description}"""\n\ndef main() -> None:\n    """Run {name}."""\n\nif __name__ == "__main__":\n    main()\n'''
         )
@@ -714,7 +735,7 @@ def status(root: Path) -> dict[str, Any]:
                 "type": package.kind,
                 "description": package_description(package),
                 "tests": python_tests(package.root / "main.py")
-                if package.kind in {"python", "python-latex"}
+                if package.kind == "python"
                 else [],
             }
             for package in packages
@@ -801,9 +822,33 @@ def main() -> None:
         raise SystemExit(1) from error
 
 
-def test_haskell_is_not_a_supported_package_kind() -> None:
-    """Rejects removed Haskell package support."""
-    assert "haskell" not in PACKAGE_KINDS
+def test_removed_package_kinds_are_not_supported() -> None:
+    """Reject removed Haskell and Python-LaTeX package kinds."""
+    assert {"haskell", "python-latex"}.isdisjoint(PACKAGE_KINDS)
+
+
+def test_python_package_allows_latex_resources_in_prm() -> None:
+    """Classify LaTeX resources under prm as an opaque Python implementation detail."""
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        root = Path(temporary_directory)
+        package = root / "packages" / "report"
+        (package / "prm").mkdir(parents=True)
+        (package / "default.nix").write_text("{ }: { }\n", encoding="utf-8")
+        (package / "main.py").write_text("", encoding="utf-8")
+        (package / "prm" / "ms.tex").write_text("", encoding="utf-8")
+        assert detect_packages(root) == [Package("report", "python", package)]
+
+
+def test_python_scaffold_installs_optional_prm_resources() -> None:
+    """Use one canonical Python package template for optional package resources."""
+    files = scaffold("python", "report", None)
+    default = files[Path("packages/report/default.nix")]
+    assert "if [ -d prm ]; then" in default
+    assert 'cp -R prm/ "$out/bin/"' in default
+    assert 'builtins.replaceStrings [ "-" ] [ "_" ] pname' in default
+    assert "pythonDeps = [ ];" in default
+    assert "<nixpkgs>" not in default
+    assert "passthru.python = python;" in default
 
 
 def test_remote_paths_and_test_names() -> None:

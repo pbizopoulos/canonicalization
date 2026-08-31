@@ -1,6 +1,4 @@
-{
-  pkgs ? import <nixpkgs> { },
-}:
+{ pkgs, ... }:
 pkgs.stdenv.mkDerivation rec {
   buildInputs = [ pkgs.stdenv.cc.cc.lib ];
   doInstallCheck = pkgs.stdenv.isLinux;
@@ -24,9 +22,9 @@ pkgs.stdenv.mkDerivation rec {
   pname = baseNameOf ./.;
   sourceRoot = ".";
   src = pkgs.fetchurl {
-    sha256 = "hQ7tdZWraoT6VlI9OJ0V753fCVMB1nEy+kNWdwVli2I=";
+    sha256 = "/zo/r7sBHRs14AEd6gbpiDwkgGiLatuCZ6GhE54V0oE=";
     url = "https://github.com/Goldziher/${pname}/releases/download/v${version}/${pname}-x86_64-unknown-linux-gnu.tar.gz";
   };
   strictDeps = true;
-  version = "3.5.2";
+  version = "3.6.0";
 }

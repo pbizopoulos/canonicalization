@@ -1,8 +1,4 @@
-{
-  inputs,
-  pkgs,
-  ...
-}:
+{ inputs, pkgs, ... }:
 let
   checkName = baseNameOf ./.;
   packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${packageName};
@@ -19,7 +15,7 @@ in
 pkgs.runCommand checkName
   {
     nativeBuildInputs = [ pythonEnv ];
-    src = ../../packages/git-canonicalization;
+    src = ../.. + "/packages/${packageName}";
   }
   ''
     export HOME="$(mktemp -d)"

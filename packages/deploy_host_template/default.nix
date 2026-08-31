@@ -1,7 +1,4 @@
-{
-  inputs,
-  pkgs ? import <nixpkgs> { },
-}:
+{ inputs, pkgs, ... }:
 pkgs.writeShellApplication rec {
   meta.description = "A Terraform template package for deploying a host.";
   name = baseNameOf ./.;

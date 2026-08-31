@@ -317,7 +317,8 @@ def rewrite(
         source,
         [(target.start_byte, target.end_byte, transformed.encode())],
     ).decode()
-    return nix_syntax.format_source(replaced, document.path)
+    nix_syntax.parse(replaced, document.path)
+    return replaced
 
 
 def process_repository(root: Path) -> None:

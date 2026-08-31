@@ -24,7 +24,10 @@ let
       deadnix.enable = true;
       dos2unix.enable = true;
       hclfmt.enable = true;
-      nixfmt.enable = true;
+      nixfmt = {
+        enable = true;
+        priority = 2;
+      };
       oxfmt = {
         enable = true;
         priority = 1;
@@ -97,6 +100,7 @@ let
         nix-alphabetize = {
           command = inputs.self.packages.${pkgs.stdenv.system}.nix-alphabetize;
           includes = [ "*.nix" ];
+          priority = 1;
         };
         oxlint = {
           command = pkgs.oxlint;

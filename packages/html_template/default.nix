@@ -1,6 +1,4 @@
-{
-  pkgs ? import <nixpkgs> { },
-}:
+{ pkgs, ... }:
 pkgs.writeShellApplication rec {
   meta.description = "An HTML, CSS, and JavaScript template package.";
   name = baseNameOf ./.;

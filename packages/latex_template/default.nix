@@ -1,6 +1,4 @@
-{
-  pkgs ? import <nixpkgs> { },
-}:
+{ pkgs, ... }:
 pkgs.stdenv.mkDerivation rec {
   buildPhase = ''
     latexmk -pdf ms.tex

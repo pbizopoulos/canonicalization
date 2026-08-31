@@ -1,8 +1,4 @@
-{
-  inputs,
-  pkgs,
-  ...
-}:
+{ inputs, pkgs, ... }:
 let
   checkName = baseNameOf ./.;
   packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${packageName};
@@ -18,11 +14,8 @@ let
 in
 pkgs.runCommand checkName
   {
-    nativeBuildInputs = [
-      packageDrv
-      pythonEnv
-    ];
-    src = ../../packages/nix_syntax;
+    nativeBuildInputs = [ pythonEnv ];
+    src = ../.. + "/packages/${packageName}";
   }
   ''
     export HOME="$(mktemp -d)"
