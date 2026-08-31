@@ -20,5 +20,6 @@ pkgs.runCommand checkName
   ''
     export HOME="$(mktemp -d)"
     mkdir -p "$out/html"
+    cd "$out"
     PACKAGE_E2E_EXECUTABLE="${packageDrv}/bin/${packageName}" python -m pytest -p no:cacheprovider --cov="$src" --cov-report "html:$out/html" "$src/main.py"
   ''

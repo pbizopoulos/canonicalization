@@ -574,6 +574,7 @@ pkgs.runCommand checkName
   ''
     export HOME="$(mktemp -d)"
     mkdir -p "$out/html"
+    cd "$out"
     PACKAGE_E2E_EXECUTABLE="${packageDrv}/bin/${packageName}" python -m pytest -p no:cacheprovider --cov="$src" --cov-report "html:$out/html" "$src/main.py"
   ''
 """
@@ -681,7 +682,7 @@ python.pkgs.buildPythonPackage {
 
 
 def _python_coverage_source(name: str) -> str:
-    return f"""{{ inputs, pkgs, ... }}:\nlet\n  packageDrv = inputs.self.packages.${{pkgs.stdenv.system}}.{name};\n  pythonEnv = packageDrv.python.withPackages (_: packageDrv.propagatedBuildInputs ++ [ packageDrv.python.pkgs.pytest packageDrv.python.pkgs.pytest-cov ]);\nin pkgs.runCommand "{name}_coverage" {{ nativeBuildInputs = [ pythonEnv ]; src = ../../packages/{name}; }} ''\n  mkdir -p "$out/html"\n  PACKAGE_E2E_EXECUTABLE="${{packageDrv}}/bin/{name}" python -m pytest -p no:cacheprovider --cov="$src" --cov-report "html:$out/html" "$src/main.py"\n''\n"""
+    return f"""{{ inputs, pkgs, ... }}:\nlet\n  packageDrv = inputs.self.packages.${{pkgs.stdenv.system}}.{name};\n  pythonEnv = packageDrv.python.withPackages (_: packageDrv.propagatedBuildInputs ++ [ packageDrv.python.pkgs.pytest packageDrv.python.pkgs.pytest-cov ]);\nin pkgs.runCommand "{name}_coverage" {{ nativeBuildInputs = [ pythonEnv ]; src = ../../packages/{name}; }} ''\n  mkdir -p "$out/html"\n  cd "$out"\n  PACKAGE_E2E_EXECUTABLE="${{packageDrv}}/bin/{name}" python -m pytest -p no:cacheprovider --cov="$src" --cov-report "html:$out/html" "$src/main.py"\n''\n"""
 
 
 def add_package(root: Path, kind: str, name: str, description: str | None) -> None:
