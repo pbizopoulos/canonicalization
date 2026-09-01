@@ -16,7 +16,7 @@ python.pkgs.buildPythonPackage {
     install -Dm755 main.py "$out/bin/$pname"
     if [ -d prm ]; then
       cp -R prm/ "$out/${python.sitePackages}/"
-     cp -R prm/ "$out/bin/"
+      cp -R prm/ "$out/bin/"
     fi
   '';
   meta.mainProgram = pname;

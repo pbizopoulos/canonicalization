@@ -11,10 +11,10 @@ in
 python.pkgs.buildPythonPackage {
   inherit pname;
   installPhase = ''
-      install -Dm644 main.py "$out/${python.sitePackages}/$pname.py"
-      install -Dm755 main.py "$out/bin/$pname"
-      if [ -d prm ]; then
-        cp -R prm/ "$out/${python.sitePackages}/"
+    install -Dm644 main.py "$out/${python.sitePackages}/$pname.py"
+    install -Dm755 main.py "$out/bin/$pname"
+    if [ -d prm ]; then
+      cp -R prm/ "$out/${python.sitePackages}/"
       cp -R prm/ "$out/bin/"
     fi
   '';
