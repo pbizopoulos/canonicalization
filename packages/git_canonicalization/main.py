@@ -334,8 +334,6 @@ def detect_packages(root: Path) -> list[Package]:
 
 def validate_name(kind: str, name: str) -> None:
     """Enforce package naming conventions."""
-    if name in {"git-canonicalization", "nix-alphabetize", "nix-remove-defaults"}:
-        return
     separator = KIND_SEPARATOR[kind]
     if not re.fullmatch(rf"[a-z0-9]+(?:{re.escape(separator)}[a-z0-9]+)*", name):
         msg = f"package name must use snake_case: {name}"
@@ -630,7 +628,6 @@ def scaffold(kind: str, name: str, description: str | None) -> dict[Path, str]:
     root = Path("packages") / name
     default = """{ inputs, pkgs, ... }:
 let
-  moduleName = builtins.replaceStrings [ "-" ] [ "_" ] pname;
   nativeDeps = [ ];
   pname = baseNameOf ./.;
   python = pkgs.python3;
@@ -639,11 +636,11 @@ in
 python.pkgs.buildPythonPackage {
   inherit pname;
   installPhase = ''
-    install -Dm644 main.py "$out/${python.sitePackages}/${moduleName}.py"
+    install -Dm644 main.py "$out/${python.sitePackages}/$pname.py"
     install -Dm755 main.py "$out/bin/$pname"
     if [ -d prm ]; then
       cp -R prm/ "$out/${python.sitePackages}/"
-      cp -R prm/ "$out/bin/"
+     cp -R prm/ "$out/bin/"
     fi
   '';
   meta.mainProgram = pname;
@@ -662,7 +659,7 @@ python.pkgs.buildPythonPackage {
             f'''#!/usr/bin/env python3\n"""{description}"""\n\ndef main() -> None:\n    """Run {name}."""\n\nif __name__ == "__main__":\n    main()\n'''
         )
         check = Path("checks") / f"{name}_coverage" / "default.nix"
-        files[check] = _python_coverage_source(name)
+        files[check] = _current_python_coverage_source()
     elif kind == "html":
         files.update(
             {
@@ -939,7 +936,7 @@ def test_python_scaffold_installs_optional_prm_resources() -> None:
     default = files[Path("packages/report/default.nix")]
     assert "if [ -d prm ]; then" in default
     assert 'cp -R prm/ "$out/bin/"' in default
-    assert 'builtins.replaceStrings [ "-" ] [ "_" ] pname' in default
+    assert '"$out/${python.sitePackages}/$pname.py"' in default
     assert "nativeDeps = [ ];" in default
     assert "pythonDeps = [ ];" in default
     assert "<nixpkgs>" not in default

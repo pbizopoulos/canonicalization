@@ -8,8 +8,8 @@ let
   formatter = treefmtEval.config.build.wrapper;
   git-canonicalization-script = pkgs.writeShellScriptBin "git-canonicalization-check" ''
     ${
-      inputs.self.packages.${pkgs.stdenv.system}."git-canonicalization"
-    }/bin/git-canonicalization check --fix
+      inputs.self.packages.${pkgs.stdenv.system}.git_canonicalization
+    }/bin/git_canonicalization check --fix
   '';
   treefmtEval = inputs.treefmt-nix.lib.evalModule pkgs {
     programs = {
@@ -85,9 +85,9 @@ let
         mypy = {
           command = pkgs.mypy;
           excludes = [
-            "packages/git-canonicalization/main.py"
-            "packages/nix-alphabetize/main.py"
-            "packages/nix-remove-defaults/main.py"
+            "packages/git_canonicalization/main.py"
+            "packages/nix_alphabetize/main.py"
+            "packages/nix_remove_defaults/main.py"
           ];
           includes = [ "*.py" ];
           options = [
@@ -98,7 +98,7 @@ let
           ];
         };
         nix-alphabetize = {
-          command = inputs.self.packages.${pkgs.stdenv.system}.nix-alphabetize;
+          command = inputs.self.packages.${pkgs.stdenv.system}.nix_alphabetize;
           includes = [ "*.nix" ];
           priority = 1;
         };
