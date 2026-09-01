@@ -23,7 +23,7 @@ python.pkgs.buildPythonPackage {
   passthru.python = python;
   propagatedBuildInputs = pythonDeps;
   pyproject = false;
-  src = inputs.self + "/packages/${pname}";
+  src = ./.;
   strictDeps = true;
   version = "0.0.0";
 }

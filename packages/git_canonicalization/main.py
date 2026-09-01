@@ -503,6 +503,12 @@ def _compact_nix(source: str) -> str:
 
 def _without_dependency_lists(source: str) -> str:
     """Replace native and Python dependency bindings with empty lists."""
+    source = re.sub(
+        r"\{\s*inputs,\s*pkgs,\s*\.\.\.\s*\}:",
+        "{ pkgs, ... }:",
+        source,
+        count=1,
+    )
     for dependency_name in ("nativeDeps", "pythonDeps"):
         source, count = re.subn(
             rf"(?s)(\b{dependency_name}\s*=\s*)\[.*?\](\s*;)",
@@ -524,7 +530,9 @@ def _check_python_default(package: Package) -> None:
     expected = scaffold("python", package.name, None)[
         Path("packages") / package.name / "default.nix"
     ]
-    if _compact_nix(_without_dependency_lists(actual)) != _compact_nix(expected):
+    if _compact_nix(_without_dependency_lists(actual)) != _compact_nix(
+        _without_dependency_lists(expected),
+    ):
         msg = (
             f"packages/{package.name}/default.nix: differs from the canonical "
             "Python package template outside pythonDeps"
@@ -648,7 +656,7 @@ python.pkgs.buildPythonPackage {
   passthru.python = python;
   propagatedBuildInputs = pythonDeps;
   pyproject = false;
-  src = inputs.self + "/packages/${pname}";
+  src = ./.;
   strictDeps = true;
   version = "0.0.0";
 }
@@ -958,6 +966,7 @@ def test_python_default_allows_only_dependency_customization() -> None:
             "nativeDeps = [ ];",
             "nativeDeps = [ pkgs.some_native_dependency ];",
         )
+        source = source.replace("{ inputs, pkgs, ... }:", "{ pkgs, ... }:")
         package = Package("report", "python", package_root)
         (package_root / "default.nix").write_text(source, encoding="utf-8")
         _check_python_default(package)
