@@ -663,8 +663,9 @@ python.pkgs.buildPythonPackage {
 """
     files: dict[Path, str] = {root / "default.nix": default}
     if kind == "python":
+        description_literal = repr(description)
         files[root / "main.py"] = (
-            f'''#!/usr/bin/env python3\n"""{description}"""\n\ndef main() -> None:\n    """Run {name}."""\n\nif __name__ == "__main__":\n    main()\n'''
+            f'''#!/usr/bin/env python3\n{description_literal}\n\ndef main() -> None:\n    """Run {name}."""\n\nif __name__ == "__main__":\n    main()\n'''
         )
         check = Path("checks") / f"{name}_coverage" / "default.nix"
         files[check] = _current_python_coverage_source()
@@ -767,6 +768,50 @@ def remove_package(root: Path, name: str, dry_run: bool, force: bool) -> None:
     )
 
 
+def _imported_status(source: str) -> tuple[list[dict[str, str | None]], list[str]]:
+    """Validate package and host resources imported from a status document."""
+    imported = json.loads(source)
+    if not isinstance(imported, dict):
+        msg = "status document must be a JSON object"
+        raise CommandError(msg)
+    packages = imported.get("packages", [])
+    hosts = imported.get("hosts", [])
+    if not isinstance(packages, list) or not isinstance(hosts, list):
+        msg = "status document packages and hosts must be arrays"
+        raise CommandError(msg)
+    validated_packages: list[dict[str, str | None]] = []
+    for item in packages:
+        if not isinstance(item, dict):
+            msg = "status document packages must contain objects"
+            raise CommandError(msg)
+        kind = item.get("type")
+        name = item.get("name")
+        description = item.get("description")
+        if not isinstance(kind, str) or kind not in PACKAGE_KINDS:
+            msg = f"unsupported package type: {kind}"
+            raise CommandError(msg)
+        if not isinstance(name, str):
+            msg = "status document package name must be a string"
+            raise CommandError(msg)
+        if description is not None and not isinstance(description, str):
+            msg = "status document package description must be a string or null"
+            raise CommandError(msg)
+        validate_name(kind, name)
+        validated_packages.append(
+            {"type": kind, "name": name, "description": description},
+        )
+    validated_hosts: list[str] = []
+    for host in hosts:
+        if not isinstance(host, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]*",
+            host,
+        ):
+            msg = f"invalid host name: {host}"
+            raise CommandError(msg)
+        validated_hosts.append(host)
+    return validated_packages, validated_hosts
+
+
 def initialize(directory: Path, status_path: str | None) -> None:
     """Initialize a canonical flake repository and optional status resources."""
     directory = directory.absolute()
@@ -790,15 +835,10 @@ def initialize(directory: Path, status_path: str | None) -> None:
             if status_path == "-"
             else Path(status_path).read_text(encoding="utf-8")
         )
-        imported = json.loads(source)
-        for item in imported.get("packages", []):
-            kind = item["type"]
-            if kind not in PACKAGE_KINDS:
-                msg = f"unsupported package type: {kind}"
-                raise CommandError(msg)
-        for item in imported.get("packages", []):
+        packages, hosts = _imported_status(source)
+        for item in packages:
             add_package(directory, item["type"], item["name"], item.get("description"))
-        for host in imported.get("hosts", []):
+        for host in hosts:
             path = directory / "hosts" / host / "configuration.nix"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("{ ... }: { }\n", encoding="utf-8")
@@ -949,6 +989,35 @@ def test_python_scaffold_installs_optional_prm_resources() -> None:
     assert "pythonDeps = [ ];" in default
     assert "<nixpkgs>" not in default
     assert "passthru.python = python;" in default
+
+
+def test_python_scaffold_escapes_arbitrary_description() -> None:
+    """Produce parseable Python source for descriptions containing quotes and newlines."""
+    source = scaffold("python", "report", 'A """ quoted\\ndescription.')[
+        Path("packages/report/main.py")
+    ]
+    module = ast.parse(source)
+    assert ast.get_docstring(module) == 'A """ quoted\\ndescription.'
+
+
+def test_imported_status_rejects_invalid_shapes_and_host_paths() -> None:
+    """Reject malformed imported resources before they affect the destination."""
+    for source in (
+        "[]",
+        '{"packages": {}}',
+        '{"packages": [{"type": "python"}]}',
+        '{"hosts": ["../outside"]}',
+    ):
+        _assert_invalid_imported_status(source)
+
+
+def _assert_invalid_imported_status(source: str) -> None:
+    try:
+        _imported_status(source)
+    except CommandError:
+        return
+    msg = f"invalid status was accepted: {source}"
+    raise AssertionError(msg)
 
 
 def test_python_default_allows_only_dependency_customization() -> None:
