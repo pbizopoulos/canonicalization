@@ -4,9 +4,11 @@ let
   pname = baseNameOf ./.;
   python = pkgs.python3;
   pythonDeps = [ ];
+  shellHook = "";
 in
 python.pkgs.buildPythonPackage {
   inherit pname;
+  inherit shellHook;
   installPhase = ''
     install -Dm644 main.py "$out/${python.sitePackages}/$pname.py"
     install -Dm755 main.py "$out/bin/$pname"

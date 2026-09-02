@@ -502,7 +502,7 @@ def _compact_nix(source: str) -> str:
 
 
 def _without_dependency_lists(source: str) -> str:
-    """Replace native and Python dependency bindings with empty lists."""
+    """Replace package-specific bindings with their template defaults."""
     source = re.sub(
         r"\{\s*inputs,\s*pkgs,\s*\.\.\.\s*\}:",
         "{ pkgs, ... }:",
@@ -519,11 +519,20 @@ def _without_dependency_lists(source: str) -> str:
         if count != 1:
             msg = f"Python package default.nix must declare exactly one {dependency_name} list"
             raise CommandError(msg)
+    source, count = re.subn(
+        r"(?s)(\bshellHook\s*=\s*)(?:\".*?\"|''.*?'')(\s*;)",
+        r'\1""\2',
+        source,
+        count=1,
+    )
+    if count != 1:
+        msg = "Python package default.nix must declare exactly one shellHook string"
+        raise CommandError(msg)
     return source
 
 
 def _check_python_default(package: Package) -> None:
-    """Ensure generated Python package definitions only customize dependencies."""
+    """Ensure generated Python definitions only customize approved package fields."""
     actual = _read_regular(package.root / "default.nix")
     if actual is None:
         return
@@ -640,9 +649,11 @@ let
   pname = baseNameOf ./.;
   python = pkgs.python3;
   pythonDeps = [ ];
+  shellHook = "";
 in
 python.pkgs.buildPythonPackage {
   inherit pname;
+  inherit shellHook;
   installPhase = ''
     install -Dm644 main.py "$out/${python.sitePackages}/$pname.py"
     install -Dm755 main.py "$out/bin/$pname"
@@ -1020,8 +1031,8 @@ def _assert_invalid_imported_status(source: str) -> None:
     raise AssertionError(msg)
 
 
-def test_python_default_allows_only_dependency_customization() -> None:
-    """Permit native and Python dependency changes but reject template changes."""
+def test_python_default_allows_only_package_customization() -> None:
+    """Permit dependency and shell-hook changes but reject template changes."""
     with tempfile.TemporaryDirectory() as temporary_directory:
         root = Path(temporary_directory)
         package_root = root / "packages" / "report"
@@ -1034,6 +1045,10 @@ def test_python_default_allows_only_dependency_customization() -> None:
         source = source.replace(
             "nativeDeps = [ ];",
             "nativeDeps = [ pkgs.some_native_dependency ];",
+        )
+        source = source.replace(
+            'shellHook = "";',
+            "shellHook = ''\n  export EXAMPLE=value\n'';",
         )
         source = source.replace("{ inputs, pkgs, ... }:", "{ pkgs, ... }:")
         package = Package("report", "python", package_root)
