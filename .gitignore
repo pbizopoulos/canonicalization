@@ -65,7 +65,3 @@
 !/packages/uncomment/default.nix
 !/prm/
 !/prm/**
-!/secrets/
-!/secrets/secrets.age
-!/secrets/secrets.env.example
-!/secrets/secrets.nix

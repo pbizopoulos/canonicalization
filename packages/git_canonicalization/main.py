@@ -42,9 +42,6 @@ ROOT_FILES = {
     "flake.lock",
     "flake.nix",
     "formatter.nix",
-    "secrets/secrets.age",
-    "secrets/secrets.env.example",
-    "secrets/secrets.nix",
 }
 OPAQUE = {"prm"}
 

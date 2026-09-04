@@ -16,7 +16,7 @@ cd ~/github.com/pbizopoulos/canonicalization/
 # - set systemd.services.default.environment.CSRF_TRUSTED_ORIGINS = "https://<your-domain>"
 # - add a matching security.acme configuration and email address
 
-cd secrets/
+cd prm/
 nix run github:ryantm/agenix -- -e secrets.age
 # Upload your public ssh key named default in https://console.hetzner.com/projects/<project-id>/security/sshkeys
 # Generate an API token named default in https://console.hetzner.com/projects/<project-id>/security/tokens

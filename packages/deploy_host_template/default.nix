@@ -17,7 +17,7 @@ pkgs.writeShellApplication rec {
     source ${
       pkgs.lib.getExe (
         inputs.agenix-shell.lib.installationScript pkgs.stdenv.system {
-          secrets.secrets.file = ../../secrets/secrets.age;
+          secrets.secrets.file = ../../prm/secrets.age;
         }
       )
     }
