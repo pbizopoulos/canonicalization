@@ -17,7 +17,10 @@ python.pkgs.buildPythonPackage {
       cp -R prm/ "$out/bin/"
     fi
   '';
-  meta.mainProgram = pname;
+  meta = {
+    description = "Remove new lines from explicitly selected text files.";
+    mainProgram = pname;
+  };
   nativeBuildInputs = nativeDeps;
   passthru.python = python;
   propagatedBuildInputs = pythonDeps;

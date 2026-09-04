@@ -17,7 +17,10 @@ python.pkgs.buildPythonPackage {
       cp -R prm/ "$out/bin/"
     fi
   '';
-  meta.mainProgram = pname;
+  meta = {
+    description = "Canonicalize ordering and nesting in Nix expressions.";
+    mainProgram = pname;
+  };
   nativeBuildInputs = nativeDeps;
   passthru.python = python;
   propagatedBuildInputs = pythonDeps;

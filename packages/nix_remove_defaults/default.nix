@@ -20,7 +20,10 @@ python.pkgs.buildPythonPackage {
       cp -R prm/ "$out/bin/"
     fi
   '';
-  meta.mainProgram = pname;
+  meta = {
+    description = "Remove literal NixOS and treefmt assignments equal to option defaults.";
+    mainProgram = pname;
+  };
   nativeBuildInputs = nativeDeps;
   passthru.python = python;
   propagatedBuildInputs = pythonDeps;

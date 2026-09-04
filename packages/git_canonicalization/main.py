@@ -18,12 +18,14 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 import nix_syntax
 import tomllib
 
+if TYPE_CHECKING:
+    from tree_sitter import Node
 PACKAGE_KINDS = ("python", "html", "opentofu", "latex")
 KIND_MARKERS = {
     "python": ("main.py",),
@@ -487,13 +489,78 @@ def package_description(package: Package) -> str | None:
                 return description
         except (OSError, tomllib.TOMLDecodeError):
             pass
-    default = _read_regular(package.root / "default.nix") or ""
-    match = re.search(r'description\s*=\s*"([^"\\]*(?:\\.[^"\\]*)*)"', default)
+    default = _read_regular(package.root / "default.nix")
+    if default is None:
+        return None
+    with contextlib.suppress(json.JSONDecodeError, nix_syntax.NixSyntaxError):
+        description = _meta_description(default)
+        if description is not None:
+            return description
+    return None
+
+
+def _meta_description(source: str) -> str | None:
+    """Return a literal meta.description through the Nix syntax tree."""
+    document, expression = _meta_description_expression(source)
+    if expression is None or expression.type != "string_expression":
+        return None
+    return json.loads(document.text(expression))
+
+
+def _replace_meta_description(source: str, description: str) -> str:
+    """Replace a literal meta.description while retaining surrounding source."""
+    _document, expression = _meta_description_expression(source)
+    if expression is None or expression.type != "string_expression":
+        msg = "Python package default.nix must declare exactly one literal meta.description"
+        raise CommandError(msg)
+    encoded = source.encode("utf-8")
+    replacement = json.dumps(description).encode("utf-8")
     return (
-        None
-        if match is None
-        else bytes(match.group(1), "utf-8").decode("unicode_escape")
+        encoded[: expression.start_byte] + replacement + encoded[expression.end_byte :]
+    ).decode("utf-8")
+
+
+def _meta_description_expression(
+    source: str,
+) -> tuple[nix_syntax.Document, Node | None]:
+    """Find the meta description value in either supported metadata form."""
+    document = nix_syntax.parse(source)
+    matches = []
+    for binding in (
+        node for node in nix_syntax.walk(document.root) if node.type == "binding"
+    ):
+        attrpath = nix_syntax.field(binding, "attrpath")
+        expression = nix_syntax.field(binding, "expression")
+        if attrpath is None or expression is None:
+            continue
+        path = nix_syntax.static_attrpath(document, attrpath)
+        if path == ("meta", "description"):
+            matches.append(expression)
+        elif path == ("meta",):
+            matches.extend(_attrset_expression(document, expression, ("description",)))
+    return document, matches[0] if len(matches) == 1 else None
+
+
+def _attrset_expression(
+    document: nix_syntax.Document,
+    expression: Node,
+    path: tuple[str, ...],
+) -> list[Node]:
+    """Find direct static bindings beneath an attribute-set expression."""
+    if expression.type != "attrset_expression":
+        return []
+    binding_set = next(
+        (child for child in expression.named_children if child.type == "binding_set"),
+        None,
     )
+    return [
+        value
+        for binding in ([] if binding_set is None else binding_set.named_children)
+        if binding.type == "binding"
+        and (attrpath := nix_syntax.field(binding, "attrpath")) is not None
+        and nix_syntax.static_attrpath(document, attrpath) == path
+        and (value := nix_syntax.field(binding, "expression")) is not None
+    ]
 
 
 def _compact_nix(source: str) -> str:
@@ -528,7 +595,7 @@ def _without_dependency_lists(source: str) -> str:
     if count != 1:
         msg = "Python package default.nix must declare exactly one shellHook string"
         raise CommandError(msg)
-    return source
+    return _replace_meta_description(source, "A Python package.")
 
 
 def _check_python_default(package: Package) -> None:
@@ -642,6 +709,7 @@ def scaffold(kind: str, name: str, description: str | None) -> dict[Path, str]:
             "latex": "A LaTeX package.",
         }[kind]
     )
+    description_literal = json.dumps(description)
     root = Path("packages") / name
     default = """{ inputs, pkgs, ... }:
 let
@@ -662,7 +730,10 @@ python.pkgs.buildPythonPackage {
      cp -R prm/ "$out/bin/"
     fi
   '';
-  meta.mainProgram = pname;
+  meta = {
+    description = __DESCRIPTION__;
+    mainProgram = pname;
+  };
   nativeBuildInputs = nativeDeps;
   passthru.python = python;
   propagatedBuildInputs = pythonDeps;
@@ -671,12 +742,11 @@ python.pkgs.buildPythonPackage {
   strictDeps = true;
   version = "0.0.0";
 }
-"""
+""".replace("__DESCRIPTION__", description_literal)
     files: dict[Path, str] = {root / "default.nix": default}
     if kind == "python":
-        description_literal = repr(description)
         files[root / "main.py"] = (
-            f'''#!/usr/bin/env python3\n{description_literal}\n\ndef main() -> None:\n    """Run {name}."""\n\nif __name__ == "__main__":\n    main()\n'''
+            f'''#!/usr/bin/env python3\n{description!r}\n\ndef main() -> None:\n    """Run {name}."""\n\nif __name__ == "__main__":\n    main()\n'''
         )
         check = Path("checks") / f"{name}_coverage" / "default.nix"
         files[check] = _current_python_coverage_source()
@@ -1009,6 +1079,17 @@ def test_python_scaffold_escapes_arbitrary_description() -> None:
     ]
     module = ast.parse(source)
     assert ast.get_docstring(module) == 'A """ quoted\\ndescription.'
+
+
+def test_meta_description_uses_nix_syntax() -> None:
+    """Read and replace metadata without relying on source formatting."""
+    nested = '{ meta = { description = "A \\"quoted\\" description."; }; }'
+    direct = '{ meta.description = "A direct description."; }'
+    assert _meta_description(nested) == 'A "quoted" description.'
+    assert _meta_description(direct) == "A direct description."
+    assert _replace_meta_description(nested, "A replacement.") == (
+        '{ meta = { description = "A replacement."; }; }'
+    )
 
 
 def test_imported_status_rejects_invalid_shapes_and_host_paths() -> None:

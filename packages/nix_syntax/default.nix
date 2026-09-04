@@ -17,7 +17,10 @@ python.pkgs.buildPythonPackage {
       cp -R prm/ "$out/bin/"
     fi
   '';
-  meta.mainProgram = pname;
+  meta = {
+    description = "Provide shared, lossless-enough Nix parsing and rewriting helpers.";
+    mainProgram = pname;
+  };
   nativeBuildInputs = nativeDeps;
   passthru.python = python;
   propagatedBuildInputs = pythonDeps;
