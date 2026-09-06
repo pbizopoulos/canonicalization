@@ -132,7 +132,7 @@ let
             "*.html"
             "*.js"
           ];
-          priority = 7;
+          priority = 2;
         };
         ruff-check.options = [
           "--cache-dir=/tmp/.ruff_cache"

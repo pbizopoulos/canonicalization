@@ -38,12 +38,11 @@ Every package MUST build. Python tests run when present, HTML is statically vali
 Canonical source is produced in this order:
 
 1. Remove ordinary comments using `uncomment` while retaining its default exceptions for documentation, task markers, directives, and explicit keep markers.
-2. Normalize line endings and remove discretionary blank lines before language formatting. README prose is exempt from blank-line removal.
+2. Normalize line endings, remove discretionary blank lines, and remove physical CR and LF characters from CSS, HTML, and JavaScript before language formatting. README prose is exempt from blank-line removal.
 3. Apply aggressive deterministic lint fixes, including unsafe fixes where configured.
 4. Alphabetize Nix bindings and formals. Nix lists without string elements retain the current `nix_alphabetize` sorting heuristic; lists containing strings retain their order.
 5. Apply one formatter per syntax: nixfmt, Ruff, Oxfmt for JavaScript and CSS, html-tidy, hclfmt, texfmt, bibtex-tidy, and yamlfmt.
 6. Run strict mypy without package exemptions and the applicable read-only language validators.
-7. Remove physical CR and LF characters from CSS, HTML, and JavaScript.
 
 `nix_remove_defaults` is a declared experiment, not part of conformance. It may be run separately to remove evaluated NixOS and treefmt assignments equal to their defaults.
 
