@@ -210,6 +210,17 @@ def _clean_arguments(*, dry_run: bool) -> list[str]:
     ]
 
 
+def _clean_output(source: str) -> str:
+    """Normalize Git clean actions to the canonical message style."""
+    return re.sub(
+        r"(?m)^(?:Would remove|Removing) ",
+        lambda match: (
+            "would remove " if match.group().startswith("Would") else "remove "
+        ),
+        source,
+    )
+
+
 def hosted_remote(remote: str) -> tuple[str, str]:
     """Parse URL- and SCP-style hosted Git remotes."""
     parsed = urlparse(remote)
@@ -397,7 +408,7 @@ def check_home(root: Path, dry_run: bool) -> list[dict[str, str]]:
     if clean.returncode != 0:
         raise CommandError(clean.stderr.strip() or "git clean failed")
     if clean.stdout:
-        print(clean.stdout, end="")  # noqa: T201
+        print(_clean_output(clean.stdout), end="")  # noqa: T201
         changed = True
     if dry_run and changed:
         msg_0 = "home repository would change"
@@ -443,7 +454,7 @@ def validate_name(kind: str, name: str) -> None:
 
 
 def package_files(package: Package) -> set[Path]:
-    """Return allowed regular files for a package kind."""
+    """Return permitted regular files for a package kind."""
     relative = Path("packages") / package.name
     kind_files = {
         "python": {"main.py"},
@@ -452,6 +463,17 @@ def package_files(package: Package) -> set[Path]:
         "nix": set(),
     }[package.kind]
     return {relative / "default.nix", *(relative / item for item in kind_files)}
+
+
+def required_package_files(package: Package) -> set[Path]:
+    """Return regular files required for a package kind."""
+    optional = {
+        "html": {"script.js", "style.css"},
+        "latex": set(),
+        "nix": set(),
+        "python": set(),
+    }[package.kind]
+    return {path for path in package_files(package) if path.name not in optional}
 
 
 def allowed_paths(root: Path, packages: list[Package]) -> set[Path]:
@@ -533,7 +555,7 @@ def inspect_structure(root: Path) -> tuple[list[Package], list[str]]:
     issues: list[str] = []
     for package in packages:
         validate_name(package.kind, package.name)
-        for relative in sorted(package_files(package)):
+        for relative in sorted(required_package_files(package)):
             if not (root / relative).is_file():
                 issues.extend([f"{relative}: missing required regular file"])
     opaque = opaque_trees(root)
@@ -888,7 +910,11 @@ def _converge_packages(root: Path, packages: list[Package], dry_run: bool) -> bo
             package_description(package),
         )
         for relative, source in expected_files.items():
-            if relative.name == "default.nix" or (root / relative).exists():
+            if (
+                relative.name == "default.nix"
+                or relative not in required_package_files(package)
+                or (root / relative).exists()
+            ):
                 continue
             changed |= _write_managed(
                 root,
@@ -1019,7 +1045,7 @@ def _cleanup_flake(root: Path, packages: list[Package], dry_run: bool) -> bool:
     if clean.returncode != 0:
         raise CommandError(clean.stderr.strip() or "git clean failed")
     if clean.stdout:
-        print(clean.stdout, end="")  # noqa: T201
+        print(_clean_output(clean.stdout), end="")  # noqa: T201
         changed = True
     return changed
 
@@ -1667,6 +1693,27 @@ def test_domain_resources_in_prm_remain_an_unconstrained_nix_package() -> None:
         assert package_files(detected) == {Path("packages/deployment/default.nix")}
 
 
+def test_html_styles_and_scripts_are_optional() -> None:
+    """Allow HTML packages without standalone CSS or JavaScript assets."""
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        root = Path(temporary_directory)
+        package_root = root / "packages" / "cv"
+        package_root.mkdir(parents=True)
+        files = scaffold("html", "cv", None)
+        for name in ("default.nix", "index.html"):
+            relative = Path("packages/cv") / name
+            (root / relative).write_text(files[relative], encoding="utf-8")
+        package = Package("cv", "html", package_root)
+        assert required_package_files(package) == {
+            Path("packages/cv/default.nix"),
+            Path("packages/cv/index.html"),
+        }
+        assert inspect_structure(root) == ([package], [])
+        assert not _converge_packages(root, [package], False)
+        assert not (package_root / "script.js").exists()
+        assert not (package_root / "style.css").exists()
+
+
 def test_repository_layout_error_explains_how_to_place_unrestricted_files() -> None:
     """Report unsupported paths together with an actionable prm location."""
     with tempfile.TemporaryDirectory() as temporary_directory:
@@ -1814,6 +1861,12 @@ def test_gitignore_patterns_are_globally_sorted() -> None:
         {Path("z/file"), Path("a")},
         {Path("prm")},
     ) == ("*\n!/a\n!/prm/\n!/prm/**\n!/z/\n!/z/file\n")
+
+
+def test_git_clean_actions_use_canonical_message_style() -> None:
+    """Use lowercase imperative action messages for Git cleanup output."""
+    assert _clean_output("Would remove tmp.txt\n") == "would remove tmp.txt\n"
+    assert _clean_output("Removing tmp.txt\n") == "remove tmp.txt\n"
 
 
 def _temporary_flake(root: Path) -> None:

@@ -25,7 +25,7 @@ Running `nix fmt` grants canonicalization authority to rewrite or delete conflic
 Package names MUST use `snake_case`. The supported kinds are:
 
 - `python`: `main.py`, a generated Python `default.nix`, optional `prm/`, and optional `tmp/`. The Nix definition may customize native dependencies, Python dependencies, `shellHook`, and a literal description. Tests, when present, are pytest functions in `main.py`; their generated coverage check exists only while tests exist, and coverage is informational.
-- `html`: `index.html`, `script.js`, `style.css`, a generated `default.nix`, optional `prm/`, and optional `tmp/`. The Nix definition may customize runtime inputs and a literal description.
+- `html`: `index.html`, a generated `default.nix`, optional `script.js`, optional `style.css`, optional `prm/`, and optional `tmp/`. The Nix definition may customize runtime inputs and a literal description.
 - `latex`: `ms.tex`, `ms.bib`, a generated `default.nix`, optional `prm/`, and optional `tmp/`. The Nix definition may customize native inputs and a literal description.
 - `nix`: an otherwise unconstrained, formatted `default.nix`, optional `prm/`, and optional `tmp/`. Domain-specific resources such as OpenTofu configurations and dependency locks belong under `prm/`; their package decides how to validate and run them.
 
