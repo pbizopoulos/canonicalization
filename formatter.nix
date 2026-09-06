@@ -32,6 +32,7 @@ let
         enable = true;
         includes = [
           "*.css"
+          "*.html"
           "*.js"
         ];
         priority = 5;
@@ -75,21 +76,6 @@ let
             "--sort"
             "--sort-fields"
             "--v2"
-          ];
-          priority = 5;
-        };
-        html-tidy = {
-          command = pkgs.html-tidy;
-          includes = [ "*.html" ];
-          options = [
-            "--quiet"
-            "yes"
-            "--tidy-mark"
-            "no"
-            "--wrap"
-            "0"
-            "--write-back"
-            "yes"
           ];
           priority = 5;
         };
