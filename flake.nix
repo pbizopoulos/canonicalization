@@ -23,7 +23,6 @@
     inputs:
     inputs.blueprint {
       inherit inputs;
-      systems = [ "x86_64-linux" ];
     }
     // {
       inherit (inputs) blueprint;

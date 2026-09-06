@@ -9,7 +9,6 @@ The specification is intentionally opinionated and intended for advanced Nix use
 A canonical flake repository MUST:
 
 - Be a Git repository whose persistent, non-opaque files are tracked by Git. Tracked modifications and local commits are allowed.
-- Use the canonicalization Blueprint output layout on `x86_64-linux`.
 - Contain only the supported root files, checks, hosts, and packages described by `git canonicalization status`.
 - Put uninterpreted but persistent resources only in `prm/`, `hosts/<host>/prm/`, or `packages/<package>/prm/`. These trees are opaque to canonicalization but their persistent contents remain ordinary Git declarations.
 - Put untracked scratch state only in `tmp/` or `packages/<package>/tmp/`. These trees are ignored by conformance and preserved by cleanup. If scratch state is tracked, canonicalization removes it from Git without deleting its bytes.
