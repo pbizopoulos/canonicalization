@@ -1,35 +1,79 @@
 # Canonicalization
 
-Canonicalization selects one declared state from the system states that meet the same requirements and makes it the required state. Its purpose is to minimize the ongoing effort required to maintain the system. A canonical declarative system declares all state that must persist, so it can be rebuilt from its declarations instead of tracing past changes.
+Canonicalization selects one declared state from the system states that meet the same requirements and makes it the required state. Its purpose is to minimize the ongoing effort required to maintain a system. This README is the normative specification for the mechanically enforced home and flake profiles. The machine design near the end is a non-normative reference architecture.
 
-A canonical declarative system:
+The specification is intentionally opinionated and intended for advanced Nix users who adopt it as a whole. A repository conforms to the exact revision of canonicalization recorded in its `flake.lock`; updating that input deliberately adopts the rules on a newer revision. Compatibility between revisions is not promised. Packages which require a version use `0.0.0`; Git identifies their implementations.
 
-- Is defined with NixOS and uses an ephemeral root filesystem, so the machine can be rebuilt from declarations and only declared state persists.
-- Keeps its home directory in a Git repository with a whitelist `.gitignore`, making the files kept in Git explicit and reviewable.
-- Organizes projects at paths based on their Git remotes (for example, `github.com/owner/project`), so their locations can be discovered and checked without configuration for each project.
-- Treats each project as a Git submodule and a Nix flake, allowing it to be versioned, initialized, rebuilt, and checked independently.
-- Uses a defined subset of the https://github.com/numtide/blueprint directory layout so tools can create and check flake repositories: each has a README explaining its purpose, packages with a single source file, and tests named for expected behavior.
+## Flake profile
 
-`git canonicalization` initializes flake repositories, creates their packages, and checks home and flake repositories.
+A canonical flake repository MUST:
 
-Initialize the home repository:
+- Be a Git repository whose persistent, non-opaque files are tracked by Git. Tracked modifications and local commits are allowed.
+- Use the canonicalization Blueprint output layout on `x86_64-linux`.
+- Contain only the supported root files, checks, hosts, and packages described by `git canonicalization status`.
+- Put uninterpreted but persistent resources only in `prm/`, `hosts/<host>/prm/`, or `packages/<package>/prm/`. These trees are opaque to canonicalization but their persistent contents remain ordinary Git declarations.
+- Put untracked scratch state only in `tmp/` or `packages/<package>/tmp/`. These trees are ignored by conformance and preserved by cleanup. If scratch state is tracked, canonicalization removes it from Git without deleting its bytes.
+- Treat `result` and every other undeclared path normally; canonicalization removes unsupported tracked and untracked artifacts.
+- Use regular, non-executable declared files except for Python `main.py` entrypoints, which MUST be executable. Symbolic links are unsupported outside opaque and scratch trees.
+- Reach a fixed point after one `nix fmt` invocation. A second invocation MUST make no changes.
+
+Running `nix fmt` grants canonicalization authority to rewrite or delete conflicting state inside the recognized repository. `git canonicalization check` performs the structural part of that convergence directly. `git canonicalization check --dry-run` reports the same actions without applying them. Failures stop immediately and MAY leave earlier changes in place.
+
+`nix flake check` proves builds, tests, canonical formatting, and layout for the Git-filtered source. It cannot observe ignored files or live Git metadata; use `git canonicalization check --dry-run` for those.
+
+## Package profiles
+
+Package names MUST use `snake_case`. The supported kinds are:
+
+- `python`: `main.py`, a generated Python `default.nix`, optional `prm/`, and optional `tmp/`. The Nix definition may customize native dependencies, Python dependencies, `shellHook`, and a literal description. Tests, when present, are pytest functions in `main.py`; their generated coverage check exists only while tests exist, and coverage is informational.
+- `html`: `index.html`, `script.js`, `style.css`, a generated `default.nix`, optional `prm/`, and optional `tmp/`. The Nix definition may customize runtime inputs and a literal description.
+- `latex`: `ms.tex`, `ms.bib`, a generated `default.nix`, optional `prm/`, and optional `tmp/`. The Nix definition may customize native inputs and a literal description.
+- `nix`: an otherwise unconstrained, formatted `default.nix`, optional `prm/`, and optional `tmp/`. Domain-specific resources such as OpenTofu configurations and dependency locks belong under `prm/`; their package decides how to validate and run them.
+
+Typed package definitions are regenerated from their canonical templates while preserving their permitted fields. The `nix` kind is the explicit escape hatch for derivations which do not fit a typed template.
+
+Every package MUST build. Python tests run when present, HTML is statically validated, and LaTeX is compiled. A `nix` package MAY expose additional project-specific checks. Test behavior names describe the rules they protect; formal rule identifiers are not used.
+
+## Source form
+
+Canonical source is produced in this order:
+
+1. Remove ordinary comments using `uncomment` while retaining its default exceptions for documentation, task markers, directives, and explicit keep markers.
+2. Normalize line endings and remove discretionary blank lines before language formatting. README prose is exempt from blank-line removal.
+3. Apply aggressive deterministic lint fixes, including unsafe fixes where configured.
+4. Alphabetize Nix bindings and formals. Nix lists without string elements retain the current `nix_alphabetize` sorting heuristic; lists containing strings retain their order.
+5. Apply one formatter per syntax: nixfmt, Ruff, Oxfmt for JavaScript and CSS, html-tidy, hclfmt, texfmt, bibtex-tidy, and yamlfmt.
+6. Run strict mypy without package exemptions and the applicable read-only language validators.
+7. Remove physical CR and LF characters from CSS, HTML, and JavaScript.
+
+`nix_remove_defaults` is a declared experiment, not part of conformance. It may be run separately to remove evaluated NixOS and treefmt assignments equal to their defaults.
+
+## Home profile
+
+The canonical home repository is `$HOME`. Its `.gitignore` MUST begin with `*`; every later line MUST be a root-relative negation. A negation follows normal Git semantics: it permits a path to be tracked but does not make untracked content persistent.
+
+Projects MUST be registered as top-level Git submodules. Each `.gitmodules` name and path MUST equal the lowercase host plus remote path with a trailing `.git` removed, for example `github.com/owner/project`. HTTP, HTTPS, SSH, git, git+ssh, and SCP-style hosted URLs are accepted and their spelling is preserved. Local remotes are unsupported. Missing registered submodules are initialized automatically and unpublished local submodule commits are allowed.
+
+`git canonicalization init home` initializes and stages the home policy without cleaning or committing, so required paths can be whitelisted and staged first. `git canonicalization init flake REMOTE` accepts an empty hosted remote, creates its scaffold at the derived home path, makes a local initial commit, and stages the submodule in the home repository without pushing it.
+
+## Scaffold status
+
+`git canonicalization status` emits deterministic JSON containing the README, hosts, and package names, kinds, descriptions, and expected Python behavior names. It is a scaffold description, not a backup. Status requires canonical structure and formatting. `init flake REMOTE --from-status FILE` restores the README and resource declarations using current templates; expected behaviors become failing test stubs until implemented.
+
+## Non-normative machine architecture
+
+A canonical declarative machine should use NixOS with a volatile root, explicitly declared persistence, immutable user declarations, and enough information to reconstruct required state. Persistent content-addressed stores such as `/nix` are non-authoritative caches when deleting them cannot destroy required state. The reference host uses Disko and preservation, persists `/home/nixos`, and demonstrates this architecture, but host configuration is not currently a conformance profile. The included Hetzner/OpenTofu deployment is likewise a reference prototype rather than a required provider or disk layout.
+
+## Bootstrap
+
+Create the empty project remote first, then run:
 
 ```sh
-cd
-git init
-printf '*\n!/.gitignore\n!/.gitmodules\n' > .gitignore # add other required paths, such as .ssh, to the whitelist
-git add .gitignore
-git commit -m 'Initialize home repository'
-```
-
-Add and initialize a project submodule:
-
-```sh
-# Create the empty remote before starting this workflow.
-git submodule add --force git@github.com:owner/demo.git ~/github.com/owner/demo
-cd ~/github.com/owner/demo
-git canonicalization init . # initializes a canonical flake repository
-git canonicalization add <type> <name> # creates a package in the current flake repository
-nix fmt # runs standard formatters and strict linters
-nix flake check # checks the layout and runs builds and tests
+git canonicalization init home
+# Add required home whitelist entries and stage their files before cleanup.
+git canonicalization init flake git@github.com:owner/demo.git
+cd "$HOME/github.com/owner/demo"
+git canonicalization add python demo "A demo package."
+nix fmt
+nix flake check
 ```

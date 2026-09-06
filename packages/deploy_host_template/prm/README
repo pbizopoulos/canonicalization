@@ -2,7 +2,7 @@
 
 git clone git@github.com:pbizopoulos/canonicalization ~/github.com/pbizopoulos/canonicalization/
 cd ~/github.com/pbizopoulos/canonicalization/
-# server_type ~/github.com/pbizopoulos/canonicalization/packages/deploy_host_template/main.tf at least cpx22
+# server_type ~/github.com/pbizopoulos/canonicalization/packages/deploy_host_template/prm/main.tf at least cpx22
 
 # Domain name is optional.
 # Without a domain, the template deploys over plain HTTP and is reachable by IP/hostname.

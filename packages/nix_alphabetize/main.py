@@ -12,7 +12,7 @@ import tempfile
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import nix_syntax
 
@@ -42,7 +42,7 @@ def _replace_children(document: nix_syntax.Document, node: Node) -> str:
                     rendered,
                 ),
             )
-    return nix_syntax.apply_edits(source, edits).decode()
+    return cast("bytes", nix_syntax.apply_edits(source, edits)).decode()
 
 
 def _binding(document: nix_syntax.Document, node: Node) -> Binding:
@@ -124,8 +124,9 @@ def _normalize(bindings: list[Binding]) -> list[Binding]:
         normalized = _normalize(nested)
         if len(normalized) == 1 and normalized[0].path:
             child = normalized[0]
+            child_path = cast("tuple[str, ...]", child.path)
             result.append(
-                Binding((root, *child.path), child.value, child.raw, child.nested),
+                Binding((root, *child_path), child.value, child.raw, child.nested),
             )
         else:
             result.append(Binding((root,), _render_set(normalized), ""))

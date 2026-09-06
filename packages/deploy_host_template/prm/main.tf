@@ -6,7 +6,9 @@ terraform {
       version = "~> 1.54"
     }
   }
-  backend "local" {}
+  backend "local" {
+    path = "../tmp/terraform.tfstate"
+  }
 }
 variable "hcloud_token" {
   type      = string

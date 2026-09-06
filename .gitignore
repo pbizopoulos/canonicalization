@@ -22,6 +22,8 @@
 !/checks/remove_empty_lines_coverage/default.nix
 !/checks/remove_new_lines_coverage/
 !/checks/remove_new_lines_coverage/default.nix
+!/checks/source_conformance/
+!/checks/source_conformance/default.nix
 !/flake.lock
 !/flake.nix
 !/formatter.nix
@@ -31,7 +33,6 @@
 !/packages/
 !/packages/deploy_host_template/
 !/packages/deploy_host_template/default.nix
-!/packages/deploy_host_template/main.tf
 !/packages/deploy_host_template/prm/
 !/packages/deploy_host_template/prm/**
 !/packages/git_canonicalization/

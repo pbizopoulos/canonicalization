@@ -18,7 +18,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlparse
 
 import nix_syntax
@@ -26,11 +26,10 @@ import tomllib
 
 if TYPE_CHECKING:
     from tree_sitter import Node
-PACKAGE_KINDS = ("python", "html", "opentofu", "latex")
+PACKAGE_KINDS = ("html", "latex", "nix", "python")
 KIND_MARKERS = {
     "python": ("main.py",),
     "html": ("index.html",),
-    "opentofu": ("main.tf",),
     "latex": ("ms.tex",),
 }
 KIND_SEPARATOR = dict.fromkeys(PACKAGE_KINDS, "_")
@@ -43,7 +42,8 @@ ROOT_FILES = {
     "flake.nix",
     "formatter.nix",
 }
-OPAQUE = {"prm"}
+OPAQUE_NAME = "prm"
+SCRATCH_NAME = "tmp"
 
 
 class CommandError(RuntimeError):
@@ -160,6 +160,56 @@ def _read_regular(path: Path) -> str | None:
     return path.read_text(encoding="utf-8")
 
 
+def _change(message: str, *, dry_run: bool) -> None:
+    """Report one deterministic convergence action."""
+    print(("would " if dry_run else "") + message)  # noqa: T201
+
+
+def _write_managed(
+    root: Path,
+    relative: Path,
+    source: str,
+    *,
+    dry_run: bool,
+    executable: bool = False,
+) -> bool:
+    """Write and stage one managed file when its contents or mode differ."""
+    path = root / relative
+    current = _read_regular(path) if path.exists() and not path.is_symlink() else None
+    current_mode = path.lstat().st_mode if path.exists() or path.is_symlink() else 0
+    mode_matches = bool(current_mode & 0o111) == executable
+    if current == source and mode_matches:
+        return False
+    _change(f"write '{relative}'", dry_run=dry_run)
+    if dry_run:
+        return True
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink():
+        path.unlink()
+    path.write_text(source, encoding="utf-8")
+    path.chmod(0o755 if executable else 0o644)
+    git(root, ["add", "--", str(relative)])
+    return True
+
+
+def _tracked_paths(root: Path) -> set[Path]:
+    """Return paths represented in the index."""
+    completed = git(root, ["ls-files", "-z"])
+    return {Path(item) for item in completed.stdout.split("\0") if item}
+
+
+def _clean_arguments(*, dry_run: bool) -> list[str]:
+    """Build the single-force cleanup command with scratch exclusions."""
+    return [
+        "clean",
+        "-ndx" if dry_run else "-fdx",
+        "-e",
+        f"/{SCRATCH_NAME}/",
+        "-e",
+        f"/packages/*/{SCRATCH_NAME}/",
+    ]
+
+
 def hosted_remote(remote: str) -> tuple[str, str]:
     """Parse URL- and SCP-style hosted Git remotes."""
     parsed = urlparse(remote)
@@ -241,17 +291,15 @@ def home_repositories(root: Path) -> list[dict[str, str]]:
     return repositories
 
 
-def check_home(root: Path, fix: bool) -> list[dict[str, str]]:
-    """Check or repair a canonical home repository."""
+def _converge_home_ignore(root: Path, *, dry_run: bool) -> bool:
+    """Converge the canonical home whitelist."""
+    changed = False
     gitignore_path = root / ".gitignore"
     source = _read_regular(gitignore_path)
     required = ["!/.gitignore", "!/.gitmodules"]
     if source is None:
-        if not fix:
-            msg = f"{gitignore_path}: is missing"
-            raise CommandError(msg)
         source = "*\n" + "\n".join(required) + "\n"
-        gitignore_path.write_text(source, encoding="utf-8")
+        changed |= _write_managed(root, Path(".gitignore"), source, dry_run=dry_run)
     lines = source.splitlines()
     if (
         not lines
@@ -263,38 +311,97 @@ def check_home(root: Path, fix: bool) -> list[dict[str, str]]:
             msg,
         )
     missing = [line for line in required if line not in lines]
-    if missing and not fix:
-        msg = f"{gitignore_path}: must whitelist .gitignore and .gitmodules"
-        raise CommandError(
-            msg,
-        )
     if missing:
-        gitignore_path.write_text(
-            source.rstrip("\n") + "\n" + "\n".join(missing) + "\n",
-            encoding="utf-8",
+        source = source.rstrip("\n") + "\n" + "\n".join(missing) + "\n"
+        changed |= _write_managed(
+            root,
+            Path(".gitignore"),
+            source,
+            dry_run=dry_run,
         )
-    repositories = home_repositories(root)
-    expected_seen: set[Path] = set()
-    actual_seen: set[Path] = set()
-    for repository in repositories:
-        actual = Path(repository["path"])
-        expected = canonical_remote_path(repository["url"])
-        if expected in expected_seen:
-            msg = f"duplicate canonical repository path: {expected}"
-            raise CommandError(msg)
-        if actual in actual_seen:
-            msg = f"duplicate configured repository path: {actual}"
-            raise CommandError(msg)
-        expected_seen.add(expected)
-        actual_seen.add(actual)
-        if actual != expected:
-            if not fix:
-                msg = f"submodule \"{repository['name']}\": path '{actual}' does not match URL; expected '{expected}'"
-                raise CommandError(
-                    msg,
-                )
+    return changed
+
+
+def _converge_home_repository(
+    root: Path,
+    repository: dict[str, str],
+    expected: Path,
+    *,
+    dry_run: bool,
+) -> bool:
+    """Converge one home submodule record and checkout."""
+    actual = Path(repository["path"])
+    changed = False
+    if repository["name"] != expected.as_posix():
+        _change(
+            f"rename submodule '{repository['name']}' to '{expected.as_posix()}'",
+            dry_run=dry_run,
+        )
+        changed = True
+        if not dry_run:
+            git(
+                root,
+                [
+                    "config",
+                    "--file",
+                    ".gitmodules",
+                    "--rename-section",
+                    f"submodule.{repository['name']}",
+                    f"submodule.{expected.as_posix()}",
+                ],
+            )
+    if actual != expected:
+        _change(f"move '{actual}' to '{expected}'", dry_run=dry_run)
+        changed = True
+        if not dry_run:
             (root / expected).parent.mkdir(parents=True, exist_ok=True)
-            run(["git", "-C", str(root), "mv", "--", str(actual), str(expected)])
+            git(root, ["mv", "--", str(actual), str(expected)])
+    checkout = root / (actual if dry_run and actual != expected else expected)
+    if not (checkout / ".git").exists():
+        _change(f"initialize submodule '{expected}'", dry_run=dry_run)
+        changed = True
+        if not dry_run:
+            git(root, ["submodule", "update", "--init", "--", str(expected)])
+    if (checkout / ".git").exists():
+        origin = git(checkout, ["remote", "get-url", "origin"], check=False)
+        if origin.returncode != 0 or origin.stdout.strip() != repository["url"]:
+            msg = f"{expected}: origin does not match .gitmodules URL"
+            raise CommandError(msg)
+    return changed
+
+
+def check_home(root: Path, dry_run: bool) -> list[dict[str, str]]:
+    """Converge a canonical home repository."""
+    changed = _converge_home_ignore(root, dry_run=dry_run)
+    repositories = home_repositories(root)
+    actual_paths = [Path(repository["path"]) for repository in repositories]
+    expected_paths = [
+        canonical_remote_path(repository["url"]) for repository in repositories
+    ]
+    if len(set(expected_paths)) != len(expected_paths):
+        msg = "duplicate canonical repository path"
+        raise CommandError(msg)
+    if len(set(actual_paths)) != len(actual_paths):
+        msg = "duplicate configured repository path"
+        raise CommandError(msg)
+    for repository, expected in zip(repositories, expected_paths, strict=True):
+        changed |= _converge_home_repository(
+            root,
+            repository,
+            expected,
+            dry_run=dry_run,
+        )
+    if not dry_run and repositories:
+        git(root, ["add", "--", ".gitmodules"])
+    clean = git(root, _clean_arguments(dry_run=dry_run), check=False)
+    if clean.returncode != 0:
+        raise CommandError(clean.stderr.strip() or "git clean failed")
+    if clean.stdout:
+        print(clean.stdout, end="")  # noqa: T201
+        changed = True
+    if dry_run and changed:
+        msg_0 = "home repository would change"
+        raise CommandError(msg_0)
     return repositories
 
 
@@ -322,11 +429,7 @@ def detect_packages(root: Path) -> list[Package]:
                 msg,
             )
         result.append(
-            Package(
-                package_root.name,
-                matches[0] if matches else "other",
-                package_root,
-            ),
+            Package(package_root.name, matches[0] if matches else "nix", package_root),
         )
     return result
 
@@ -345,9 +448,8 @@ def package_files(package: Package) -> set[Path]:
     kind_files = {
         "python": {"main.py"},
         "html": {"index.html", "script.js", "style.css"},
-        "opentofu": {"main.tf", ".terraform.lock.hcl"},
         "latex": {"ms.tex", "ms.bib"},
-        "other": set(),
+        "nix": set(),
     }[package.kind]
     return {relative / "default.nix", *(relative / item for item in kind_files)}
 
@@ -379,15 +481,35 @@ def allowed_paths(root: Path, packages: list[Package]) -> set[Path]:
 def opaque_trees(root: Path) -> set[Path]:
     """Return existing repository trees whose contents are unrestricted."""
     candidates = {Path("prm")}
-    for parent, names in (("hosts", ("prm",)), ("packages", ("prm", "figures"))):
+    for parent in ("hosts", "packages"):
         base = root / parent
         if base.is_dir():
             for child in base.iterdir():
                 if child.is_dir():
-                    candidates.update(
-                        Path(parent) / child.name / name for name in names
-                    )
+                    candidates.add(Path(parent) / child.name / OPAQUE_NAME)
     return {path for path in candidates if (root / path).is_dir()}
+
+
+def scratch_trees(root: Path) -> set[Path]:
+    """Return permitted untracked scratch trees."""
+    candidates = {Path(SCRATCH_NAME)}
+    packages = root / "packages"
+    if packages.is_dir():
+        candidates.update(
+            Path("packages") / child.name / SCRATCH_NAME
+            for child in packages.iterdir()
+            if child.is_dir()
+        )
+    return {
+        path
+        for path in candidates
+        if (root / path).is_dir() and not (root / path).is_symlink()
+    }
+
+
+def beneath(path: Path, trees: set[Path]) -> bool:
+    """Return whether path is a tree or lies beneath one."""
+    return any(path == tree or tree in path.parents for tree in trees)
 
 
 def render_gitignore(paths: set[Path], trees: set[Path] | None = None) -> str:
@@ -410,15 +532,15 @@ def inspect_structure(root: Path) -> tuple[list[Package], list[str]]:
     allowed = allowed_paths(root, packages)
     issues: list[str] = []
     for package in packages:
-        if not (package.root / "default.nix").is_file():
-            issues.append(f"packages/{package.name}: missing required file default.nix")
-        if package.kind != "other":
-            validate_name(package.kind, package.name)
+        validate_name(package.kind, package.name)
+        for relative in sorted(package_files(package)):
+            if not (root / relative).is_file():
+                issues.extend([f"{relative}: missing required regular file"])
+    opaque = opaque_trees(root)
+    scratch = scratch_trees(root)
     for path in sorted(root.rglob("*")):
         relative = path.relative_to(root)
-        if relative.parts[0] == ".git" or any(
-            part in OPAQUE or part in {"tmp", "result"} for part in relative.parts
-        ):
+        if relative.parts[0] == ".git" or beneath(relative, opaque | scratch):
             continue
         if path.is_symlink():
             issues.append(
@@ -505,7 +627,15 @@ def _meta_description(source: str) -> str | None:
     document, expression = _meta_description_expression(source)
     if expression is None or expression.type != "string_expression":
         return None
-    return json.loads(document.text(expression))
+    if any(node.type == "interpolation" for node in nix_syntax.walk(expression)):
+        return None
+    decoded = json.loads(document.text(expression).replace(r"\${", "${"))
+    return cast("str", decoded)
+
+
+def _nix_string(value: str) -> str:
+    """Encode a non-interpolating Nix string literal."""
+    return json.dumps(value).replace("${", r"\${")
 
 
 def _replace_meta_description(source: str, description: str) -> str:
@@ -515,7 +645,7 @@ def _replace_meta_description(source: str, description: str) -> str:
         msg = "Python package default.nix must declare exactly one literal meta.description"
         raise CommandError(msg)
     encoded = source.encode("utf-8")
-    replacement = json.dumps(description).encode("utf-8")
+    replacement = _nix_string(description).encode()
     return (
         encoded[: expression.start_byte] + replacement + encoded[expression.end_byte :]
     ).decode("utf-8")
@@ -653,7 +783,8 @@ let
 in
 pkgs.runCommand checkName
   {
-    nativeBuildInputs = packageDrv.nativeBuildInputs ++ [ pythonEnv ];
+    nativeBuildInputs =
+      packageDrv.nativeBuildInputs ++ packageDrv.propagatedBuildInputs ++ [ pythonEnv ];
     src = ../.. + "/packages/${packageName}";
   }
   ''
@@ -665,8 +796,236 @@ pkgs.runCommand checkName
 """
 
 
-def check_flake(root: Path, fix: bool) -> list[Package]:
-    """Check required files, structure, templates, and root whitelist."""
+def _binding_value(source: str, name: str, kind: str) -> str | None:
+    """ExtractReturn one permitted template binding expression."""
+    patterns = {
+        "list": rf"(?s)\b{name}\s*=\s*(\[.*?\])\s*;",
+        "string": rf"""(?s)\b{name}\s*=\s*((?:"(?:\\.|[^"\\])*"|''.*?''))\s*;""",
+    }
+    match = re.search(patterns[kind], source)
+    return match.group(1) if match else None
+
+
+def _replace_binding(source: str, name: str, value: str) -> str:
+    """Replace one binding expression in a generated template."""
+    return re.sub(
+        rf"(?s)(\b{name}\s*=\s*)(?:\[.*?\]|\"(?:\\.|[^\"\\])*\"|''.*?'')(\s*;)",
+        lambda match: match.group(1) + value + match.group(2),
+        source,
+        count=1,
+    )
+
+
+def canonical_typed_default(package: Package) -> str | None:
+    """Render a typed definition while retaining its permitted fields."""
+    if package.kind == "nix":
+        return None
+    source = _read_regular(package.root / "default.nix")
+    if source is None:
+        return scaffold(package.kind, package.name, None)[
+            Path("packages") / package.name / "default.nix"
+        ]
+    nix_syntax.parse(source, str(package.root / "default.nix"))
+    description = package_description(package)
+    rendered = scaffold(package.kind, package.name, description)[
+        Path("packages") / package.name / "default.nix"
+    ]
+    fields = {
+        "html": (("runtimeDeps", "list"),),
+        "latex": (("nativeDeps", "list"),),
+        "python": (
+            ("nativeDeps", "list"),
+            ("pythonDeps", "list"),
+            ("shellHook", "string"),
+        ),
+    }[package.kind]
+    for name, kind in fields:
+        value = _binding_value(source, name, kind)
+        if value is not None:
+            rendered = _replace_binding(rendered, name, value)
+    if package.kind == "python" and not re.match(
+        r"\s*\{\s*inputs\s*,",
+        source,
+    ):
+        rendered = rendered.replace(
+            "{ inputs, pkgs, ... }:",
+            "{ pkgs, ... }:",
+            1,
+        )
+    return rendered
+
+
+def _write_managed_nix(
+    root: Path,
+    relative: Path,
+    source: str,
+    *,
+    dry_run: bool,
+) -> bool:
+    """Write a Nix template only when its formatted structure differs."""
+    current = _read_regular(root / relative)
+    if current is not None and _compact_nix(current) == _compact_nix(source):
+        source = current
+    return _write_managed(root, relative, source, dry_run=dry_run)
+
+
+def _converge_packages(root: Path, packages: list[Package], dry_run: bool) -> bool:
+    """Converge package templates, generated checks, and file modes."""
+    changed = False
+    for package in packages:
+        expected_default = canonical_typed_default(package)
+        if expected_default is not None:
+            relative = Path("packages") / package.name / "default.nix"
+            changed |= _write_managed_nix(
+                root,
+                relative,
+                expected_default,
+                dry_run=dry_run,
+            )
+        expected_files = scaffold(
+            package.kind,
+            package.name,
+            package_description(package),
+        )
+        for relative, source in expected_files.items():
+            if relative.name == "default.nix" or (root / relative).exists():
+                continue
+            changed |= _write_managed(
+                root,
+                relative,
+                source,
+                dry_run=dry_run,
+                executable=relative.name == "main.py",
+            )
+        if package.kind == "python" and (package.root / "main.py").is_file():
+            tests = python_tests(package.root / "main.py")
+            check = Path("checks") / f"{package.name}_coverage" / "default.nix"
+            if tests:
+                changed |= _write_managed_nix(
+                    root,
+                    check,
+                    _current_python_coverage_source(),
+                    dry_run=dry_run,
+                )
+            elif (root / check).exists():
+                _change(f"remove '{check.parent}'", dry_run=dry_run)
+                changed = True
+                if not dry_run:
+                    git(root, ["rm", "-rf", "--", str(check.parent)])
+        for relative in package_files(package):
+            path = root / relative
+            if not path.exists() or path.is_symlink():
+                continue
+            executable = package.kind == "python" and relative.name == "main.py"
+            mode_matches = bool(path.stat().st_mode & 0o111) == executable
+            if not mode_matches:
+                _change(f"set mode on '{relative}'", dry_run=dry_run)
+                changed = True
+                if not dry_run:
+                    path.chmod(0o755 if executable else 0o644)
+                    git(root, ["add", "--", str(relative)])
+    return changed
+
+
+def _converge_allowed_files(
+    root: Path,
+    allowed: set[Path],
+    tracked: set[Path],
+    python_entrypoints: set[Path],
+    *,
+    dry_run: bool,
+) -> bool:
+    """Stage declared files and normalize their executable bits."""
+    changed = False
+    for relative in sorted(allowed - tracked):
+        path = root / relative
+        if not path.is_file() or path.is_symlink():
+            continue
+        _change(f"stage '{relative}'", dry_run=dry_run)
+        changed = True
+        if not dry_run:
+            git(root, ["add", "--", str(relative)])
+            tracked.add(relative)
+    for relative in sorted(allowed):
+        path = root / relative
+        if not path.is_file() or path.is_symlink():
+            continue
+        executable = relative in python_entrypoints
+        if bool(path.stat().st_mode & 0o111) != executable:
+            _change(f"set mode on '{relative}'", dry_run=dry_run)
+            changed = True
+            if not dry_run:
+                path.chmod(0o755 if executable else 0o644)
+                git(root, ["add", "--", str(relative)])
+    return changed
+
+
+def _remove_unsupported_tracked(
+    root: Path,
+    tracked: set[Path],
+    scratch: set[Path],
+    protected: set[Path],
+    *,
+    dry_run: bool,
+) -> bool:
+    """Untrack scratch content and delete unsupported tracked paths."""
+    changed = False
+    for relative in sorted(path for path in tracked if beneath(path, scratch)):
+        _change(f"untrack '{relative}'", dry_run=dry_run)
+        changed = True
+        if not dry_run:
+            git(root, ["rm", "--cached", "-r", "--", str(relative)])
+    for relative in sorted(tracked):
+        if beneath(relative, protected):
+            continue
+        _change(f"remove '{relative}'", dry_run=dry_run)
+        changed = True
+        if not dry_run:
+            git(root, ["rm", "-rf", "--", str(relative)])
+    return changed
+
+
+def _cleanup_flake(root: Path, packages: list[Package], dry_run: bool) -> bool:
+    """Remove undeclared files while preserving permitted scratch trees."""
+    allowed = allowed_paths(root, packages)
+    opaque = opaque_trees(root)
+    scratch = scratch_trees(root)
+    tracked = _tracked_paths(root)
+    python_entrypoints = {
+        Path("packages") / package.name / "main.py"
+        for package in packages
+        if package.kind == "python"
+    }
+    changed = _converge_allowed_files(
+        root,
+        allowed,
+        tracked,
+        python_entrypoints,
+        dry_run=dry_run,
+    )
+    changed |= _remove_unsupported_tracked(
+        root,
+        tracked,
+        scratch,
+        opaque | scratch | allowed,
+        dry_run=dry_run,
+    )
+    clean_arguments = _clean_arguments(dry_run=dry_run)
+    if dry_run:
+        for relative in sorted(allowed):
+            if (root / relative).exists():
+                clean_arguments.extend(("-e", f"/{relative.as_posix()}"))
+    clean = git(root, clean_arguments, check=False)
+    if clean.returncode != 0:
+        raise CommandError(clean.stderr.strip() or "git clean failed")
+    if clean.stdout:
+        print(clean.stdout, end="")  # noqa: T201
+        changed = True
+    return changed
+
+
+def check_flake(root: Path, dry_run: bool) -> list[Package]:
+    """Converge required files, structure, templates, and root whitelist."""
     missing = [
         name
         for name in (".gitignore", "flake.nix", "flake.lock")
@@ -674,26 +1033,47 @@ def check_flake(root: Path, fix: bool) -> list[Package]:
     ]
     if missing:
         raise CommandError("missing required file: " + missing[0])
-    packages, issues = inspect_structure(root)
-    if issues:
-        formatted_issues = "\n".join(f"  - {issue}" for issue in issues)
-        msg = f"repository layout validation failed:\n{formatted_issues}"
-        raise CommandError(
-            msg,
-        )
+    packages = detect_packages(root)
+    changed = _converge_packages(root, packages, dry_run)
     expected = render_gitignore(allowed_paths(root, packages), opaque_trees(root))
     actual = _read_regular(root / ".gitignore")
     if actual != expected:
-        if not fix:
-            msg = ".gitignore: differs from repository structure policy"
-            raise CommandError(msg)
-        nix_syntax.write_if_changed(root / ".gitignore", expected)
+        changed |= _write_managed(
+            root,
+            Path(".gitignore"),
+            expected,
+            dry_run=dry_run,
+        )
+    changed |= _cleanup_flake(root, packages, dry_run)
+    if dry_run and changed:
+        msg = "flake repository would change"
+        raise CommandError(msg)
+    return validate_flake_source(root)
+
+
+def validate_flake_source(root: Path) -> list[Package]:
+    """Validate a Git-filtered flake source without requiring Git metadata."""
+    packages, issues = inspect_structure(root)
+    for required in (".gitignore", "README", "flake.lock", "flake.nix"):
+        if not (root / required).is_file():
+            issues.append(f"{required}: missing required regular file")
+    expected_ignore = render_gitignore(
+        allowed_paths(root, packages),
+        opaque_trees(root),
+    )
+    if _read_regular(root / ".gitignore") != expected_ignore:
+        issues.append(".gitignore: does not match the canonical source whitelist")
+    for package in packages:
+        issues.extend(_source_package_issues(root, package))
+    if issues:
+        formatted_issues = "\n".join(f"  - {issue}" for issue in issues)
+        msg = f"repository layout validation failed:\n{formatted_issues}"
+        raise CommandError(msg)
     for package in packages:
         default = package.root / "default.nix"
         if default.is_file():
             nix_syntax.parse(default.read_bytes(), str(default))
         if package.kind == "python":
-            _check_python_default(package)
             _check_coverage_default(root, package)
     checks_root = root / "checks"
     if checks_root.is_dir():
@@ -704,20 +1084,50 @@ def check_flake(root: Path, fix: bool) -> list[Package]:
     return packages
 
 
-def scaffold(kind: str, name: str, description: str | None) -> dict[Path, str]:
+def _source_package_issues(root: Path, package: Package) -> list[str]:
+    """Return source-only typed-template and generated-check issues."""
+    issues: list[str] = []
+    relative = Path("packages") / package.name / "default.nix"
+    actual = _read_regular(root / relative)
+    expected = canonical_typed_default(package)
+    if (
+        expected is not None
+        and actual is not None
+        and _compact_nix(actual) != _compact_nix(expected)
+    ):
+        issues.append(f"{relative}: differs from its canonical typed template")
+    main = package.root / "main.py"
+    if package.kind != "python" or not main.is_file():
+        return issues
+    check = root / "checks" / f"{package.name}_coverage" / "default.nix"
+    tests = python_tests(main)
+    if tests and not check.is_file():
+        issues.append(f"{check.relative_to(root)}: missing for tested package")
+    if not tests and check.exists():
+        issues.append(f"{check.relative_to(root)}: exists for untested package")
+    return issues
+
+
+def scaffold(
+    kind: str,
+    name: str,
+    description: str | None,
+    tests: list[str] | None = None,
+) -> dict[Path, str]:
     """Render one supported package and its optional coverage check."""
     description = (
         description
         or {
             "python": "A Python package.",
             "html": "An HTML package.",
-            "opentofu": "An OpenTofu package.",
             "latex": "A LaTeX package.",
+            "nix": "A Nix package.",
         }[kind]
     )
-    description_literal = json.dumps(description)
+    description_literal = _nix_string(description)
     root = Path("packages") / name
-    default = """{ inputs, pkgs, ... }:
+    defaults = {
+        "python": """{ inputs, pkgs, ... }:
 let
   nativeDeps = [ ];
   pname = baseNameOf ./.;
@@ -733,7 +1143,7 @@ python.pkgs.buildPythonPackage {
     install -Dm755 main.py "$out/bin/$pname"
     if [ -d prm ]; then
       cp -R prm/ "$out/${python.sitePackages}/"
-     cp -R prm/ "$out/bin/"
+      cp -R prm/ "$out/bin/"
     fi
   '';
   meta = {
@@ -748,24 +1158,74 @@ python.pkgs.buildPythonPackage {
   strictDeps = true;
   version = "0.0.0";
 }
-""".replace("__DESCRIPTION__", description_literal)
+""",
+        "html": """{ pkgs, ... }:
+let
+  pname = baseNameOf ./.;
+  runtimeDeps = [ ];
+in
+pkgs.writeShellApplication {
+  meta.description = __DESCRIPTION__;
+  name = pname;
+  runtimeInputs = runtimeDeps ++ [ pkgs.http-server ];
+  text = ''
+    exec http-server ${./.} "$@"
+  '';
+}
+""",
+        "latex": """{ pkgs, ... }:
+let
+  nativeDeps = [ ];
+  pname = baseNameOf ./.;
+in
+pkgs.stdenv.mkDerivation {
+  inherit pname;
+  buildPhase = ''
+    latexmk -pdf ms.tex
+  '';
+  installPhase = ''
+    install -Dm644 ms.pdf "$out/ms.pdf"
+  '';
+  meta.description = __DESCRIPTION__;
+  nativeBuildInputs = nativeDeps ++ [ pkgs.texliveFull ];
+  src = ./.;
+  strictDeps = true;
+  version = "0.0.0";
+}
+""",
+        "nix": """{ pkgs, ... }:
+pkgs.writeTextFile {
+  name = baseNameOf ./.;
+  text = "";
+  meta.description = __DESCRIPTION__;
+}
+""",
+    }
+    default = defaults[kind].replace("__DESCRIPTION__", description_literal)
     files: dict[Path, str] = {root / "default.nix": default}
     if kind == "python":
-        files[root / "main.py"] = (
-            f'''#!/usr/bin/env python3\n{description!r}\n\ndef main() -> None:\n    """Run {name}."""\n\nif __name__ == "__main__":\n    main()\n'''
+        test_source = "".join(
+            f"\n\ndef test_{_identifier(test)}() -> None:\n"
+            f"    {test!r}\n"
+            f"    raise AssertionError({'not implemented: ' + test!r})\n"
+            for test in tests or []
         )
-        check = Path("checks") / f"{name}_coverage" / "default.nix"
-        files[check] = _current_python_coverage_source()
+        files[root / "main.py"] = (
+            f'''#!/usr/bin/env python3\n{description!r}\n\ndef main() -> None:\n    """Run {name}."""\n{test_source}\nif __name__ == "__main__":\n    main()\n'''
+        )
+        if tests:
+            check = Path("checks") / f"{name}_coverage" / "default.nix"
+            files[check] = _current_python_coverage_source()
     elif kind == "html":
         files.update(
             {
                 root / "index.html": "<!doctype html><html><body></body></html>\n",
-                root / "script.js": "",
+                root / "script.js": (
+                    'document.documentElement.dataset.javascript = "enabled";\n'
+                ),
                 root / "style.css": "",
             },
         )
-    elif kind == "opentofu":
-        files[root / "main.tf"] = 'terraform { required_version = ">= 1.0" }\n'
     elif kind == "latex":
         files.update(
             {
@@ -775,6 +1235,14 @@ python.pkgs.buildPythonPackage {
             },
         )
     return files
+
+
+def _identifier(description: str) -> str:
+    """Render a human behavior name as a stable Python identifier."""
+    rendered = re.sub(r"[^a-z0-9]+", "_", description.lower()).strip("_")
+    if not rendered:
+        return "not_implemented"
+    return f"behavior_{rendered}" if rendered[0].isdigit() else rendered
 
 
 def _python_coverage_source(name: str) -> str:
@@ -799,6 +1267,7 @@ def add_package(root: Path, kind: str, name: str, description: str | None) -> No
             path = root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(source, encoding="utf-8")
+            path.chmod(0o755 if path.name == "main.py" else 0o644)
             created.append(path)
         packages = detect_packages(root)
         nix_syntax.write_if_changed(
@@ -817,7 +1286,7 @@ def add_package(root: Path, kind: str, name: str, description: str | None) -> No
         raise
 
 
-def remove_package(root: Path, name: str, dry_run: bool, force: bool) -> None:
+def remove_package(root: Path, name: str, dry_run: bool) -> None:
     """Remove a package and generated coverage check safely."""
     package_root = root / "packages" / name
     if not package_root.is_dir() or package_root.is_symlink():
@@ -825,22 +1294,7 @@ def remove_package(root: Path, name: str, dry_run: bool, force: bool) -> None:
         raise CommandError(msg)
     check_root = root / "checks" / f"{name}_coverage"
     targets = [package_root, *([check_root] if check_root.exists() else [])]
-    if not force:
-        completed = git(
-            root,
-            [
-                "status",
-                "--porcelain",
-                "--",
-                *(str(path.relative_to(root)) for path in targets),
-            ],
-            check=False,
-        )
-        if completed.stdout:
-            msg = f"package contains local changes: {name}; use --force to remove"
-            raise CommandError(
-                msg,
-            )
+    target_relatives = [str(target.relative_to(root)) for target in targets]
     if dry_run:
         for target in targets:
             print(f"rm '{target.relative_to(root)}'")  # noqa: T201
@@ -853,9 +1307,21 @@ def remove_package(root: Path, name: str, dry_run: bool, force: bool) -> None:
         root / ".gitignore",
         render_gitignore(allowed_paths(root, packages), opaque_trees(root)),
     )
+    git(
+        root,
+        [
+            "add",
+            "--all",
+            "--",
+            *target_relatives,
+            ".gitignore",
+        ],
+    )
 
 
-def _imported_status(source: str) -> tuple[list[dict[str, str | None]], list[str]]:
+def _imported_status(
+    source: str,
+) -> tuple[str, list[dict[str, Any]], list[str]]:
     """Validate package and host resources imported from a status document."""
     imported = json.loads(source)
     if not isinstance(imported, dict):
@@ -863,10 +1329,14 @@ def _imported_status(source: str) -> tuple[list[dict[str, str | None]], list[str
         raise CommandError(msg)
     packages = imported.get("packages", [])
     hosts = imported.get("hosts", [])
+    readme = imported.get("readme")
+    if not isinstance(readme, str):
+        msg = "status document readme must be a string"
+        raise CommandError(msg)
     if not isinstance(packages, list) or not isinstance(hosts, list):
         msg = "status document packages and hosts must be arrays"
         raise CommandError(msg)
-    validated_packages: list[dict[str, str | None]] = []
+    validated_packages: list[dict[str, Any]] = []
     for item in packages:
         if not isinstance(item, dict):
             msg = "status document packages must contain objects"
@@ -874,6 +1344,7 @@ def _imported_status(source: str) -> tuple[list[dict[str, str | None]], list[str
         kind = item.get("type")
         name = item.get("name")
         description = item.get("description")
+        tests = item.get("tests", [])
         if not isinstance(kind, str) or kind not in PACKAGE_KINDS:
             msg = f"unsupported package type: {kind}"
             raise CommandError(msg)
@@ -883,9 +1354,23 @@ def _imported_status(source: str) -> tuple[list[dict[str, str | None]], list[str
         if description is not None and not isinstance(description, str):
             msg = "status document package description must be a string or null"
             raise CommandError(msg)
+        if not isinstance(tests, list) or not all(
+            isinstance(test, str) and test.strip() for test in tests
+        ):
+            msg = "status document package tests must contain nonempty strings"
+            raise CommandError(msg)
+        identifiers = [_identifier(test) for test in tests]
+        if len(identifiers) != len(set(identifiers)):
+            msg = f"status document package tests collide after normalization: {name}"
+            raise CommandError(msg)
         validate_name(kind, name)
         validated_packages.append(
-            {"type": kind, "name": name, "description": description},
+            {
+                "type": kind,
+                "name": name,
+                "description": description,
+                "tests": tests,
+            },
         )
     validated_hosts: list[str] = []
     for host in hosts:
@@ -896,54 +1381,124 @@ def _imported_status(source: str) -> tuple[list[dict[str, str | None]], list[str
             msg = f"invalid host name: {host}"
             raise CommandError(msg)
         validated_hosts.append(host)
-    return validated_packages, validated_hosts
+    return readme, validated_packages, validated_hosts
 
 
-def initialize(directory: Path, status_path: str | None) -> None:
-    """Initialize a canonical flake repository and optional status resources."""
-    directory = directory.absolute()
-    directory.mkdir(parents=True, exist_ok=True)
-    if not (directory / ".git").exists():
-        run(["git", "init", str(directory)], quiet=True)
-    if profile(directory, "flake") != "flake":
-        msg = "cannot initialize a home repository as a flake repository"
+def initialize_home() -> None:
+    """Initialize and stage the canonical home policy without cleaning."""
+    root = Path.home()
+    if not (root / ".git").exists():
+        run(["git", "init", str(root)], quiet=True)
+    if profile(root, "home") != "home":
+        msg = "cannot initialize a flake repository as a home repository"
         raise CommandError(msg)
+    path = root / ".gitignore"
+    source = _read_regular(path) or "*\n!/.gitignore\n!/.gitmodules\n"
+    lines = source.splitlines()
+    if not lines or lines[0] != "*":
+        msg = f"{path}: must start with *"
+        raise CommandError(msg)
+    for required in ("!/.gitignore", "!/.gitmodules"):
+        if required not in lines:
+            lines.append(required)
+    _write_managed(root, Path(".gitignore"), "\n".join(lines) + "\n", dry_run=False)
+
+
+def _remote_is_empty(remote: str) -> bool:
+    """Return whether a hosted remote advertises no heads."""
+    completed = subprocess.run(
+        ["git", "ls-remote", remote],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise CommandError(completed.stderr.strip() or "could not read remote")
+    return not completed.stdout.strip()
+
+
+def initialize_flake(remote: str, status_path: str | None) -> None:
+    """Create a canonical flake at its remote-derived home path."""
+    relative = canonical_remote_path(remote)
+    home = Path.home()
+    if repository_root(home) != home or profile(home) != "home":
+        msg = "$HOME must be an initialized canonical home repository"
+        raise CommandError(msg)
+    if not _remote_is_empty(remote):
+        msg = "init flake requires an empty remote"
+        raise CommandError(msg)
+    directory = home / relative
+    if directory.exists():
+        msg = f"target already exists: {directory}"
+        raise CommandError(msg)
+    directory.parent.mkdir(parents=True, exist_ok=True)
+    run(["git", "clone", remote, str(directory)], quiet=True)
     flake = directory / "flake.nix"
-    if not flake.exists():
-        flake.write_text(
-            '{ inputs.canonicalization.url = "github:pbizopoulos/canonicalization"; outputs = inputs: inputs.canonicalization.blueprint { inherit inputs; }; }\n',
-            encoding="utf-8",
-        )
-    if not (directory / "README").exists():
-        (directory / "README").write_text(f"# {directory.name}\n", encoding="utf-8")
+    flake.write_text(
+        '{ inputs.canonicalization.url = "github:pbizopoulos/canonicalization"; outputs = inputs: inputs.canonicalization.blueprint { inherit inputs; }; }\n',
+        encoding="utf-8",
+    )
+    readme = f"# {directory.name}\n"
     if status_path is not None:
         source = (
             sys.stdin.read()
             if status_path == "-"
             else Path(status_path).read_text(encoding="utf-8")
         )
-        packages, hosts = _imported_status(source)
-        for item in packages:
-            add_package(directory, item["type"], item["name"], item.get("description"))
+        readme, package_specs, hosts = _imported_status(source)
+        (directory / "README").write_text(readme, encoding="utf-8")
+        for item in package_specs:
+            files = scaffold(
+                item["type"],
+                item["name"],
+                item.get("description"),
+                item.get("tests"),
+            )
+            for path, contents in files.items():
+                target = directory / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(contents, encoding="utf-8")
+                if target.name == "main.py":
+                    target.chmod(0o755)
         for host in hosts:
             path = directory / "hosts" / host / "configuration.nix"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("{ ... }: { }\n", encoding="utf-8")
+    else:
+        (directory / "README").write_text(readme, encoding="utf-8")
     run(
         [os.environ.get("GIT_CANONICALIZATION_NIX", "nix"), "flake", "lock"],
         cwd=directory,
         quiet=True,
     )
-    packages = detect_packages(directory)
-    gitignore = directory / ".gitignore"
-    if not gitignore.exists():
-        gitignore.write_text(
-            render_gitignore(
-                allowed_paths(directory, packages),
-                opaque_trees(directory),
-            ),
-            encoding="utf-8",
-        )
+    detected_packages = detect_packages(directory)
+    (directory / ".gitignore").write_text(
+        render_gitignore(
+            allowed_paths(directory, detected_packages),
+            opaque_trees(directory),
+        ),
+        encoding="utf-8",
+    )
+    run(
+        [os.environ.get("GIT_CANONICALIZATION_NIX", "nix"), "fmt"],
+        cwd=directory,
+        quiet=True,
+    )
+    git(directory, ["add", "--all"])
+    git(directory, ["branch", "-M", "main"])
+    git(directory, ["commit", "-m", "Initialize repository"])
+    git(
+        home,
+        [
+            "submodule",
+            "add",
+            "--force",
+            "--name",
+            relative.as_posix(),
+            remote,
+            str(relative),
+        ],
+    )
 
 
 def status(root: Path) -> dict[str, Any]:
@@ -952,7 +1507,17 @@ def status(root: Path) -> dict[str, Any]:
     if current_profile == "home":
         msg = "home repositories are not compatible with status"
         raise CommandError(msg)
-    packages = check_flake(root, False)
+    packages = check_flake(root, True)
+    run(
+        [
+            os.environ.get("GIT_CANONICALIZATION_NIX", "nix"),
+            "build",
+            ".#checks.x86_64-linux.pkgs-formatter-check",
+            "--no-link",
+        ],
+        cwd=root,
+        quiet=True,
+    )
     return {
         "readme": _read_regular(root / "README"),
         "packages": [
@@ -979,8 +1544,9 @@ def parser() -> argparse.ArgumentParser:
         description="Check canonical home repositories and manage Nix flake repositories.",
     )
     commands = result.add_subparsers(dest="command", required=True)
-    init = commands.add_parser("init", help="Initialize a canonical flake repository.")
-    init.add_argument("directory", nargs="?", default=".")
+    init = commands.add_parser("init", help="Initialize a canonical repository.")
+    init.add_argument("profile", choices=("flake", "home"))
+    init.add_argument("remote", nargs="?")
     init.add_argument("--from-status", metavar="FILE|-")
     commands.add_parser("status", help="Write repository status as JSON.")
     add = commands.add_parser("add", help="Scaffold a package.")
@@ -990,10 +1556,27 @@ def parser() -> argparse.ArgumentParser:
     remove = commands.add_parser("rm", help="Remove a package and its generated check.")
     remove.add_argument("name")
     remove.add_argument("-n", "--dry-run", action="store_true")
-    remove.add_argument("-f", "--force", action="store_true")
-    check = commands.add_parser("check", help="Check the selected repository.")
-    check.add_argument("--fix", action="store_true")
+    check = commands.add_parser("check", help="Converge the selected repository.")
+    check.add_argument("-n", "--dry-run", action="store_true")
+    check.add_argument("--source", type=Path, help=argparse.SUPPRESS)
     return result
+
+
+def _dispatch_init(options: argparse.Namespace) -> bool:
+    """Dispatch initialization and report whether it handled the command."""
+    if options.command != "init":
+        return False
+    if options.profile == "home":
+        if options.remote is not None or options.from_status is not None:
+            msg = "init home does not accept a remote or status document"
+            raise CommandError(msg)
+        initialize_home()
+    else:
+        if options.remote is None:
+            msg = "init flake requires REMOTE"
+            raise CommandError(msg)
+        initialize_flake(options.remote, options.from_status)
+    return True
 
 
 def main() -> None:
@@ -1003,8 +1586,10 @@ def main() -> None:
         arguments = [arguments[1], "--help"] if len(arguments) > 1 else ["--help"]
     try:
         options = parser().parse_args(arguments)
-        if options.command == "init":
-            initialize(Path(options.directory), options.from_status)
+        if _dispatch_init(options):
+            return
+        if options.command == "check" and options.source is not None:
+            validate_flake_source(options.source.resolve())
             return
         root = repository_root()
         current_profile = profile(root)
@@ -1023,9 +1608,12 @@ def main() -> None:
                 ),
             )
         elif options.command == "check":
-            check_home(root, options.fix) if current_profile == "home" else check_flake(
+            check_home(
                 root,
-                options.fix,
+                options.dry_run,
+            ) if current_profile == "home" else check_flake(
+                root,
+                options.dry_run,
             )
         elif options.command == "add":
             add_package(
@@ -1035,7 +1623,7 @@ def main() -> None:
                 " ".join(options.description) or None,
             )
         elif options.command == "rm":
-            remove_package(root, options.name, options.dry_run, options.force)
+            remove_package(root, options.name, options.dry_run)
     except (
         CommandError,
         OSError,
@@ -1049,8 +1637,8 @@ def main() -> None:
 
 
 def test_removed_package_kinds_are_not_supported() -> None:
-    """Reject removed Haskell and Python-LaTeX package kinds."""
-    assert {"haskell", "python-latex"}.isdisjoint(PACKAGE_KINDS)
+    """Reject package kinds replaced by typed or unconstrained Nix packages."""
+    assert {"haskell", "opentofu", "python-latex"}.isdisjoint(PACKAGE_KINDS)
 
 
 def test_python_package_allows_latex_resources_in_prm() -> None:
@@ -1065,6 +1653,20 @@ def test_python_package_allows_latex_resources_in_prm() -> None:
         assert detect_packages(root) == [Package("report", "python", package)]
 
 
+def test_domain_resources_in_prm_remain_an_unconstrained_nix_package() -> None:
+    """Treat an OpenTofu implementation under prm as opaque Nix package data."""
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        root = Path(temporary_directory)
+        package = root / "packages" / "deployment"
+        (package / "prm").mkdir(parents=True)
+        (package / "default.nix").write_text("{ pkgs, ... }: pkgs.emptyFile\n")
+        (package / "prm" / "main.tf").write_text("terraform {}\n")
+        (package / "prm" / ".terraform.lock.hcl").write_text("")
+        detected = Package("deployment", "nix", package)
+        assert detect_packages(root) == [detected]
+        assert package_files(detected) == {Path("packages/deployment/default.nix")}
+
+
 def test_repository_layout_error_explains_how_to_place_unrestricted_files() -> None:
     """Report unsupported paths together with an actionable prm location."""
     with tempfile.TemporaryDirectory() as temporary_directory:
@@ -1074,19 +1676,14 @@ def test_repository_layout_error_explains_how_to_place_unrestricted_files() -> N
         secrets = root / "secrets"
         secrets.mkdir()
         (secrets / "secrets.age").write_text("", encoding="utf-8")
-        try:
-            check_flake(root, False)
-        except CommandError as error:
-            error_message = str(error)
-        else:
-            msg = "unsupported repository path was accepted"
-            raise AssertionError(msg)
-        assert error_message == (
-            "repository layout validation failed:\n"
-            "  - secrets/secrets.age: unsupported by the canonical flake "
-            "layout; move unrestricted project files under prm/ "
-            "(for example, prm/secrets.age)"
-        )
+        _packages, issues = inspect_structure(root)
+        assert issues == [
+            (
+                "secrets/secrets.age: unsupported by the canonical flake "
+                "layout; move unrestricted project files under prm/ "
+                "(for example, prm/secrets.age)"
+            ),
+        ]
 
 
 def test_python_scaffold_installs_optional_prm_resources() -> None:
@@ -1120,6 +1717,9 @@ def test_meta_description_uses_nix_syntax() -> None:
     assert _replace_meta_description(nested, "A replacement.") == (
         '{ meta = { description = "A replacement."; }; }'
     )
+    escaped = _replace_meta_description(nested, "Literal ${value}.")
+    assert r"Literal \${value}." in escaped
+    assert _meta_description(escaped) == "Literal ${value}."
 
 
 def test_imported_status_rejects_invalid_shapes_and_host_paths() -> None:
@@ -1129,6 +1729,10 @@ def test_imported_status_rejects_invalid_shapes_and_host_paths() -> None:
         '{"packages": {}}',
         '{"packages": [{"type": "python"}]}',
         '{"hosts": ["../outside"]}',
+        (
+            '{"readme":"x","packages":[{"type":"python","name":"sample",'
+            '"tests":["A-B","A B"]}],"hosts":[]}'
+        ),
     ):
         _assert_invalid_imported_status(source)
 
@@ -1210,6 +1814,91 @@ def test_gitignore_patterns_are_globally_sorted() -> None:
         {Path("z/file"), Path("a")},
         {Path("prm")},
     ) == ("*\n!/a\n!/prm/\n!/prm/**\n!/z/\n!/z/file\n")
+
+
+def _temporary_flake(root: Path) -> None:
+    """Create the minimum indexed flake used by convergence tests."""
+    git(root, ["init", "--quiet"])
+    for relative in (".gitignore", "README", "flake.lock", "flake.nix"):
+        (root / relative).write_text("", encoding="utf-8")
+    git(root, ["add", ".gitignore", "README", "flake.lock", "flake.nix"])
+
+
+def test_convergence_preserves_root_and_package_scratch_only() -> None:
+    """Preserve both allowed tmp trees while deleting unsupported artifacts."""
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        root = Path(temporary_directory)
+        _temporary_flake(root)
+        package = root / "packages" / "sample"
+        package.mkdir(parents=True)
+        (package / "default.nix").write_text("{ pkgs, ... }: pkgs.emptyFile\n")
+        root_tmp = root / "tmp" / "root-state"
+        package_tmp = package / "tmp" / "package-state"
+        root_tmp.parent.mkdir()
+        package_tmp.parent.mkdir()
+        root_tmp.write_text("root", encoding="utf-8")
+        package_tmp.write_text("package", encoding="utf-8")
+        unsupported = root / "result"
+        unsupported.write_text("unsupported", encoding="utf-8")
+        git(
+            root,
+            [
+                "add",
+                "--force",
+                "packages/sample/default.nix",
+                "packages/sample/tmp/package-state",
+                "result",
+            ],
+        )
+        check_flake(root, False)
+        assert root_tmp.read_text(encoding="utf-8") == "root"
+        assert package_tmp.read_text(encoding="utf-8") == "package"
+        assert not unsupported.exists()
+        assert (
+            "packages/sample/tmp/package-state"
+            not in git(
+                root,
+                ["ls-files"],
+            ).stdout.splitlines()
+        )
+
+
+def test_single_force_cleanup_rejects_nested_git_repository() -> None:
+    """Leave nested Git data intact and then reject its unsupported structure."""
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        root = Path(temporary_directory)
+        _temporary_flake(root)
+        nested = root / "undeclared"
+        nested.mkdir()
+        git(nested, ["init", "--quiet"])
+        error_message = ""
+        try:
+            check_flake(root, False)
+        except CommandError as error:
+            error_message = str(error)
+        else:
+            msg = "nested Git repository passed structural validation"
+            raise AssertionError(msg)
+        assert "repository layout validation failed" in error_message
+        assert (nested / ".git").is_dir()
+
+
+def test_scaffold_coverage_exists_only_for_declared_behaviors() -> None:
+    """Generate coverage and failing stubs only when behavior names are supplied."""
+    without_tests = scaffold("python", "sample", None)
+    assert Path("checks/sample_coverage/default.nix") not in without_tests
+    with_tests = scaffold(
+        "python",
+        "sample",
+        None,
+        ["Loads a document", "123", 'Says "yes"\nnow'],
+    )
+    source = with_tests[Path("packages/sample/main.py")]
+    ast.parse(source)
+    assert Path("checks/sample_coverage/default.nix") in with_tests
+    assert "def test_loads_a_document()" in source
+    assert "def test_behavior_123()" in source
+    assert "not implemented: Loads a document" in source
 
 
 if __name__ == "__main__":

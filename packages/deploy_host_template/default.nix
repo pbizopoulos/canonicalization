@@ -1,33 +1,29 @@
-{ inputs, pkgs, ... }:
-pkgs.writeShellApplication rec {
+{ pkgs, ... }:
+let
+  pname = baseNameOf ./.;
+  providerPlugins = p: [
+    p.hashicorp_external
+    p.hashicorp_local
+    p.hashicorp_null
+    p.hetznercloud_hcloud
+  ];
+  runtimeDeps = [ pkgs.openssh ];
+  tofu = pkgs.opentofu.withPlugins providerPlugins;
+in
+pkgs.writeShellApplication {
   meta.description = "A Terraform template package for deploying a host.";
-  name = baseNameOf ./.;
-  runtimeInputs = [
-    (pkgs.opentofu.withPlugins (p: [
-      p.hashicorp_external
-      p.hashicorp_local
-      p.hashicorp_null
-      p.hetznercloud_hcloud
-    ]))
-    pkgs.jq
-    pkgs.openssh
+  name = pname;
+  runtimeInputs = runtimeDeps ++ [
+    pkgs.git
+    tofu
   ];
   text = ''
-    # shellcheck disable=SC1091
-    source ${
-      pkgs.lib.getExe (
-        inputs.agenix-shell.lib.installationScript pkgs.stdenv.system {
-          secrets.secrets.file = ../../prm/secrets.age;
-        }
-      )
-    }
-    # shellcheck disable=SC2086,SC2163,SC2154
-    export $secrets
-    workdir=$(mktemp -d)
-    cp -R ${../..}/. "$workdir/"
-    chmod -R u+w "$workdir"
-    rm -rf "$workdir/packages/${name}/.terraform" "$workdir/packages/${name}/.terraform.lock.hcl"
-    tofu -chdir="$workdir/packages/${name}" init -reconfigure
-    tofu -chdir="$workdir/packages/${name}" apply
+    repository_root=$(git rev-parse --show-toplevel)
+    package_root="$repository_root/packages/${pname}"
+    configuration_root="$package_root/prm"
+    export TF_DATA_DIR="$package_root/tmp/.terraform"
+    mkdir -p "$TF_DATA_DIR"
+    tofu -chdir="$configuration_root" init -lockfile=readonly
+    exec tofu -chdir="$configuration_root" apply "$@"
   '';
 }

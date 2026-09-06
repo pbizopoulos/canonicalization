@@ -1,9 +1,13 @@
 { pkgs, ... }:
-pkgs.writeShellApplication rec {
+let
+  pname = baseNameOf ./.;
+  runtimeDeps = [ ];
+in
+pkgs.writeShellApplication {
   meta.description = "An HTML, CSS, and JavaScript template package.";
-  name = baseNameOf ./.;
-  runtimeInputs = [ pkgs.http-server ];
+  name = pname;
+  runtimeInputs = runtimeDeps ++ [ pkgs.http-server ];
   text = ''
-    exec ${pkgs.http-server}/bin/http-server ${./.} "$@"
+    exec http-server ${./.} "$@"
   '';
 }

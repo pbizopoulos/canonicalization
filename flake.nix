@@ -4,10 +4,6 @@
       inputs.nixpkgs.follows = "nixpkgs";
       url = "github:ryantm/agenix";
     };
-    agenix-shell = {
-      inputs.nixpkgs.follows = "nixpkgs";
-      url = "github:aciceri/agenix-shell";
-    };
     blueprint = {
       inputs.nixpkgs.follows = "nixpkgs";
       url = "github:numtide/blueprint";
@@ -27,11 +23,7 @@
     inputs:
     inputs.blueprint {
       inherit inputs;
-      systems = [
-        "aarch64-darwin"
-        "aarch64-linux"
-        "x86_64-linux"
-      ];
+      systems = [ "x86_64-linux" ];
     }
     // {
       inherit (inputs) blueprint;

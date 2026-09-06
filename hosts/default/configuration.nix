@@ -100,6 +100,7 @@ in
           inInitrd = true;
         }
       ];
+      users.nixos.directories = [ "." ];
     };
   };
   programs.bash.promptInit = "";

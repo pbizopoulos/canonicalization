@@ -1,5 +1,10 @@
 { pkgs, ... }:
-pkgs.stdenv.mkDerivation rec {
+let
+  nativeDeps = [ ];
+  pname = baseNameOf ./.;
+in
+pkgs.stdenv.mkDerivation {
+  inherit pname;
   buildPhase = ''
     latexmk -pdf ms.tex
   '';
@@ -7,8 +12,7 @@ pkgs.stdenv.mkDerivation rec {
     install -Dm644 ms.pdf "$out/ms.pdf"
   '';
   meta.description = "A LaTeX template package.";
-  nativeBuildInputs = [ pkgs.texliveFull ];
-  pname = baseNameOf ./.;
+  nativeBuildInputs = nativeDeps ++ [ pkgs.texliveFull ];
   src = ./.;
   strictDeps = true;
   version = "0.0.0";

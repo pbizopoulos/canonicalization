@@ -5,47 +5,62 @@
   ...
 }:
 let
-  formatter = treefmtEval.config.build.wrapper;
-  git-canonicalization-script = pkgs.writeShellScriptBin "git-canonicalization-check" ''
-    ${
-      inputs.self.packages.${pkgs.stdenv.system}.git_canonicalization
-    }/bin/git_canonicalization check --fix
-  '';
+  rawFormatter = treefmtEval.config.build.wrapper;
   treefmtEval = inputs.treefmt-nix.lib.evalModule pkgs {
     programs = {
-      actionlint.enable = true;
-      beautysh.enable = true;
-      biome = {
+      actionlint = {
         enable = true;
-        formatUnsafe = true;
+        priority = 6;
+      };
+      deadnix = {
+        enable = true;
+        priority = 3;
+      };
+      dos2unix = {
+        enable = true;
         priority = 1;
       };
-      clang-format.enable = true;
-      deadnix.enable = true;
-      dos2unix.enable = true;
-      hclfmt.enable = true;
+      hclfmt = {
+        enable = true;
+        priority = 5;
+      };
       nixfmt = {
         enable = true;
-        priority = 2;
+        priority = 5;
       };
       oxfmt = {
         enable = true;
-        priority = 1;
+        includes = [
+          "*.css"
+          "*.js"
+        ];
+        priority = 5;
       };
       ruff-check = {
         enable = true;
         extendSelect = [ "ALL" ];
+        priority = 3;
       };
-      ruff-format.enable = true;
-      rustfmt.enable = true;
-      shellcheck.enable = true;
-      shfmt.enable = true;
-      statix.enable = true;
-      taplo.enable = true;
-      texfmt.enable = true;
-      toml-sort.enable = true;
-      yamlfmt.enable = true;
-      yamllint.enable = true;
+      ruff-format = {
+        enable = true;
+        priority = 5;
+      };
+      statix = {
+        enable = true;
+        priority = 3;
+      };
+      texfmt = {
+        enable = true;
+        priority = 5;
+      };
+      yamlfmt = {
+        enable = true;
+        priority = 5;
+      };
+      yamllint = {
+        enable = true;
+        priority = 6;
+      };
     };
     projectRootFile = "flake.nix";
     settings = {
@@ -61,12 +76,7 @@ let
             "--sort-fields"
             "--v2"
           ];
-        };
-        biome.options = [ "--max-diagnostics=none" ];
-        git-canonicalization = {
-          command = "${git-canonicalization-script}/bin/git-canonicalization-check";
-          includes = [ "*.nix" ];
-          priority = 1;
+          priority = 5;
         };
         html-tidy = {
           command = pkgs.html-tidy;
@@ -81,14 +91,10 @@ let
             "--write-back"
             "yes"
           ];
+          priority = 5;
         };
         mypy = {
           command = pkgs.mypy;
-          excludes = [
-            "packages/git_canonicalization/main.py"
-            "packages/nix_alphabetize/main.py"
-            "packages/nix_remove_defaults/main.py"
-          ];
           includes = [ "*.py" ];
           options = [
             "--cache-dir=/tmp/.mypy_cache"
@@ -96,25 +102,28 @@ let
             "--ignore-missing-imports"
             "--strict"
           ];
+          priority = 6;
         };
         nix-alphabetize = {
           command = inputs.self.packages.${pkgs.stdenv.system}.nix_alphabetize;
           includes = [ "*.nix" ];
-          priority = 1;
+          priority = 4;
         };
         oxlint = {
           command = pkgs.oxlint;
           includes = [ "*.js" ];
           options = [
-            "-A"
+            "--fix-dangerously"
+            "-D"
             "all"
           ];
-          priority = 1;
+          priority = 3;
         };
         remove-empty-lines = {
           command = inputs.self.packages.${pkgs.stdenv.system}.remove_empty_lines;
           excludes = [ "README" ];
           includes = [ "*" ];
+          priority = 2;
         };
         remove-new-lines = {
           command = inputs.self.packages.${pkgs.stdenv.system}.remove_new_lines;
@@ -122,31 +131,41 @@ let
             "*.css"
             "*.html"
             "*.js"
-            "*.rs"
           ];
+          priority = 7;
         };
         ruff-check.options = [
           "--cache-dir=/tmp/.ruff_cache"
           "--unsafe-fixes"
         ];
         ruff-format.options = [ "--cache-dir=/tmp/.ruff_cache" ];
-        shfmt.options = [ "--posix" ];
-        texfmt.options = [ "--nowrap" ];
         uncomment = {
           command = inputs.self.packages.${pkgs.stdenv.system}.uncomment;
           includes = [ "*" ];
+          priority = 1;
         };
       };
       global.excludes = [
         "*/prm/**"
         "*/tmp/**"
+        "prm/**"
+        "tmp/**"
       ];
     };
   };
+  wrapper = pkgs.writeShellApplication {
+    name = "treefmt";
+    runtimeInputs = [ inputs.self.packages.${pkgs.stdenv.system}.git_canonicalization ];
+    text = ''
+      git_canonicalization check
+      exec ${rawFormatter}/bin/treefmt "$@"
+    '';
+  };
 in
-formatter
+wrapper
 // {
-  passthru = formatter.passthru // {
+  passthru = wrapper.passthru // {
+    raw = rawFormatter;
     tests.check = treefmtEval.config.build.check flake;
   };
 }

@@ -12,7 +12,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import nix_syntax
 
@@ -68,9 +68,13 @@ def literal(document: nix_syntax.Document, node: Node) -> Literal:
             raise ValueError(msg)
         return value
     if node.type == "string_expression" and "${" not in text:
-        return json.loads(text)
+        decoded = json.loads(text)
+        if isinstance(decoded, str):
+            return decoded
+        msg = "not a literal string"
+        raise ValueError(msg)
     if node.type == "indented_string_expression" and "${" not in text:
-        return text[2:-2]
+        return str(text[2:-2])
     if node.type == "list_expression":
         return [literal(document, child) for child in node.named_children]
     if node.type == "attrset_expression" and not text.lstrip().startswith("rec"):
@@ -318,7 +322,7 @@ def rewrite(
         [(target.start_byte, target.end_byte, transformed.encode())],
     ).decode()
     nix_syntax.parse(replaced, document.path)
-    return replaced
+    return cast("str", replaced)
 
 
 def process_repository(root: Path) -> None:

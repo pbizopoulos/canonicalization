@@ -1,1 +1,1 @@
-console.log("Hello World!");
+document.documentElement.dataset.javascript = "enabled";
