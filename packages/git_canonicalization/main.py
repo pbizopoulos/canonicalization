@@ -425,7 +425,11 @@ def inspect_structure(root: Path) -> tuple[list[Package], list[str]]:
                 f"{relative}: expected regular file or directory, found symbolic link",
             )
         elif path.is_file() and relative not in allowed:
-            issues.append(f"{relative}: is not allowed")
+            issues.append(
+                f"{relative}: unsupported by the canonical flake layout; "
+                "move unrestricted project files under prm/ "
+                f"(for example, prm/{relative.name})",
+            )
     return packages, issues
 
 
@@ -607,8 +611,9 @@ def _check_python_default(package: Package) -> None:
         _without_dependency_lists(expected),
     ):
         msg = (
-            f"packages/{package.name}/default.nix: differs from the canonical "
-            "Python package template outside pythonDeps"
+            f"packages/{package.name}/default.nix: does not match the canonical "
+            "Python package template; permitted customizations are nativeDeps, "
+            "pythonDeps, shellHook, and meta.description"
         )
         raise CommandError(msg)
 
@@ -671,7 +676,11 @@ def check_flake(root: Path, fix: bool) -> list[Package]:
         raise CommandError("missing required file: " + missing[0])
     packages, issues = inspect_structure(root)
     if issues:
-        raise CommandError("directory structure: " + "\nerror: ".join(issues))
+        formatted_issues = "\n".join(f"  - {issue}" for issue in issues)
+        msg = f"repository layout validation failed:\n{formatted_issues}"
+        raise CommandError(
+            msg,
+        )
     expected = render_gitignore(allowed_paths(root, packages), opaque_trees(root))
     actual = _read_regular(root / ".gitignore")
     if actual != expected:
@@ -1056,6 +1065,30 @@ def test_python_package_allows_latex_resources_in_prm() -> None:
         assert detect_packages(root) == [Package("report", "python", package)]
 
 
+def test_repository_layout_error_explains_how_to_place_unrestricted_files() -> None:
+    """Report unsupported paths together with an actionable prm location."""
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        root = Path(temporary_directory)
+        for required in (".gitignore", "flake.lock", "flake.nix"):
+            (root / required).write_text("", encoding="utf-8")
+        secrets = root / "secrets"
+        secrets.mkdir()
+        (secrets / "secrets.age").write_text("", encoding="utf-8")
+        try:
+            check_flake(root, False)
+        except CommandError as error:
+            error_message = str(error)
+        else:
+            msg = "unsupported repository path was accepted"
+            raise AssertionError(msg)
+        assert error_message == (
+            "repository layout validation failed:\n"
+            "  - secrets/secrets.age: unsupported by the canonical flake "
+            "layout; move unrestricted project files under prm/ "
+            "(for example, prm/secrets.age)"
+        )
+
+
 def test_python_scaffold_installs_optional_prm_resources() -> None:
     """Use one canonical Python package template for optional package resources."""
     files = scaffold("python", "report", None)
@@ -1138,11 +1171,16 @@ def test_python_default_allows_only_package_customization() -> None:
         )
         try:
             _check_python_default(package)
-        except CommandError:
-            pass
+        except CommandError as error:
+            error_message = str(error)
         else:
             msg = "static Python package template drift was not detected"
             raise AssertionError(msg)
+        assert error_message == (
+            "packages/report/default.nix: does not match the canonical "
+            "Python package template; permitted customizations are nativeDeps, "
+            "pythonDeps, shellHook, and meta.description"
+        )
 
 
 def test_coverage_default_matches_current_template() -> None:
