@@ -802,12 +802,21 @@ def canonical_typed_default(package: Package) -> str | None:
             ("nativeDeps", "list"),
             ("pythonDeps", "list"),
             ("shellHook", "string"),
+            ("postInstall", "string"),
+            ("postFixup", "string"),
         ),
     }[package.kind]
     for name, kind in fields:
         value = _binding_value(source, name, kind)
         if value is not None:
-            rendered = _replace_binding(rendered, name, value)
+            if name in {"postInstall", "postFixup"}:
+                rendered = rendered.replace(
+                    "  meta = {",
+                    f"  {name} = {value};\n  meta = {{",
+                    1,
+                )
+            else:
+                rendered = _replace_binding(rendered, name, value)
     if package.kind == "python" and not re.match(
         r"\s*\{\s*inputs\s*,",
         source,
@@ -1769,6 +1778,20 @@ def test_python_default_allows_only_package_customization() -> None:
         assert _source_package_issues(root, package) == [
             "packages/report/default.nix: differs from its canonical typed template",
         ]
+
+
+def test_python_default_preserves_post_install_hook() -> None:
+    """Retain a Python package's runtime wrapper hook in its canonical template."""
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        root = Path(temporary_directory)
+        package_root = root / "packages" / "report"
+        package_root.mkdir(parents=True)
+        source = scaffold("python", "report", None)[Path("packages/report/default.nix")]
+        hook = "postInstall = ''\n  wrapProgram \"$out/bin/report\"\n'';"
+        source = source.replace("  meta = {", f"  {hook}\n  meta = {{", 1)
+        package = Package("report", "python", package_root)
+        (package_root / "default.nix").write_text(source, encoding="utf-8")
+        assert canonical_typed_default(package) == source
 
 
 def test_coverage_default_matches_current_template() -> None:
