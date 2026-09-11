@@ -761,8 +761,35 @@ pkgs.runCommand checkName
 """
 
 
+def _python_static_template_issues(package: Package, source: str) -> list[str]:
+    """Check only the stable interface required by Python package templates."""
+    template = scaffold("python", package.name, None)[
+        Path("packages") / package.name / "default.nix"
+    ]
+    expected_install_phase = _binding_value(template, "installPhase", "string")
+    actual_install_phase = _binding_value(source, "installPhase", "string")
+    issues: list[str] = []
+    if actual_install_phase != expected_install_phase:
+        issues.append("installPhase differs from the canonical install phase")
+    required = {
+        "pname": r"baseNameOf\s+\./\.\s*;",
+        "pyproject": r"false\s*;",
+        "src": r"\./\.\s*;",
+        "strictDeps": r"true\s*;",
+    }
+    for name, expression in required.items():
+        if not re.search(rf"\b{name}\s*=\s*{expression}", source):
+            issues.append(f"missing required {name} definition")
+    if not re.search(
+        r"(?:meta\.mainProgram|\bmainProgram)\s*=\s*pname\s*;",
+        source,
+    ):
+        issues.append("missing required meta.mainProgram definition")
+    return issues
+
+
 def _binding_value(source: str, name: str, kind: str) -> str | None:
-    """ExtractReturn one permitted template binding expression."""
+    """Extract one permitted template binding expression."""
     patterns = {
         "list": rf"(?s)\b{name}\s*=\s*(\[.*?\])\s*;",
         "string": rf"""(?s)\b{name}\s*=\s*((?:"(?:\\.|[^"\\])*"|''.*?''))\s*;""",
@@ -781,8 +808,82 @@ def _replace_binding(source: str, name: str, value: str) -> str:
     )
 
 
+def _canonical_python_default(package: Package, source: str) -> str:
+    """Repair required Python bindings without removing custom attributes."""
+    template = scaffold("python", package.name, None)[
+        Path("packages") / package.name / "default.nix"
+    ]
+    expected_install_phase = _binding_value(template, "installPhase", "string")
+    assert expected_install_phase is not None
+    required = {
+        "pname": "baseNameOf ./.",
+        "pyproject": "false",
+        "src": "./.",
+        "strictDeps": "true",
+    }
+    for name, value in required.items():
+        if re.search(rf"\b{name}\s*=\s*[^;]+;", source):
+            source = re.sub(
+                rf"(\b{name}\s*=\s*)[^;]+(;)",
+                rf"\g<1>{value}\2",
+                source,
+                count=1,
+            )
+        else:
+            source = source.replace(
+                "  installPhase =",
+                f"  {name} = {value};\n  installPhase =",
+                1,
+            )
+    if re.search(r"\binstallPhase\s*=", source):
+        source = _replace_binding(source, "installPhase", expected_install_phase)
+    else:
+        updated = source.replace(
+            "  meta = {",
+            f"  installPhase = {expected_install_phase};\n  meta = {{",
+            1,
+        )
+        source = (
+            updated
+            if updated != source
+            else source.replace(
+                "\n}",
+                f"\n  installPhase = {expected_install_phase};\n}}",
+                1,
+            )
+        )
+    main_program = re.compile(
+        r"(?s)(\bmainProgram\s*=\s*)[^;]+(;)|"
+        r"(\bmeta\.mainProgram\s*=\s*)[^;]+(;)",
+    )
+    if main_program.search(source):
+        source = main_program.sub(
+            lambda match: (
+                f"{match.group(1) or match.group(3)}pname{match.group(2) or match.group(4)}"
+            ),
+            source,
+            count=1,
+        )
+    else:
+        updated = source.replace(
+            "  meta = {",
+            "  meta = {\n    mainProgram = pname;",
+            1,
+        )
+        source = (
+            updated
+            if updated != source
+            else source.replace(
+                "\n}",
+                "\n  meta.mainProgram = pname;\n}",
+                1,
+            )
+        )
+    return source
+
+
 def canonical_typed_default(package: Package) -> str | None:
-    """Render a typed definition while retaining its permitted fields."""
+    """Render a typed definition while retaining package-specific fields."""
     if package.kind == "nix":
         return None
     source = _read_regular(package.root / "default.nix")
@@ -791,6 +892,8 @@ def canonical_typed_default(package: Package) -> str | None:
             Path("packages") / package.name / "default.nix"
         ]
     nix_syntax.parse(source, str(package.root / "default.nix"))
+    if package.kind == "python":
+        return _canonical_python_default(package, source)
     description = package_description(package)
     rendered = scaffold(package.kind, package.name, description)[
         Path("packages") / package.name / "default.nix"
@@ -798,34 +901,11 @@ def canonical_typed_default(package: Package) -> str | None:
     fields = {
         "html": (("runtimeDeps", "list"),),
         "latex": (("nativeDeps", "list"),),
-        "python": (
-            ("nativeDeps", "list"),
-            ("pythonDeps", "list"),
-            ("shellHook", "string"),
-            ("postInstall", "string"),
-            ("postFixup", "string"),
-        ),
     }[package.kind]
     for name, kind in fields:
         value = _binding_value(source, name, kind)
         if value is not None:
-            if name in {"postInstall", "postFixup"}:
-                rendered = rendered.replace(
-                    "  meta = {",
-                    f"  {name} = {value};\n  meta = {{",
-                    1,
-                )
-            else:
-                rendered = _replace_binding(rendered, name, value)
-    if package.kind == "python" and not re.match(
-        r"\s*\{\s*inputs\s*,",
-        source,
-    ):
-        rendered = rendered.replace(
-            "{ inputs, pkgs, ... }:",
-            "{ pkgs, ... }:",
-            1,
-        )
+            rendered = _replace_binding(rendered, name, value)
     return rendered
 
 
@@ -1062,6 +1142,11 @@ def _source_package_issues(root: Path, package: Package) -> list[str]:
         and _compact_nix(actual) != _compact_nix(expected)
     ):
         issues.append(f"{relative}: differs from its canonical typed template")
+    if package.kind == "python" and actual is not None:
+        issues.extend(
+            f"{relative}: {issue}"
+            for issue in _python_static_template_issues(package, actual)
+        )
     main = package.root / "main.py"
     if package.kind != "python" or not main.is_file():
         return issues
@@ -1095,15 +1180,10 @@ def scaffold(
     defaults = {
         "python": """{ inputs, pkgs, ... }:
 let
-  nativeDeps = [ ];
-  pname = baseNameOf ./.;
   python = pkgs.python3;
-  pythonDeps = [ ];
-  shellHook = "";
 in
 python.pkgs.buildPythonPackage {
-  inherit pname;
-  inherit shellHook;
+  pname = baseNameOf ./.;
   installPhase = ''
     install -Dm644 main.py "$out/${python.sitePackages}/$pname.py"
     install -Dm755 main.py "$out/bin/$pname"
@@ -1116,9 +1196,7 @@ python.pkgs.buildPythonPackage {
     description = __DESCRIPTION__;
     mainProgram = pname;
   };
-  nativeBuildInputs = nativeDeps;
   passthru.python = python;
-  propagatedBuildInputs = pythonDeps;
   pyproject = false;
   src = ./.;
   strictDeps = true;
@@ -1689,14 +1767,16 @@ def test_orphan_coverage_check_is_not_canonical() -> None:
 
 
 def test_python_scaffold_installs_optional_prm_resources() -> None:
-    """Use one canonical Python package template for optional package resources."""
+    """Use one canonical install phase and a minimal Python package template."""
     files = scaffold("python", "report", None)
     default = files[Path("packages/report/default.nix")]
     assert "if [ -d prm ]; then" in default
     assert 'cp -R prm/ "$out/bin/"' in default
     assert '"$out/${python.sitePackages}/$pname.py"' in default
-    assert "nativeDeps = [ ];" in default
-    assert "pythonDeps = [ ];" in default
+    assert "pname = baseNameOf ./.;" in default
+    assert "pyproject = false;" in default
+    assert "src = ./.;" in default
+    assert "strictDeps = true;" in default
     assert "<nixpkgs>" not in default
     assert "passthru.python = python;" in default
 
@@ -1747,51 +1827,39 @@ def _assert_invalid_imported_status(source: str) -> None:
     raise AssertionError(msg)
 
 
-def test_python_default_allows_only_package_customization() -> None:
-    """Permit dependency and shell-hook changes but reject template changes."""
+def test_python_default_preserves_custom_attributes() -> None:
+    """Permit package-specific Nix attributes while retaining static fields."""
     with tempfile.TemporaryDirectory() as temporary_directory:
         root = Path(temporary_directory)
         package_root = root / "packages" / "report"
         package_root.mkdir(parents=True)
         source = scaffold("python", "report", None)[Path("packages/report/default.nix")]
         source = source.replace(
-            "pythonDeps = [ ];",
-            "pythonDeps = [ pkgs.some_dependency ];",
-        )
-        source = source.replace(
-            "nativeDeps = [ ];",
-            "nativeDeps = [ pkgs.some_native_dependency ];",
-        )
-        source = source.replace(
-            'shellHook = "";',
-            "shellHook = ''\n  export EXAMPLE=value\n'';",
+            "  meta = {",
+            "  buildInputs = [ pkgs.some_dependency ];\n  meta = {",
         )
         source = source.replace("{ inputs, pkgs, ... }:", "{ pkgs, ... }:")
         package = Package("report", "python", package_root)
         (package_root / "default.nix").write_text(source, encoding="utf-8")
         assert canonical_typed_default(package) == source
         assert _source_package_issues(root, package) == []
-        (package_root / "default.nix").write_text(
-            source.replace('version = "0.0.0";', 'version = "1.0.0";'),
-            encoding="utf-8",
-        )
-        assert _source_package_issues(root, package) == [
-            "packages/report/default.nix: differs from its canonical typed template",
-        ]
 
 
-def test_python_default_preserves_post_install_hook() -> None:
-    """Retain a Python package's runtime wrapper hook in its canonical template."""
+def test_python_default_requires_static_build_fields() -> None:
+    """Repair Python definitions that omit one of the canonical build fields."""
     with tempfile.TemporaryDirectory() as temporary_directory:
         root = Path(temporary_directory)
         package_root = root / "packages" / "report"
         package_root.mkdir(parents=True)
         source = scaffold("python", "report", None)[Path("packages/report/default.nix")]
-        hook = "postInstall = ''\n  wrapProgram \"$out/bin/report\"\n'';"
-        source = source.replace("  meta = {", f"  {hook}\n  meta = {{", 1)
+        source = source.replace("  strictDeps = true;\n", "")
         package = Package("report", "python", package_root)
         (package_root / "default.nix").write_text(source, encoding="utf-8")
-        assert canonical_typed_default(package) == source
+        repaired = canonical_typed_default(package)
+        assert repaired is not None
+        assert "strictDeps = true;" in repaired
+        (package_root / "default.nix").write_text(repaired, encoding="utf-8")
+        assert _source_package_issues(root, package) == []
 
 
 def test_coverage_default_matches_current_template() -> None:
