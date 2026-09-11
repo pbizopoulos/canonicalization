@@ -1185,11 +1185,12 @@ in
 python.pkgs.buildPythonPackage {
   pname = baseNameOf ./.;
   installPhase = ''
-    install -Dm644 main.py "$out/${python.sitePackages}/$pname.py"
-    install -Dm755 main.py "$out/bin/$pname"
+    install -Dm644 main.py "$out/${python.sitePackages}/$pname/__init__.py"
+    mkdir -p "$out/bin"
+    printf '%s\\n' '#!${python.interpreter}' "from $pname import main" 'main()' > "$out/bin/$pname"
+    chmod 755 "$out/bin/$pname"
     if [ -d prm ]; then
-      cp -R prm/ "$out/${python.sitePackages}/"
-      cp -R prm/ "$out/bin/"
+      cp -R prm/ "$out/${python.sitePackages}/$pname/"
     fi
   '';
   meta = {
@@ -1767,12 +1768,16 @@ def test_orphan_coverage_check_is_not_canonical() -> None:
 
 
 def test_python_scaffold_installs_optional_prm_resources() -> None:
-    """Use one canonical install phase and a minimal Python package template."""
+    """Namespace Python modules and resources so package environments compose."""
     files = scaffold("python", "report", None)
     default = files[Path("packages/report/default.nix")]
     assert "if [ -d prm ]; then" in default
-    assert 'cp -R prm/ "$out/bin/"' in default
-    assert '"$out/${python.sitePackages}/$pname.py"' in default
+    assert 'cp -R prm/ "$out/${python.sitePackages}/$pname/"' in default
+    assert '"$out/${python.sitePackages}/$pname/__init__.py"' in default
+    assert '"from $pname import main"' in default
+    assert "#!${python.interpreter}" in default
+    assert 'cp -R prm/ "$out/bin/"' not in default
+    assert '"$out/${python.sitePackages}/$pname.py"' not in default
     assert "pname = baseNameOf ./.;" in default
     assert "pyproject = false;" in default
     assert "src = ./.;" in default
