@@ -1006,6 +1006,30 @@ def _converge_allowed_files(
     return changed
 
 
+def _converge_opaque_files(
+    root: Path,
+    opaque: set[Path],
+    tracked: set[Path],
+    *,
+    dry_run: bool,
+) -> tuple[bool, set[Path]]:
+    """Stage unmanaged files below opaque trees without changing their modes."""
+    files = {
+        path.relative_to(root)
+        for tree in opaque
+        for path in (root / tree).rglob("*")
+        if path.is_file() or path.is_symlink()
+    }
+    changed = False
+    for relative in sorted(files - tracked):
+        _change(f"stage '{relative}'", dry_run=dry_run)
+        changed = True
+        if not dry_run:
+            git(root, ["add", "--", str(relative)])
+            tracked.add(relative)
+    return changed, files
+
+
 def _remove_unsupported_tracked(
     root: Path,
     tracked: set[Path],
@@ -1049,6 +1073,13 @@ def _cleanup_flake(root: Path, packages: list[Package], dry_run: bool) -> bool:
         python_entrypoints,
         dry_run=dry_run,
     )
+    opaque_changed, opaque_files = _converge_opaque_files(
+        root,
+        opaque,
+        tracked,
+        dry_run=dry_run,
+    )
+    changed |= opaque_changed
     changed |= _remove_unsupported_tracked(
         root,
         tracked,
@@ -1058,7 +1089,7 @@ def _cleanup_flake(root: Path, packages: list[Package], dry_run: bool) -> bool:
     )
     clean_arguments = _clean_arguments(dry_run=dry_run)
     if dry_run:
-        for relative in sorted(allowed):
+        for relative in sorted(allowed | opaque_files):
             if (root / relative).exists():
                 clean_arguments.extend(("-e", f"/{relative.as_posix()}"))
     clean = git(root, clean_arguments, check=False)
@@ -1974,6 +2005,30 @@ def test_convergence_preserves_root_and_package_scratch_only() -> None:
         assert (
             "packages/sample/tmp/package-state"
             not in git(
+                root,
+                ["ls-files"],
+            ).stdout.splitlines()
+        )
+
+
+def test_convergence_stages_untracked_opaque_package_files() -> None:
+    """Stage new opaque resources before Git cleanup can remove them."""
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        root = Path(temporary_directory)
+        _temporary_flake(root)
+        package = root / "packages" / "sample"
+        resource = package / "prm" / "visual" / "snapshot.png"
+        resource.parent.mkdir(parents=True)
+        (package / "default.nix").write_text(
+            "{ pkgs, ... }: pkgs.emptyFile\n",
+            encoding="utf-8",
+        )
+        resource.write_bytes(b"snapshot")
+        check_flake(root, False)
+        assert resource.read_bytes() == b"snapshot"
+        assert (
+            resource.relative_to(root).as_posix()
+            in git(
                 root,
                 ["ls-files"],
             ).stdout.splitlines()
