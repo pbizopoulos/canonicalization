@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026- Paschalis Bizopoulos
 # ruff: noqa: C901, D101, E501, FBT001, FBT003, PLR2004, S101, S603, TRY301
-"""Check canonical home repositories and manage canonical flake repositories."""
+"""Canonicalize home repositories and manage canonical flake repositories."""
 
 from __future__ import annotations
 
@@ -126,7 +126,9 @@ def profile(root: Path, default: str | None = None) -> str:
             msg,
         )
     msg = (
-        f"cannot determine the repository type; run 'git canonicalization init {root}'"
+        "cannot determine the repository type; run "
+        "'git canonicalization init home' or "
+        "'git canonicalization init flake REMOTE'"
     )
     raise CommandError(
         msg,
@@ -351,6 +353,16 @@ def _converge_home_repository(
         if not dry_run:
             (root / expected).parent.mkdir(parents=True, exist_ok=True)
             git(root, ["mv", "--", str(actual), str(expected)])
+            git(
+                root,
+                [
+                    "config",
+                    "--file",
+                    ".gitmodules",
+                    f"submodule.{expected.as_posix()}.path",
+                    expected.as_posix(),
+                ],
+            )
     checkout = root / (actual if dry_run and actual != expected else expected)
     if not (checkout / ".git").exists():
         _change(f"initialize submodule '{expected}'", dry_run=dry_run)
@@ -358,10 +370,63 @@ def _converge_home_repository(
         if not dry_run:
             git(root, ["submodule", "update", "--init", "--", str(expected)])
     if (checkout / ".git").exists():
-        origin = git(checkout, ["remote", "get-url", "origin"], check=False)
-        if origin.returncode != 0 or origin.stdout.strip() != repository["url"]:
-            msg = f"{expected}: origin does not match .gitmodules URL"
-            raise CommandError(msg)
+        changed |= _converge_home_checkout(
+            root,
+            checkout,
+            expected,
+            repository["url"],
+            dry_run=dry_run,
+        )
+    return changed
+
+
+def _converge_home_checkout(
+    root: Path,
+    checkout: Path,
+    expected: Path,
+    configured_url: str,
+    *,
+    dry_run: bool,
+) -> bool:
+    """Converge a present submodule's origin and indexed commit."""
+    changed = False
+    origin = git(checkout, ["remote", "get-url", "origin"], check=False)
+    if origin.returncode != 0:
+        msg = f"{expected}: checkout has no origin remote"
+        raise CommandError(msg)
+    if origin.stdout.strip() != configured_url:
+        _change(
+            f"set origin URL for '{expected}' to '{configured_url}'",
+            dry_run=dry_run,
+        )
+        changed = True
+        if not dry_run:
+            git(checkout, ["remote", "set-url", "origin", configured_url])
+    status = git(checkout, ["status", "--porcelain=v1", "--untracked-files=all"])
+    if status.stdout:
+        msg = f"{expected}: submodule worktree is dirty"
+        raise CommandError(msg)
+    head = git(checkout, ["rev-parse", "HEAD"]).stdout.strip()
+    remote_refs = git(
+        checkout,
+        [
+            "for-each-ref",
+            "--format=%(refname)",
+            "--contains",
+            head,
+            "refs/remotes/origin/",
+        ],
+    ).stdout.splitlines()
+    if not remote_refs:
+        msg = f"{expected}: HEAD is not known to an origin remote-tracking ref"
+        raise CommandError(msg)
+    indexed = git(root, ["ls-files", "--stage", "--", str(expected)]).stdout.split()
+    indexed_head = indexed[1] if len(indexed) >= 2 and indexed[0] == "160000" else None
+    if indexed_head != head:
+        _change(f"stage submodule '{expected}' at {head}", dry_run=dry_run)
+        changed = True
+        if not dry_run:
+            git(root, ["add", "--", str(expected)])
     return changed
 
 
@@ -1488,18 +1553,9 @@ def initialize_flake(remote: str, status_path: str | None) -> None:
     if not _remote_is_empty(remote):
         msg = "init flake requires an empty remote"
         raise CommandError(msg)
-    directory = home / relative
-    if directory.exists():
-        msg = f"target already exists: {directory}"
-        raise CommandError(msg)
-    directory.parent.mkdir(parents=True, exist_ok=True)
-    _run(["git", "clone", remote, str(directory)])
-    flake = directory / "flake.nix"
-    flake.write_text(
-        '{ inputs.canonicalization.url = "github:pbizopoulos/canonicalization"; outputs = inputs: inputs.canonicalization.blueprint { inherit inputs; }; }\n',
-        encoding="utf-8",
-    )
-    readme = f"# {directory.name}\n"
+    readme = f"# {relative.name}\n"
+    package_specs: list[dict[str, Any]] = []
+    hosts: list[str] = []
     if status_path is not None:
         source = (
             sys.stdin.read()
@@ -1507,6 +1563,18 @@ def initialize_flake(remote: str, status_path: str | None) -> None:
             else Path(status_path).read_text(encoding="utf-8")
         )
         readme, package_specs, hosts = _imported_status(source)
+    directory = home / relative
+    if directory.exists():
+        msg = f"target already exists: {directory}"
+        raise CommandError(msg)
+    directory.parent.mkdir(parents=True, exist_ok=True)
+    _run(["git", "clone", remote, str(directory)])
+    try:
+        flake = directory / "flake.nix"
+        flake.write_text(
+            '{ inputs.canonicalization.url = "github:pbizopoulos/canonicalization"; outputs = inputs: inputs.canonicalization.blueprint { inherit inputs; }; }\n',
+            encoding="utf-8",
+        )
         (directory / "README").write_text(readme, encoding="utf-8")
         for item in package_specs:
             files = scaffold(
@@ -1525,27 +1593,31 @@ def initialize_flake(remote: str, status_path: str | None) -> None:
             path = directory / "hosts" / host / "configuration.nix"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("{ ... }: { }\n", encoding="utf-8")
-    else:
-        (directory / "README").write_text(readme, encoding="utf-8")
-    _run(
-        [os.environ.get("GIT_CANONICALIZATION_NIX", "nix"), "flake", "lock"],
-        cwd=directory,
-    )
-    detected_packages = detect_packages(directory)
-    (directory / ".gitignore").write_text(
-        render_gitignore(
-            allowed_paths(directory, detected_packages),
-            opaque_trees(directory),
-        ),
-        encoding="utf-8",
-    )
-    _run(
-        [os.environ.get("GIT_CANONICALIZATION_NIX", "nix"), "fmt"],
-        cwd=directory,
-    )
-    git(directory, ["add", "--all"])
-    git(directory, ["branch", "-M", "main"])
-    git(directory, ["commit", "-m", "Initialize repository"])
+        _run(
+            [os.environ.get("GIT_CANONICALIZATION_NIX", "nix"), "flake", "lock"],
+            cwd=directory,
+        )
+        detected_packages = detect_packages(directory)
+        (directory / ".gitignore").write_text(
+            render_gitignore(
+                allowed_paths(directory, detected_packages),
+                opaque_trees(directory),
+            ),
+            encoding="utf-8",
+        )
+        _run(
+            [os.environ.get("GIT_CANONICALIZATION_NIX", "nix"), "fmt"],
+            cwd=directory,
+        )
+        git(directory, ["add", "--all"])
+        git(directory, ["branch", "-M", "main"])
+        git(directory, ["commit", "-m", "Initialize repository"])
+        git(directory, ["push", "--set-upstream", "origin", "main"])
+    except BaseException:
+        shutil.rmtree(directory)
+        with contextlib.suppress(OSError):
+            directory.parent.rmdir()
+        raise
     git(
         home,
         [
@@ -1567,11 +1639,16 @@ def status(root: Path) -> dict[str, Any]:
         msg = "home repositories are not compatible with status"
         raise CommandError(msg)
     packages = check_flake(root, True)
+    nix = os.environ.get("GIT_CANONICALIZATION_NIX", "nix")
+    system = _run(
+        [nix, "eval", "--impure", "--raw", "--expr", "builtins.currentSystem"],
+        cwd=root,
+    ).stdout.strip()
     _run(
         [
-            os.environ.get("GIT_CANONICALIZATION_NIX", "nix"),
+            nix,
             "build",
-            ".#checks.x86_64-linux.pkgs-formatter-check",
+            f".#checks.{system}.pkgs-formatter-check",
             "--no-link",
         ],
         cwd=root,
@@ -1599,7 +1676,7 @@ def parser() -> argparse.ArgumentParser:
     """Construct the public command-line parser."""
     result = argparse.ArgumentParser(
         prog="git canonicalization",
-        description="Check canonical home repositories and manage Nix flake repositories.",
+        description="Canonicalize home repositories and manage canonical flake repositories.",
     )
     commands = result.add_subparsers(dest="command", required=True)
     init = commands.add_parser("init", help="Initialize a canonical repository.")
@@ -1614,9 +1691,12 @@ def parser() -> argparse.ArgumentParser:
     remove = commands.add_parser("rm", help="Remove a package and its generated check.")
     remove.add_argument("name")
     remove.add_argument("-n", "--dry-run", action="store_true")
-    check = commands.add_parser("check", help="Converge the selected repository.")
-    check.add_argument("-n", "--dry-run", action="store_true")
-    check.add_argument("--source", type=Path, help=argparse.SUPPRESS)
+    canonicalize = commands.add_parser(
+        "canonicalize",
+        help="Converge the selected repository.",
+    )
+    canonicalize.add_argument("-n", "--dry-run", action="store_true")
+    canonicalize.add_argument("--source", type=Path, help=argparse.SUPPRESS)
     return result
 
 
@@ -1646,7 +1726,7 @@ def main() -> None:
         options = parser().parse_args(arguments)
         if _dispatch_init(options):
             return
-        if options.command == "check" and options.source is not None:
+        if options.command == "canonicalize" and options.source is not None:
             validate_flake_source(options.source.resolve())
             return
         root = repository_root()
@@ -1665,7 +1745,7 @@ def main() -> None:
                     sort_keys=True,
                 ),
             )
-        elif options.command == "check":
+        elif options.command == "canonicalize":
             check_home(
                 root,
                 options.dry_run,
@@ -1929,6 +2009,105 @@ def test_remote_paths_and_test_names() -> None:
         "github.com/owner/demo",
     )
     assert _humanize("test_cli_handles_utf8_url") == "CLI handles UTF-8 URL."
+
+
+def test_home_checkout_converges_origin_and_gitlink() -> None:
+    """Use .gitmodules as authority and stage only a published clean HEAD."""
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        root = Path(temporary_directory)
+        checkout = root / "github.com" / "owner" / "demo"
+        checkout.mkdir(parents=True)
+        git(root, ["init", "--quiet"])
+        git(checkout, ["init", "--quiet"])
+        git(checkout, ["config", "user.email", "test@example.com"])
+        git(checkout, ["config", "user.name", "Test"])
+        source = checkout / "README"
+        source.write_text("first\n", encoding="utf-8")
+        git(checkout, ["add", "README"])
+        git(checkout, ["commit", "--quiet", "-m", "first"])
+        git(checkout, ["remote", "add", "origin", "git@github.com:owner/demo.git"])
+        first = git(checkout, ["rev-parse", "HEAD"]).stdout.strip()
+        git(checkout, ["update-ref", "refs/remotes/origin/main", first])
+        git(root, ["add", str(checkout.relative_to(root))])
+        source.write_text("second\n", encoding="utf-8")
+        git(checkout, ["add", "README"])
+        git(checkout, ["commit", "--quiet", "-m", "second"])
+        second = git(checkout, ["rev-parse", "HEAD"]).stdout.strip()
+        git(checkout, ["update-ref", "refs/remotes/origin/main", second])
+        expected = Path("github.com/owner/demo")
+        assert _converge_home_checkout(
+            root,
+            checkout,
+            expected,
+            "git@github.com:owner/demo",
+            dry_run=False,
+        )
+        assert git(checkout, ["remote", "get-url", "origin"]).stdout.strip() == (
+            "git@github.com:owner/demo"
+        )
+        indexed = git(root, ["ls-files", "--stage", "--", str(expected)]).stdout
+        assert indexed.split()[1] == second
+
+
+def test_home_checkout_rejects_dirty_or_unpublished_head() -> None:
+    """Do not record submodule state that another checkout cannot reproduce."""
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        root = Path(temporary_directory)
+        checkout = root / "demo"
+        checkout.mkdir()
+        git(root, ["init", "--quiet"])
+        git(checkout, ["init", "--quiet"])
+        git(checkout, ["config", "user.email", "test@example.com"])
+        git(checkout, ["config", "user.name", "Test"])
+        source = checkout / "README"
+        source.write_text("clean\n", encoding="utf-8")
+        git(checkout, ["add", "README"])
+        git(checkout, ["commit", "--quiet", "-m", "initial"])
+        git(checkout, ["remote", "add", "origin", "git@example.com:owner/demo"])
+        git(root, ["add", "demo"])
+        error_message = ""
+        try:
+            _converge_home_checkout(
+                root,
+                checkout,
+                Path("demo"),
+                "git@example.com:owner/demo",
+                dry_run=False,
+            )
+        except CommandError as error:
+            error_message = str(error)
+        else:
+            msg = "unpublished submodule HEAD was accepted"
+            raise AssertionError(msg)
+        assert "not known to an origin remote-tracking ref" in error_message
+        source.write_text("dirty\n", encoding="utf-8")
+        error_message = ""
+        try:
+            _converge_home_checkout(
+                root,
+                checkout,
+                Path("demo"),
+                "git@example.com:owner/demo",
+                dry_run=False,
+            )
+        except CommandError as error:
+            error_message = str(error)
+        else:
+            msg = "dirty submodule worktree was accepted"
+            raise AssertionError(msg)
+        assert "submodule worktree is dirty" in error_message
+
+
+def test_canonicalize_is_the_convergence_command() -> None:
+    """Name the mutating operation after what it does."""
+    assert parser().parse_args(["canonicalize"]).command == "canonicalize"
+    try:
+        parser().parse_args(["check"])
+    except SystemExit:
+        pass
+    else:
+        msg = "legacy check command was accepted"
+        raise AssertionError(msg)
 
 
 def test_gitignore_patterns_are_globally_sorted() -> None:

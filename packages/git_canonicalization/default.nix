@@ -23,7 +23,7 @@ python.pkgs.buildPythonPackage {
     fi
   '';
   meta = {
-    description = "Check canonical home repositories and manage canonical flake repositories.";
+    description = "Canonicalize home repositories and manage canonical flake repositories.";
     mainProgram = pname;
   };
   nativeBuildInputs = nativeDeps;

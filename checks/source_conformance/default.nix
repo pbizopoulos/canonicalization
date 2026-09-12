@@ -8,6 +8,6 @@ pkgs.runCommand "source_conformance"
     src = ../..;
   }
   ''
-    git_canonicalization check --source "$src"
+    git_canonicalization canonicalize --source "$src"
     touch "$out"
   ''

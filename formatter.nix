@@ -143,7 +143,7 @@ let
     name = "treefmt";
     runtimeInputs = [ inputs.self.packages.${pkgs.stdenv.system}.git_canonicalization ];
     text = ''
-      git_canonicalization check
+      git_canonicalization canonicalize
       exec ${rawFormatter}/bin/treefmt "$@"
     '';
   };
