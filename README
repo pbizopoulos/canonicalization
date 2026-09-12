@@ -19,6 +19,17 @@ git_canonicalization add python demo "A demo package."
 cd "$HOME/github.com/owner/demo"
 git_canonicalization rm demo
 
+# Enter a development environment of a package
+cd "$HOME/github.com/owner/demo"
+nix develop .#<package-name>
+
+# Run a local package
+cd "$HOME/github.com/owner/demo"
+nix run .#<package-name>
+
+# Run an package from the registry
+nix run nixpkgs#<package-name>
+
 # Format, build/test packages/hosts
 nix fmt
 nix flake check
