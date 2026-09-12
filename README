@@ -40,6 +40,9 @@ git submodule foreach <command> # e.g. nix fmt, nix flake check
 
 # Rules
 # Use Nix flakes in repositories
-# Use git_canonicalization for all persistent directory-structure changes; use prm/ for exceptions
+# HOME is local-only and intentionally tracks selected private persistent state
+# git_canonicalization canonicalize is a mutating convergence command that rewrites, stages, and cleans the canonical layout
+# Use native Git commands for repository lifecycle operations
+# Use git_canonicalization for persistent directory-structure changes and preserve its strict canonical layout; use prm/ for deliberate exceptions, including required opaque assets
 # Keep as few files and directories as possible in prm/
 # Save generated artifacts in tmp/ directories
