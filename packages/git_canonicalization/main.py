@@ -184,26 +184,24 @@ def _tracked_paths(root: Path) -> set[Path]:
     return {Path(item) for item in completed.stdout.split("\0") if item}
 
 
-def _clean_arguments(*, dry_run: bool) -> list[str]:
-    """Build the single-force cleanup command with scratch exclusions."""
-    return [
-        "clean",
-        "-ndx" if dry_run else "-fdx",
-        "-e",
-        f"/{SCRATCH_NAME}/",
-        "-e",
-        f"/packages/*/{SCRATCH_NAME}/",
-    ]
+def _clean_arguments(*, dry_run: bool, exclusions: tuple[str, ...]) -> list[str]:
+    """Build a native Git clean command with profile-selected exclusions."""
+    arguments = ["clean", "-ndx" if dry_run else "-fdx"]
+    for exclusion in exclusions:
+        arguments.extend(("-e", exclusion))
+    return arguments
 
 
-def _clean_output(source: str) -> str:
-    """Normalize Git clean actions to the canonical message style."""
-    return re.sub(
-        r"(?m)^(?:Would remove|Removing) ",
-        lambda match: (
-            "would remove " if match.group().startswith("Would") else "remove "
-        ),
-        source,
+def _home_clean_arguments(*, dry_run: bool) -> list[str]:
+    """Build the HOME cleanup command."""
+    return _clean_arguments(dry_run=dry_run, exclusions=(f"/{SCRATCH_NAME}/",))
+
+
+def _flake_clean_arguments(*, dry_run: bool) -> list[str]:
+    """Build the flake cleanup command."""
+    return _clean_arguments(
+        dry_run=dry_run,
+        exclusions=(f"/{SCRATCH_NAME}/", f"/packages/*/{SCRATCH_NAME}/"),
     )
 
 
@@ -396,12 +394,19 @@ def _converge_home_checkout(
         raise CommandError(msg)
     if origin.stdout.strip() != configured_url:
         _change(
-            f"set origin URL for '{expected}' to '{configured_url}'",
+            f"synchronize submodule URL for '{expected}'",
             dry_run=dry_run,
         )
         changed = True
         if not dry_run:
-            git(checkout, ["remote", "set-url", "origin", configured_url])
+            git(root, ["submodule", "sync", "--recursive", "--", str(expected)])
+            synchronized = git(checkout, ["remote", "get-url", "origin"], check=False)
+            if (
+                synchronized.returncode != 0
+                or synchronized.stdout.strip() != configured_url
+            ):
+                msg = f"{expected}: origin does not match .gitmodules URL after sync"
+                raise CommandError(msg)
     status = git(checkout, ["status", "--porcelain=v1", "--untracked-files=all"])
     if status.stdout:
         msg = f"{expected}: submodule worktree is dirty"
@@ -453,11 +458,11 @@ def check_home(root: Path, dry_run: bool) -> list[dict[str, str]]:
         )
     if not dry_run and repositories:
         git(root, ["add", "--", ".gitmodules"])
-    clean = git(root, _clean_arguments(dry_run=dry_run), check=False)
+    clean = git(root, _home_clean_arguments(dry_run=dry_run), check=False)
     if clean.returncode != 0:
         raise CommandError(clean.stderr.strip() or "git clean failed")
     if clean.stdout:
-        print(_clean_output(clean.stdout), end="")  # noqa: T201
+        print(clean.stdout, end="")  # noqa: T201
         changed = True
     if dry_run and changed:
         msg_0 = "home repository would change"
@@ -1152,7 +1157,7 @@ def _cleanup_flake(root: Path, packages: list[Package], dry_run: bool) -> bool:
         opaque | scratch | allowed,
         dry_run=dry_run,
     )
-    clean_arguments = _clean_arguments(dry_run=dry_run)
+    clean_arguments = _flake_clean_arguments(dry_run=dry_run)
     if dry_run:
         for relative in sorted(allowed | opaque_files):
             if (root / relative).exists():
@@ -1161,7 +1166,7 @@ def _cleanup_flake(root: Path, packages: list[Package], dry_run: bool) -> bool:
     if clean.returncode != 0:
         raise CommandError(clean.stderr.strip() or "git clean failed")
     if clean.stdout:
-        print(_clean_output(clean.stdout), end="")  # noqa: T201
+        print(clean.stdout, end="")  # noqa: T201
         changed = True
     return changed
 
@@ -2035,6 +2040,20 @@ def test_home_checkout_converges_origin_and_gitlink() -> None:
         second = git(checkout, ["rev-parse", "HEAD"]).stdout.strip()
         git(checkout, ["update-ref", "refs/remotes/origin/main", second])
         expected = Path("github.com/owner/demo")
+        (root / ".gitmodules").write_text(
+            '[submodule "github.com/owner/demo"]\n'
+            "\tpath = github.com/owner/demo\n"
+            "\turl = git@github.com:owner/demo\n",
+            encoding="utf-8",
+        )
+        git(
+            root,
+            [
+                "config",
+                "submodule.github.com/owner/demo.url",
+                "git@github.com:owner/demo.git",
+            ],
+        )
         assert _converge_home_checkout(
             root,
             checkout,
@@ -2137,10 +2156,22 @@ def test_home_initialization_uses_canonical_ignore_policy() -> None:
             raise AssertionError(msg)
 
 
-def test_git_clean_actions_use_canonical_message_style() -> None:
-    """Use lowercase imperative action messages for Git cleanup output."""
-    assert _clean_output("Would remove tmp.txt\n") == "would remove tmp.txt\n"
-    assert _clean_output("Removing tmp.txt\n") == "remove tmp.txt\n"
+def test_git_clean_arguments_are_profile_specific() -> None:
+    """Preserve each profile's scratch trees through native Git clean options."""
+    assert _home_clean_arguments(dry_run=True) == [
+        "clean",
+        "-ndx",
+        "-e",
+        f"/{SCRATCH_NAME}/",
+    ]
+    assert _flake_clean_arguments(dry_run=False) == [
+        "clean",
+        "-fdx",
+        "-e",
+        f"/{SCRATCH_NAME}/",
+        "-e",
+        f"/packages/*/{SCRATCH_NAME}/",
+    ]
 
 
 def _temporary_flake(root: Path) -> None:
