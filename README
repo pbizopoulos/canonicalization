@@ -34,6 +34,10 @@ nix run nixpkgs#package-name
 nix fmt
 nix flake check
 
+# Run a command in each HOME submodule
+cd
+git submodule foreach <command> # e.g. nix fmt, nix flake check
+
 # Rules
 # Use Nix flakes in repositories
 # Use git_canonicalization for all persistent directory-structure changes; use prm/ for exceptions
