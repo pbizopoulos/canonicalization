@@ -1,20 +1,30 @@
 # Canonicalization
 
-NixOS with preservation and a git repository in HOME with nix-flakes numtide/blueprint git submodules in go-style paths.
+Environment: NixOS meta-distribution with nix flakes-enabled and preservation and a git repository in HOME with nix flakes-enabled git submodules in go-style paths that consist of a subset of numtide/blueprint directory structure.
 
 # Initialize HOME
 # Create the empty project remote
 git_canonicalization init home
-# Add required home whitelist entries
-# Stage their files before cleanup.
+# Add required home whitelist entries in .gitignore
+# Stage files before cleanup
 
 # Initialize repository
 git_canonicalization init flake git@github.com:owner/demo.git
 
-# Initialize package
+# Add package
 cd "$HOME/github.com/owner/demo"
 git_canonicalization add python demo "A demo package."
+
+# Remove package
+cd "$HOME/github.com/owner/demo"
+git_canonicalization rm demo
 
 # Format, build/test packages/hosts
 nix fmt
 nix flake check
+
+# Rules
+# Use nix flakes in repositories
+# git_canonicalization is solely responsible for persistent changes in the directory structure (prm/ is the escape hatch)
+# prm/ directories must contain as few as possible
+# tmp/ directories must be used to save artifacts
