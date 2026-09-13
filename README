@@ -28,7 +28,7 @@ cd "$HOME/github.com/owner/demo"
 nix run .#package-name
 
 # Run a package from the registry
-nix run nixpkgs#package-name
+nix run nixpkgs#ripgrep
 
 # Format, build, and test packages and hosts
 nix fmt
@@ -40,9 +40,7 @@ git submodule foreach <command> # e.g. nix fmt, nix flake check
 
 # Rules
 # Use Nix flakes in repositories
-# HOME is local-only and intentionally tracks selected private persistent state
-# git_canonicalization canonicalize is a mutating convergence command that rewrites, stages, and cleans the canonical layout
+# HOME Git repo is local-only and has a whitelist .gitignore that tracks persistent state
 # Use native Git commands for repository lifecycle operations
 # Use git_canonicalization for persistent directory-structure changes and preserve its strict canonical layout; use prm/ for deliberate exceptions, including required opaque assets
-# Keep as few files and directories as possible in prm/
 # Save generated artifacts in tmp/ directories
