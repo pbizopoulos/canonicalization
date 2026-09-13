@@ -1,16 +1,16 @@
 # Canonicalization
 
-This is a NixOS machine using preservation. `$HOME` is the outer persistence
-Git repository; only paths explicitly unignored by its whitelist `.gitignore`
-are persistent. Hosted repositories are Git submodules located at
-`HOST/OWNER/REPOSITORY`.
+Canonicalization defines a NixOS preservation layout. `$HOME` is the outer
+persistence Git repository; only paths unignored by its whitelist `.gitignore`
+and tracked by Git are persistent. Hosted repositories are flake submodules
+located at `HOST/OWNER/REPOSITORY`.
 
-Before acting, run `pwd` and `git rev-parse --show-toplevel`. If the Git root
-is `$HOME`, the current repository is the outer persistence repository. A Git
-root under `$HOME/HOST/OWNER/REPOSITORY` is a flake submodule.
+Use `git rev-parse --show-toplevel` to distinguish the outer persistence
+repository at `$HOME` from flake submodules under
+`$HOME/HOST/OWNER/REPOSITORY`.
 
-Run `git_canonicalization help` for the action guide and
-`git_canonicalization help <subcommand>` before invoking that subcommand.
+Run `git_canonicalization help` to choose an action and
+`git_canonicalization help <subcommand>` before invoking a subcommand.
 
 ## Rules
 
@@ -18,17 +18,16 @@ Run `git_canonicalization help` for the action guide and
 - Use `git_canonicalization` for repository initialization, package
   scaffolding or removal, layout convergence, and exporting a validated flake
   description with `git_canonicalization status`.
-- Always run `git_canonicalization canonicalize --dry-run` and review its
-  output before running the mutating command. Canonicalization may rewrite and
-  stage managed files and delete ignored or untracked files.
+- Before mutating with `git_canonicalization canonicalize`, run
+  `git_canonicalization canonicalize --dry-run`. Proceed only when the reported
+  changes are intended. Canonicalization may rewrite and stage managed files
+  and delete ignored or untracked files.
 - Do not add a `$HOME` path to the persistence whitelist merely because it
-  exists at runtime. Determine that it is intentionally persistent first.
-- Put unrestricted persistent implementation files in an existing `prm/`
-  tree permitted by the canonical layout. Put generated or disposable
+  exists at runtime. Confirm that it is intentionally persistent and track it
+  before canonicalization.
+- Preserve the canonical layout. Put unrestricted persistent implementation
+  files in an existing permitted `prm/` tree and generated or disposable
   artifacts in an existing permitted `tmp/` tree. Consult the relevant
-  subcommand help before creating either tree when its location is uncertain.
-- Preserve the existing canonical layout; consult command help when the
-  correct location is uncertain.
+  subcommand help when the correct location is uncertain.
 - After changing a flake submodule, run `nix fmt` and `nix flake check` from
-  that submodule's root. Do not run them from `$HOME`, which is not itself a
-  flake.
+  its root. Do not run them from `$HOME`, which is not a flake.
