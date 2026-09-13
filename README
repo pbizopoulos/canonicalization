@@ -1,6 +1,6 @@
 # Canonicalization
 
-Environment: NixOS with Nix flakes and preservation. HOME is a Git repository containing flake-enabled Git submodules in Go-style paths. Each submodule follows a subset of the numtide/blueprint directory structure.
+Environment: NixOS with preservation. HOME is a local-only Git repository with a whitelist .gitignore that tracks persistent state and contains flake-enabled Git submodules in Go-style paths. Each submodule follows a subset of the numtide/blueprint directory structure.
 
 # Initialize HOME
 # Create the empty project remote
@@ -39,8 +39,6 @@ cd
 git submodule foreach <command> # e.g. nix fmt, nix flake check
 
 # Rules
-# Use Nix flakes in repositories
-# HOME Git repo is local-only and has a whitelist .gitignore that tracks persistent state
 # Use native Git commands for repository lifecycle operations
 # Use git_canonicalization for persistent directory-structure changes and preserve its strict canonical layout; use prm/ for deliberate exceptions, including required opaque assets
 # Save generated artifacts in tmp/ directories
