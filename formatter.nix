@@ -131,12 +131,7 @@ let
           priority = 1;
         };
       };
-      global.excludes = [
-        "*/prm/**"
-        "*/tmp/**"
-        "prm/**"
-        "tmp/**"
-      ];
+      global.excludes = [ "{prm,tmp,*/prm,*/tmp}/**" ];
     };
   };
   wrapper = pkgs.writeShellApplication {
