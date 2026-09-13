@@ -1,13 +1,30 @@
 # Canonicalization
 
-Environment: NixOS with preservation. HOME is a local-only Git repository with a whitelist .gitignore that tracks persistent state and contains flake-enabled Git submodules in Go-style paths. Each submodule follows a subset of the numtide/blueprint directory structure.
+This is a NixOS machine using preservation. `$HOME` is the outer persistence
+Git repository; only paths explicitly unignored by its whitelist `.gitignore`
+are persistent. Hosted repositories are Git submodules located at
+`HOST/OWNER/REPOSITORY`.
+
+Before acting, identify whether the current directory is `$HOME` or a flake
+submodule.
 
 Run `git_canonicalization help` for the action guide and
-`git_canonicalization help COMMAND` for command-specific instructions.
+`git_canonicalization help COMMAND` before using a command.
 
-## Development rules
+## Rules
 
-Use native Git commands for repository lifecycle operations.
-Use `git_canonicalization` for persistent directory-structure changes and preserve its strict canonical layout.
-Put deliberate opaque persistent exceptions under `prm/` and generated artifacts under `tmp/`.
-After making changes, run `nix fmt` and `nix flake check`.
+- Use native Git for commits, branches, merges, remotes, fetches, and pushes.
+- Use `git_canonicalization` for repository initialization, package
+  scaffolding or removal, layout convergence, and canonical status.
+- Always run `git_canonicalization canonicalize --dry-run` and review its
+  output before running the mutating command. Canonicalization may rewrite and
+  stage managed files and delete ignored or untracked files.
+- Do not add a `$HOME` path to the persistence whitelist merely because it
+  exists at runtime. Determine that it is intentionally persistent first.
+- Put unrestricted persistent implementation files in an allowed `prm/` tree.
+  Put generated or disposable artifacts in an allowed `tmp/` tree.
+- Preserve the existing canonical layout; consult command help when the
+  correct location is uncertain.
+- After changing a flake submodule, run `nix fmt` and `nix flake check` from
+  that submodule's root. Do not run them from `$HOME`, which is not itself a
+  flake.
