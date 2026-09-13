@@ -4,3 +4,10 @@ Environment: NixOS with preservation. HOME is a local-only Git repository with a
 
 Run `git_canonicalization help` for the action guide and
 `git_canonicalization help COMMAND` for command-specific instructions.
+
+## Development rules
+
+Use native Git commands for repository lifecycle operations.
+Use `git_canonicalization` for persistent directory-structure changes and preserve its strict canonical layout.
+Put deliberate opaque persistent exceptions under `prm/` and generated artifacts under `tmp/`.
+After making changes, run `nix fmt` and `nix flake check`.
