@@ -45,6 +45,7 @@ python.pkgs.buildPythonPackage {
       "Home checkout rejects dirty or unpublished head."
       "Home initialization uses canonical ignore policy."
       "Host check requires its host."
+      "Host names use camel case."
       "Html styles and scripts are optional."
       "Meta description uses nix syntax."
       "Mv rejects cross resource and noncanonical paths."

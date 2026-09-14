@@ -507,9 +507,9 @@ def validate_name(name: str) -> None:
 
 
 def validate_host_name(name: str) -> None:
-    """Enforce the host naming convention used by status documents."""
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
-        msg = f"invalid host name: {name}"
+    """Enforce lower camelCase host names."""
+    if not re.fullmatch(r"[a-z][A-Za-z0-9]*", name):
+        msg = f"host name must use camelCase: {name}"
         raise CommandError(msg)
 
 
@@ -556,6 +556,7 @@ def canonical_checks(root: Path, packages: list[Package]) -> dict[Path, str]:
                 and not host.is_symlink()
                 and (host / "configuration.nix").is_file()
             ):
+                validate_host_name(host.name)
                 checks[check] = _current_host_check_source()
     return checks
 
@@ -2149,6 +2150,23 @@ def test_host_check_requires_its_host() -> None:
         }
 
 
+def test_host_names_use_camel_case() -> None:
+    """Reject an existing host resource whose name is not camelCase."""
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        root = Path(temporary_directory)
+        host = root / "hosts" / "install-iso"
+        host.mkdir(parents=True)
+        (host / "configuration.nix").write_text("{ ... }: { }\n", encoding="utf-8")
+        try:
+            inspect_structure(root)
+        except CommandError as error:
+            error_message = str(error)
+        else:
+            msg = "non-camelCase host name was accepted"
+            raise AssertionError(msg)
+        assert error_message == "host name must use camelCase: install-iso"  # noqa: S101
+
+
 def test_python_scaffold_installs_optional_prm_resources() -> None:
     """Namespace Python modules and resources so package environments compose."""
     files = scaffold("python", "report", None)
@@ -2385,7 +2403,7 @@ def test_mv_renames_packages_generated_checks_and_hosts() -> None:
         git(root, ["init"])
         package = root / "packages" / "old_package"
         check = root / "checks" / "old_package_coverage"
-        host = root / "hosts" / "old-host"
+        host = root / "hosts" / "oldHost"
         package.mkdir(parents=True)
         check.mkdir(parents=True)
         host.mkdir(parents=True)
@@ -2412,13 +2430,13 @@ def test_mv_renames_packages_generated_checks_and_hosts() -> None:
             "packages/new_package",
             False,  # noqa: FBT003
         )
-        rename_resource(root, "hosts/old-host", "hosts/new-host", False)  # noqa: FBT003
+        rename_resource(root, "hosts/oldHost", "hosts/newHost", False)  # noqa: FBT003
         assert not package.exists()  # noqa: S101
         assert (root / "packages" / "new_package" / "main.py").is_file()  # noqa: S101
         assert not check.exists()  # noqa: S101
         assert (root / "checks" / "new_package_coverage" / "default.nix").is_file()  # noqa: S101
         assert not host.exists()  # noqa: S101
-        assert (root / "hosts" / "new-host" / "configuration.nix").is_file()  # noqa: S101
+        assert (root / "hosts" / "newHost" / "configuration.nix").is_file()  # noqa: S101
         assert _read_regular(root / ".gitignore") == render_gitignore(  # noqa: S101
             allowed_paths(root, detect_packages(root)),
             opaque_trees(root),
@@ -2431,6 +2449,7 @@ def test_mv_rejects_cross_resource_and_noncanonical_paths() -> None:
         ("packages/demo", "hosts/demo", "cannot rename"),
         ("demo", "packages/example", "packages/NAME or hosts/NAME"),
         ("packages/bad-name", "packages/example", "snake_case"),
+        ("hosts/demo", "hosts/install-iso", "camelCase"),
     ):
         assert expected in _rename_error(source, destination)  # noqa: S101
 
@@ -2451,20 +2470,20 @@ def test_add_and_rm_manage_hosts_as_explicit_resources() -> None:
         root = Path(temporary_directory)
         git(root, ["init", "--quiet"])
         (root / ".gitignore").write_text("*\n", encoding="utf-8")
-        _dispatch_add(root, parser().parse_args(["add", "hosts/new-host"]))
-        configuration = root / "hosts" / "new-host" / "configuration.nix"
+        _dispatch_add(root, parser().parse_args(["add", "hosts/newHost"]))
+        configuration = root / "hosts" / "newHost" / "configuration.nix"
         assert configuration.read_text(encoding="utf-8") == "{ ... }: { }\n"  # noqa: S101
-        assert Path("hosts/new-host/configuration.nix") in _tracked_paths(root)  # noqa: S101
-        host_check = root / "checks" / "new-hostVmWithDisko"
+        assert Path("hosts/newHost/configuration.nix") in _tracked_paths(root)  # noqa: S101
+        host_check = root / "checks" / "newHostVmWithDisko"
         assert (host_check / "default.nix").read_text(encoding="utf-8") == (  # noqa: S101
             _current_host_check_source()
         )
-        assert Path("checks/new-hostVmWithDisko/default.nix") in _tracked_paths(root)  # noqa: S101
-        remove_resource(root, "hosts/new-host", False)  # noqa: FBT003
+        assert Path("checks/newHostVmWithDisko/default.nix") in _tracked_paths(root)  # noqa: S101
+        remove_resource(root, "hosts/newHost", False)  # noqa: FBT003
         assert not configuration.parent.exists()  # noqa: S101
         assert not host_check.exists()  # noqa: S101
-        assert Path("hosts/new-host/configuration.nix") not in _tracked_paths(root)  # noqa: S101
-        assert Path("checks/new-hostVmWithDisko/default.nix") not in _tracked_paths(  # noqa: S101
+        assert Path("hosts/newHost/configuration.nix") not in _tracked_paths(root)  # noqa: S101
+        assert Path("checks/newHostVmWithDisko/default.nix") not in _tracked_paths(  # noqa: S101
             root,
         )
         _dispatch_add(
