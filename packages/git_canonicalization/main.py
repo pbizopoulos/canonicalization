@@ -1425,7 +1425,7 @@ def add_package(root: Path, kind: str, name: str, description: str | None) -> No
             render_gitignore(allowed_paths(root, packages), opaque_trees(root)),
         )
         generated = [str(path.relative_to(root)) for path in created] + [".gitignore"]
-        completed = git(root, ["add", "--", *generated], check=False)
+        completed = git(root, ["add", "--force", "--", *generated], check=False)
         if completed.returncode != 0:
             raise CommandError(completed.stderr.strip() or "git add failed")
     except BaseException:
@@ -1436,14 +1436,53 @@ def add_package(root: Path, kind: str, name: str, description: str | None) -> No
         raise
 
 
-def remove_package(root: Path, name: str, dry_run: bool) -> None:
-    """Remove a package and generated coverage check safely."""
-    package_root = root / "packages" / name
-    if not package_root.is_dir() or package_root.is_symlink():
-        msg = f"package does not exist: {name}"
+def add_host(root: Path, name: str) -> None:
+    """Create a host and stage its canonical configuration."""
+    validate_host_name(name)
+    relative = Path("hosts") / name / "configuration.nix"
+    path = root / relative
+    if path.parent.exists() or path.parent.is_symlink():
+        msg = f"host already exists: {name}"
+        raise CommandError(msg)
+    try:
+        path.parent.mkdir(parents=True)
+        path.write_text("{ ... }: { }\n", encoding="utf-8")
+        packages = detect_packages(root)
+        nix_syntax.write_if_changed(
+            root / ".gitignore",
+            render_gitignore(allowed_paths(root, packages), opaque_trees(root)),
+        )
+        completed = git(
+            root,
+            ["add", "--force", "--", str(relative), ".gitignore"],
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise CommandError(completed.stderr.strip() or "git add failed")
+    except BaseException:
+        path.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            path.parent.rmdir()
+        raise
+
+
+def remove_resource(root: Path, value: str, dry_run: bool) -> None:
+    """Remove a canonical package or host and stage its related metadata."""
+    kind, name, relative = _parse_resource_path(value)
+    resource_root = root / relative
+    marker = "default.nix" if kind == "package" else "configuration.nix"
+    if (
+        not resource_root.is_dir()
+        or resource_root.is_symlink()
+        or not (resource_root / marker).is_file()
+    ):
+        msg = f"{kind} does not exist: {name}"
         raise CommandError(msg)
     check_root = root / "checks" / f"{name}_coverage"
-    targets = [package_root, *([check_root] if check_root.exists() else [])]
+    targets = [
+        resource_root,
+        *([check_root] if kind == "package" and check_root.exists() else []),
+    ]
     target_relatives = [str(target.relative_to(root)) for target in targets]
     if dry_run:
         for target in targets:
@@ -1462,6 +1501,7 @@ def remove_package(root: Path, name: str, dry_run: bool) -> None:
         [
             "add",
             "--all",
+            "--force",
             "--",
             *target_relatives,
             ".gitignore",
@@ -1469,7 +1509,7 @@ def remove_package(root: Path, name: str, dry_run: bool) -> None:
     )
 
 
-def _rename_resource_path(value: str) -> tuple[str, str, Path]:
+def _parse_resource_path(value: str) -> tuple[str, str, Path]:
     """Parse a canonical package or host resource path."""
     path = Path(value)
     if path.is_absolute() or len(path.parts) != 2:
@@ -1488,8 +1528,8 @@ def _rename_resource_path(value: str) -> tuple[str, str, Path]:
 
 def rename_resource(root: Path, source: str, destination: str, dry_run: bool) -> None:
     """Rename one canonical package or host and stage its related metadata."""
-    source_kind, source_name, source_relative = _rename_resource_path(source)
-    destination_kind, _, destination_relative = _rename_resource_path(destination)
+    source_kind, source_name, source_relative = _parse_resource_path(source)
+    destination_kind, _, destination_relative = _parse_resource_path(destination)
     if source_kind != destination_kind:
         msg = "cannot rename a package to a host or a host to a package"
         raise CommandError(msg)
@@ -1799,15 +1839,20 @@ def parser() -> argparse.ArgumentParser:
     )
     add = commands.add_parser(
         "add",
-        help="add a package",
-        description="Create and stage a canonical package.",
+        help="add a package or host",
+        description="Create and stage a canonical package or host.",
+    )
+    add.add_argument(
+        "resource",
+        metavar="RESOURCE",
+        help="new packages/NAME or hosts/NAME path",
     )
     add.add_argument(
         "type",
+        nargs="?",
         metavar="TYPE",
         help=f"package type ({', '.join(PACKAGE_KINDS)})",
     )
-    add.add_argument("name", metavar="NAME", help="snake_case package name")
     add.add_argument(
         "description",
         nargs="*",
@@ -1816,10 +1861,14 @@ def parser() -> argparse.ArgumentParser:
     )
     remove = commands.add_parser(
         "rm",
-        help="remove a package",
-        description="Remove and stage a package and its generated check.",
+        help="remove a package or host",
+        description="Remove and stage a canonical package or host.",
     )
-    remove.add_argument("name", metavar="NAME", help="package to remove")
+    remove.add_argument(
+        "resource",
+        metavar="RESOURCE",
+        help="existing packages/NAME or hosts/NAME path",
+    )
     remove.add_argument(
         "-n",
         "--dry-run",
@@ -1886,6 +1935,29 @@ def _normalize_help_arguments(arguments: list[str]) -> list[str]:
     return arguments
 
 
+def _dispatch_add(root: Path, options: argparse.Namespace) -> None:
+    """Create the selected package or host resource."""
+    kind, name, _relative = _parse_resource_path(options.resource)
+    description = " ".join(options.description) or None
+    if kind == "host":
+        if options.type is not None or description is not None:
+            msg = "host creation does not accept a type or description"
+            raise CommandError(msg)
+        add_host(root, name)
+        return
+    if options.type is None:
+        msg = "package creation requires TYPE"
+        raise CommandError(msg)
+    if options.type not in PACKAGE_KINDS:
+        supported = ", ".join(PACKAGE_KINDS)
+        msg = (
+            f"unsupported package type: {options.type}\n"
+            f"hint: supported package types: {supported}"
+        )
+        raise CommandError(msg)
+    add_package(root, options.type, name, description)
+
+
 def main() -> None:
     """Dispatch the git_canonicalization CLI."""
     arguments = _normalize_help_arguments(sys.argv[1:])
@@ -1921,14 +1993,9 @@ def main() -> None:
                 options.dry_run,
             )
         elif options.command == "add":
-            add_package(
-                root,
-                options.type,
-                options.name,
-                " ".join(options.description) or None,
-            )
+            _dispatch_add(root, options)
         elif options.command == "rm":
-            remove_package(root, options.name, options.dry_run)
+            remove_resource(root, options.resource, options.dry_run)
         elif options.command == "mv":
             rename_resource(
                 root,
@@ -2365,6 +2432,27 @@ def _rename_error(source: str, destination: str) -> str:
     raise AssertionError(msg)
 
 
+def test_add_and_rm_manage_hosts_as_explicit_resources() -> None:
+    """Create and remove packages and hosts through qualified resource paths."""
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        root = Path(temporary_directory)
+        git(root, ["init", "--quiet"])
+        (root / ".gitignore").write_text("*\n", encoding="utf-8")
+        _dispatch_add(root, parser().parse_args(["add", "hosts/new-host"]))
+        configuration = root / "hosts" / "new-host" / "configuration.nix"
+        assert configuration.read_text(encoding="utf-8") == "{ ... }: { }\n"
+        assert Path("hosts/new-host/configuration.nix") in _tracked_paths(root)
+        remove_resource(root, "hosts/new-host", False)
+        assert not configuration.parent.exists()
+        assert Path("hosts/new-host/configuration.nix") not in _tracked_paths(root)
+        _dispatch_add(
+            root,
+            parser().parse_args(["add", "packages/example", "nix"]),
+        )
+        remove_resource(root, "packages/example", False)
+        assert not (root / "packages" / "example").exists()
+
+
 def test_top_level_help_is_concise_and_conventional() -> None:
     """List commands without embedding a usage guide in parser help."""
     help_text = _render_help([])
@@ -2389,9 +2477,9 @@ def test_subcommand_help_describes_arguments_and_hides_internal_options() -> Non
     expected = {
         "init": ("REMOTE", "--from-status"),
         "status": ("validated flake status",),
-        "add": ("TYPE", "snake_case package name"),
+        "add": ("RESOURCE", "packages/NAME or hosts/NAME", "TYPE"),
         "mv": ("SOURCE", "DESTINATION"),
-        "rm": ("--dry-run", "generated check"),
+        "rm": ("RESOURCE", "packages/NAME or hosts/NAME"),
         "canonicalize": ("--dry-run", "canonical layout"),
     }
     for command, fragments in expected.items():
