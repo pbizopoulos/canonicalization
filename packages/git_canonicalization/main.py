@@ -1763,51 +1763,18 @@ def parser() -> argparse.ArgumentParser:
     """Construct the public command-line parser."""
     result = argparse.ArgumentParser(
         prog="git_canonicalization",
-        description="Canonicalize home repositories and manage canonical flake repositories.",
-        epilog="""Choose an action:
-  Initialize HOME's persistence repository:
-    git_canonicalization init home
-  Initialize a flake from an empty hosted remote:
-    git_canonicalization init flake git@github.com:owner/demo.git
-  Add, rename, or remove resources in a flake repository:
-    git_canonicalization add python demo "A demo package."
-    git_canonicalization mv packages/demo packages/example
-    git_canonicalization mv hosts/old hosts/new
-    git_canonicalization rm demo
-  Preview or apply repository convergence:
-    git_canonicalization canonicalize --dry-run
-    git_canonicalization canonicalize
-  Export a validated flake repository description as JSON:
-    git_canonicalization status
-Use the right tool:
-  Use git_canonicalization for canonical repository initialization, package
-  structure, convergence, and status. Before the first HOME convergence, add
-  persistent paths to HOME's whitelist .gitignore and stage them.
-  Use native Git for commits, branches, remotes, and ordinary repository
-  lifecycle. Create the empty hosted remote before initializing a flake.
-  Use Nix to enter or run packages (`nix develop .#PACKAGE`,
-  `nix run .#PACKAGE`), run registry packages (`nix run nixpkgs#PACKAGE`), and
-  format or check repositories (`nix fmt`, `nix flake check`). From HOME, use
-  `git submodule foreach COMMAND` to run a command in every submodule.
-Layout policy:
-  Put deliberate opaque persistent exceptions under prm/. Put generated or
-  scratch artifacts under tmp/. Convergence preserves these locations while
-  enforcing the canonical layout everywhere else.""",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Canonicalize HOME and flake repositories.",
     )
-    commands = result.add_subparsers(dest="command", required=True)
+    commands = result.add_subparsers(
+        dest="command",
+        required=True,
+        title="commands",
+        metavar="COMMAND",
+    )
     init = commands.add_parser(
         "init",
-        help="Initialize HOME or a new canonical flake repository.",
-        description="Initialize HOME or clone, populate, publish, and register a canonical flake repository.",
-        epilog="""Examples:
-  git_canonicalization init home
-  git_canonicalization init flake git@github.com:owner/demo.git
-  git_canonicalization init flake --from-status status.json REMOTE
-The flake remote must already exist and be empty. HOME must be initialized
-before a flake can be initialized. After initializing HOME, add persistent
-paths to its whitelist .gitignore and stage them before convergence.""",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        help="initialize HOME or a flake repository",
+        description="Initialize HOME or a flake repository.",
     )
     init.add_argument(
         "profile",
@@ -1827,20 +1794,13 @@ paths to its whitelist .gitignore and stage them before convergence.""",
     )
     commands.add_parser(
         "status",
-        help="Validate a flake and write its reusable status as JSON.",
-        description="Validate the current flake repository and write its README, packages, tests, and hosts as JSON.",
-        epilog="""Example:
-  mkdir -p tmp
-  git_canonicalization status >tmp/status.json
-The resulting document can seed `init flake --from-status tmp/status.json`.""",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        help="write validated flake status as JSON",
+        description="Write the validated flake status as JSON.",
     )
     add = commands.add_parser(
         "add",
-        help="Scaffold and stage a package in a flake repository.",
-        description="Create and stage a package that follows the canonical flake layout.",
-        epilog='Example:\n  git_canonicalization add python demo "A demo package."',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        help="add a package",
+        description="Create and stage a canonical package.",
     )
     add.add_argument(
         "type",
@@ -1856,10 +1816,8 @@ The resulting document can seed `init flake --from-status tmp/status.json`.""",
     )
     remove = commands.add_parser(
         "rm",
-        help="Remove a package and its generated check.",
-        description="Remove and stage a package, its generated coverage check, and the updated whitelist.",
-        epilog="Example:\n  git_canonicalization rm demo",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        help="remove a package",
+        description="Remove and stage a package and its generated check.",
     )
     remove.add_argument("name", metavar="NAME", help="package to remove")
     remove.add_argument(
@@ -1870,12 +1828,8 @@ The resulting document can seed `init flake --from-status tmp/status.json`.""",
     )
     move = commands.add_parser(
         "mv",
-        help="Rename a package or host and stage the result.",
-        description="Rename a canonical package or host, including generated package metadata, and stage the result.",
-        epilog="""Examples:
-  git_canonicalization mv packages/demo packages/example
-  git_canonicalization mv hosts/old hosts/new""",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        help="rename a package or host",
+        description="Rename a canonical package or host and stage the result.",
     )
     move.add_argument(
         "source",
@@ -1895,14 +1849,8 @@ The resulting document can seed `init flake --from-status tmp/status.json`.""",
     )
     canonicalize = commands.add_parser(
         "canonicalize",
-        help="Stage, repair, and clean the selected repository.",
-        description="Mutate the current HOME or flake repository until it matches the canonical layout.",
-        epilog="""Examples:
-  git_canonicalization canonicalize --dry-run
-  git_canonicalization canonicalize
-Convergence can rewrite and stage managed files and remove unsupported files.
-Use --dry-run first when you need to review the pending actions.""",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        help="converge the repository to its canonical layout",
+        description="Converge the repository to its canonical layout.",
     )
     canonicalize.add_argument(
         "-n",
@@ -2417,40 +2365,34 @@ def _rename_error(source: str, destination: str) -> str:
     raise AssertionError(msg)
 
 
-def test_top_level_help_selects_the_right_tool_for_each_action() -> None:
-    """Keep operational guidance discoverable from the executable."""
+def test_top_level_help_is_concise_and_conventional() -> None:
+    """List commands without embedding a usage guide in parser help."""
     help_text = _render_help([])
     for expected in (
         "usage: git_canonicalization",
-        "git_canonicalization init home",
-        "git_canonicalization init flake",
-        "git_canonicalization add python",
-        "git_canonicalization mv packages/demo packages/example",
-        "git_canonicalization mv hosts/old hosts/new",
-        "git_canonicalization rm demo",
-        "git_canonicalization canonicalize --dry-run",
-        "git_canonicalization status",
-        "Use native Git",
-        "Use Nix",
-        "prm/",
-        "tmp/",
+        "commands:",
+        "init",
+        "status",
+        "add",
+        "mv",
+        "rm",
+        "canonicalize",
+        "-h, --help",
     ):
         assert expected in help_text
-    assert "git canonicalization" not in help_text
+    for unwanted in ("Choose an action", "Use native Git", "Layout policy"):
+        assert unwanted not in help_text
 
 
-def test_subcommand_help_is_actionable_and_keeps_internal_options_hidden() -> None:
-    """Describe inputs, examples, and safety properties at point of use."""
+def test_subcommand_help_describes_arguments_and_hides_internal_options() -> None:
+    """Describe public inputs without custom examples or policy text."""
     expected = {
-        "init": ("REMOTE", "--from-status", "must already exist and be empty"),
-        "status": (
-            "status >tmp/status.json",
-            "init flake --from-status tmp/status.json",
-        ),
-        "add": ("TYPE", "snake_case package name", "add python demo"),
-        "mv": ("SOURCE", "DESTINATION", "packages/demo packages/example"),
-        "rm": ("--dry-run", "generated coverage check", "rm demo"),
-        "canonicalize": ("--dry-run", "rewrite and stage", "remove unsupported"),
+        "init": ("REMOTE", "--from-status"),
+        "status": ("validated flake status",),
+        "add": ("TYPE", "snake_case package name"),
+        "mv": ("SOURCE", "DESTINATION"),
+        "rm": ("--dry-run", "generated check"),
+        "canonicalize": ("--dry-run", "canonical layout"),
     }
     for command, fragments in expected.items():
         help_text = _render_help([command])
@@ -2459,7 +2401,7 @@ def test_subcommand_help_is_actionable_and_keeps_internal_options_hidden() -> No
 
 
 def test_help_command_is_equivalent_to_help_option() -> None:
-    """Support both documented paths to top-level and command help."""
+    """Support top-level and command help through either spelling."""
     assert _render_cli_help(_normalize_help_arguments(["help"])) == _render_cli_help(
         ["--help"],
     )
