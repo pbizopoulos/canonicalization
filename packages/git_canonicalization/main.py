@@ -507,6 +507,13 @@ def validate_name(name: str) -> None:
         raise CommandError(msg)
 
 
+def validate_host_name(name: str) -> None:
+    """Enforce the host naming convention used by status documents."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
+        msg = f"invalid host name: {name}"
+        raise CommandError(msg)
+
+
 def package_files(package: Package) -> set[Path]:
     """Return permitted regular files for a package kind."""
     relative = Path("packages") / package.name
@@ -1462,6 +1469,82 @@ def remove_package(root: Path, name: str, dry_run: bool) -> None:
     )
 
 
+def _rename_resource_path(value: str) -> tuple[str, str, Path]:
+    """Parse a canonical package or host resource path."""
+    path = Path(value)
+    if path.is_absolute() or len(path.parts) != 2:
+        msg = f"resource path must be packages/NAME or hosts/NAME: {value}"
+        raise CommandError(msg)
+    parent, name = path.parts
+    if parent == "packages":
+        validate_name(name)
+        return "package", name, path
+    if parent == "hosts":
+        validate_host_name(name)
+        return "host", name, path
+    msg = f"resource path must be packages/NAME or hosts/NAME: {value}"
+    raise CommandError(msg)
+
+
+def rename_resource(root: Path, source: str, destination: str, dry_run: bool) -> None:
+    """Rename one canonical package or host and stage its related metadata."""
+    source_kind, source_name, source_relative = _rename_resource_path(source)
+    destination_kind, _, destination_relative = _rename_resource_path(destination)
+    if source_kind != destination_kind:
+        msg = "cannot rename a package to a host or a host to a package"
+        raise CommandError(msg)
+    source_path = root / source_relative
+    destination_path = root / destination_relative
+    marker = "default.nix" if source_kind == "package" else "configuration.nix"
+    if (
+        not source_path.is_dir()
+        or source_path.is_symlink()
+        or not (source_path / marker).is_file()
+    ):
+        msg = f"{source_kind} does not exist: {source_name}"
+        raise CommandError(msg)
+    if destination_path.exists() or destination_path.is_symlink():
+        msg = f"destination already exists: {destination_relative}"
+        raise CommandError(msg)
+    moves = [(source_relative, destination_relative)]
+    if source_kind == "package":
+        source_check = Path("checks") / f"{source_name}_coverage"
+        destination_name = destination_relative.name
+        destination_check = Path("checks") / f"{destination_name}_coverage"
+        if (root / source_check).exists():
+            if (root / destination_check).exists():
+                msg = f"destination already exists: {destination_check}"
+                raise CommandError(msg)
+            moves.append((source_check, destination_check))
+    for old, new in moves:
+        _change(f"move '{old}' to '{new}'", dry_run=dry_run)
+    _change("update '.gitignore'", dry_run=dry_run)
+    if dry_run:
+        return
+    tracked = _tracked_paths(root)
+    tracked_sources = [
+        old for old, _new in moves if any(beneath(path, {old}) for path in tracked)
+    ]
+    for old, new in moves:
+        shutil.move(root / old, root / new)
+    packages = detect_packages(root)
+    nix_syntax.write_if_changed(
+        root / ".gitignore",
+        render_gitignore(allowed_paths(root, packages), opaque_trees(root)),
+    )
+    git(
+        root,
+        [
+            "add",
+            "--all",
+            "--",
+            *(str(path) for path in tracked_sources),
+            *(str(new) for _old, new in moves),
+            ".gitignore",
+        ],
+    )
+
+
 def _imported_status(
     source: str,
 ) -> tuple[str, list[dict[str, Any]], list[str]]:
@@ -1517,12 +1600,10 @@ def _imported_status(
         )
     validated_hosts: list[str] = []
     for host in hosts:
-        if not isinstance(host, str) or not re.fullmatch(
-            r"[A-Za-z0-9][A-Za-z0-9._-]*",
-            host,
-        ):
+        if not isinstance(host, str):
             msg = f"invalid host name: {host}"
             raise CommandError(msg)
+        validate_host_name(host)
         validated_hosts.append(host)
     return readme, validated_packages, validated_hosts
 
@@ -1688,8 +1769,10 @@ def parser() -> argparse.ArgumentParser:
     git_canonicalization init home
   Initialize a flake from an empty hosted remote:
     git_canonicalization init flake git@github.com:owner/demo.git
-  Add or remove a package in a flake repository:
+  Add, rename, or remove resources in a flake repository:
     git_canonicalization add python demo "A demo package."
+    git_canonicalization mv packages/demo packages/example
+    git_canonicalization mv hosts/old hosts/new
     git_canonicalization rm demo
   Preview or apply repository convergence:
     git_canonicalization canonicalize --dry-run
@@ -1785,6 +1868,31 @@ The resulting document can seed `init flake --from-status tmp/status.json`.""",
         action="store_true",
         help="print removals without changing the repository",
     )
+    move = commands.add_parser(
+        "mv",
+        help="Rename a package or host and stage the result.",
+        description="Rename a canonical package or host, including generated package metadata, and stage the result.",
+        epilog="""Examples:
+  git_canonicalization mv packages/demo packages/example
+  git_canonicalization mv hosts/old hosts/new""",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    move.add_argument(
+        "source",
+        metavar="SOURCE",
+        help="existing packages/NAME or hosts/NAME path",
+    )
+    move.add_argument(
+        "destination",
+        metavar="DESTINATION",
+        help="new path in the same resource collection",
+    )
+    move.add_argument(
+        "-n",
+        "--dry-run",
+        action="store_true",
+        help="print moves without changing the repository",
+    )
     canonicalize = commands.add_parser(
         "canonicalize",
         help="Stage, repair, and clean the selected repository.",
@@ -1842,8 +1950,8 @@ def main() -> None:
             return
         root = repository_root()
         current_profile = profile(root)
-        if options.command in {"add", "rm"} and current_profile != "flake":
-            msg = f"{current_profile} repositories do not support package resources"
+        if options.command in {"add", "mv", "rm"} and current_profile != "flake":
+            msg = f"{current_profile} repositories do not support flake resources"
             raise CommandError(
                 msg,
             )
@@ -1873,6 +1981,13 @@ def main() -> None:
             )
         elif options.command == "rm":
             remove_package(root, options.name, options.dry_run)
+        elif options.command == "mv":
+            rename_resource(
+                root,
+                options.source,
+                options.destination,
+                options.dry_run,
+            )
     except (
         CommandError,
         OSError,
@@ -2235,6 +2350,73 @@ def test_canonicalize_is_the_convergence_command() -> None:
         raise AssertionError(msg)
 
 
+def test_mv_renames_packages_generated_checks_and_hosts() -> None:
+    """Move both resource kinds and keep generated package paths aligned."""
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        root = Path(temporary_directory)
+        git(root, ["init"])
+        package = root / "packages" / "old_package"
+        check = root / "checks" / "old_package_coverage"
+        host = root / "hosts" / "old-host"
+        package.mkdir(parents=True)
+        check.mkdir(parents=True)
+        host.mkdir(parents=True)
+        (package / "default.nix").write_text("{ }: { }\n", encoding="utf-8")
+        (package / "main.py").write_text(
+            "def test_behavior() -> None:\n    pass\n",
+            encoding="utf-8",
+        )
+        (check / "default.nix").write_text(
+            _current_python_coverage_source(),
+            encoding="utf-8",
+        )
+        (host / "configuration.nix").write_text("{ ... }: { }\n", encoding="utf-8")
+        packages = detect_packages(root)
+        (root / ".gitignore").write_text(
+            render_gitignore(allowed_paths(root, packages), opaque_trees(root)),
+            encoding="utf-8",
+        )
+        git(root, ["add", "--force", "--all"])
+        assert Path("packages/old_package/main.py") in _tracked_paths(root)
+        rename_resource(
+            root,
+            "packages/old_package",
+            "packages/new_package",
+            False,
+        )
+        rename_resource(root, "hosts/old-host", "hosts/new-host", False)
+        assert not package.exists()
+        assert (root / "packages" / "new_package" / "main.py").is_file()
+        assert not check.exists()
+        assert (root / "checks" / "new_package_coverage" / "default.nix").is_file()
+        assert not host.exists()
+        assert (root / "hosts" / "new-host" / "configuration.nix").is_file()
+        assert _read_regular(root / ".gitignore") == render_gitignore(
+            allowed_paths(root, detect_packages(root)),
+            opaque_trees(root),
+        )
+
+
+def test_mv_rejects_cross_resource_and_noncanonical_paths() -> None:
+    """Keep rename operations within one canonical resource collection."""
+    for source, destination, expected in (
+        ("packages/demo", "hosts/demo", "cannot rename"),
+        ("demo", "packages/example", "packages/NAME or hosts/NAME"),
+        ("packages/bad-name", "packages/example", "snake_case"),
+    ):
+        assert expected in _rename_error(source, destination)
+
+
+def _rename_error(source: str, destination: str) -> str:
+    """Return the user-facing failure for an invalid rename."""
+    try:
+        rename_resource(Path(), source, destination, True)
+    except CommandError as error:
+        return str(error)
+    msg = f"invalid rename was accepted: {source} -> {destination}"
+    raise AssertionError(msg)
+
+
 def test_top_level_help_selects_the_right_tool_for_each_action() -> None:
     """Keep operational guidance discoverable from the executable."""
     help_text = _render_help([])
@@ -2243,6 +2425,8 @@ def test_top_level_help_selects_the_right_tool_for_each_action() -> None:
         "git_canonicalization init home",
         "git_canonicalization init flake",
         "git_canonicalization add python",
+        "git_canonicalization mv packages/demo packages/example",
+        "git_canonicalization mv hosts/old hosts/new",
         "git_canonicalization rm demo",
         "git_canonicalization canonicalize --dry-run",
         "git_canonicalization status",
@@ -2264,6 +2448,7 @@ def test_subcommand_help_is_actionable_and_keeps_internal_options_hidden() -> No
             "init flake --from-status tmp/status.json",
         ),
         "add": ("TYPE", "snake_case package name", "add python demo"),
+        "mv": ("SOURCE", "DESTINATION", "packages/demo packages/example"),
         "rm": ("--dry-run", "generated coverage check", "rm demo"),
         "canonicalize": ("--dry-run", "rewrite and stage", "remove unsupported"),
     }
