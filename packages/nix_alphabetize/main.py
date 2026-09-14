@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026- Paschalis Bizopoulos
-# ruff: noqa: D101, S101, S603
 """Canonicalize ordering and nesting in Nix expressions."""
 
 from __future__ import annotations
@@ -21,7 +20,7 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class Binding:
+class Binding:  # noqa: D101
     path: tuple[str, ...] | None
     value: str | None
     raw: str
@@ -87,7 +86,7 @@ def _normalize(bindings: list[Binding]) -> list[Binding]:
     opaque = [binding for binding in bindings if not binding.path]
     groups: dict[str, list[Binding]] = {}
     for binding in static:
-        assert binding.path is not None
+        assert binding.path is not None  # noqa: S101
         groups.setdefault(binding.path[0], []).append(binding)
     result = opaque
     for root in sorted(groups):
@@ -109,7 +108,7 @@ def _normalize(bindings: list[Binding]) -> list[Binding]:
             continue
         nested: list[Binding] = []
         for binding in group:
-            assert binding.path is not None
+            assert binding.path is not None  # noqa: S101
             if len(binding.path) > 1:
                 nested.append(
                     Binding(
@@ -213,22 +212,22 @@ def test_preserves_string_order_and_sorts_other_constructs() -> None:
     formatted = format_text(
         '{ z = [ 3 1 2 ]; strings = [ "c" "a" ]; f = { z, a }: z + a; }',
     )
-    assert (
+    assert (  # noqa: S101
         formatted.index("f =") < formatted.index("strings =") < formatted.index("z =")
     )
-    assert formatted.index("1") < formatted.index("2") < formatted.index("3")
-    assert formatted.index('"c"') < formatted.index('"a"')
+    assert formatted.index("1") < formatted.index("2") < formatted.index("3")  # noqa: S101
+    assert formatted.index('"c"') < formatted.index('"a"')  # noqa: S101
 
 
 def test_dotted_bindings_collapse_safely() -> None:
     """Collapses compatible bindings without changing conflicting paths."""
     formatted = format_text("{ b.z = 1; b.x = 2; a = 1; }")
-    assert "b = {" in formatted
-    assert "x = 2;" in formatted
-    assert "z = 1;" in formatted
+    assert "b = {" in formatted  # noqa: S101
+    assert "x = 2;" in formatted  # noqa: S101
+    assert "z = 1;" in formatted  # noqa: S101
     conflicting = format_text("{ a = 1; a.b = 2; }")
-    assert "a = 1;" in conflicting
-    assert "a.b = 2;" in conflicting
+    assert "a = 1;" in conflicting  # noqa: S101
+    assert "a.b = 2;" in conflicting  # noqa: S101
 
 
 def test_installed_executable_formats_files() -> None:
@@ -239,16 +238,16 @@ def test_installed_executable_formats_files() -> None:
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "example.nix"
         path.write_text("{ b = 2; a = 1; }", encoding="utf-8")
-        completed = subprocess.run(
+        completed = subprocess.run(  # noqa: S603
             [executable, str(path)],
             capture_output=True,
             check=False,
             text=True,
         )
-        assert completed.returncode == 0
-        assert not completed.stdout
-        assert not completed.stderr
-        assert path.read_text(encoding="utf-8").index("a = 1") < path.read_text(
+        assert completed.returncode == 0  # noqa: S101
+        assert not completed.stdout  # noqa: S101
+        assert not completed.stderr  # noqa: S101
+        assert path.read_text(encoding="utf-8").index("a = 1") < path.read_text(  # noqa: S101
             encoding="utf-8",
         ).index("b = 2")
 

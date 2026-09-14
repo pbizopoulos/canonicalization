@@ -18,8 +18,6 @@
 !/checks/remove_empty_lines_coverage/default.nix
 !/checks/remove_new_lines_coverage/
 !/checks/remove_new_lines_coverage/default.nix
-!/checks/source_conformance/
-!/checks/source_conformance/default.nix
 !/flake.lock
 !/flake.nix
 !/formatter.nix

@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026- Paschalis Bizopoulos
-# ruff: noqa: ANN401, C901, E501, PLR0911, PLR2004, S101, S603, S607
 """Remove literal NixOS and treefmt assignments equal to option defaults."""
 
 from __future__ import annotations
@@ -54,7 +53,7 @@ def find_nix_files(root: Path) -> list[Path]:
     return sorted(result)
 
 
-def literal(document: nix_syntax.Document, node: Node) -> Literal:
+def literal(document: nix_syntax.Document, node: Node) -> Literal:  # noqa: C901, PLR0911
     """Decode a context-free Nix literal or raise ValueError."""
     text = document.text(node)
     if node.type == "variable_expression" and text in {"null", "true", "false"}:
@@ -173,7 +172,7 @@ def _nix_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-def _render_literal(value: Literal) -> str:
+def _render_literal(value: Literal) -> str:  # noqa: PLR0911
     if value is None:
         return "null"
     if value is True:
@@ -200,9 +199,9 @@ def _path_list(path: tuple[str, ...]) -> str:
     return "[ " + " ".join(_nix_string(part) for part in path) + " ]"
 
 
-def _run_nix(expression: str) -> Any:
-    completed = subprocess.run(
-        ["nix", "eval", "--impure", "--json", "--expr", expression],
+def _run_nix(expression: str) -> Any:  # noqa: ANN401
+    completed = subprocess.run(  # noqa: S603
+        ["nix", "eval", "--impure", "--json", "--expr", expression],  # noqa: S607
         capture_output=True,
         check=False,
         text=True,
@@ -227,8 +226,8 @@ def treefmt_defaults(
         "pkgs = import flake.inputs.nixpkgs { system = builtins.currentSystem; }; "
         "evaluated = flake.inputs.treefmt-nix.lib.evalModule pkgs {}; "
         f"paths = [ {' '.join(_path_list(path) for path in sorted(paths))} ]; "
-        "at = value: path: if path == [] then { success = true; inherit value; } else let key = builtins.head path; rest = builtins.tail path; in if builtins.isAttrs value && builtins.hasAttr key value then at value.${key} rest else { success = false; }; "
-        'one = path: let attempt = at evaluated.options path; raw = if attempt.success && builtins.isAttrs attempt.value && attempt.value ? default then attempt.value.default else throw "missing option default"; tried = builtins.tryEval (builtins.deepSeq raw raw); in if tried.success then [{ inherit path; default = tried.value; }] else []; '
+        "at = value: path: if path == [] then { success = true; inherit value; } else let key = builtins.head path; rest = builtins.tail path; in if builtins.isAttrs value && builtins.hasAttr key value then at value.${key} rest else { success = false; }; "  # noqa: E501
+        'one = path: let attempt = at evaluated.options path; raw = if attempt.success && builtins.isAttrs attempt.value && attempt.value ? default then attempt.value.default else throw "missing option default"; tried = builtins.tryEval (builtins.deepSeq raw raw); in if tried.success then [{ inherit path; default = tried.value; }] else []; '  # noqa: E501
         "in builtins.concatMap one paths"
     )
     return {tuple(record["path"]): record["default"] for record in _run_nix(expression)}
@@ -242,7 +241,7 @@ def nixos_removals(
     if not candidates:
         return {}
     configurations = _run_nix(
-        f"let f = builtins.getFlake (toString (/. + {_nix_string(str(root))})); in builtins.attrNames (f.nixosConfigurations or {{}})",
+        f"let f = builtins.getFlake (toString (/. + {_nix_string(str(root))})); in builtins.attrNames (f.nixosConfigurations or {{}})",  # noqa: E501
     )
     if not configurations:
         return {}
@@ -259,10 +258,10 @@ def nixos_removals(
         + " ]"
     )
     expression = (
-        f"let f = builtins.getFlake (toString (/. + {_nix_string(str(root))})); cs = f.nixosConfigurations or {{}}; names = {json.dumps(configurations)}; candidates = {rendered}; "
-        "at = value: path: if path == [] then { success = true; inherit value; } else let key = builtins.head path; rest = builtins.tail path; in if builtins.isAttrs value && builtins.hasAttr key value then at value.${key} rest else { success = false; }; "
-        "eq = a: b: builtins.toJSON a == builtins.toJSON b; files = name: candidate: let option = at (builtins.getAttr name cs).options candidate.path; raw = if option.success && option.value ? default && eq candidate.value option.value.default then builtins.concatMap (d: if builtins.isAttrs d && d ? file then [d.file] else []) (option.value.definitionsWithLocations or []) else []; tried = builtins.tryEval (builtins.deepSeq raw raw); in if tried.success then tried.value else []; "
-        "one = candidate: { inherit (candidate) path; files = builtins.concatMap (name: files name candidate) names; }; in builtins.map one candidates"
+        f"let f = builtins.getFlake (toString (/. + {_nix_string(str(root))})); cs = f.nixosConfigurations or {{}}; names = {json.dumps(configurations)}; candidates = {rendered}; "  # noqa: E501
+        "at = value: path: if path == [] then { success = true; inherit value; } else let key = builtins.head path; rest = builtins.tail path; in if builtins.isAttrs value && builtins.hasAttr key value then at value.${key} rest else { success = false; }; "  # noqa: E501
+        "eq = a: b: builtins.toJSON a == builtins.toJSON b; files = name: candidate: let option = at (builtins.getAttr name cs).options candidate.path; raw = if option.success && option.value ? default && eq candidate.value option.value.default then builtins.concatMap (d: if builtins.isAttrs d && d ? file then [d.file] else []) (option.value.definitionsWithLocations or []) else []; tried = builtins.tryEval (builtins.deepSeq raw raw); in if tried.success then tried.value else []; "  # noqa: E501
+        "one = candidate: { inherit (candidate) path; files = builtins.concatMap (name: files name candidate) names; }; in builtins.map one candidates"  # noqa: E501
     )
     removals: dict[Path, set[tuple[str, ...]]] = {}
     for record in _run_nix(expression):
@@ -362,9 +361,9 @@ def process_repository(root: Path) -> None:
 
 def main() -> None:
     """Process the current or explicitly selected flake repository."""
-    if len(sys.argv) > 2:
+    if len(sys.argv) > 2:  # noqa: PLR2004
         raise SystemExit(1)
-    argument = Path(sys.argv[1] if len(sys.argv) == 2 else ".")
+    argument = Path(sys.argv[1] if len(sys.argv) == 2 else ".")  # noqa: PLR2004
     if not argument.is_dir():
         print(f"error: no such flake/repository directory: {argument}", file=sys.stderr)  # noqa: T201
         raise SystemExit(1)
@@ -381,10 +380,10 @@ def main() -> None:
 def test_literal_candidates_and_rewrite() -> None:
     """Collects literal options and removes empty structural parents."""
     document = nix_syntax.parse("{ services = { demo.enable = false; }; keep = true; }")
-    assert (("services", "demo", "enable"), False) in collect_candidates(document)
+    assert (("services", "demo", "enable"), False) in collect_candidates(document)  # noqa: S101
     output = rewrite(document, {("services", "demo", "enable")})
-    assert "services" not in output
-    assert "keep = true;" in output
+    assert "services" not in output  # noqa: S101
+    assert "keep = true;" in output  # noqa: S101
 
 
 if __name__ == "__main__":

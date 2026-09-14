@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026- Paschalis Bizopoulos
-# ruff: noqa: PERF203, PTH101, PTH105, PTH108, S101
 """Shared, lossless-enough Nix parsing and rewriting helpers."""
 
 from __future__ import annotations
@@ -28,7 +27,7 @@ class NixSyntaxError(ValueError):
 
 @dataclass(frozen=True)
 class Document:
-    """Parsed Nix source and its concrete syntax tree."""
+    """Parsed Nix source and its concrete syntax tree."""  # noqa: D204
 
     source: bytes
     tree: Tree
@@ -130,11 +129,11 @@ def write_if_changed(path: Path, contents: str) -> None:
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(contents)
-        os.chmod(temporary_name, path.stat().st_mode)
-        os.replace(temporary_name, path)
+        os.chmod(temporary_name, path.stat().st_mode)  # noqa: PTH101
+        os.replace(temporary_name, path)  # noqa: PTH105
     finally:
         with contextlib.suppress(FileNotFoundError):
-            os.unlink(temporary_name)
+            os.unlink(temporary_name)  # noqa: PTH108
 
 
 def main() -> None:
@@ -143,7 +142,7 @@ def main() -> None:
     for argument in sys.argv[1:]:
         try:
             parse(Path(argument).read_bytes(), argument)
-        except (OSError, NixSyntaxError) as error:
+        except (OSError, NixSyntaxError) as error:  # noqa: PERF203
             print(f"error: {error}", file=sys.stderr)  # noqa: T201
             failed = True
     if failed:
@@ -154,7 +153,7 @@ def test_parse_extracts_static_paths_and_rejects_errors() -> None:
     """Parses bindings and rejects malformed source."""
     document = parse('{ "a".b = 1; }')
     attrpath = next(node for node in walk(document.root) if node.type == "attrpath")
-    assert static_attrpath(document, attrpath) == ("a", "b")
+    assert static_attrpath(document, attrpath) == ("a", "b")  # noqa: S101
     try:
         parse("{ invalid = ; }")
     except NixSyntaxError:
