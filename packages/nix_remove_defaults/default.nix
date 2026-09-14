@@ -26,7 +26,10 @@ python.pkgs.buildPythonPackage {
     mainProgram = pname;
   };
   nativeBuildInputs = nativeDeps;
-  passthru.python = python;
+  passthru = {
+    inherit python;
+    canonicalization.tests = [ "Literal candidates and rewrite." ];
+  };
   propagatedBuildInputs = pythonDeps;
   pyproject = false;
   src = ./.;

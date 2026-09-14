@@ -18,7 +18,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 from urllib.parse import urlparse
 
 import nix_syntax
@@ -699,6 +699,14 @@ def _humanize(identifier: str) -> str:
     )
 
 
+def _render_test_list(path: Path) -> str:
+    """Render discovered Python test names as a canonical Nix list."""
+    tests = python_tests(path)
+    if not tests:
+        return "[ ]"
+    return "[\n" + "".join(f"      {_nix_string(test)}\n" for test in tests) + "    ]"
+
+
 def package_description(package: Package) -> str | None:
     """Extract declared package metadata where supported."""
     pyproject = package.root / "pyproject.toml"
@@ -780,6 +788,31 @@ def _attrset_expression(
         and nix_syntax.static_attrpath(document, attrpath) == path
         and (value := nix_syntax.field(binding, "expression")) is not None
     ]
+
+
+def _passthru_expression(
+    source: str,
+    requested_path: tuple[str, ...],
+) -> tuple[nix_syntax.Document, Node | None]:
+    """Find a static expression in either supported passthru form."""
+    document = nix_syntax.parse(source)
+    matches = []
+    for binding in (
+        node for node in nix_syntax.walk(document.root) if node.type == "binding"
+    ):
+        attrpath = nix_syntax.field(binding, "attrpath")
+        expression = nix_syntax.field(binding, "expression")
+        if attrpath is None or expression is None:
+            continue
+        binding_path = nix_syntax.static_attrpath(document, attrpath)
+        if binding_path == ("passthru", *requested_path):
+            matches.append(expression)
+        elif binding_path == ("passthru",):
+            matches.extend(
+                _attrset_expression(document, expression, requested_path),
+            )
+    unique = {node.start_byte: node for node in matches}
+    return document, next(iter(unique.values())) if len(unique) == 1 else None
 
 
 def _compact_nix(source: str) -> str:
@@ -867,6 +900,15 @@ def _python_static_template_issues(package: Package, source: str) -> list[str]:
     issues: list[str] = []
     if actual_install_phase != expected_install_phase:
         issues.append("installPhase differs from the canonical install phase")
+    expected_tests = _render_test_list(package.root / "main.py")
+    document, tests_expression = _passthru_expression(
+        source,
+        ("canonicalization", "tests"),
+    )
+    if tests_expression is None:
+        issues.append("missing required passthru.canonicalization.tests definition")
+    elif _compact_nix(document.text(tests_expression)) != _compact_nix(expected_tests):
+        issues.append("tests differ from discovered Python tests")
     required = {
         "pname": r"baseNameOf\s+\./\.\s*;",
         "pyproject": r"false\s*;",
@@ -886,9 +928,13 @@ def _python_static_template_issues(package: Package, source: str) -> list[str]:
 
 def _binding_value(source: str, name: str, kind: str) -> str | None:
     """Extract one permitted template binding expression."""
+    escaped = re.escape(name)
     patterns = {
-        "list": rf"(?s)\b{name}\s*=\s*(\[.*?\])\s*;",
-        "string": rf"""(?s)\b{name}\s*=\s*((?:"(?:\\.|[^"\\])*"|''.*?''))\s*;""",
+        "list": rf"(?s)(?<![\w.]){escaped}\s*=\s*(\[.*?\])\s*;",
+        "string": (
+            rf"(?s)(?<![\w.]){escaped}\s*=\s*"
+            r"""((?:"(?:\\.|[^"\\])*"|''.*?''))\s*;"""
+        ),
     }
     match = re.search(patterns[kind], source)
     return match.group(1) if match else None
@@ -896,11 +942,72 @@ def _binding_value(source: str, name: str, kind: str) -> str | None:
 
 def _replace_binding(source: str, name: str, value: str) -> str:
     """Replace one binding expression in a generated template."""
+    escaped = re.escape(name)
     return re.sub(
-        rf"(?s)(\b{name}\s*=\s*)(?:\[.*?\]|\"(?:\\.|[^\"\\])*\"|''.*?'')(\s*;)",
+        rf"(?s)((?<![\w.]){escaped}\s*=\s*)(?:\[.*?\]|\"(?:\\.|[^\"\\])*\"|''.*?'')(\s*;)",
         lambda match: match.group(1) + value + match.group(2),
         source,
         count=1,
+    )
+
+
+def _canonical_python_tests(package: Package, source: str) -> str:
+    """Migrate and refresh canonical Python test metadata."""
+    expected = _render_test_list(package.root / "main.py")
+    legacy_assertion = r"(?m)^assert\s+builtins\.all\s+builtins\.isString\s+tests\s*;\n"
+    if re.search(legacy_assertion, source):
+        source = re.sub(
+            r"(?ms)^[ \t]*tests\s*=\s*\[.*?\][ \t]*;\n",
+            "",
+            source,
+            count=1,
+        )
+        source = re.sub(legacy_assertion, "", source, count=1)
+    _document, reserved_tests = _passthru_expression(source, ("tests",))
+    if reserved_tests is not None:
+        source = re.sub(
+            r"(?ms)^[ ]{4}tests\s*=\s*\[.*?\][ \t]*;\n",
+            "",
+            source,
+            count=1,
+        )
+        source = re.sub(
+            r"(?ms)^  passthru\.tests\s*=\s*\[.*?\][ \t]*;\n",
+            "",
+            source,
+            count=1,
+        )
+    document, tests_expression = _passthru_expression(
+        source,
+        ("canonicalization", "tests"),
+    )
+    if tests_expression is not None:
+        return cast(
+            "bytes",
+            nix_syntax.apply_edits(
+                document.source,
+                [
+                    (
+                        tests_expression.start_byte,
+                        tests_expression.end_byte,
+                        expected.encode(),
+                    ),
+                ],
+            ),
+        ).decode()
+    if "  passthru = {\n" in source:
+        return source.replace(
+            "  passthru = {\n",
+            f"  passthru = {{\n    canonicalization.tests = {expected};\n",
+            1,
+        )
+    return source.replace(
+        "  passthru.python = python;",
+        "  passthru = {\n"
+        f"    canonicalization.tests = {expected};\n"
+        "    inherit python;\n"
+        "  };",
+        1,
     )
 
 
@@ -910,7 +1017,10 @@ def _canonical_python_default(package: Package, source: str) -> str:
         Path("packages") / package.name / "default.nix"
     ]
     expected_install_phase = _binding_value(template, "installPhase", "string")
-    assert expected_install_phase is not None  # noqa: S101
+    if expected_install_phase is None:
+        msg = "Python scaffold omitted its install phase"
+        raise AssertionError(msg)
+    source = _canonical_python_tests(package, source)
     required = {
         "pname": "baseNameOf ./.",
         "pyproject": "false",
@@ -984,9 +1094,14 @@ def canonical_typed_default(package: Package) -> str | None:
         return None
     source = _read_regular(package.root / "default.nix")
     if source is None:
-        return scaffold(package.kind, package.name, None)[
+        rendered = scaffold(package.kind, package.name, None)[
             Path("packages") / package.name / "default.nix"
         ]
+        return (
+            _canonical_python_default(package, rendered)
+            if package.kind == "python"
+            else rendered
+        )
     nix_syntax.parse(source, str(package.root / "default.nix"))
     if package.kind == "python":
         return _canonical_python_default(package, source)
@@ -1288,9 +1403,8 @@ def scaffold(
     kind: str,
     name: str,
     description: str | None,
-    tests: list[str] | None = None,
 ) -> dict[Path, str]:
-    """Render one supported package and its optional coverage check."""
+    """Render one supported package."""
     description = (
         description
         or {
@@ -1322,7 +1436,10 @@ python.pkgs.buildPythonPackage {
     description = __DESCRIPTION__;
     mainProgram = pname;
   };
-  passthru.python = python;
+  passthru = {
+    canonicalization.tests = [ ];
+    inherit python;
+  };
   pyproject = false;
   src = ./.;
   strictDeps = true;
@@ -1374,18 +1491,9 @@ pkgs.writeTextFile {
     default = defaults[kind].replace("__DESCRIPTION__", description_literal)
     files: dict[Path, str] = {root / "default.nix": default}
     if kind == "python":
-        test_source = "".join(
-            f"\n\ndef test_{_identifier(test)}() -> None:\n"
-            f"    {test!r}\n"
-            f"    raise AssertionError({'not implemented: ' + test!r})\n"
-            for test in tests or []
-        )
         files[root / "main.py"] = (
-            f'''#!/usr/bin/env python3\n{description!r}\n\ndef main() -> None:\n    """Run {name}."""\n{test_source}\nif __name__ == "__main__":\n    main()\n'''  # noqa: E501
+            f'''#!/usr/bin/env python3\n{description!r}\n\ndef main() -> None:\n    """Run {name}."""\n\n\nif __name__ == "__main__":\n    main()\n'''  # noqa: E501
         )
-        if tests:
-            check = Path("checks") / f"{name}_coverage" / "default.nix"
-            files[check] = _current_python_coverage_source()
     elif kind == "html":
         files.update(
             {
@@ -1405,14 +1513,6 @@ pkgs.writeTextFile {
             },
         )
     return files
-
-
-def _identifier(description: str) -> str:
-    """Render a human behavior name as a stable Python identifier."""
-    rendered = re.sub(r"[^a-z0-9]+", "_", description.lower()).strip("_")
-    if not rendered:
-        return "not_implemented"
-    return f"behavior_{rendered}" if rendered[0].isdigit() else rendered
 
 
 def add_package(root: Path, kind: str, name: str, description: str | None) -> None:
@@ -1624,69 +1724,6 @@ def rename_resource(root: Path, source: str, destination: str, dry_run: bool) ->
     )
 
 
-def _imported_status(  # noqa: C901
-    source: str,
-) -> tuple[str, list[dict[str, Any]], list[str]]:
-    """Validate package and host resources imported from a status document."""
-    imported = json.loads(source)
-    if not isinstance(imported, dict):
-        msg = "status document must be a JSON object"
-        raise CommandError(msg)
-    packages = imported.get("packages", [])
-    hosts = imported.get("hosts", [])
-    readme = imported.get("readme")
-    if not isinstance(readme, str):
-        msg = "status document readme must be a string"
-        raise CommandError(msg)
-    if not isinstance(packages, list) or not isinstance(hosts, list):
-        msg = "status document packages and hosts must be arrays"
-        raise CommandError(msg)
-    validated_packages: list[dict[str, Any]] = []
-    for item in packages:
-        if not isinstance(item, dict):
-            msg = "status document packages must contain objects"
-            raise CommandError(msg)
-        kind = item.get("type")
-        name = item.get("name")
-        description = item.get("description")
-        tests = item.get("tests", [])
-        if not isinstance(kind, str) or kind not in PACKAGE_KINDS:
-            msg = f"unsupported package type: {kind}"
-            raise CommandError(msg)
-        if not isinstance(name, str):
-            msg = "status document package name must be a string"
-            raise CommandError(msg)
-        if description is not None and not isinstance(description, str):
-            msg = "status document package description must be a string or null"
-            raise CommandError(msg)
-        if not isinstance(tests, list) or not all(
-            isinstance(test, str) and test.strip() for test in tests
-        ):
-            msg = "status document package tests must contain nonempty strings"
-            raise CommandError(msg)
-        identifiers = [_identifier(test) for test in tests]
-        if len(identifiers) != len(set(identifiers)):
-            msg = f"status document package tests collide after normalization: {name}"
-            raise CommandError(msg)
-        validate_name(name)
-        validated_packages.append(
-            {
-                "type": kind,
-                "name": name,
-                "description": description,
-                "tests": tests,
-            },
-        )
-    validated_hosts: list[str] = []
-    for host in hosts:
-        if not isinstance(host, str):
-            msg = f"invalid host name: {host}"
-            raise CommandError(msg)
-        validate_host_name(host)
-        validated_hosts.append(host)
-    return readme, validated_packages, validated_hosts
-
-
 def initialize_home() -> None:
     """Initialize and stage the canonical home policy without cleaning."""
     root = Path.home()
@@ -1709,7 +1746,7 @@ def _remote_is_empty(remote: str) -> bool:
     return not completed.stdout.strip()
 
 
-def initialize_flake(remote: str, status_path: str | None) -> None:
+def initialize_flake(remote: str) -> None:
     """Create a canonical flake at its remote-derived home path."""
     relative = canonical_remote_path(remote)
     home = Path.home()
@@ -1720,15 +1757,6 @@ def initialize_flake(remote: str, status_path: str | None) -> None:
         msg = "init flake requires an empty remote"
         raise CommandError(msg)
     readme = f"# {relative.name}\n"
-    package_specs: list[dict[str, Any]] = []
-    hosts: list[str] = []
-    if status_path is not None:
-        source = (
-            sys.stdin.read()
-            if status_path == "-"
-            else Path(status_path).read_text(encoding="utf-8")
-        )
-        readme, package_specs, hosts = _imported_status(source)
     directory = home / relative
     if directory.exists():
         msg = f"target already exists: {directory}"
@@ -1742,23 +1770,6 @@ def initialize_flake(remote: str, status_path: str | None) -> None:
             encoding="utf-8",
         )
         (directory / "README").write_text(readme, encoding="utf-8")
-        for item in package_specs:
-            files = scaffold(
-                item["type"],
-                item["name"],
-                item.get("description"),
-                item.get("tests"),
-            )
-            for path, contents in files.items():
-                target = directory / path
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(contents, encoding="utf-8")
-                if target.name == "main.py":
-                    target.chmod(0o755)
-        for host in hosts:
-            path = directory / "hosts" / host / "configuration.nix"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("{ ... }: { }\n", encoding="utf-8")
         _run(
             [os.environ.get("GIT_CANONICALIZATION_NIX", "nix"), "flake", "lock"],
             cwd=directory,
@@ -1799,46 +1810,6 @@ def initialize_flake(remote: str, status_path: str | None) -> None:
     )
 
 
-def status(root: Path) -> dict[str, Any]:
-    """Build the stable repository status payload."""
-    current_profile = profile(root)
-    if current_profile == "home":
-        msg = "home repositories are not compatible with status"
-        raise CommandError(msg)
-    packages = check_flake(root, True)  # noqa: FBT003
-    nix = os.environ.get("GIT_CANONICALIZATION_NIX", "nix")
-    system = _run(
-        [nix, "eval", "--impure", "--raw", "--expr", "builtins.currentSystem"],
-        cwd=root,
-    ).stdout.strip()
-    _run(
-        [
-            nix,
-            "build",
-            f".#checks.{system}.pkgs-formatter-check",
-            "--no-link",
-        ],
-        cwd=root,
-    )
-    return {
-        "readme": _read_regular(root / "README"),
-        "packages": [
-            {
-                "name": package.name,
-                "type": package.kind,
-                "description": package_description(package),
-                "tests": python_tests(package.root / "main.py")
-                if package.kind == "python"
-                else [],
-            }
-            for package in packages
-        ],
-        "hosts": sorted(path.name for path in (root / "hosts").iterdir())
-        if (root / "hosts").is_dir()
-        else [],
-    }
-
-
 def parser() -> argparse.ArgumentParser:
     """Construct the public command-line parser."""
     result = argparse.ArgumentParser(
@@ -1866,16 +1837,6 @@ def parser() -> argparse.ArgumentParser:
         nargs="?",
         metavar="REMOTE",
         help="empty hosted Git remote required by the flake profile",
-    )
-    init.add_argument(
-        "--from-status",
-        metavar="FILE|-",
-        help="initialize a flake from status JSON in FILE or standard input",
-    )
-    commands.add_parser(
-        "status",
-        help="write validated flake status as JSON",
-        description="Write the validated flake status as JSON.",
     )
     add = commands.add_parser(
         "add",
@@ -1956,15 +1917,15 @@ def _dispatch_init(options: argparse.Namespace) -> bool:
     if options.command != "init":
         return False
     if options.profile == "home":
-        if options.remote is not None or options.from_status is not None:
-            msg = "init home does not accept a remote or status document"
+        if options.remote is not None:
+            msg = "init home does not accept a remote"
             raise CommandError(msg)
         initialize_home()
     else:
         if options.remote is None:
             msg = "init flake requires REMOTE"
             raise CommandError(msg)
-        initialize_flake(options.remote, options.from_status)
+        initialize_flake(options.remote)
     return True
 
 
@@ -2015,16 +1976,7 @@ def main() -> None:
             raise CommandError(  # noqa: TRY301
                 msg,
             )
-        if options.command == "status":
-            print(  # noqa: T201
-                json.dumps(
-                    status(root),
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                ),
-            )
-        elif options.command == "canonicalize":
+        if options.command == "canonicalize":
             check_home(
                 root,
                 options.dry_run,
@@ -2212,8 +2164,13 @@ def test_python_scaffold_installs_optional_prm_resources() -> None:
     assert "pyproject = false;" in default  # noqa: S101
     assert "src = ./.;" in default  # noqa: S101
     assert "strictDeps = true;" in default  # noqa: S101
+    if "canonicalization.tests = [ ];" not in default:
+        msg = "Python scaffold omitted its empty tests list"
+        raise AssertionError(msg)
     assert "<nixpkgs>" not in default  # noqa: S101
-    assert "passthru.python = python;" in default  # noqa: S101
+    if "inherit python;" not in default:
+        msg = "Python scaffold omitted python from passthru"
+        raise AssertionError(msg)
 
 
 def test_python_scaffold_escapes_arbitrary_description() -> None:
@@ -2238,30 +2195,6 @@ def test_meta_description_uses_nix_syntax() -> None:
     )
 
 
-def test_imported_status_rejects_invalid_shapes_and_host_paths() -> None:
-    """Reject malformed imported resources before they affect the destination."""
-    for source in (
-        "[]",
-        '{"packages": {}}',
-        '{"packages": [{"type": "python"}]}',
-        '{"hosts": ["../outside"]}',
-        (
-            '{"readme":"x","packages":[{"type":"python","name":"sample",'
-            '"tests":["A-B","A B"]}],"hosts":[]}'
-        ),
-    ):
-        _assert_invalid_imported_status(source)
-
-
-def _assert_invalid_imported_status(source: str) -> None:
-    try:
-        _imported_status(source)
-    except CommandError:
-        return
-    msg = f"invalid status was accepted: {source}"
-    raise AssertionError(msg)
-
-
 def test_python_default_preserves_custom_attributes() -> None:
     """Permit package-specific Nix attributes while retaining static fields."""
     with tempfile.TemporaryDirectory() as temporary_directory:
@@ -2275,6 +2208,7 @@ def test_python_default_preserves_custom_attributes() -> None:
         )
         source = source.replace("{ inputs, pkgs, ... }:", "{ pkgs, ... }:")
         package = Package("report", "python", package_root)
+        (package_root / "main.py").write_text("", encoding="utf-8")
         (package_root / "default.nix").write_text(source, encoding="utf-8")
         assert canonical_typed_default(package) == source  # noqa: S101
         assert _source_package_issues(root, package) == []  # noqa: S101
@@ -2289,6 +2223,7 @@ def test_python_default_requires_static_build_fields() -> None:
         source = scaffold("python", "report", None)[Path("packages/report/default.nix")]
         source = source.replace("  strictDeps = true;\n", "")
         package = Package("report", "python", package_root)
+        (package_root / "main.py").write_text("", encoding="utf-8")
         (package_root / "default.nix").write_text(source, encoding="utf-8")
         repaired = canonical_typed_default(package)
         assert repaired is not None  # noqa: S101
@@ -2547,7 +2482,6 @@ def test_top_level_help_is_concise_and_conventional() -> None:
         "usage: git_canonicalization",
         "commands:",
         "init",
-        "status",
         "add",
         "mv",
         "rm",
@@ -2562,8 +2496,7 @@ def test_top_level_help_is_concise_and_conventional() -> None:
 def test_subcommand_help_describes_arguments_and_hides_internal_options() -> None:
     """Describe public inputs without custom examples or policy text."""
     expected = {
-        "init": ("REMOTE", "--from-status"),
-        "status": ("validated flake status",),
+        "init": ("REMOTE", "flake repository"),
         "add": ("RESOURCE", "packages/NAME or hosts/NAME", "TYPE"),
         "mv": ("SOURCE", "DESTINATION"),
         "rm": ("RESOURCE", "packages/NAME or hosts/NAME"),
@@ -2573,6 +2506,25 @@ def test_subcommand_help_describes_arguments_and_hides_internal_options() -> Non
         help_text = _render_help([command])
         assert all(fragment in help_text for fragment in fragments)  # noqa: S101
     assert "--source" not in _render_help(["canonicalize"])  # noqa: S101
+
+
+def test_removed_status_interfaces_are_rejected() -> None:
+    """Keep retired status import and export interfaces out of the CLI."""
+    argparse_error = 2
+    for arguments in (
+        ["status"],
+        ["init", "flake", "remote", "--from-status", "status.json"],
+    ):
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                parser().parse_args(arguments)
+            except SystemExit as error:
+                if error.code != argparse_error:
+                    msg = f"removed status interface exited with {error.code}"
+                    raise AssertionError(msg) from error
+            else:
+                msg = f"removed status interface was accepted: {arguments}"
+                raise AssertionError(msg)
 
 
 def test_help_command_is_equivalent_to_help_option() -> None:
@@ -2705,7 +2657,12 @@ def test_convergence_derives_checks_and_removes_orphans() -> None:
     with tempfile.TemporaryDirectory() as temporary_directory:
         root = Path(temporary_directory)
         _temporary_flake(root)
-        files = scaffold("python", "sample", None, ["works"])
+        files = scaffold("python", "sample", None)
+        main_source = files[Path("packages/sample/main.py")]
+        files[Path("packages/sample/main.py")] = main_source.replace(
+            '\n\nif __name__ == "__main__":',
+            '\n\ndef test_works() -> None:\n    pass\n\n\nif __name__ == "__main__":',
+        )
         generated_check = Path("checks/sample_coverage/default.nix")
         for relative, source in files.items():
             if relative != generated_check:
@@ -2786,22 +2743,41 @@ def test_single_force_cleanup_rejects_nested_git_repository() -> None:
         assert (nested / ".git").is_dir()  # noqa: S101
 
 
-def test_scaffold_coverage_exists_only_for_declared_behaviors() -> None:
-    """Generate coverage and failing stubs only when behavior names are supplied."""
-    without_tests = scaffold("python", "sample", None)
-    assert Path("checks/sample_coverage/default.nix") not in without_tests  # noqa: S101
-    with_tests = scaffold(
-        "python",
-        "sample",
-        None,
-        ["Loads a document", "123", 'Says "yes"\nnow'],
-    )
-    source = with_tests[Path("packages/sample/main.py")]
-    ast.parse(source)
-    assert Path("checks/sample_coverage/default.nix") in with_tests  # noqa: S101
-    assert "def test_loads_a_document()" in source  # noqa: S101
-    assert "def test_behavior_123()" in source  # noqa: S101
-    assert "not implemented: Loads a document" in source  # noqa: S101
+def test_python_default_derives_normalized_test_list() -> None:
+    """Generate sorted sentence names from Python tests into the Nix definition."""
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        package_root = Path(temporary_directory) / "packages" / "sample"
+        package_root.mkdir(parents=True)
+        (package_root / "main.py").write_text(
+            """def test_z_last(): pass
+async def test_cli_handles_utf8_url(): pass
+class TestGroup:
+    def test_a_first(self): pass
+""",
+            encoding="utf-8",
+        )
+        (package_root / "default.nix").write_text(
+            scaffold("python", "sample", None)[Path("packages/sample/default.nix")],
+            encoding="utf-8",
+        )
+        package = Package("sample", "python", package_root)
+        rendered = canonical_typed_default(package)
+        if rendered is None:
+            msg = "Python default was not rendered"
+            raise AssertionError(msg)
+        expected = (
+            'canonicalization.tests = [\n      "A first."\n'
+            '      "CLI handles UTF-8 URL."\n'
+            '      "Z last."\n    ];'
+        )
+        if expected not in rendered:
+            msg = "Python default did not contain its normalized tests"
+            raise AssertionError(msg)
+        (package_root / "default.nix").write_text(rendered, encoding="utf-8")
+        issues = _source_package_issues(Path(temporary_directory), package)
+        if issues:
+            msg = f"rendered Python default was not canonical: {issues}"
+            raise AssertionError(msg)
 
 
 if __name__ == "__main__":

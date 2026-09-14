@@ -23,7 +23,14 @@ python.pkgs.buildPythonPackage {
     mainProgram = pname;
   };
   nativeBuildInputs = nativeDeps;
-  passthru.python = python;
+  passthru = {
+    inherit python;
+    canonicalization.tests = [
+      "Dotted bindings collapse safely."
+      "Installed executable formats files."
+      "Preserves string order and sorts other constructs."
+    ];
+  };
   propagatedBuildInputs = pythonDeps;
   pyproject = false;
   src = ./.;

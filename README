@@ -2,7 +2,7 @@
 
 Canonicalization converges `$HOME` to whitelisted, tracked state and each flake submodule to its supported layout, using `git clean` to remove disposable state.
 
-Use `git_canonicalization` for repository initialization, package scaffolding or removal, layout convergence, and exporting a validated flake description with `git_canonicalization status`; use native Git for all other Git operations.
+Use `git_canonicalization` for repository initialization, package scaffolding or removal, and layout convergence; use native Git for all other Git operations.
 
 In a flake submodule, reserve an existing supported `prm/` tree as an escape hatch for tracked source code outside the package's main source tree.
 Put untracked generated or scratch artifacts under an existing supported `tmp/` tree; they remain local but are not persistent.

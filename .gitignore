@@ -55,5 +55,3 @@
 !/packages/remove_new_lines/main.py
 !/packages/uncomment/
 !/packages/uncomment/default.nix
-!/prm/
-!/prm/**

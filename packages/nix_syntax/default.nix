@@ -23,7 +23,10 @@ python.pkgs.buildPythonPackage {
     mainProgram = pname;
   };
   nativeBuildInputs = nativeDeps;
-  passthru.python = python;
+  passthru = {
+    inherit python;
+    canonicalization.tests = [ "Parse extracts static paths and rejects errors." ];
+  };
   propagatedBuildInputs = pythonDeps;
   pyproject = false;
   src = ./.;
