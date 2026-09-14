@@ -1,36 +1,20 @@
 # Canonicalization
 
-Canonicalization is a CLI and Nix flake for converging repositories into a
-NixOS preservation layout. `$HOME` is the outer persistence Git repository,
-and hosted repositories are flake submodules at `HOST/OWNER/REPOSITORY`.
-
-Persistence under `$HOME` requires both admission by its whitelist
-`.gitignore` and tracking by the outer Git repository. Runtime state outside
-that tracked whitelist is disposable. A flake submodule instead follows the
-canonical source layout enforced by `git_canonicalization`.
-
-Use `git rev-parse --show-toplevel` before acting to distinguish `$HOME` from a
-flake submodule. Before first using `git_canonicalization` in a task, run
-`git_canonicalization help` and `git_canonicalization help <subcommand>` for
-the selected action.
+Canonicalization converges `$HOME` to whitelisted, tracked state and each flake submodule to its supported layout, using `git clean` to remove disposable state.
 
 ## Rules
 
-- Use native Git for commits, branches, merges, remotes, fetches, and pushes.
 - Use `git_canonicalization` for repository initialization, package
   scaffolding or removal, layout convergence, and exporting a validated flake
-  description with `git_canonicalization status`.
-- Before mutating with `git_canonicalization canonicalize`, run
-  `git_canonicalization canonicalize --dry-run`. Proceed only when the reported
-  changes are intended. Canonicalization may rewrite and stage managed files
-  and delete ignored or untracked files.
-- Persist a `$HOME` path only deliberately: admit it in the whitelist
-  `.gitignore` and track it in the outer repository before canonicalization.
-  Never whitelist a path merely because it exists at runtime.
-- Preserve the canonical flake layout. Put deliberately opaque, tracked source
-  under an existing supported `prm/` tree. Put untracked generated or scratch
-  artifacts under an existing supported `tmp/` tree; canonicalization preserves
-  them locally, but they are not persistent. Consult the relevant subcommand
-  help when the correct location is uncertain.
+  description with `git_canonicalization status`; use native Git for all other
+  Git operations.
+- Before first using `git_canonicalization` in a task, run
+  `git_canonicalization help` and `git_canonicalization help <subcommand>` for
+  the selected action.
+- In a flake submodule, put deliberately opaque, tracked source under an
+  existing supported `prm/` tree. Put untracked generated or scratch artifacts
+  under an existing supported `tmp/` tree; they remain local but are not
+  persistent. Consult the relevant subcommand help when the correct location
+  is uncertain.
 - After changing a flake submodule, run `nix fmt` and `nix flake check` from
-  its root. Do not run them from `$HOME`, which is not a flake.
+  its root.
