@@ -879,16 +879,23 @@ def _current_host_check_source() -> str:
     """Render the canonical host VM check definition."""
     return """{ inputs, pkgs, ... }:
 let
+  configuration = inputs.self.nixosConfigurations.${host};
+  diskoDevices = configuration.config.disko.devices or { };
   host = pkgs.lib.removeSuffix "VmWithDisko" (baseNameOf ./.);
+  vm =
+    if builtins.attrNames diskoDevices == [ ] then
+      configuration.config.system.build.vm
+    else
+      configuration.config.system.build.vmWithDisko;
 in
 pkgs.runCommand (baseNameOf ./.)
   {
-    buildInputs = [ inputs.self.nixosConfigurations.${host}.config.system.build.vmWithDisko ];
+    buildInputs = [ vm ];
   }
   ''
     touch "$out"
   ''
-"""  # noqa: E501
+"""
 
 
 def _python_static_template_issues(package: Package, source: str) -> list[str]:
@@ -2127,6 +2134,15 @@ def test_standalone_check_is_not_canonical() -> None:
                 "prm/ (for example, prm/default.nix)"
             ),
         ]
+
+
+def test_host_check_falls_back_to_regular_vm() -> None:
+    """Use Disko's VM only for hosts that define Disko devices."""
+    source = _current_host_check_source()
+    assert "configuration.config.disko.devices or { };" in source  # noqa: S101
+    assert "configuration.config.system.build.vm\n" in source  # noqa: S101
+    assert "configuration.config.system.build.vmWithDisko;" in source  # noqa: S101
+    assert "buildInputs = [ vm ];" in source  # noqa: S101
 
 
 def test_host_check_requires_its_host() -> None:

@@ -44,6 +44,7 @@ python.pkgs.buildPythonPackage {
       "Home checkout converges origin and gitlink."
       "Home checkout rejects dirty or unpublished head."
       "Home initialization uses canonical ignore policy."
+      "Host check falls back to regular vm."
       "Host check requires its host."
       "Host names use camel case."
       "Html styles and scripts are optional."
