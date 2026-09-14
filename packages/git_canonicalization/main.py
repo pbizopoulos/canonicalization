@@ -1478,10 +1478,14 @@ def remove_resource(root: Path, value: str, dry_run: bool) -> None:
     ):
         msg = f"{kind} does not exist: {name}"
         raise CommandError(msg)
-    check_root = root / "checks" / f"{name}_coverage"
+    check_root = (
+        root
+        / "checks"
+        / (f"{name}_coverage" if kind == "package" else f"{name}VmWithDisko")
+    )
     targets = [
         resource_root,
-        *([check_root] if kind == "package" and check_root.exists() else []),
+        *([check_root] if check_root.exists() else []),
     ]
     target_relatives = [str(target.relative_to(root)) for target in targets]
     if dry_run:
@@ -2442,9 +2446,17 @@ def test_add_and_rm_manage_hosts_as_explicit_resources() -> None:
         configuration = root / "hosts" / "new-host" / "configuration.nix"
         assert configuration.read_text(encoding="utf-8") == "{ ... }: { }\n"
         assert Path("hosts/new-host/configuration.nix") in _tracked_paths(root)
+        host_check = root / "checks" / "new-hostVmWithDisko"
+        host_check.mkdir(parents=True)
+        (host_check / "default.nix").write_text("{ }: { }\n", encoding="utf-8")
+        git(root, ["add", "--force", "--", str(host_check)])
         remove_resource(root, "hosts/new-host", False)
         assert not configuration.parent.exists()
+        assert not host_check.exists()
         assert Path("hosts/new-host/configuration.nix") not in _tracked_paths(root)
+        assert Path("checks/new-hostVmWithDisko/default.nix") not in _tracked_paths(
+            root,
+        )
         _dispatch_add(
             root,
             parser().parse_args(["add", "packages/example", "nix"]),

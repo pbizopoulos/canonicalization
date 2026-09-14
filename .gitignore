@@ -6,12 +6,8 @@
 !/LICENSE
 !/README
 !/checks/
-!/checks/defaultVmWithDisko/
-!/checks/defaultVmWithDisko/default.nix
 !/checks/git_canonicalization_coverage/
 !/checks/git_canonicalization_coverage/default.nix
-!/checks/host_default/
-!/checks/host_default/default.nix
 !/checks/nix_alphabetize_coverage/
 !/checks/nix_alphabetize_coverage/default.nix
 !/checks/nix_remove_defaults_coverage/
@@ -27,9 +23,6 @@
 !/flake.lock
 !/flake.nix
 !/formatter.nix
-!/hosts/
-!/hosts/default/
-!/hosts/default/configuration.nix
 !/packages/
 !/packages/deploy_host_template/
 !/packages/deploy_host_template/default.nix
