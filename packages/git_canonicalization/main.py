@@ -721,7 +721,7 @@ def package_description(package: Package) -> str | None:
 
 def _meta_description(source: str) -> str | None:
     """Return a literal meta.description through the Nix syntax tree."""
-    document, expression = _meta_description_expression(source)
+    document, expression = _metadata_expression(source, "meta", ("description",))
     if expression is None or expression.type != "string_expression":
         return None
     if any(node.type == "interpolation" for node in nix_syntax.walk(expression)):
@@ -733,27 +733,6 @@ def _meta_description(source: str) -> str | None:
 def _nix_string(value: str) -> str:
     """Encode a non-interpolating Nix string literal."""
     return json.dumps(value).replace("${", r"\${")
-
-
-def _meta_description_expression(
-    source: str,
-) -> tuple[nix_syntax.Document, Node | None]:
-    """Find the meta description value in either supported metadata form."""
-    document = nix_syntax.parse(source)
-    matches = []
-    for binding in (
-        node for node in nix_syntax.walk(document.root) if node.type == "binding"
-    ):
-        attrpath = nix_syntax.field(binding, "attrpath")
-        expression = nix_syntax.field(binding, "expression")
-        if attrpath is None or expression is None:
-            continue
-        path = nix_syntax.static_attrpath(document, attrpath)
-        if path == ("meta", "description"):
-            matches.append(expression)
-        elif path == ("meta",):
-            matches.extend(_attrset_expression(document, expression, ("description",)))
-    return document, matches[0] if len(matches) == 1 else None
 
 
 def _attrset_expression(
@@ -778,11 +757,12 @@ def _attrset_expression(
     ]
 
 
-def _passthru_expression(
+def _metadata_expression(
     source: str,
+    namespace: str,
     requested_path: tuple[str, ...],
 ) -> tuple[nix_syntax.Document, Node | None]:
-    """Find a static expression in either supported passthru form."""
+    """Find an unambiguous metadata expression in dotted or nested form."""
     document = nix_syntax.parse(source)
     matches = []
     for binding in (
@@ -793,19 +773,14 @@ def _passthru_expression(
         if attrpath is None or expression is None:
             continue
         binding_path = nix_syntax.static_attrpath(document, attrpath)
-        if binding_path == ("passthru", *requested_path):
+        if binding_path == (namespace, *requested_path):
             matches.append(expression)
-        elif binding_path == ("passthru",):
+        elif binding_path == (namespace,):
             matches.extend(
                 _attrset_expression(document, expression, requested_path),
             )
     unique = {node.start_byte: node for node in matches}
     return document, next(iter(unique.values())) if len(unique) == 1 else None
-
-
-def _compact_nix(source: str) -> str:
-    """Normalize insignificant whitespace for template comparisons."""
-    return " ".join(source.split())
 
 
 def _check_coverage_default(root: Path, package: Package) -> None:
@@ -816,7 +791,7 @@ def _check_coverage_default(root: Path, package: Package) -> None:
     actual = _read_regular(check)
     assert actual is not None  # noqa: S101
     expected = _current_python_coverage_source()
-    if _compact_nix(actual) != _compact_nix(expected):
+    if nix_syntax.compact(actual) != nix_syntax.compact(expected):
         msg = (
             f"{check.relative_to(root)}: differs from the canonical coverage "
             "check template"
@@ -903,13 +878,16 @@ def _python_static_template_issues(package: Package, source: str) -> list[str]:
     if actual_install_phase != expected_install_phase:
         issues.append("installPhase differs from the canonical install phase")
     expected_tests = _render_test_list(package.root / "main.py")
-    document, tests_expression = _passthru_expression(
+    document, tests_expression = _metadata_expression(
         source,
+        "passthru",
         ("canonicalization", "tests"),
     )
     if tests_expression is None:
         issues.append("missing required passthru.canonicalization.tests definition")
-    elif _compact_nix(document.text(tests_expression)) != _compact_nix(expected_tests):
+    elif nix_syntax.compact(document.text(tests_expression)) != nix_syntax.compact(
+        expected_tests,
+    ):
         issues.append("tests differ from discovered Python tests")
     required = {
         "pname": r"baseNameOf\s+\./\.\s*;",
@@ -956,8 +934,9 @@ def _replace_binding(source: str, name: str, value: str) -> str:
 def _canonical_python_tests(package: Package, source: str) -> str:
     """Refresh the required canonical Python test metadata."""
     expected = _render_test_list(package.root / "main.py")
-    document, tests_expression = _passthru_expression(
+    document, tests_expression = _metadata_expression(
         source,
+        "passthru",
         ("canonicalization", "tests"),
     )
     if tests_expression is None:
@@ -1099,7 +1078,9 @@ def _write_managed_nix(
 ) -> bool:
     """Write a Nix template only when its formatted structure differs."""
     current = _read_regular(root / relative)
-    if current is not None and _compact_nix(current) == _compact_nix(source):
+    if current is not None and nix_syntax.compact(current) == nix_syntax.compact(
+        source,
+    ):
         source = current
     return _write_managed(root, relative, source, dry_run=dry_run)
 
@@ -1344,7 +1325,7 @@ def _generated_check_issues(root: Path, packages: list[Package]) -> list[str]:
         actual = _read_regular(root / check)
         if actual is None:
             issues.append(f"{check}: missing generated check")
-        elif _compact_nix(actual) != _compact_nix(expected):
+        elif nix_syntax.compact(actual) != nix_syntax.compact(expected):
             issues.append(f"{check}: differs from its canonical generated template")
     return issues
 
@@ -1358,7 +1339,7 @@ def _source_package_issues(root: Path, package: Package) -> list[str]:
     if (
         expected is not None
         and actual is not None
-        and _compact_nix(actual) != _compact_nix(expected)
+        and nix_syntax.compact(actual) != nix_syntax.compact(expected)
     ):
         issues.append(f"{relative}: differs from its canonical typed template")
     if package.kind == "python" and actual is not None:
