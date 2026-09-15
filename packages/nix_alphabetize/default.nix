@@ -1,14 +1,10 @@
 { inputs, pkgs, ... }:
 let
-  nativeDeps = [ ];
   pname = baseNameOf ./.;
   python = pkgs.python3;
-  pythonDeps = [ inputs.self.packages.${pkgs.stdenv.system}.nix_syntax ];
-  shellHook = "";
 in
 python.pkgs.buildPythonPackage {
   inherit pname;
-  inherit shellHook;
   installPhase = ''
     install -Dm644 main.py "$out/${python.sitePackages}/$pname/__init__.py"
     mkdir -p "$out/bin"
@@ -22,7 +18,6 @@ python.pkgs.buildPythonPackage {
     description = "Canonicalize ordering and nesting in Nix expressions.";
     mainProgram = pname;
   };
-  nativeBuildInputs = nativeDeps;
   passthru = {
     inherit python;
     canonicalization.tests = [
@@ -31,7 +26,7 @@ python.pkgs.buildPythonPackage {
       "Preserves string order and sorts other constructs."
     ];
   };
-  propagatedBuildInputs = pythonDeps;
+  propagatedBuildInputs = [ inputs.self.packages.${pkgs.stdenv.system}.nix_syntax ];
   pyproject = false;
   src = ./.;
   strictDeps = true;

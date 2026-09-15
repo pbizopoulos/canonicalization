@@ -1,14 +1,10 @@
 { pkgs, ... }:
 let
-  nativeDeps = [ ];
   pname = baseNameOf ./.;
   python = pkgs.python3;
-  pythonDeps = [ ];
-  shellHook = "";
 in
 python.pkgs.buildPythonPackage {
   inherit pname;
-  inherit shellHook;
   installPhase = ''
     install -Dm644 main.py "$out/${python.sitePackages}/$pname/__init__.py"
     mkdir -p "$out/bin"
@@ -22,7 +18,6 @@ python.pkgs.buildPythonPackage {
     description = "Remove empty lines from explicitly selected text files.";
     mainProgram = pname;
   };
-  nativeBuildInputs = nativeDeps;
   passthru = {
     inherit python;
     canonicalization.tests = [
@@ -31,7 +26,7 @@ python.pkgs.buildPythonPackage {
       "Remove empty lines preserves nonempty and invalid UTF-8 lines."
     ];
   };
-  propagatedBuildInputs = pythonDeps;
+  propagatedBuildInputs = [ ];
   pyproject = false;
   src = ./.;
   strictDeps = true;

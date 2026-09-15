@@ -1,17 +1,10 @@
 { inputs, pkgs, ... }:
 let
-  nativeDeps = [ ];
   pname = baseNameOf ./.;
   python = pkgs.python3;
-  pythonDeps = [
-    inputs.self.packages.${pkgs.stdenv.system}.nix_syntax
-    pkgs.nix
-  ];
-  shellHook = "";
 in
 python.pkgs.buildPythonPackage {
   inherit pname;
-  inherit shellHook;
   installPhase = ''
     install -Dm644 main.py "$out/${python.sitePackages}/$pname/__init__.py"
     mkdir -p "$out/bin"
@@ -25,12 +18,14 @@ python.pkgs.buildPythonPackage {
     description = "Remove literal NixOS and treefmt assignments equal to option defaults.";
     mainProgram = pname;
   };
-  nativeBuildInputs = nativeDeps;
   passthru = {
     inherit python;
     canonicalization.tests = [ "Literal candidates and rewrite." ];
   };
-  propagatedBuildInputs = pythonDeps;
+  propagatedBuildInputs = [
+    inputs.self.packages.${pkgs.stdenv.system}.nix_syntax
+    pkgs.nix
+  ];
   pyproject = false;
   src = ./.;
   strictDeps = true;

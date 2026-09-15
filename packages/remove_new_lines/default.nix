@@ -1,14 +1,10 @@
 { pkgs, ... }:
 let
-  nativeDeps = [ ];
   pname = baseNameOf ./.;
   python = pkgs.python3;
-  pythonDeps = [ ];
-  shellHook = "";
 in
 python.pkgs.buildPythonPackage {
   inherit pname;
-  inherit shellHook;
   installPhase = ''
     install -Dm644 main.py "$out/${python.sitePackages}/$pname/__init__.py"
     mkdir -p "$out/bin"
@@ -22,7 +18,6 @@ python.pkgs.buildPythonPackage {
     description = "Remove new lines from explicitly selected text files.";
     mainProgram = pname;
   };
-  nativeBuildInputs = nativeDeps;
   passthru = {
     inherit python;
     canonicalization.tests = [
@@ -31,7 +26,7 @@ python.pkgs.buildPythonPackage {
       "Remove new lines preserves non newline bytes."
     ];
   };
-  propagatedBuildInputs = pythonDeps;
+  propagatedBuildInputs = [ ];
   pyproject = false;
   src = ./.;
   strictDeps = true;

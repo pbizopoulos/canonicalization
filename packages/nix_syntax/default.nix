@@ -1,14 +1,10 @@
 { pkgs, ... }:
 let
-  nativeDeps = [ ];
   pname = baseNameOf ./.;
   python = pkgs.python3;
-  pythonDeps = [ python.pkgs.tree-sitter-language-pack ];
-  shellHook = "";
 in
 python.pkgs.buildPythonPackage {
   inherit pname;
-  inherit shellHook;
   installPhase = ''
     install -Dm644 main.py "$out/${python.sitePackages}/$pname/__init__.py"
     mkdir -p "$out/bin"
@@ -22,12 +18,11 @@ python.pkgs.buildPythonPackage {
     description = "Provide shared, lossless-enough Nix parsing and rewriting helpers.";
     mainProgram = pname;
   };
-  nativeBuildInputs = nativeDeps;
   passthru = {
     inherit python;
     canonicalization.tests = [ "Parse extracts static paths and rejects errors." ];
   };
-  propagatedBuildInputs = pythonDeps;
+  propagatedBuildInputs = [ python.pkgs.tree-sitter-language-pack ];
   pyproject = false;
   src = ./.;
   strictDeps = true;

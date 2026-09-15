@@ -22,7 +22,6 @@ from typing import TYPE_CHECKING, cast
 from urllib.parse import urlparse
 
 import nix_syntax
-import tomllib
 
 if TYPE_CHECKING:
     from tree_sitter import Node
@@ -710,18 +709,6 @@ def _render_test_list(path: Path) -> str:
 
 def package_description(package: Package) -> str | None:
     """Extract declared package metadata where supported."""
-    pyproject = package.root / "pyproject.toml"
-    if pyproject.is_file():
-        try:
-            description = (
-                tomllib.loads(pyproject.read_text(encoding="utf-8"))
-                .get("project", {})
-                .get("description")
-            )
-            if isinstance(description, str):
-                return description
-        except (OSError, tomllib.TOMLDecodeError):
-            pass
     default = _read_regular(package.root / "default.nix")
     if default is None:
         return None
@@ -842,14 +829,21 @@ def _current_python_coverage_source() -> str:
     return """{ inputs, pkgs, ... }:
 let
   checkName = baseNameOf ./.;
-  dependencyInputs = builtins.concatLists [
-    (packageDrv.buildInputs or [ ])
-    (packageDrv.checkInputs or [ ])
-    (packageDrv.nativeBuildInputs or [ ])
-    (packageDrv.nativeCheckInputs or [ ])
-    (packageDrv.propagatedBuildInputs or [ ])
-    (packageDrv.propagatedNativeBuildInputs or [ ])
-  ];
+  dependencyInputs = builtins.concatLists (
+    builtins.attrValues (
+      pkgs.lib.filterAttrs (
+        name: _:
+        builtins.elem name [
+          "buildInputs"
+          "checkInputs"
+          "nativeBuildInputs"
+          "nativeCheckInputs"
+          "propagatedBuildInputs"
+          "propagatedNativeBuildInputs"
+        ]
+      ) packageDrv
+    )
+  );
   packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${packageName};
   packageName = pkgs.lib.removeSuffix "_coverage" checkName;
   pythonEnv = packageDrv.python.withPackages (
@@ -960,63 +954,31 @@ def _replace_binding(source: str, name: str, value: str) -> str:
 
 
 def _canonical_python_tests(package: Package, source: str) -> str:
-    """Migrate and refresh canonical Python test metadata."""
+    """Refresh the required canonical Python test metadata."""
     expected = _render_test_list(package.root / "main.py")
-    legacy_assertion = r"(?m)^assert\s+builtins\.all\s+builtins\.isString\s+tests\s*;\n"
-    if re.search(legacy_assertion, source):
-        source = re.sub(
-            r"(?ms)^[ \t]*tests\s*=\s*\[.*?\][ \t]*;\n",
-            "",
-            source,
-            count=1,
-        )
-        source = re.sub(legacy_assertion, "", source, count=1)
-    _document, reserved_tests = _passthru_expression(source, ("tests",))
-    if reserved_tests is not None:
-        source = re.sub(
-            r"(?ms)^[ ]{4}tests\s*=\s*\[.*?\][ \t]*;\n",
-            "",
-            source,
-            count=1,
-        )
-        source = re.sub(
-            r"(?ms)^  passthru\.tests\s*=\s*\[.*?\][ \t]*;\n",
-            "",
-            source,
-            count=1,
-        )
     document, tests_expression = _passthru_expression(
         source,
         ("canonicalization", "tests"),
     )
-    if tests_expression is not None:
-        return cast(
-            "bytes",
-            nix_syntax.apply_edits(
-                document.source,
-                [
-                    (
-                        tests_expression.start_byte,
-                        tests_expression.end_byte,
-                        expected.encode(),
-                    ),
-                ],
-            ),
-        ).decode()
-    if "  passthru = {\n" in source:
-        return source.replace(
-            "  passthru = {\n",
-            f"  passthru = {{\n    canonicalization.tests = {expected};\n",
-            1,
+    if tests_expression is None:
+        msg = (
+            f"{package.root / 'default.nix'}: missing required "
+            "passthru.canonicalization.tests definition"
         )
-    return source.replace(
-        "  passthru.python = python;",
-        "  passthru = {\n"
-        f"    canonicalization.tests = {expected};\n"
-        "    inherit python;\n"
-        "  };",
-        1,
-    )
+        raise CommandError(msg)
+    return cast(
+        "bytes",
+        nix_syntax.apply_edits(
+            document.source,
+            [
+                (
+                    tests_expression.start_byte,
+                    tests_expression.end_byte,
+                    expected.encode(),
+                ),
+            ],
+        ),
+    ).decode()
 
 
 def _canonical_python_default(package: Package, source: str) -> str:
@@ -1425,12 +1387,13 @@ def scaffold(
     description_literal = _nix_string(description)
     root = Path("packages") / name
     defaults = {
-        "python": """{ inputs, pkgs, ... }:
+        "python": """{ pkgs, ... }:
 let
+  pname = baseNameOf ./.;
   python = pkgs.python3;
 in
 python.pkgs.buildPythonPackage {
-  pname = baseNameOf ./.;
+  inherit pname;
   installPhase = ''
     install -Dm644 main.py "$out/${python.sitePackages}/$pname/__init__.py"
     mkdir -p "$out/bin"
@@ -1448,6 +1411,7 @@ python.pkgs.buildPythonPackage {
     canonicalization.tests = [ ];
     inherit python;
   };
+  propagatedBuildInputs = [ ];
   pyproject = false;
   src = ./.;
   strictDeps = true;
@@ -2008,7 +1972,6 @@ def main() -> None:
         OSError,
         UnicodeError,
         json.JSONDecodeError,
-        tomllib.TOMLDecodeError,
         nix_syntax.NixSyntaxError,
     ) as error:
         print(f"error: {error}", file=sys.stderr)  # noqa: T201
@@ -2205,6 +2168,21 @@ def test_python_scaffold_installs_optional_prm_resources() -> None:
     if "inherit python;" not in default:
         msg = "Python scaffold omitted python from passthru"
         raise AssertionError(msg)
+    evaluated = _run(
+        [
+            "nix",
+            "--extra-experimental-features",
+            "nix-command",
+            "eval",
+            "--raw",
+            "--expr",
+            (
+                f"({default}) {{ pkgs.python3.pkgs.buildPythonPackage = "
+                "attrs: attrs.meta.mainProgram; }"
+            ),
+        ],
+    )
+    assert evaluated.stdout == Path.cwd().name  # noqa: S101
 
 
 def test_python_scaffold_escapes_arbitrary_description() -> None:
@@ -2240,7 +2218,6 @@ def test_python_default_preserves_custom_attributes() -> None:
             "  meta = {",
             "  buildInputs = [ pkgs.some_dependency ];\n  meta = {",
         )
-        source = source.replace("{ inputs, pkgs, ... }:", "{ pkgs, ... }:")
         package = Package("report", "python", package_root)
         (package_root / "main.py").write_text("", encoding="utf-8")
         (package_root / "default.nix").write_text(source, encoding="utf-8")
@@ -2266,11 +2243,30 @@ def test_python_default_requires_static_build_fields() -> None:
         assert _source_package_issues(root, package) == []  # noqa: S101
 
 
+def test_python_default_requires_canonical_test_metadata() -> None:
+    """Reject missing canonical test metadata without migrating old definitions."""
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        package_root = Path(temporary_directory)
+        (package_root / "main.py").write_text("", encoding="utf-8")
+        package = Package("report", "python", package_root)
+        source = scaffold("python", "report", None)[Path("packages/report/default.nix")]
+        for replacement in ("", "tests = [ ];"):
+            invalid = source.replace("canonicalization.tests = [ ];", replacement)
+            try:
+                _canonical_python_tests(package, invalid)
+            except CommandError as error:
+                error_message = str(error)
+            else:
+                msg = "missing canonical test metadata was accepted"
+                raise AssertionError(msg)
+            assert "missing required passthru.canonicalization.tests" in error_message  # noqa: S101
+
+
 def test_coverage_default_matches_current_template() -> None:
     """Recognize the canonical generated coverage check definition."""
     template = _current_python_coverage_source()
     assert "dependencyInputs = builtins.concatLists" in template  # noqa: S101
-    assert "(packageDrv.nativeCheckInputs or [ ])" in template  # noqa: S101
+    assert '"nativeCheckInputs"' in template  # noqa: S101
     with tempfile.TemporaryDirectory() as temporary_directory:
         root = Path(temporary_directory)
         check = root / "checks" / "report_coverage"
