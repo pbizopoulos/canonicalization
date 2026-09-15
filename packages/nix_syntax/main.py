@@ -89,16 +89,53 @@ def static_attrpath(document: Document, attrpath: Node) -> tuple[str, ...] | Non
         text = document.text(child)
         if child.type == "identifier":
             parts.append(text)
-        elif child.type == "string_expression" and "${" not in text:
-            parts.append(text[1:-1])
+        elif child.type == "string_expression" and not any(
+            node.type == "interpolation" for node in walk(child)
+        ):
+            characters = iter(text[1:-1])
+            decoded = []
+            for character in characters:
+                if character == "\\":
+                    escaped = next(characters)
+                    decoded.append(
+                        {"n": "\n", "r": "\r", "t": "\t"}.get(escaped, escaped),
+                    )
+                else:
+                    decoded.append(character)
+            parts.append("".join(decoded))
         else:
             return None
     return tuple(parts) if parts else None
 
 
 def compact(text: str) -> str:
-    """Render diagnostic source on one whitespace-normalized line."""
-    return " ".join(text.split())
+    """Normalize layout whitespace while preserving literals and comments."""
+    document = parse(text)
+    edits = []
+
+    def normalize(node: Node) -> None:
+        if node.type in {"string_expression", "indented_string_expression", "comment"}:
+            return
+        position = node.start_byte
+        line_comment = False
+        for child in node.children:
+            normalize_gap(position, child.start_byte, line_comment=line_comment)
+            normalize(child)
+            position = child.end_byte
+            line_comment = child.type == "comment" and document.text(child).startswith(
+                "#",
+            )
+        if node.children:
+            normalize_gap(position, node.end_byte, line_comment=line_comment)
+
+    def normalize_gap(start: int, end: int, *, line_comment: bool) -> None:
+        gap = document.source[start:end]
+        if gap and gap.isspace():
+            replacement = b"\n" if line_comment else b" "
+            edits.append((start, end, replacement))
+
+    normalize(document.tree.root_node)
+    return apply_edits(document.source, edits).decode().strip()
 
 
 def apply_edits(source: bytes, edits: Iterable[tuple[int, int, bytes]]) -> bytes:
@@ -161,6 +198,37 @@ def test_parse_extracts_static_paths_and_rejects_errors() -> None:
     else:
         msg = "malformed source parsed successfully"
         raise AssertionError(msg)
+
+
+def test_static_paths_decode_escapes_and_reject_interpolation() -> None:
+    """Static paths decode Nix escapes and distinguish literal interpolation."""
+    cases = [
+        (r'"a\"b"."c\\d"', ('a"b', "c\\d")),
+        (r'"a\nb\rc\td"', ("a\nb\rc\td",)),
+        (r'"\${literal}"', ("${literal}",)),
+        (r'"\q"', ("q",)),
+        ('"${variable}"', None),
+        (r'"\\${variable}"', None),
+        ("${variable}", None),
+    ]
+    for source, expected in cases:
+        document = parse("{ " + source + " = 1; }")
+        attrpath = next(node for node in walk(document.root) if node.type == "attrpath")
+        assert static_attrpath(document, attrpath) == expected  # noqa: S101
+
+
+def test_compact_preserves_literal_and_comment_whitespace() -> None:
+    """Comparisons ignore layout but retain significant source whitespace."""
+    assert compact("{\n  a = 1;\n}") == compact("{ a = 1; }")  # noqa: S101
+    for left, right in [
+        ('"a  b"', '"a b"'),
+        ("''a  b''", "''a b''"),
+        ('"a\nb"', '"a b"'),
+        ('"${ "a  b" }"', '"${ "a b" }"'),
+        ("{ /* a  b */ a = 1; }", "{ /* a b */ a = 1; }"),
+        ("{ # comment\n a = 1;\n}", "{ # comment a = 1;\n}"),
+    ]:
+        assert compact(left) != compact(right)  # noqa: S101
 
 
 if __name__ == "__main__":

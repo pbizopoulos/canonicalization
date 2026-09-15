@@ -20,7 +20,11 @@ python.pkgs.buildPythonPackage {
   };
   passthru = {
     inherit python;
-    canonicalization.tests = [ "Parse extracts static paths and rejects errors." ];
+    canonicalization.tests = [
+      "Compact preserves literal and comment whitespace."
+      "Parse extracts static paths and rejects errors."
+      "Static paths decode escapes and reject interpolation."
+    ];
   };
   propagatedBuildInputs = [ python.pkgs.tree-sitter-language-pack ];
   pyproject = false;
