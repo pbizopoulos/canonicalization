@@ -627,6 +627,15 @@ def render_gitignore(paths: set[Path], trees: set[Path] | None = None) -> str:
     return "\n".join(["*", *sorted(patterns)]) + "\n"
 
 
+def _refresh_gitignore(root: Path) -> None:
+    """Refresh the whitelist after changing repository resources."""
+    packages = detect_packages(root)
+    nix_syntax.write_if_changed(
+        root / ".gitignore",
+        render_gitignore(allowed_paths(root, packages), opaque_trees(root)),
+    )
+
+
 def inspect_structure(root: Path) -> tuple[list[Package], list[str]]:
     """Validate the declared repository subset."""
     packages = detect_packages(root)
@@ -1488,11 +1497,7 @@ def add_package(root: Path, kind: str, name: str, description: str | None) -> No
             path.write_text(source, encoding="utf-8")
             path.chmod(0o755 if path.name == "main.py" else 0o644)
             created.append(path)
-        packages = detect_packages(root)
-        nix_syntax.write_if_changed(
-            root / ".gitignore",
-            render_gitignore(allowed_paths(root, packages), opaque_trees(root)),
-        )
+        _refresh_gitignore(root)
         generated = [str(path.relative_to(root)) for path in created] + [".gitignore"]
         completed = git(root, ["add", "--force", "--", *generated], check=False)
         if completed.returncode != 0:
@@ -1525,11 +1530,7 @@ def add_host(root: Path, name: str) -> None:
         path.write_text("{ ... }: { }\n", encoding="utf-8")
         check.parent.mkdir(parents=True)
         check.write_text(_current_host_check_source(), encoding="utf-8")
-        packages = detect_packages(root)
-        nix_syntax.write_if_changed(
-            root / ".gitignore",
-            render_gitignore(allowed_paths(root, packages), opaque_trees(root)),
-        )
+        _refresh_gitignore(root)
         completed = git(
             root,
             [
@@ -1583,11 +1584,7 @@ def remove_resource(root: Path, value: str, dry_run: bool) -> None:  # noqa: FBT
         return
     for target in targets:
         shutil.rmtree(target)
-    packages = detect_packages(root)
-    nix_syntax.write_if_changed(
-        root / ".gitignore",
-        render_gitignore(allowed_paths(root, packages), opaque_trees(root)),
-    )
+    _refresh_gitignore(root)
     git(
         root,
         [
@@ -1659,11 +1656,7 @@ def rename_resource(root: Path, source: str, destination: str, dry_run: bool) ->
     ]
     for old, new in moves:
         shutil.move(root / old, root / new)
-    packages = detect_packages(root)
-    nix_syntax.write_if_changed(
-        root / ".gitignore",
-        render_gitignore(allowed_paths(root, packages), opaque_trees(root)),
-    )
+    _refresh_gitignore(root)
     git(
         root,
         [
