@@ -1895,13 +1895,6 @@ def _dispatch_add(root: Path, options: argparse.Namespace) -> None:
     if options.type is None:
         msg = "package creation requires TYPE"
         raise CommandError(msg)
-    if options.type not in PACKAGE_KINDS:
-        supported = ", ".join(PACKAGE_KINDS)
-        msg = (
-            f"unsupported package type: {options.type}\n"
-            f"hint: supported package types: {supported}"
-        )
-        raise CommandError(msg)
     add_package(root, options.type, name, description)
 
 
