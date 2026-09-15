@@ -37,15 +37,15 @@ def find_nix_files(root: Path) -> list[Path]:
     """Find regular Nix files without following ignored trees or links."""
     result: list[Path] = []
     for directory, names, files in os.walk(root, followlinks=False):
-        names[:] = sorted(
+        names[:] = [
             name
             for name in names
             if name not in SKIPPED_DIRECTORIES
             and not (Path(directory) / name).is_symlink()
-        )
+        ]
         result.extend(
             path
-            for name in sorted(files)
+            for name in files
             if name.endswith(".nix")
             and not (path := Path(directory) / name).is_symlink()
             and path.is_file()
@@ -105,9 +105,7 @@ def literal(document: nix_syntax.Document, node: Node) -> Literal:  # noqa: C901
 
 
 def _returned_expression(node: Node) -> Node:
-    if node.type == "function_expression":
-        return _returned_expression(nix_syntax.field(node, "body") or node)
-    if node.type == "let_expression":
+    if node.type in {"function_expression", "let_expression"}:
         return _returned_expression(nix_syntax.field(node, "body") or node)
     return node
 
@@ -226,8 +224,7 @@ def treefmt_defaults(
         "pkgs = import flake.inputs.nixpkgs { system = builtins.currentSystem; }; "
         "evaluated = flake.inputs.treefmt-nix.lib.evalModule pkgs {}; "
         f"paths = [ {' '.join(_path_list(path) for path in sorted(paths))} ]; "
-        "at = value: path: if path == [] then { success = true; inherit value; } else let key = builtins.head path; rest = builtins.tail path; in if builtins.isAttrs value && builtins.hasAttr key value then at value.${key} rest else { success = false; }; "  # noqa: E501
-        'one = path: let attempt = at evaluated.options path; raw = if attempt.success && builtins.isAttrs attempt.value && attempt.value ? default then attempt.value.default else throw "missing option default"; tried = builtins.tryEval (builtins.deepSeq raw raw); in if tried.success then [{ inherit path; default = tried.value; }] else []; '  # noqa: E501
+        'one = path: let raw = pkgs.lib.attrByPath (path ++ [ "default" ]) (throw "missing option default") evaluated.options; tried = builtins.tryEval (builtins.deepSeq raw raw); in if tried.success then [{ inherit path; default = tried.value; }] else []; '  # noqa: E501
         "in builtins.concatMap one paths"
     )
     return {tuple(record["path"]): record["default"] for record in _run_nix(expression)}
@@ -239,11 +236,6 @@ def nixos_removals(
 ) -> dict[Path, set[tuple[str, ...]]]:
     """Resolve matching NixOS defaults and their defining source files."""
     if not candidates:
-        return {}
-    configurations = _run_nix(
-        f"let f = builtins.getFlake (toString (/. + {_nix_string(str(root))})); in builtins.attrNames (f.nixosConfigurations or {{}})",  # noqa: E501
-    )
-    if not configurations:
         return {}
     unique_candidates = {
         (path, json.dumps(value, sort_keys=True, ensure_ascii=False)): value
@@ -258,9 +250,8 @@ def nixos_removals(
         + " ]"
     )
     expression = (
-        f"let f = builtins.getFlake (toString (/. + {_nix_string(str(root))})); cs = f.nixosConfigurations or {{}}; names = {json.dumps(configurations)}; candidates = {rendered}; "  # noqa: E501
-        "at = value: path: if path == [] then { success = true; inherit value; } else let key = builtins.head path; rest = builtins.tail path; in if builtins.isAttrs value && builtins.hasAttr key value then at value.${key} rest else { success = false; }; "  # noqa: E501
-        "eq = a: b: builtins.toJSON a == builtins.toJSON b; files = name: candidate: let option = at (builtins.getAttr name cs).options candidate.path; raw = if option.success && option.value ? default && eq candidate.value option.value.default then builtins.concatMap (d: if builtins.isAttrs d && d ? file then [d.file] else []) (option.value.definitionsWithLocations or []) else []; tried = builtins.tryEval (builtins.deepSeq raw raw); in if tried.success then tried.value else []; "  # noqa: E501
+        f"let f = builtins.getFlake (toString (/. + {_nix_string(str(root))})); lib = f.inputs.nixpkgs.lib; cs = f.nixosConfigurations or {{}}; names = builtins.attrNames cs; candidates = {rendered}; "  # noqa: E501
+        "eq = a: b: builtins.toJSON a == builtins.toJSON b; files = name: candidate: let option = lib.attrByPath candidate.path {} (builtins.getAttr name cs).options; raw = if builtins.isAttrs option && option ? default && eq candidate.value option.default then builtins.concatMap (d: if builtins.isAttrs d && d ? file then [d.file] else []) (option.definitionsWithLocations or []) else []; tried = builtins.tryEval (builtins.deepSeq raw raw); in if tried.success then tried.value else []; "  # noqa: E501
         "one = candidate: { inherit (candidate) path; files = builtins.concatMap (name: files name candidate) names; }; in builtins.map one candidates"  # noqa: E501
     )
     removals: dict[Path, set[tuple[str, ...]]] = {}
