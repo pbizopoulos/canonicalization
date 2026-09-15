@@ -86,7 +86,8 @@ def _normalize(bindings: list[Binding]) -> list[Binding]:
     opaque = [binding for binding in bindings if not binding.path]
     groups: dict[str, list[Binding]] = {}
     for binding in static:
-        assert binding.path is not None  # noqa: S101
+        if not (binding.path is not None):
+            raise AssertionError
         groups.setdefault(binding.path[0], []).append(binding)
     result = opaque
     for root in sorted(groups):
@@ -108,7 +109,8 @@ def _normalize(bindings: list[Binding]) -> list[Binding]:
             continue
         nested: list[Binding] = []
         for binding in group:
-            assert binding.path is not None  # noqa: S101
+            if not (binding.path is not None):
+                raise AssertionError
             if len(binding.path) > 1:
                 nested.append(
                     Binding(
@@ -212,22 +214,30 @@ def test_preserves_string_order_and_sorts_other_constructs() -> None:
     formatted = format_text(
         '{ z = [ 3 1 2 ]; strings = [ "c" "a" ]; f = { z, a }: z + a; }',
     )
-    assert (  # noqa: S101
+    if not (
         formatted.index("f =") < formatted.index("strings =") < formatted.index("z =")
-    )
-    assert formatted.index("1") < formatted.index("2") < formatted.index("3")  # noqa: S101
-    assert formatted.index('"c"') < formatted.index('"a"')  # noqa: S101
+    ):
+        raise AssertionError
+    if not (formatted.index("1") < formatted.index("2") < formatted.index("3")):
+        raise AssertionError
+    if not (formatted.index('"c"') < formatted.index('"a"')):
+        raise AssertionError
 
 
 def test_dotted_bindings_collapse_safely() -> None:
     """Collapses compatible bindings without changing conflicting paths."""
     formatted = format_text("{ b.z = 1; b.x = 2; a = 1; }")
-    assert "b = {" in formatted  # noqa: S101
-    assert "x = 2;" in formatted  # noqa: S101
-    assert "z = 1;" in formatted  # noqa: S101
+    if "b = {" not in formatted:
+        raise AssertionError
+    if "x = 2;" not in formatted:
+        raise AssertionError
+    if "z = 1;" not in formatted:
+        raise AssertionError
     conflicting = format_text("{ a = 1; a.b = 2; }")
-    assert "a = 1;" in conflicting  # noqa: S101
-    assert "a.b = 2;" in conflicting  # noqa: S101
+    if "a = 1;" not in conflicting:
+        raise AssertionError
+    if "a.b = 2;" not in conflicting:
+        raise AssertionError
 
 
 def test_installed_executable_formats_files() -> None:
@@ -244,12 +254,19 @@ def test_installed_executable_formats_files() -> None:
             check=False,
             text=True,
         )
-        assert completed.returncode == 0  # noqa: S101
-        assert not completed.stdout  # noqa: S101
-        assert not completed.stderr  # noqa: S101
-        assert path.read_text(encoding="utf-8").index("a = 1") < path.read_text(  # noqa: S101
-            encoding="utf-8",
-        ).index("b = 2")
+        if not (completed.returncode == 0):
+            raise AssertionError
+        if completed.stdout:
+            raise AssertionError
+        if completed.stderr:
+            raise AssertionError
+        if not (
+            path.read_text(encoding="utf-8").index("a = 1")
+            < path.read_text(
+                encoding="utf-8",
+            ).index("b = 2")
+        ):
+            raise AssertionError
 
 
 if __name__ == "__main__":

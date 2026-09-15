@@ -371,10 +371,13 @@ def main() -> None:
 def test_literal_candidates_and_rewrite() -> None:
     """Collects literal options and removes empty structural parents."""
     document = nix_syntax.parse("{ services = { demo.enable = false; }; keep = true; }")
-    assert (("services", "demo", "enable"), False) in collect_candidates(document)  # noqa: S101
+    if (("services", "demo", "enable"), False) not in collect_candidates(document):
+        raise AssertionError
     output = rewrite(document, {("services", "demo", "enable")})
-    assert "services" not in output  # noqa: S101
-    assert "keep = true;" in output  # noqa: S101
+    if not ("services" not in output):
+        raise AssertionError
+    if "keep = true;" not in output:
+        raise AssertionError
 
 
 if __name__ == "__main__":
