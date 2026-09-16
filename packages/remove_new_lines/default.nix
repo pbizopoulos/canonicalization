@@ -18,9 +18,7 @@ python.pkgs.buildPythonPackage {
     description = "Remove new lines from explicitly selected text files.";
     mainProgram = pname;
   };
-  passthru = {
-    inherit python;
-  };
+  passthru.python = python;
   propagatedBuildInputs = [ ];
   pyproject = false;
   src = ./.;

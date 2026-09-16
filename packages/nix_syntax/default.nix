@@ -18,9 +18,7 @@ python.pkgs.buildPythonPackage {
     description = "Provide shared, lossless-enough Nix parsing and rewriting helpers.";
     mainProgram = pname;
   };
-  passthru = {
-    inherit python;
-  };
+  passthru.python = python;
   propagatedBuildInputs = [ python.pkgs.tree-sitter-language-pack ];
   pyproject = false;
   src = ./.;

@@ -18,9 +18,7 @@ python.pkgs.buildPythonPackage {
     description = "Remove literal NixOS and treefmt assignments equal to option defaults.";
     mainProgram = pname;
   };
-  passthru = {
-    inherit python;
-  };
+  passthru.python = python;
   propagatedBuildInputs = [
     inputs.self.packages.${pkgs.stdenv.system}.nix_syntax
     pkgs.nix

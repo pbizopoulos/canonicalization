@@ -544,7 +544,7 @@ def canonical_checks(root: Path, packages: list[Package]) -> dict[Path, str]:
         for package in packages
         if package.kind == "python"
         and (package.root / "main.py").is_file()
-        and python_tests(package.root / "main.py")
+        and has_python_tests(package.root / "main.py")
     }
     hosts = root / "hosts"
     if hosts.is_dir():
@@ -665,8 +665,8 @@ def inspect_structure(root: Path) -> tuple[list[Package], list[str]]:
     return packages, issues
 
 
-def python_tests(path: Path) -> list[str]:
-    """Discover pytest-style tests without executing package source."""
+def has_python_tests(path: Path) -> bool:
+    """Detect pytest-style tests without executing package source."""
     try:
         module = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     except (OSError, SyntaxError, UnicodeError) as error:
@@ -674,21 +674,23 @@ def python_tests(path: Path) -> list[str]:
         raise CommandError(
             msg,
         ) from error
-    identifiers = []
     for node in module.body:
         if isinstance(
             node,
             (ast.FunctionDef, ast.AsyncFunctionDef),
         ) and node.name.startswith("test_"):
-            identifiers.append(node.name)
-        if isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
-            identifiers.extend(
-                child.name
-                for child in node.body
-                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+            return True
+        if (
+            isinstance(node, ast.ClassDef)
+            and node.name.startswith("Test")
+            and any(
+                isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
                 and child.name.startswith("test_")
+                for child in node.body
             )
-    return sorted(set(identifiers))
+        ):
+            return True
+    return False
 
 
 def package_description(package: Package) -> str | None:
@@ -854,29 +856,11 @@ pkgs.runCommand (baseNameOf ./.)
 
 def _python_static_template_issues(package: Package, source: str) -> list[str]:
     """Check only the stable interface required by Python package templates."""
-    template = scaffold("python", package.name, None)[
-        Path("packages") / package.name / "default.nix"
+    return [
+        f"missing required {name} definition"
+        for name, edits in _python_required_edits(package, source).items()
+        if edits
     ]
-    expected_install_phase = _binding_value(template, "installPhase", "string")
-    actual_install_phase = _binding_value(source, "installPhase", "string")
-    issues: list[str] = []
-    if actual_install_phase != expected_install_phase:
-        issues.append("installPhase differs from the canonical install phase")
-    required = {
-        "pname": r"baseNameOf\s+\./\.\s*;",
-        "pyproject": r"false\s*;",
-        "src": r"\./\.\s*;",
-        "strictDeps": r"true\s*;",
-    }
-    for name, expression in required.items():
-        if not re.search(rf"\b{name}\s*=\s*{expression}", source):
-            issues.append(f"missing required {name} definition")
-    if not re.search(
-        r"(?:meta\.mainProgram|\bmainProgram)\s*=\s*pname\s*;",
-        source,
-    ):
-        issues.append("missing required meta.mainProgram definition")
-    return issues
 
 
 def _binding_value(source: str, name: str, kind: str) -> str | None:
@@ -904,80 +888,181 @@ def _replace_binding(source: str, name: str, value: str) -> str:
     )
 
 
-def _canonical_python_default(package: Package, source: str) -> str:
-    """Repair required Python bindings without removing custom attributes."""
+def _nix_binding_edits(
+    document: nix_syntax.Document,
+    container: Node,
+    path: tuple[str, ...],
+    value: str,
+) -> list[tuple[int, int, bytes]]:
+    """Set a scoped binding, retaining unrelated fields and inherited names."""
+    while container.type == "parenthesized_expression" or (
+        container.type == "binary_expression"
+        and document.text(nix_syntax.field(container, "operator")) == "//"
+    ):
+        container = nix_syntax.field(
+            container,
+            "expression" if container.type == "parenthesized_expression" else "right",
+        )
+    assignment = f"{'.'.join(path)} = {value};"
+    if container.type not in {
+        "attrset_expression",
+        "rec_attrset_expression",
+        "let_expression",
+    }:
+        replacement = f"({document.text(container)}) // {{ {assignment} }}"
+        return [(container.start_byte, container.end_byte, replacement.encode())]
+    bindings = next(
+        (node for node in container.named_children if node.type == "binding_set"),
+        None,
+    )
+    children = [] if bindings is None else bindings.named_children
+    for binding in children:
+        attrpath = nix_syntax.field(binding, "attrpath")
+        expression = nix_syntax.field(binding, "expression")
+        if attrpath is not None and expression is not None:
+            names = nix_syntax.static_attrpath(document, attrpath)
+            if names == path:
+                if nix_syntax.compact(document.text(expression)) == nix_syntax.compact(
+                    value,
+                ):
+                    return []
+                return [(expression.start_byte, expression.end_byte, value.encode())]
+            if names and path[: len(names)] == names:
+                return _nix_binding_edits(
+                    document,
+                    expression,
+                    path[len(names) :],
+                    value,
+                )
+    inherited = [
+        (binding, attr)
+        for binding in children
+        if (attrs := nix_syntax.field(binding, "attrs")) is not None
+        for attr in attrs.named_children
+        if document.text(attr) == path[0]
+    ]
+    if (
+        len(path) == 1
+        and value == path[0]
+        and any(binding.type == "inherit" for binding, _ in inherited)
+    ):
+        return []
+    edits = [(attr.start_byte, attr.end_byte, b"") for _, attr in inherited]
+    offset = (
+        container.start_byte + 3
+        if container.type == "let_expression"
+        else container.end_byte - 1
+    )
+    edits.append((offset, offset, f"\n  {assignment}\n".encode()))
+    return edits
+
+
+def _python_required_edits(
+    package: Package,
+    source: str,
+) -> dict[str, list[tuple[int, int, bytes]]]:
+    """Derive validation and repair from the same scoped Python requirements."""
+    document = nix_syntax.parse(source)
+    body = document.root
+    scope = None
+    while body.type in {
+        "function_expression",
+        "let_expression",
+        "parenthesized_expression",
+    }:
+        if body.type == "let_expression":
+            scope = body
+        body = nix_syntax.field(
+            body,
+            "expression" if body.type == "parenthesized_expression" else "body",
+        )
+    argument = nix_syntax.field(body, "argument")
+    function = nix_syntax.field(body, "function")
+    if (
+        body.type != "apply_expression"
+        or function is None
+        or nix_syntax.compact(document.text(function))
+        != "python.pkgs.buildPythonPackage"
+        or argument is None
+        or argument.type not in {"attrset_expression", "rec_attrset_expression"}
+    ):
+        msg = (
+            "Python package must call python.pkgs.buildPythonPackage "
+            "with an attribute set"
+        )
+        raise CommandError(msg)
     template = scaffold("python", package.name, None)[
         Path("packages") / package.name / "default.nix"
     ]
-    expected_install_phase = _binding_value(template, "installPhase", "string")
-    if expected_install_phase is None:
+    install_phase = _binding_value(template, "installPhase", "string")
+    if install_phase is None:
         msg = "Python scaffold omitted its install phase"
         raise AssertionError(msg)
     required = {
-        "pname": "baseNameOf ./.",
+        "pname": "pname",
+        "installPhase": install_phase,
+        "meta.mainProgram": "pname",
+        "passthru.python": "python",
         "pyproject": "false",
         "src": "./.",
         "strictDeps": "true",
     }
-    for name, value in required.items():
-        if re.search(rf"\b{name}\s*=\s*[^;]+;", source):
-            source = re.sub(
-                rf"(\b{name}\s*=\s*)[^;]+(;)",
-                rf"\g<1>{value}\2",
-                source,
-                count=1,
-            )
-        else:
-            source = source.replace(
-                "  installPhase =",
-                f"  {name} = {value};\n  installPhase =",
-                1,
-            )
-    if re.search(r"\binstallPhase\s*=", source):
-        source = _replace_binding(source, "installPhase", expected_install_phase)
-    else:
-        updated = source.replace(
-            "  meta = {",
-            f"  installPhase = {expected_install_phase};\n  meta = {{",
-            1,
-        )
-        source = (
-            updated
-            if updated != source
-            else source.replace(
-                "\n}",
-                f"\n  installPhase = {expected_install_phase};\n}}",
-                1,
-            )
-        )
-    main_program = re.compile(
-        r"(?s)(\bmainProgram\s*=\s*)[^;]+(;)|"
-        r"(\bmeta\.mainProgram\s*=\s*)[^;]+(;)",
-    )
-    if main_program.search(source):
-        source = main_program.sub(
-            lambda match: (
-                f"{match.group(1) or match.group(3)}pname{match.group(2) or match.group(4)}"  # noqa: E501
+    edits = {
+        name: _nix_binding_edits(document, argument, tuple(name.split(".")), value)
+        for name, value in required.items()
+    }
+    if scope is None:
+        edits["Python let bindings"] = [
+            (
+                body.start_byte,
+                body.start_byte,
+                b"let pname = baseNameOf ./.; python = pkgs.python3; in ",
             ),
-            source,
-            count=1,
-        )
+        ]
     else:
-        updated = source.replace(
-            "  meta = {",
-            "  meta = {\n    mainProgram = pname;",
-            1,
+        edits["local pname"] = _nix_binding_edits(
+            document,
+            scope,
+            ("pname",),
+            "baseNameOf ./.",
         )
-        source = (
-            updated
-            if updated != source
-            else source.replace(
-                "\n}",
-                "\n  meta.mainProgram = pname;\n}",
-                1,
+        bindings = next(
+            (node for node in scope.named_children if node.type == "binding_set"),
+            None,
+        )
+        has_python = any(
+            (
+                (path := nix_syntax.field(binding, "attrpath")) is not None
+                and nix_syntax.static_attrpath(document, path) == ("python",)
             )
+            or (
+                (attrs := nix_syntax.field(binding, "attrs")) is not None
+                and any(
+                    document.text(attr) == "python" for attr in attrs.named_children
+                )
+            )
+            for binding in ([] if bindings is None else bindings.named_children)
         )
-    return source
+        if not has_python:
+            edits["local python"] = _nix_binding_edits(
+                document,
+                scope,
+                ("python",),
+                "pkgs.python3",
+            )
+    return edits
+
+
+def _canonical_python_default(package: Package, source: str) -> str:
+    """Repair required Python bindings without removing custom attributes."""
+    edits = _python_required_edits(package, source)
+    return cast(
+        "bytes",
+        nix_syntax.apply_edits(
+            source.encode(),
+            [edit for changes in edits.values() for edit in changes],
+        ),
+    ).decode()
 
 
 def canonical_typed_default(package: Package) -> str | None:
@@ -2208,6 +2293,142 @@ def test_python_default_requires_static_build_fields() -> None:
             raise AssertionError
 
 
+def test_python_default_restores_python_passthru() -> None:
+    """Restore missing interpreter metadata without losing custom attributes."""
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        package = Package("report", "python", Path(temporary_directory))
+        template = scaffold("python", "report", None)[
+            Path("packages/report/default.nix")
+        ]
+        original = "  passthru = {\n    inherit python;\n  };\n"
+        for passthru in (
+            "",
+            '  passthru = { custom = "kept"; };\n',
+            '  passthru.custom = "kept";\n',
+            '  passthru = { python = null; custom = "kept"; };\n',
+            "  passthru.python = null;\n",
+            '  passthru = ( { custom = "kept"; } );\n',
+        ):
+            source = template.replace(original, passthru)
+            if "missing required passthru.python definition" not in (
+                _python_static_template_issues(package, source)
+            ):
+                raise AssertionError
+            repaired = _canonical_python_default(package, source)
+            if _python_static_template_issues(package, repaired):
+                raise AssertionError
+            if _canonical_python_default(package, repaired) != repaired:
+                raise AssertionError
+            if 'custom = "kept";' in source and 'custom = "kept";' not in repaired:
+                raise AssertionError
+            evaluated = _run(
+                [
+                    "nix",
+                    "--extra-experimental-features",
+                    "nix-command",
+                    "eval",
+                    "--json",
+                    "--expr",
+                    (
+                        'let python = { sitePackages = "site"; interpreter = "python"; '
+                        "pkgs.buildPythonPackage = x: x; }; "
+                        f"package = ({repaired}) {{ pkgs.python3 = python; }}; "
+                        "in package.passthru.python.interpreter"
+                    ),
+                ],
+                package.root,
+            )
+            if json.loads(evaluated.stdout) != "python":
+                raise AssertionError
+
+
+def test_python_repairs_are_scoped_and_complete() -> None:
+    """Repair missing fields in one pass without changing unrelated bindings."""
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        package = Package("report", "python", Path(temporary_directory))
+        template = scaffold("python", "report", None)[
+            Path("packages/report/default.nix")
+        ]
+        install_phase = _binding_value(template, "installPhase", "string")
+        custom = (
+            '  custom = { src = "kept"; pname = "custom"; '
+            'mainProgram = "custom"; installPhase = "custom"; };\n'
+        )
+        cases = [
+            template.replace("  inherit pname;\n", ""),
+            template.replace("  python = pkgs.python3;\n", ""),
+            template.replace("  pname = baseNameOf ./.;\n", ""),
+            template.replace("  src = ./.;\n", "").replace(
+                f"  installPhase = {install_phase};\n",
+                "",
+            ),
+            template.replace("  src = ./.;\n", "").replace(
+                "  inherit pname;",
+                custom + "  inherit pname;",
+            ),
+            template.replace("    mainProgram = pname;\n", "").replace(
+                "  inherit pname;",
+                custom + "  inherit pname;",
+            ),
+            template.replace(
+                f"installPhase = {install_phase};",
+                "installPhase = null;",
+            ),
+            template.replace(
+                "let\n  pname = baseNameOf ./.;\n  python = pkgs.python3;\nin\n",
+                "",
+            ),
+        ]
+        for source in cases:
+            if not _python_static_template_issues(package, source):
+                raise AssertionError
+            repaired = _canonical_python_default(package, source)
+            if _python_static_template_issues(package, repaired):
+                raise AssertionError
+            if _canonical_python_default(package, repaired) != repaired:
+                raise AssertionError
+            if custom in source and custom not in repaired:
+                raise AssertionError
+            evaluated = _run(
+                [
+                    "nix",
+                    "--extra-experimental-features",
+                    "nix-command",
+                    "eval",
+                    "--json",
+                    "--expr",
+                    (
+                        'let python = { sitePackages = "site"; interpreter = "python"; '
+                        "pkgs.buildPythonPackage = x: x; }; "
+                        f"package = ({repaired}) {{ pkgs.python3 = python; }}; "
+                        "in package.pname == baseNameOf ./. "
+                        "&& package.src == ./. "
+                        "&& package.meta.mainProgram == package.pname "
+                        '&& package.passthru.python.interpreter == "python" '
+                        "&& builtins.isString package.installPhase"
+                    ),
+                ],
+                package.root,
+            )
+            if json.loads(evaluated.stdout) is not True:
+                raise AssertionError
+
+
+def test_python_repairs_preserve_commented_inherit() -> None:
+    """Recognize inherited fields structurally, including intervening comments."""
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        package = Package("report", "python", Path(temporary_directory))
+        source = scaffold("python", "report", None)[Path("packages/report/default.nix")]
+        source = source.replace(
+            "inherit python;",
+            "inherit /* interpreter */ python;",
+        ).replace("inherit pname;", "inherit /* package name */ pname;")
+        if _python_static_template_issues(package, source):
+            raise AssertionError
+        if _canonical_python_default(package, source) != source:
+            raise AssertionError
+
+
 def test_coverage_default_matches_current_template() -> None:
     """Recognize the canonical generated coverage check definition."""
     template = _current_python_coverage_source()
@@ -2808,11 +3029,7 @@ def test_python_default_does_not_require_test_metadata() -> None:
         package_root = Path(temporary_directory) / "packages" / "sample"
         package_root.mkdir(parents=True)
         (package_root / "main.py").write_text(
-            """def test_z_last(): pass
-async def test_cli_handles_utf8_url(): pass
-class TestGroup:
-    def test_a_first(self): pass
-""",
+            "def test_behavior(): pass\n",
             encoding="utf-8",
         )
         (package_root / "default.nix").write_text(
@@ -2826,13 +3043,6 @@ class TestGroup:
             raise AssertionError(msg)
         if "canonicalization.tests" in rendered:
             msg = "Python default included test-name metadata"
-            raise AssertionError(msg)
-        if python_tests(package_root / "main.py") != [
-            "test_a_first",
-            "test_cli_handles_utf8_url",
-            "test_z_last",
-        ]:
-            msg = "Python test discovery failed"
             raise AssertionError(msg)
         (package_root / "default.nix").write_text(rendered, encoding="utf-8")
         issues = _source_package_issues(Path(temporary_directory), package)

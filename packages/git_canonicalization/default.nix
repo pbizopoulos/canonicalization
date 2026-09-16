@@ -18,9 +18,7 @@ python.pkgs.buildPythonPackage {
     description = "Canonicalize home repositories and manage canonical flake repositories.";
     mainProgram = pname;
   };
-  passthru = {
-    inherit python;
-  };
+  passthru.python = python;
   propagatedBuildInputs = [
     inputs.self.packages.${pkgs.stdenv.system}.nix_syntax
     pkgs.git

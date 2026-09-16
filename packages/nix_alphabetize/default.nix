@@ -18,9 +18,7 @@ python.pkgs.buildPythonPackage {
     description = "Canonicalize ordering and nesting in Nix expressions.";
     mainProgram = pname;
   };
-  passthru = {
-    inherit python;
-  };
+  passthru.python = python;
   propagatedBuildInputs = [ inputs.self.packages.${pkgs.stdenv.system}.nix_syntax ];
   pyproject = false;
   src = ./.;
