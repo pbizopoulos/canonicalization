@@ -20,11 +20,6 @@ python.pkgs.buildPythonPackage {
   };
   passthru = {
     inherit python;
-    canonicalization.tests = [
-      "Dotted bindings collapse safely."
-      "Installed executable formats files."
-      "Preserves string order and sorts other constructs."
-    ];
   };
   propagatedBuildInputs = [ inputs.self.packages.${pkgs.stdenv.system}.nix_syntax ];
   pyproject = false;

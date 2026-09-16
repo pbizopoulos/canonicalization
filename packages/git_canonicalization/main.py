@@ -688,32 +688,7 @@ def python_tests(path: Path) -> list[str]:
                 if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
                 and child.name.startswith("test_")
             )
-    return sorted({_humanize(identifier) for identifier in identifiers})
-
-
-def _humanize(identifier: str) -> str:
-    words = identifier.removeprefix("test_").replace("_", " ")
-    replacements = {
-        "cli": "CLI",
-        "gitignore": ".gitignore",
-        "gitmodules": ".gitmodules",
-        "url": "URL",
-        "utf8": "UTF-8",
-    }
-    rendered = " ".join(replacements.get(word, word) for word in words.split())
-    return (
-        rendered[:1].upper()
-        + rendered[1:]
-        + ("" if rendered.endswith((".", "!", "?")) else ".")
-    )
-
-
-def _render_test_list(path: Path) -> str:
-    """Render discovered Python test names as a canonical Nix list."""
-    tests = python_tests(path)
-    if not tests:
-        return "[ ]"
-    return "[\n" + "".join(f"      {_nix_string(test)}\n" for test in tests) + "    ]"
+    return sorted(set(identifiers))
 
 
 def package_description(package: Package) -> str | None:
@@ -887,18 +862,6 @@ def _python_static_template_issues(package: Package, source: str) -> list[str]:
     issues: list[str] = []
     if actual_install_phase != expected_install_phase:
         issues.append("installPhase differs from the canonical install phase")
-    expected_tests = _render_test_list(package.root / "main.py")
-    document, tests_expression = _metadata_expression(
-        source,
-        "passthru",
-        ("canonicalization", "tests"),
-    )
-    if tests_expression is None:
-        issues.append("missing required passthru.canonicalization.tests definition")
-    elif nix_syntax.compact(document.text(tests_expression)) != nix_syntax.compact(
-        expected_tests,
-    ):
-        issues.append("tests differ from discovered Python tests")
     required = {
         "pname": r"baseNameOf\s+\./\.\s*;",
         "pyproject": r"false\s*;",
@@ -941,35 +904,6 @@ def _replace_binding(source: str, name: str, value: str) -> str:
     )
 
 
-def _canonical_python_tests(package: Package, source: str) -> str:
-    """Refresh the required canonical Python test metadata."""
-    expected = _render_test_list(package.root / "main.py")
-    document, tests_expression = _metadata_expression(
-        source,
-        "passthru",
-        ("canonicalization", "tests"),
-    )
-    if tests_expression is None:
-        msg = (
-            f"{package.root / 'default.nix'}: missing required "
-            "passthru.canonicalization.tests definition"
-        )
-        raise CommandError(msg)
-    return cast(
-        "bytes",
-        nix_syntax.apply_edits(
-            document.source,
-            [
-                (
-                    tests_expression.start_byte,
-                    tests_expression.end_byte,
-                    expected.encode(),
-                ),
-            ],
-        ),
-    ).decode()
-
-
 def _canonical_python_default(package: Package, source: str) -> str:
     """Repair required Python bindings without removing custom attributes."""
     template = scaffold("python", package.name, None)[
@@ -979,7 +913,6 @@ def _canonical_python_default(package: Package, source: str) -> str:
     if expected_install_phase is None:
         msg = "Python scaffold omitted its install phase"
         raise AssertionError(msg)
-    source = _canonical_python_tests(package, source)
     required = {
         "pname": "baseNameOf ./.",
         "pyproject": "false",
@@ -1399,7 +1332,6 @@ python.pkgs.buildPythonPackage {
     mainProgram = pname;
   };
   passthru = {
-    canonicalization.tests = [ ];
     inherit python;
   };
   propagatedBuildInputs = [ ];
@@ -2181,8 +2113,8 @@ def test_python_scaffold_installs_optional_prm_resources() -> None:  # noqa: C90
         raise AssertionError
     if "strictDeps = true;" not in default:
         raise AssertionError
-    if "canonicalization.tests = [ ];" not in default:
-        msg = "Python scaffold omitted its empty tests list"
+    if "canonicalization.tests" in default:
+        msg = "Python scaffold included test-name metadata"
         raise AssertionError(msg)
     if not ("<nixpkgs>" not in default):
         raise AssertionError
@@ -2276,26 +2208,6 @@ def test_python_default_requires_static_build_fields() -> None:
             raise AssertionError
 
 
-def test_python_default_requires_canonical_test_metadata() -> None:
-    """Reject missing canonical test metadata without migrating old definitions."""
-    with tempfile.TemporaryDirectory() as temporary_directory:
-        package_root = Path(temporary_directory)
-        (package_root / "main.py").write_text("", encoding="utf-8")
-        package = Package("report", "python", package_root)
-        source = scaffold("python", "report", None)[Path("packages/report/default.nix")]
-        for replacement in ("", "tests = [ ];"):
-            invalid = source.replace("canonicalization.tests = [ ];", replacement)
-            try:
-                _canonical_python_tests(package, invalid)
-            except CommandError as error:
-                error_message = str(error)
-            else:
-                msg = "missing canonical test metadata was accepted"
-                raise AssertionError(msg)
-            if "missing required passthru.canonicalization.tests" not in error_message:
-                raise AssertionError
-
-
 def test_coverage_default_matches_current_template() -> None:
     """Recognize the canonical generated coverage check definition."""
     template = _current_python_coverage_source()
@@ -2323,16 +2235,14 @@ def test_coverage_default_matches_current_template() -> None:
             raise AssertionError(msg)
 
 
-def test_remote_paths_and_test_names() -> None:
-    """Canonicalizes hosted remotes and humanizes Python tests."""
+def test_remote_paths() -> None:
+    """Canonicalize hosted remotes."""
     if not (
         canonical_remote_path("git@github.com:owner/demo.git")
         == Path(
             "github.com/owner/demo",
         )
     ):
-        raise AssertionError
-    if not (_humanize("test_cli_handles_utf8_url") == "CLI handles UTF-8 URL."):
         raise AssertionError
 
 
@@ -2892,8 +2802,8 @@ def test_single_force_cleanup_rejects_nested_git_repository() -> None:
             raise AssertionError
 
 
-def test_python_default_derives_normalized_test_list() -> None:
-    """Generate sorted sentence names from Python tests into the Nix definition."""
+def test_python_default_does_not_require_test_metadata() -> None:
+    """Canonicalize tested Python packages without test-name metadata."""
     with tempfile.TemporaryDirectory() as temporary_directory:
         package_root = Path(temporary_directory) / "packages" / "sample"
         package_root.mkdir(parents=True)
@@ -2914,13 +2824,15 @@ class TestGroup:
         if rendered is None:
             msg = "Python default was not rendered"
             raise AssertionError(msg)
-        expected = (
-            'canonicalization.tests = [\n      "A first."\n'
-            '      "CLI handles UTF-8 URL."\n'
-            '      "Z last."\n    ];'
-        )
-        if expected not in rendered:
-            msg = "Python default did not contain its normalized tests"
+        if "canonicalization.tests" in rendered:
+            msg = "Python default included test-name metadata"
+            raise AssertionError(msg)
+        if python_tests(package_root / "main.py") != [
+            "test_a_first",
+            "test_cli_handles_utf8_url",
+            "test_z_last",
+        ]:
+            msg = "Python test discovery failed"
             raise AssertionError(msg)
         (package_root / "default.nix").write_text(rendered, encoding="utf-8")
         issues = _source_package_issues(Path(temporary_directory), package)

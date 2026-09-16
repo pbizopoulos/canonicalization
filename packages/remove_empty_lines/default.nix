@@ -20,11 +20,6 @@ python.pkgs.buildPythonPackage {
   };
   passthru = {
     inherit python;
-    canonicalization.tests = [
-      "Main processes explicit paths."
-      "Process file skips binary files and symbolic links."
-      "Remove empty lines preserves nonempty and invalid UTF-8 lines."
-    ];
   };
   propagatedBuildInputs = [ ];
   pyproject = false;

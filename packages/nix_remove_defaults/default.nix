@@ -20,7 +20,6 @@ python.pkgs.buildPythonPackage {
   };
   passthru = {
     inherit python;
-    canonicalization.tests = [ "Literal candidates and rewrite." ];
   };
   propagatedBuildInputs = [
     inputs.self.packages.${pkgs.stdenv.system}.nix_syntax
