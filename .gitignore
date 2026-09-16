@@ -29,15 +29,6 @@
 !/packages/git_canonicalization/
 !/packages/git_canonicalization/default.nix
 !/packages/git_canonicalization/main.py
-!/packages/html_template/
-!/packages/html_template/default.nix
-!/packages/html_template/index.html
-!/packages/html_template/script.js
-!/packages/html_template/style.css
-!/packages/latex_template/
-!/packages/latex_template/default.nix
-!/packages/latex_template/ms.bib
-!/packages/latex_template/ms.tex
 !/packages/nix_alphabetize/
 !/packages/nix_alphabetize/default.nix
 !/packages/nix_alphabetize/main.py
