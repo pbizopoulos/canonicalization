@@ -22,10 +22,6 @@
 !/flake.nix
 !/formatter.nix
 !/packages/
-!/packages/deploy_host_template/
-!/packages/deploy_host_template/default.nix
-!/packages/deploy_host_template/prm/
-!/packages/deploy_host_template/prm/**
 !/packages/git_canonicalization/
 !/packages/git_canonicalization/default.nix
 !/packages/git_canonicalization/main.py
