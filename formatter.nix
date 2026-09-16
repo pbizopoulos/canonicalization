@@ -10,56 +10,81 @@ let
     programs = {
       actionlint = {
         enable = true;
+        includes = [
+          ".github/workflows/workflow.yml"
+          ".forgejo/workflows/workflow.yml"
+        ];
         priority = 6;
       };
       deadnix = {
         enable = true;
+        includes = [
+          "flake.nix"
+          "formatter.nix"
+          "packages/*/default.nix"
+          "checks/*/default.nix"
+          "hosts/*/configuration.nix"
+          "hosts/*/hardware-configuration.nix"
+        ];
         priority = 3;
-      };
-      dos2unix = {
-        enable = true;
-        priority = 1;
-      };
-      hclfmt = {
-        enable = true;
-        priority = 5;
       };
       nixfmt = {
         enable = true;
+        includes = [
+          "flake.nix"
+          "formatter.nix"
+          "packages/*/default.nix"
+          "checks/*/default.nix"
+          "hosts/*/configuration.nix"
+          "hosts/*/hardware-configuration.nix"
+        ];
         priority = 5;
       };
       oxfmt = {
         enable = true;
         includes = [
-          "*.css"
-          "*.html"
-          "*.js"
+          ".github/workflows/workflow.yml"
+          ".forgejo/workflows/workflow.yml"
+          "packages/*/style.css"
+          "packages/*/index.html"
+          "packages/*/script.js"
         ];
         priority = 5;
       };
       ruff-check = {
         enable = true;
         extendSelect = [ "ALL" ];
+        includes = [ "packages/*/main.py" ];
         priority = 3;
       };
       ruff-format = {
         enable = true;
+        includes = [ "packages/*/main.py" ];
         priority = 5;
       };
       statix = {
         enable = true;
+        includes = [
+          "flake.nix"
+          "formatter.nix"
+          "packages/*/default.nix"
+          "checks/*/default.nix"
+          "hosts/*/configuration.nix"
+          "hosts/*/hardware-configuration.nix"
+        ];
         priority = 3;
       };
       texfmt = {
         enable = true;
-        priority = 5;
-      };
-      yamlfmt = {
-        enable = true;
+        includes = [ "packages/*/ms.tex" ];
         priority = 5;
       };
       yamllint = {
         enable = true;
+        includes = [
+          ".github/workflows/workflow.yml"
+          ".forgejo/workflows/workflow.yml"
+        ];
         priority = 6;
       };
     };
@@ -68,7 +93,7 @@ let
       formatter = {
         bibtex-tidy = {
           command = pkgs.bibtex-tidy;
-          includes = [ "*.bib" ];
+          includes = [ "packages/*/ms.bib" ];
           options = [
             "--duplicates"
             "--no-align"
@@ -81,7 +106,7 @@ let
         };
         mypy = {
           command = pkgs.mypy;
-          includes = [ "*.py" ];
+          includes = [ "packages/*/main.py" ];
           options = [
             "--cache-dir=/tmp/.mypy_cache"
             "--explicit-package-bases"
@@ -92,12 +117,19 @@ let
         };
         nix-alphabetize = {
           command = inputs.self.packages.${pkgs.stdenv.system}.nix_alphabetize;
-          includes = [ "*.nix" ];
+          includes = [
+            "flake.nix"
+            "formatter.nix"
+            "packages/*/default.nix"
+            "checks/*/default.nix"
+            "hosts/*/configuration.nix"
+            "hosts/*/hardware-configuration.nix"
+          ];
           priority = 4;
         };
         oxlint = {
           command = pkgs.oxlint;
-          includes = [ "*.js" ];
+          includes = [ "packages/*/script.js" ];
           options = [
             "--fix-dangerously"
             "-D"
@@ -108,15 +140,34 @@ let
         remove-empty-lines = {
           command = inputs.self.packages.${pkgs.stdenv.system}.remove_empty_lines;
           excludes = [ "README" ];
-          includes = [ "*" ];
+          includes = [
+            ".gitignore"
+            "LICENSE"
+            "README"
+            "flake.lock"
+            "flake.nix"
+            "formatter.nix"
+            "packages/*/default.nix"
+            "checks/*/default.nix"
+            "hosts/*/configuration.nix"
+            "hosts/*/hardware-configuration.nix"
+            "packages/*/main.py"
+            "packages/*/index.html"
+            "packages/*/script.js"
+            "packages/*/style.css"
+            "packages/*/ms.tex"
+            "packages/*/ms.bib"
+            ".github/workflows/workflow.yml"
+            ".forgejo/workflows/workflow.yml"
+          ];
           priority = 2;
         };
         remove-new-lines = {
           command = inputs.self.packages.${pkgs.stdenv.system}.remove_new_lines;
           includes = [
-            "*.css"
-            "*.html"
-            "*.js"
+            "packages/*/style.css"
+            "packages/*/index.html"
+            "packages/*/script.js"
           ];
           priority = 2;
         };
@@ -127,7 +178,26 @@ let
         ruff-format.options = [ "--cache-dir=/tmp/.ruff_cache" ];
         uncomment = {
           command = inputs.self.packages.${pkgs.stdenv.system}.uncomment;
-          includes = [ "*" ];
+          includes = [
+            ".gitignore"
+            "LICENSE"
+            "README"
+            "flake.lock"
+            "flake.nix"
+            "formatter.nix"
+            "packages/*/default.nix"
+            "checks/*/default.nix"
+            "hosts/*/configuration.nix"
+            "hosts/*/hardware-configuration.nix"
+            "packages/*/main.py"
+            "packages/*/index.html"
+            "packages/*/script.js"
+            "packages/*/style.css"
+            "packages/*/ms.tex"
+            "packages/*/ms.bib"
+            ".github/workflows/workflow.yml"
+            ".forgejo/workflows/workflow.yml"
+          ];
           priority = 1;
         };
       };
