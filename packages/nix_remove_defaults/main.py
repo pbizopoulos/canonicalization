@@ -363,7 +363,7 @@ def main() -> None:
         raise SystemExit(1)
     try:
         process_repository(root)
-    except (OSError, ValueError, RuntimeError, nix_syntax.NixSyntaxError) as error:
+    except (OSError, ValueError, RuntimeError) as error:
         print(f"error: {error}", file=sys.stderr)  # noqa: T201
         raise SystemExit(1) from error
 

@@ -197,7 +197,7 @@ def format_file(path: Path) -> bool:
         source = path.read_text(encoding="utf-8")
         formatted = format_text(source, str(path))
         nix_syntax.write_if_changed(path, formatted)
-    except (OSError, UnicodeError, nix_syntax.NixSyntaxError, ValueError) as error:
+    except (OSError, ValueError) as error:
         print(f"error: {path}: {error}", file=sys.stderr)  # noqa: T201
         return False
     return True
