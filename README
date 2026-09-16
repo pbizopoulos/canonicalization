@@ -11,4 +11,4 @@ Put untracked generated or scratch artifacts under an existing supported `tmp/` 
 
 After changing a flake submodule, run `nix fmt` and `nix flake check`.
 
-Run `nix run .#python_inline_check -- FILE.py` to statically check the entire file against the supported inlining profile, including its syntax, scopes, bindings, and function call graph, without executing it.
+Run `nix run .#python_inline -- FILE.py` to validate and automatically inline supported direct local function calls without executing the input, or add `--check` to report required changes without writing.

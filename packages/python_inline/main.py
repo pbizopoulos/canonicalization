@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026- Paschalis Bizopoulos
-"""Check a deliberately restricted, mechanically inlineable Python profile."""
+"""Inline supported direct Python calls in place without executing the input."""
 
 from __future__ import annotations
 
 import argparse
 import ast
 import builtins
+import copy
 import inspect
 import os
 import subprocess
@@ -17,6 +18,7 @@ import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
+MAX_EXPANSIONS = 1000
 DYNAMIC = frozenset(
     [
         "eval",
@@ -168,6 +170,7 @@ class Checker(ast.NodeVisitor):
         self.loops = 0
         self.lazy = 0
         self.edges: dict[str, list[tuple[str, ast.Call]]] = {}
+        self.external_aliases: set[str] = set()
 
     def error(self, node: ast.AST, code: str, message: str) -> None:
         """Record a one-based source location."""
@@ -220,6 +223,68 @@ class Checker(ast.NodeVisitor):
         self.unsupported_bindings = self.declaration_names(self.tree) - (
             self.functions.keys() | self.classes.keys() | self.imports.keys()
         )
+        self.external_aliases = self.aliases(self.tree)
+
+    def aliases(self, scope: ast.Module | ast.FunctionDef) -> set[str]:
+        """Recognize single-assignment aliases of opaque external operations."""
+        assignments: dict[str, list[ast.AST]] = {}
+        pending: list[ast.AST] = list(scope.body)
+        while pending:
+            node = pending.pop()
+            if isinstance(node, (ast.FunctionDef, ast.ClassDef, ast.Lambda)):
+                continue
+            if isinstance(node, ast.Name) and isinstance(
+                node.ctx,
+                (ast.Store, ast.Del),
+            ):
+                assignments.setdefault(node.id, []).append(node)
+            pending.extend(ast.iter_child_nodes(node))
+        locals_ = self.stores(scope)
+        if isinstance(scope, ast.FunctionDef):
+            locals_.update(
+                arg.arg
+                for arg in scope.args.posonlyargs
+                + scope.args.args
+                + scope.args.kwonlyargs
+            )
+            locals_.update(
+                arg.arg
+                for arg in (scope.args.vararg, scope.args.kwarg)
+                if arg is not None
+            )
+        result = set()
+        pending = list(scope.body)
+        while pending:
+            node = pending.pop()
+            if isinstance(node, (ast.FunctionDef, ast.ClassDef, ast.Lambda)):
+                continue
+            if (
+                isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+            ):
+                value = node.value
+                external = (
+                    isinstance(value, ast.Name)
+                    and value.id not in locals_
+                    and (value.id in self.imports or value.id in BUILTINS - DYNAMIC)
+                ) or (
+                    isinstance(value, ast.Attribute)
+                    and not self.dynamic_reference(value)
+                    and value.attr not in self.functions
+                    and value.attr
+                    not in {
+                        "__call__",
+                        "__getattribute__",
+                        "__getattr__",
+                        "__setattr__",
+                        "__delattr__",
+                    }
+                )
+                if external and len(assignments.get(node.targets[0].id, [])) == 1:
+                    result.add(node.targets[0].id)
+            pending.extend(ast.iter_child_nodes(node))
+        return result
 
     @staticmethod
     def stores(node: ast.AST, *, annotation_bindings: bool = True) -> set[str]:
@@ -464,6 +529,8 @@ class Checker(ast.NodeVisitor):
         if len(names) != len(set(names)):
             self.error(node, "signature", "Duplicate parameter names")
         previous = self.locals
+        previous_aliases = self.external_aliases
+        self.external_aliases = self.aliases(node)
         self.scope = node.name
         self.locals = self.stores(node) | set(names)
         previous_unsupported = self.unsupported_bindings
@@ -472,6 +539,7 @@ class Checker(ast.NodeVisitor):
             self.visit(statement)
         self.scope = None
         self.locals = previous
+        self.external_aliases = previous_aliases
         self.unsupported_bindings = previous_unsupported
 
     def visit_Import(self, node: ast.Import | ast.ImportFrom) -> None:
@@ -563,6 +631,14 @@ class Checker(ast.NodeVisitor):
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
         """Permit data fields while protecting potentially aliased user callables."""
+        if (
+            isinstance(node.ctx, ast.Load)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in self.functions
+            and not self.local_data(node.value.id)
+            and node.attr in {"__name__", "__defaults__", "__kwdefaults__"}
+        ):
+            return
         if not isinstance(node.ctx, ast.Load) and (
             node.attr in self.functions or node.attr in self.classes
         ):
@@ -685,9 +761,12 @@ class Checker(ast.NodeVisitor):
                 )
             if self.scope is not None:
                 self.edges[self.scope].append((name, node))
-        elif not shadowed and (
-            name in self.imports
-            or (not parts and (name in BUILTINS or name in self.classes))
+        elif (not parts and name in self.external_aliases) or (
+            not shadowed
+            and (
+                name in self.imports
+                or (not parts and (name in BUILTINS or name in self.classes))
+            )
         ):
             origin = ".".join([self.imports.get(name, f"builtins.{name}"), *parts])
             if origin.startswith("builtins.") and origin.split(".")[1] in DYNAMIC:
@@ -817,24 +896,804 @@ def check_file(path: str | Path) -> list[Diagnostic]:
     return check_source(source, str(path))
 
 
+class InlineUnsupportedError(Exception):
+    """Abort a transaction before writing any source."""
+
+    def __init__(self, node: ast.AST, message: str) -> None:
+        """Attach the original call site's location to a refusal."""
+        super().__init__(message)
+        self.diagnostic = Diagnostic(
+            getattr(node, "lineno", 1),
+            getattr(node, "col_offset", 0) + 1,
+            "inline",
+            message,
+        )
+
+
+class RenameLocals(ast.NodeTransformer):
+    """Give each expanded invocation its own statically bound names."""
+
+    def __init__(self, names: dict[str, str]) -> None:
+        """Keep the caller's bindings separate from the callee's bindings."""
+        self.names = names
+
+    def visit_Name(self, node: ast.Name) -> ast.Name:
+        """Rename both reads and writes, retaining their source locations."""
+        return ast.copy_location(
+            ast.Name(id=self.names.get(node.id, node.id), ctx=node.ctx),
+            node,
+        )
+
+
+class Inliner:
+    """Expand straight-line callees at eager, statement-level evaluation sites."""
+
+    def __init__(self, tree: ast.Module) -> None:
+        """Reserve every source identifier and retain original function bodies."""
+        self.functions = {
+            node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)
+        }
+        self.reserved = {
+            node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
+        } | {node.arg for node in ast.walk(tree) if isinstance(node, ast.arg)}
+        self.reserved.update(
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.ClassDef))
+        )
+        self.reserved.update(
+            node.asname or node.name.split(".")[0]
+            for node in ast.walk(tree)
+            if isinstance(node, ast.alias)
+        )
+        self.counter = 0
+        self.expansions = 0
+
+    def fresh(self) -> str:
+        """Allocate a collision-free temporary without class name mangling."""
+        while True:
+            self.counter += 1
+            name = f"_inline_{self.counter}"
+            if name not in self.reserved:
+                self.reserved.add(name)
+                return name
+
+    def has_call(self, node: ast.AST) -> bool:
+        """Find direct calls whose declarations belong to this source file."""
+        return any(
+            isinstance(child, ast.Call)
+            and isinstance(child.func, ast.Name)
+            and child.func.id in self.functions
+            for child in ast.walk(node)
+        )
+
+    def save(self, value: ast.expr, statements: list[ast.stmt]) -> ast.Name:
+        """Evaluate a value once before evaluating any later sibling."""
+        name = self.fresh()
+        statements.append(
+            ast.Assign(targets=[ast.Name(id=name, ctx=ast.Store())], value=value),
+        )
+        return ast.Name(id=name, ctx=ast.Load())
+
+    def call_expression(
+        self,
+        node: ast.Call,
+        caller_locals: set[str],
+    ) -> tuple[list[ast.stmt], ast.expr]:
+        """Freeze an opaque callee before evaluating its expanded arguments."""
+        statements: list[ast.stmt] = []
+        if any(isinstance(arg, ast.Starred) for arg in node.args) or any(
+            keyword.arg is None for keyword in node.keywords
+        ):
+            raise InlineUnsupportedError(
+                node,
+                "Calls with argument unpacking require runtime binding",
+            )
+        if isinstance(node.func, ast.Name) and node.func.id in self.functions:
+            return self.expand(node, caller_locals)
+        prefix, function = self.expression(node.func, caller_locals)
+        statements.extend(prefix)
+        function = self.save(function, statements)
+        args: list[ast.expr] = []
+        for argument in node.args:
+            prefix, value = self.expression(argument, caller_locals)
+            statements.extend(prefix)
+            args.append(self.save(value, statements))
+        keywords = []
+        for keyword in node.keywords:
+            prefix, value = self.expression(keyword.value, caller_locals)
+            statements.extend(prefix)
+            keywords.append(
+                ast.keyword(arg=keyword.arg, value=self.save(value, statements)),
+            )
+        return statements, ast.Call(func=function, args=args, keywords=keywords)
+
+    def expression(
+        self,
+        node: ast.expr,
+        caller_locals: set[str],
+    ) -> tuple[list[ast.stmt], ast.expr]:
+        """Lower eager expressions in Python evaluation order."""
+        if not self.has_call(node):
+            return [], copy.deepcopy(node)
+        statements: list[ast.stmt] = []
+        if isinstance(node, ast.Call):
+            return self.call_expression(node, caller_locals)
+        if isinstance(node, ast.BinOp):
+            prefix, left = self.expression(node.left, caller_locals)
+            statements.extend(prefix)
+            left = self.save(left, statements)
+            prefix, right = self.expression(node.right, caller_locals)
+            statements.extend(prefix)
+            return statements, ast.BinOp(left=left, op=node.op, right=right)
+        if isinstance(node, (ast.UnaryOp, ast.Attribute)):
+            child = node.operand if isinstance(node, ast.UnaryOp) else node.value
+            prefix, value = self.expression(child, caller_locals)
+            replacement = copy.deepcopy(node)
+            if isinstance(replacement, ast.UnaryOp):
+                replacement.operand = value
+            else:
+                replacement.value = value
+            return prefix, replacement
+        if isinstance(node, (ast.List, ast.Tuple)):
+            elements: list[ast.expr] = []
+            if any(isinstance(element, ast.Starred) for element in node.elts):
+                raise InlineUnsupportedError(
+                    node,
+                    "Container unpacking is not supported during expansion",
+                )
+            for element in node.elts:
+                prefix, value = self.expression(element, caller_locals)
+                statements.extend(prefix)
+                elements.append(self.save(value, statements))
+            return statements, type(node)(elts=elements, ctx=node.ctx)
+        if isinstance(node, ast.IfExp):
+            prefix, test = self.expression(node.test, caller_locals)
+            result = self.fresh()
+            body, value = self.expression(node.body, caller_locals)
+            body.append(
+                ast.Assign(targets=[ast.Name(id=result, ctx=ast.Store())], value=value),
+            )
+            otherwise, value = self.expression(node.orelse, caller_locals)
+            otherwise.append(
+                ast.Assign(targets=[ast.Name(id=result, ctx=ast.Store())], value=value),
+            )
+            prefix.append(ast.If(test=test, body=body, orelse=otherwise))
+            return prefix, ast.Name(id=result, ctx=ast.Load())
+        raise InlineUnsupportedError(
+            node,
+            f"Calls inside {type(node).__name__} require "
+            "additional evaluation-order handling",
+        )
+
+    def validate_body(
+        self,
+        function: ast.FunctionDef,
+        call: ast.Call,
+        caller_locals: set[str],
+    ) -> tuple[list[ast.stmt], set[str]]:
+        """Reject control flow, capture, and possibly uninitialized callee locals."""
+        args = function.args
+        body = function.body
+        if (
+            body
+            and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)
+        ):
+            body = body[1:]
+        if any(
+            not isinstance(statement, (ast.Assign, ast.Expr, ast.Pass, ast.Return))
+            for statement in body
+        ) or any(isinstance(statement, ast.Return) for statement in body[:-1]):
+            raise InlineUnsupportedError(
+                call,
+                f"{function.name}: requires a straight-line body "
+                "with at most one final return",
+            )
+        parameters = args.posonlyargs + args.args + args.kwonlyargs
+        bound = {parameter.arg for parameter in parameters}
+        local_names = Checker.stores(function) | bound
+        free = {
+            node.id
+            for statement in body
+            for node in ast.walk(statement)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+        } - local_names
+        if conflicts := free & caller_locals:
+            raise InlineUnsupportedError(
+                call,
+                f"Caller shadows callee globals: {', '.join(sorted(conflicts))}",
+            )
+        for statement in body:
+            if any(
+                isinstance(
+                    node,
+                    (
+                        ast.NamedExpr,
+                        ast.ListComp,
+                        ast.SetComp,
+                        ast.DictComp,
+                        ast.GeneratorExp,
+                        ast.Lambda,
+                    ),
+                )
+                for node in ast.walk(statement)
+            ):
+                raise InlineUnsupportedError(
+                    call,
+                    "Callee contains expression-local bindings or deferred execution",
+                )
+            if isinstance(statement, ast.Assign) and any(
+                not isinstance(target, ast.Name) for target in statement.targets
+            ):
+                raise InlineUnsupportedError(
+                    call,
+                    "Callee assignments must target simple local names",
+                )
+            reads = {
+                node.id
+                for node in ast.walk(statement)
+                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+            }
+            if (reads & local_names) - bound:
+                raise InlineUnsupportedError(
+                    call,
+                    "Callee may read a local before it is assigned",
+                )
+            if isinstance(statement, ast.Assign):
+                bound.update(
+                    target.id
+                    for target in statement.targets
+                    if isinstance(target, ast.Name)
+                )
+        return body, local_names
+
+    def bind_arguments(
+        self,
+        function: ast.FunctionDef,
+        call: ast.Call,
+        caller_locals: set[str],
+        names: dict[str, str],
+        statements: list[ast.stmt],
+    ) -> None:
+        """Evaluate actuals left to right and reuse the function's default objects."""
+        args = function.args
+        parameters = args.posonlyargs + args.args + args.kwonlyargs
+        values: dict[str, ast.expr] = {}
+        positional = args.posonlyargs + args.args
+        for parameter, argument in zip(positional, call.args, strict=False):
+            prefix, value = self.expression(argument, caller_locals)
+            statements.extend(prefix)
+            values[parameter.arg] = self.save(value, statements)
+        for keyword in call.keywords:
+            prefix, value = self.expression(keyword.value, caller_locals)
+            statements.extend(prefix)
+            if keyword.arg is not None:
+                values[keyword.arg] = self.save(value, statements)
+        for index, parameter in enumerate(positional):
+            if parameter.arg not in values:
+                values[parameter.arg] = ast.Subscript(
+                    value=ast.Attribute(
+                        value=copy.deepcopy(call.func),
+                        attr="__defaults__",
+                        ctx=ast.Load(),
+                    ),
+                    slice=ast.Constant(
+                        value=index - (len(positional) - len(args.defaults)),
+                    ),
+                    ctx=ast.Load(),
+                )
+        for parameter in args.kwonlyargs:
+            if parameter.arg not in values:
+                values[parameter.arg] = ast.Subscript(
+                    value=ast.Attribute(
+                        value=copy.deepcopy(call.func),
+                        attr="__kwdefaults__",
+                        ctx=ast.Load(),
+                    ),
+                    slice=ast.Constant(value=parameter.arg),
+                    ctx=ast.Load(),
+                )
+        statements.extend(
+            ast.Assign(
+                targets=[ast.Name(id=names[parameter.arg], ctx=ast.Store())],
+                value=values[parameter.arg],
+            )
+            for parameter in parameters
+        )
+
+    def expand(
+        self,
+        call: ast.Call,
+        caller_locals: set[str],
+    ) -> tuple[list[ast.stmt], ast.expr]:
+        """Bind arguments once, rename local storage, and substitute a finite body."""
+        self.expansions += 1
+        if self.expansions > MAX_EXPANSIONS:
+            raise InlineUnsupportedError(
+                call,
+                "Expansion exceeds the 1000-call safety budget",
+            )
+        if not isinstance(call.func, ast.Name):
+            raise InlineUnsupportedError(call, "Expected a direct function call")
+        function = self.functions[call.func.id]
+        if any(isinstance(arg, ast.Starred) for arg in call.args) or any(
+            keyword.arg is None for keyword in call.keywords
+        ):
+            raise InlineUnsupportedError(
+                call,
+                "Calls with argument unpacking require runtime binding",
+            )
+        args = function.args
+        if args.vararg or args.kwarg:
+            raise InlineUnsupportedError(call, "Variadic callees are not supported yet")
+        body, local_names = self.validate_body(function, call, caller_locals)
+        names = {name: self.fresh() for name in sorted(local_names)}
+        statements: list[ast.stmt] = [
+            ast.Expr(
+                value=ast.Attribute(
+                    value=copy.deepcopy(call.func),
+                    attr="__name__",
+                    ctx=ast.Load(),
+                ),
+            ),
+        ]
+        self.bind_arguments(function, call, caller_locals, names, statements)
+        result: ast.expr = ast.Constant(value=None)
+        for original in body:
+            statement = RenameLocals(names).visit(copy.deepcopy(original))
+            if isinstance(statement, ast.Pass):
+                continue
+            if isinstance(statement, ast.Return):
+                if statement.value is not None:
+                    prefix, result = self.expression(statement.value, caller_locals)
+                    statements.extend(prefix)
+                break
+            prefix, value = self.expression(statement.value, caller_locals)
+            statements.extend(prefix)
+            statement.value = value
+            statements.append(statement)
+        result = self.save(result, statements)
+        if names:
+            statements.append(
+                ast.Delete(
+                    targets=[
+                        ast.Name(id=name, ctx=ast.Del()) for name in names.values()
+                    ],
+                ),
+            )
+        return statements, result
+
+
+class SourceEdits:
+    """Retain untouched text while planning every call-site replacement."""
+
+    def __init__(self, source: str, inliner: Inliner) -> None:
+        """Index source lines once for byte-aware edits."""
+        self.inliner = inliner
+        self.edits: list[tuple[int, int, str]] = []
+        self.lines = source.splitlines(keepends=True)
+        self.offsets = [0]
+        for line in self.lines:
+            self.offsets.append(self.offsets[-1] + len(line))
+
+    def offset(self, line: int, column: int) -> int:
+        """Translate AST UTF-8 byte columns into source string offsets."""
+        return self.offsets[line - 1] + len(
+            self.lines[line - 1].encode()[:column].decode(),
+        )
+
+    def replace_statement(
+        self,
+        statement: ast.Assign | ast.Expr | ast.Return,
+        caller_locals: set[str],
+    ) -> None:
+        """Render only an affected statement, preserving its surrounding text."""
+        if statement.value is None:
+            return
+        if isinstance(statement, ast.Assign) and any(
+            self.inliner.has_call(target) for target in statement.targets
+        ):
+            raise InlineUnsupportedError(
+                statement,
+                "Calls in assignment targets are not supported",
+            )
+        prefix, value = self.inliner.expression(statement.value, caller_locals)
+        replacement = copy.deepcopy(statement)
+        replacement.value = value
+        rendered = ast.unparse(
+            ast.fix_missing_locations(
+                ast.Module(body=[*prefix, replacement], type_ignores=[]),
+            ),
+        )
+        start = self.offset(statement.lineno, statement.col_offset)
+        end_line = statement.end_lineno or statement.lineno
+        end_column = statement.end_col_offset or statement.col_offset
+        end = self.offset(end_line, end_column)
+        indent = self.lines[statement.lineno - 1][: statement.col_offset]
+        if indent.strip() or self.lines[end_line - 1][
+            len(
+                self.lines[end_line - 1].encode()[:end_column].decode(),
+            ) :
+        ].lstrip().startswith(";"):
+            raise InlineUnsupportedError(
+                statement,
+                "Expansion requires a statement on its own line",
+            )
+        newline = "\r\n" if self.lines[statement.lineno - 1].endswith("\r\n") else "\n"
+        self.edits.append((start, end, rendered.replace("\n", newline + indent)))
+
+    def visit_function(self, statement: ast.FunctionDef) -> None:
+        """Check headers separately and establish the caller's lexical bindings."""
+        header = [
+            *statement.args.defaults,
+            *[value for value in statement.args.kw_defaults if value is not None],
+        ]
+        if any(self.inliner.has_call(value) for value in header):
+            raise InlineUnsupportedError(
+                statement,
+                "Calls in function defaults are not supported yet",
+            )
+        scope = Checker.stores(statement) | {
+            arg.arg
+            for arg in statement.args.posonlyargs
+            + statement.args.args
+            + statement.args.kwonlyargs
+        }
+        scope.update(
+            arg.arg
+            for arg in (statement.args.vararg, statement.args.kwarg)
+            if arg is not None
+        )
+        for child in statement.body:
+            self.visit(child, scope)
+
+    def visit_handler(
+        self,
+        handler: ast.ExceptHandler,
+        caller_locals: set[str],
+    ) -> None:
+        """Keep handler type evaluation separate from its executable body."""
+        if handler.type is not None and self.inliner.has_call(handler.type):
+            raise InlineUnsupportedError(
+                handler,
+                "Calls in exception types are not supported",
+            )
+        for statement in handler.body:
+            self.visit(statement, caller_locals)
+
+    def visit(self, statement: ast.stmt, caller_locals: set[str]) -> None:
+        """Plan statement replacements without overlapping source spans."""
+        if isinstance(statement, ast.ClassDef) and self.inliner.has_call(statement):
+            raise InlineUnsupportedError(
+                statement,
+                "Calls in class namespaces require separate binding analysis",
+            )
+        if isinstance(statement, ast.FunctionDef):
+            self.visit_function(statement)
+            return
+        if (
+            isinstance(statement, (ast.Assign, ast.Expr, ast.Return))
+            and statement.value is not None
+            and self.inliner.has_call(statement.value)
+        ):
+            self.replace_statement(statement, caller_locals)
+            return
+        for _, value in ast.iter_fields(statement):
+            children = value if isinstance(value, list) else [value]
+            for child in children:
+                if isinstance(child, ast.stmt):
+                    self.visit(child, caller_locals)
+                elif isinstance(child, ast.ExceptHandler):
+                    self.visit_handler(child, caller_locals)
+                elif isinstance(child, ast.AST) and self.inliner.has_call(child):
+                    raise InlineUnsupportedError(
+                        child,
+                        "Calls in this statement context are not supported yet",
+                    )
+
+
+def inline_source(
+    source: str,
+    filename: str = "<string>",
+) -> tuple[str, list[Diagnostic]]:
+    """Plan all edits before returning a rewritten, compilable source file."""
+    original_source = source
+    if diagnostics := check_source(source, filename):
+        return source, diagnostics
+    tree = ast.parse(source)
+    inliner = Inliner(tree)
+    planner = SourceEdits(source, inliner)
+    try:
+        for statement in tree.body:
+            planner.visit(statement, set())
+    except InlineUnsupportedError as error:
+        return source, [error.diagnostic]
+    except RecursionError:
+        return source, [
+            Diagnostic(1, 1, "inline", "Expansion exceeds the supported nesting depth"),
+        ]
+    for start, end, replacement in sorted(planner.edits, reverse=True):
+        source = source[:start] + replacement + source[end:]
+    try:
+        compile(source, filename, "exec", dont_inherit=True)
+    except (SyntaxError, RecursionError) as error:
+        return original_source, [
+            Diagnostic(1, 1, "inline", f"Generated source failed validation: {error}"),
+        ]
+    if inliner.has_call(ast.parse(source)):
+        return original_source, [
+            Diagnostic(1, 1, "inline", "Unexpanded local calls remain"),
+        ]
+    return source, []
+
+
+def rewrite_file(path: Path, original: bytes, updated: bytes) -> None:
+    """Replace a regular file atomically without truncating it on failure."""
+    if path.is_symlink() or path.stat().st_nlink != 1:
+        msg = "Refusing to replace a symbolic link or multiply linked file"
+        raise OSError(msg)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            stream.write(updated)
+            stream.flush()
+            os.fchmod(stream.fileno(), path.stat().st_mode & 0o777)
+        if path.read_bytes() != original:
+            msg = "Source changed while planning edits"
+            raise OSError(msg)
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def main() -> None:
-    """Print acceptance or source-located diagnostics with distinct exit codes."""
+    """Validate and autofix supported files, or report changes with --check."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("file", type=Path)
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="validate and report required edits without writing",
+    )
     args = parser.parse_args()
     diagnostics = check_file(args.file)
+    changed = False
+    if not diagnostics:
+        try:
+            with args.file.open("rb") as stream:
+                encoding, _ = tokenize.detect_encoding(stream.readline)
+            original = args.file.read_bytes()
+            source = original.decode(encoding)
+            updated, diagnostics = inline_source(source, str(args.file))
+            changed = updated != source
+            if changed and not diagnostics and not args.check:
+                rewrite_file(args.file, original, updated.encode(encoding))
+        except (OSError, UnicodeError, LookupError, SyntaxError) as error:
+            diagnostics = [Diagnostic(1, 1, "input", str(error))]
     for diagnostic in diagnostics:
         sys.stderr.write(
             f"{args.file}:{diagnostic.line}:{diagnostic.column}: "
             f"{diagnostic.code}: {diagnostic.message}\n",
         )
     if not diagnostics:
-        sys.stdout.write(f"OK {args.file}\n")
+        label = (
+            "Would inline" if changed and args.check else "Inlined" if changed else "OK"
+        )
+        sys.stdout.write(f"{label} {args.file}\n")
     sys.exit(
         2
         if any(d.code in {"input", "parse"} for d in diagnostics)
-        else int(bool(diagnostics)),
+        else int(bool(diagnostics) or (changed and args.check)),
     )
+
+
+def test_inline_behavior() -> None:
+    """Compare observable values, side effects, and failures before and after."""
+    cases = [
+        (
+            "def square(x):\n"
+            "    return x*x\n"
+            "def calculate(x):\n"
+            "    return square(x)+1\n"
+            "result=calculate(3)\n"
+        ),
+        (
+            "events=[]\n"
+            "def mark(x):\n"
+            "    events.append(x)\n"
+            "    return x\n"
+            "result=mark('left')+mark('right')\n"
+        ),
+        (
+            "import operator\n"
+            "events=[]\n"
+            "def mark(x):\n"
+            "    events.append(x)\n"
+            "    return x\n"
+            "result=operator.add(mark(2),mark(3))\n"
+        ),
+        (
+            "events=[]\n"
+            "def mark(x):\n"
+            "    events.append(x)\n"
+            "    return x\n"
+            "def pair(a,/,b,*,c):\n"
+            "    return (a,b,c)\n"
+            "result=pair(mark(1),c=mark(3),b=mark(2))\n"
+        ),
+        (
+            "def add(x,b=[]):\n"
+            "    b.append(x)\n"
+            "    return b\n"
+            "a=add(1)\n"
+            "b=add(2)\n"
+            "result=(a is b,b)\n"
+        ),
+        "def f(a=2,*,b=3):\n    return a+b\nresult=f()\n",
+        (
+            "events=[]\n"
+            "def mark(x):\n"
+            "    events.append(x)\n"
+            "    return x\n"
+            "result=mark(1) if False else mark(2)\n"
+        ),
+        (
+            "def f(x):\n"
+            "    y=x+1\n"
+            "    z=y*2\n"
+            "    return z\n"
+            "result=[]\n"
+            "for x in [1,2,3]:\n"
+            "    result.append(f(x))\n"
+        ),
+        "_inline_1=40\ndef f(x):\n    return x+_inline_1\nresult=f(2)\n",
+        "def f(x):\n    pass\nresult=f(1)\n",
+        "def f():\n    return\nresult=f()\n",
+        "def f(x):\n    return x+1\ndef g(x):\n    return f(x)\nresult=[g(1),g(2)]\n",
+        "def f(x):\n    return 1/x\nresult=f(0)\n",
+        "events=[]\ndef f(x):\n    return x\nresult=f(events.append(1))\n",
+        "events=[]\nresult=f(events.append(1))\ndef f(x):\n    return x\n",
+    ]
+    for source in cases:
+        updated, diagnostics = inline_source(source)
+        if diagnostics or updated == source:
+            raise AssertionError((source, diagnostics))
+        observed = []
+        for program in (source, updated):
+            namespace: dict[str, object] = {}
+            failure = None
+            try:
+                exec(program, namespace)  # noqa: S102
+            except (ZeroDivisionError, NameError) as error:
+                failure = (type(error).__name__, str(error))
+            observed.append((namespace.get("result"), namespace.get("events"), failure))
+        if observed[0] != observed[1]:
+            raise AssertionError((source, updated, observed))
+        second, diagnostics = inline_source(updated)
+        if diagnostics or second != updated:
+            raise AssertionError((updated, diagnostics))
+        if Inliner(ast.parse(source)).has_call(ast.parse(updated)):
+            raise AssertionError(updated)
+
+
+def test_inline_refusals_are_transactional() -> None:
+    """Never return partial edits after finding an unsupported call site."""
+    cases = [
+        "def f(x):\n    return x\na=f(1)\nb=f(*[2])\n",
+        "def f(x):\n    return x\na=f(1)\nb=False and f(2)\n",
+        "def f(x):\n    return x\nwhile f(False):\n    pass\n",
+        "def f(x):\n    if x:\n        return 1\n    return 2\na=f(1)\n",
+        "x=1\ndef f():\n    return x\ndef g(x):\n    return f()\na=g(2)\n",
+        "def f():\n    y=x\n    x=1\n    return y\na=f()\n",
+        "def f(*args):\n    return args\na=f(1)\n",
+        "def f():\n    return f()\na=f()\n",
+        "def f(x):\n    return x\na=f(1); b=2\n",
+        "def f(x):\n    return x\nif True: a=f(1)\n",
+        "def f():\n    return 1\ndef g(x=f()):\n    return x\na=g()\n",
+        "def f(x):\n    return x\na=[f(x) for x in [1]]\n",
+        "def f():\n    x=[i for i in [1]]\n    return x\na=f()\n",
+        "def f():\n    return 1\na={f(): 2}\n",
+        ("x=1\ndef f():\n    return x\nclass C:\n    x=2\n    y=f()\n"),
+    ]
+    for source in cases:
+        updated, diagnostics = inline_source(source)
+        if not diagnostics or updated != source:
+            raise AssertionError((source, updated, diagnostics))
+
+
+def test_inline_source_preservation() -> None:
+    """Retain shebangs, encoding headers, Unicode offsets, and unrelated comments."""
+    source = (
+        "#!/usr/bin/env python3\n# coding: utf-8\n# Keep this comment\n"
+        "def f(x):\n    return x+1  # Keep the declaration\n"
+        "résultat=f(2)  # Keep the caller comment\n# Keep the footer\n"
+    )
+    updated, diagnostics = inline_source(source)
+    if diagnostics:
+        raise AssertionError(diagnostics)
+    for comment in (
+        "#!/usr/bin/env python3",
+        "# coding: utf-8",
+        "# Keep this comment",
+        "# Keep the declaration",
+        "# Keep the caller comment",
+        "# Keep the footer",
+    ):
+        if comment not in updated:
+            raise AssertionError((comment, updated))
+    namespace: dict[str, object] = {}
+    exec(updated, namespace)  # noqa: S102
+    expected = 3
+    if namespace["résultat"] != expected:
+        raise AssertionError(namespace)
+
+
+def test_inline_cli() -> None:
+    """Exercise preview, automatic validation, idempotence, and refused writes."""
+    executable = os.environ["PACKAGE_E2E_EXECUTABLE"]
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "source.py"
+        original = (
+            b"# coding: latin-1\n# caf\xe9\ndef f(x):\n    return x+1\nresult=f(2)\n"
+        )
+        path.write_bytes(original)
+        mode = 0o751
+        path.chmod(mode)
+        for arguments, status, changes, label in [
+            (["--check"], 1, False, "Would inline"),
+            ([], 0, True, "Inlined"),
+            (["--check"], 0, True, "OK"),
+            ([], 0, True, "OK"),
+        ]:
+            completed = subprocess.run(  # noqa: S603
+                [executable, *arguments, str(path)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if (
+                completed.returncode != status
+                or (path.read_bytes() != original) != changes
+                or completed.stdout != f"{label} {path}\n"
+            ):
+                raise AssertionError(completed)
+        if path.stat().st_mode & 0o777 != mode or b"# caf\xe9" not in path.read_bytes():
+            msg = "File permissions or encoding changed"
+            raise AssertionError(msg)
+        refused = b"def f(x):\n    return x\na=f(1)\nb=f(*[2])\n"
+        path.write_bytes(refused)
+        completed = subprocess.run(  # noqa: S603
+            [executable, str(path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 1 or path.read_bytes() != refused:
+            raise AssertionError(completed)
+        path.write_bytes(original)
+        link = path.with_name("link.py")
+        link.symlink_to(path)
+        completed = subprocess.run(  # noqa: S603
+            [executable, str(link)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        input_error = 2
+        if (
+            completed.returncode != input_error
+            or path.read_bytes() != original
+            or not link.is_symlink()
+        ):
+            raise AssertionError(completed)
 
 
 def test_profile() -> None:

@@ -15,7 +15,7 @@ python.pkgs.buildPythonPackage {
     fi
   '';
   meta = {
-    description = "Statically check Python files against a supported inlining profile";
+    description = "Inline supported direct Python calls with conservative automatic fixes";
     mainProgram = pname;
   };
   passthru = {
