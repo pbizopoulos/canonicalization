@@ -15,7 +15,7 @@ python.pkgs.buildPythonPackage {
     fi
   '';
   meta = {
-    description = "Canonicalize ordering and nesting in Nix expressions.";
+    description = "Canonicalize ordering and nesting in Nix expressions";
     mainProgram = pname;
   };
   passthru.python = python;

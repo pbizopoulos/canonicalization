@@ -14,6 +14,8 @@
 !/checks/nix_remove_defaults_coverage/default.nix
 !/checks/nix_syntax_coverage/
 !/checks/nix_syntax_coverage/default.nix
+!/checks/python_inline_check_coverage/
+!/checks/python_inline_check_coverage/default.nix
 !/checks/remove_empty_lines_coverage/
 !/checks/remove_empty_lines_coverage/default.nix
 !/checks/remove_new_lines_coverage/
@@ -34,6 +36,9 @@
 !/packages/nix_syntax/
 !/packages/nix_syntax/default.nix
 !/packages/nix_syntax/main.py
+!/packages/python_inline_check/
+!/packages/python_inline_check/default.nix
+!/packages/python_inline_check/main.py
 !/packages/remove_empty_lines/
 !/packages/remove_empty_lines/default.nix
 !/packages/remove_empty_lines/main.py

@@ -15,7 +15,7 @@ python.pkgs.buildPythonPackage {
     fi
   '';
   meta = {
-    description = "Remove empty lines from explicitly selected text files.";
+    description = "Remove blank and whitespace-only lines from text files";
     mainProgram = pname;
   };
   passthru.python = python;

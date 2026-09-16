@@ -15,7 +15,7 @@ pkgs.stdenv.mkDerivation rec {
     runHook postInstall
   '';
   meta = {
-    description = "A fast Rust-based CLI tool for removing comments from source code.";
+    description = "Remove comments from source code";
     mainProgram = pname;
   };
   nativeBuildInputs = [ pkgs.autoPatchelfHook ];

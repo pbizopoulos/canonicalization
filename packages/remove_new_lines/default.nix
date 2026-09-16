@@ -15,7 +15,7 @@ python.pkgs.buildPythonPackage {
     fi
   '';
   meta = {
-    description = "Remove new lines from explicitly selected text files.";
+    description = "Remove carriage returns and line feeds from text files";
     mainProgram = pname;
   };
   passthru.python = python;

@@ -15,7 +15,7 @@ python.pkgs.buildPythonPackage {
     fi
   '';
   meta = {
-    description = "Remove literal NixOS and treefmt assignments equal to option defaults.";
+    description = "Remove literal NixOS and treefmt assignments equal to option defaults";
     mainProgram = pname;
   };
   passthru.python = python;

@@ -1,4 +1,4 @@
-{ inputs, pkgs, ... }:
+{ pkgs, ... }:
 let
   pname = baseNameOf ./.;
   python = pkgs.python3;
@@ -15,15 +15,12 @@ python.pkgs.buildPythonPackage {
     fi
   '';
   meta = {
-    description = "Canonicalize home repositories and manage flake repository layouts";
+    description = "Statically check Python files against a supported inlining profile";
     mainProgram = pname;
   };
-  passthru.python = python;
-  propagatedBuildInputs = [
-    inputs.self.packages.${pkgs.stdenv.system}.nix_syntax
-    pkgs.git
-    pkgs.nix
-  ];
+  passthru = {
+    inherit python;
+  };
   pyproject = false;
   src = ./.;
   strictDeps = true;

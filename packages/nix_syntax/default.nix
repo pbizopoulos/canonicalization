@@ -15,7 +15,7 @@ python.pkgs.buildPythonPackage {
     fi
   '';
   meta = {
-    description = "Provide shared, lossless-enough Nix parsing and rewriting helpers.";
+    description = "Parse, validate, and rewrite Nix source files";
     mainProgram = pname;
   };
   passthru.python = python;
