@@ -145,12 +145,37 @@ class Diagnostic:
     message: str
 
 
+def function_metadata_reads(tree: ast.Module) -> set[int]:
+    """Allow metadata reads without letting a mutable defaults dictionary escape."""
+    parents = {
+        id(child): parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+    return {
+        id(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.ctx, ast.Load)
+        and (
+            node.attr in {"__name__", "__defaults__"}
+            or (
+                node.attr == "__kwdefaults__"
+                and isinstance(parent := parents.get(id(node)), ast.Subscript)
+                and parent.value is node
+                and isinstance(parent.ctx, ast.Load)
+            )
+        )
+    }
+
+
 class Checker(ast.NodeVisitor):
     """Collect symbols and validate every body, including unused functions."""
 
     def __init__(self, tree: ast.Module) -> None:
         """Initialize module symbols before visiting any calls."""
         self.tree = tree
+        self.metadata_reads = function_metadata_reads(tree)
         self.errors: list[Diagnostic] = []
         self.functions: dict[str, ast.FunctionDef] = {}
         self.imports: dict[str, str] = {}
@@ -637,7 +662,7 @@ class Checker(ast.NodeVisitor):
             and isinstance(node.value, ast.Name)
             and node.value.id in self.functions
             and not self.local_data(node.value.id)
-            and node.attr in {"__name__", "__defaults__", "__kwdefaults__"}
+            and id(node) in self.metadata_reads
         ):
             return
         if not isinstance(node.ctx, ast.Load) and (
@@ -1126,15 +1151,34 @@ class Inliner:
             statements.extend(prefix)
             value = self.save(value, statements)
             spec = None
+            conversion = part.conversion
             if part.format_spec is not None:
                 prefix, spec = self.expression(part.format_spec, caller_locals)
+                if prefix and conversion != -1:
+                    converter = {ord("s"): "str", ord("r"): "repr", ord("a"): "ascii"}[
+                        conversion
+                    ]
+                    if converter in caller_locals:
+                        raise InlineUnsupportedError(
+                            part,
+                            "Format conversion builtin is shadowed in the caller",
+                        )
+                    value = self.save(
+                        ast.Call(
+                            func=ast.Name(id=converter, ctx=ast.Load()),
+                            args=[value],
+                            keywords=[],
+                        ),
+                        statements,
+                    )
+                    conversion = -1
                 statements.extend(prefix)
             formatted = self.save(
                 ast.JoinedStr(
                     values=[
                         ast.FormattedValue(
                             value=value,
-                            conversion=part.conversion,
+                            conversion=conversion,
                             format_spec=spec,
                         ),
                     ],
@@ -1592,7 +1636,7 @@ class SourceEdits:
         self.strict = strict
         self.diagnostics: list[Diagnostic] = []
         self.edits: list[tuple[int, int, str]] = []
-        self.lines = source.splitlines(keepends=True)
+        self.lines = io.StringIO(source, newline="").readlines()
         self.offsets = [0]
         for line in self.lines:
             self.offsets.append(self.offsets[-1] + len(line))
@@ -1770,12 +1814,11 @@ def unavailable_functions(
     direct_targets = {
         id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)
     }
+    metadata_reads = function_metadata_reads(tree)
     direct_targets.update(
         id(node.value)
         for node in ast.walk(tree)
-        if isinstance(node, ast.Attribute)
-        and isinstance(node.ctx, ast.Load)
-        and node.attr in {"__name__", "__defaults__", "__kwdefaults__"}
+        if isinstance(node, ast.Attribute) and id(node) in metadata_reads
     )
     unavailable: set[str] = set()
     for node in ast.walk(tree):
@@ -2160,6 +2203,97 @@ def test_inline_branches_and_comprehensions() -> None:
         second, diagnostics = inline_source(updated)
         if diagnostics or second != updated:
             raise AssertionError((updated, diagnostics))
+
+
+def test_inline_format_conversion_order() -> None:
+    """Convert values before expanding their format specs, including failures."""
+    for conversion in ("s", "r", "a"):
+        for failure in (False, True):
+            source = (
+                "events=[]\n"
+                "class C:\n"
+                "    def __str__(self):\n"
+                "        events.append('str')\n"
+                "        return self.__repr__()\n"
+                "    def __repr__(self):\n"
+                "        events.append('repr')\n"
+                + (
+                    "        raise ValueError('conversion')\n"
+                    if failure
+                    else "        return 'é'\n"
+                )
+                + "def spec():\n"
+                "    events.append('spec')\n"
+                "    return ''\n"
+                f"result=f'{{C()!{conversion}:{{spec()}}}}'\n"
+            )
+            updated, diagnostics = inline_source(source, strict=False)
+            if updated == source or any(d.code != "class" for d in diagnostics):
+                raise AssertionError((updated, diagnostics))
+            observed = []
+            for program in (source, updated):
+                namespace: dict[str, object] = {}
+                error = None
+                try:
+                    exec(program, namespace)  # noqa: S102
+                except ValueError as exception:
+                    error = str(exception)
+                observed.append((namespace.get("result"), namespace["events"], error))
+            if observed[0] != observed[1]:
+                raise AssertionError((source, updated, observed))
+    source = (
+        "def spec():\n    return ''\ndef render(repr):\n    return f'{1!r:{spec()}}'\n"
+    )
+    updated, diagnostics = inline_source(source, strict=False)
+    if updated != source or not diagnostics:
+        raise AssertionError((updated, diagnostics))
+
+
+def test_mutable_keyword_defaults() -> None:
+    """Retain calls when default keys can disappear or their dictionary escapes."""
+    for mutation in (
+        "f.__kwdefaults__.clear()",
+        "del f.__kwdefaults__['x']",
+        "defaults=f.__kwdefaults__\ndefaults.clear()",
+    ):
+        source = f"def f(*, x=1):\n    return x\n{mutation}\nresult=f()\n"
+        for strict in (False, True):
+            updated, diagnostics = inline_source(source, strict=strict)
+            if updated != source or not diagnostics:
+                raise AssertionError((source, updated, diagnostics))
+    source = (
+        "def f(*, x=[]):\n    return x\nf.__kwdefaults__['x'].append(1)\nresult=f()\n"
+    )
+    updated, diagnostics = inline_source(source)
+    if updated == source or diagnostics:
+        raise AssertionError((updated, diagnostics))
+    namespace: dict[str, object] = {}
+    exec(updated, namespace)  # noqa: S102
+    if namespace["result"] != [1]:
+        raise AssertionError(namespace["result"])
+    second, diagnostics = inline_source(updated)
+    if second != updated or diagnostics:
+        raise AssertionError((second, diagnostics))
+
+
+def test_source_line_boundaries() -> None:
+    """Use Python physical lines rather than Unicode text line boundaries."""
+    for separator in ("\v", "\f", "\x85", "\u2028", "\u2029"):
+        for newline in ("\n", "\r\n", "\r"):
+            source = (
+                f"label='a{separator}b'\ndef f():\n    return 2\nresult=f()\n"
+            ).replace("\n", newline)
+            updated, diagnostics = inline_source(source)
+            if updated == source or diagnostics:
+                raise AssertionError((source, updated, diagnostics))
+            namespace: dict[str, object] = {}
+            exec(updated, namespace)  # noqa: S102
+            expected = 2
+            if (
+                namespace["result"] != expected
+                or namespace["label"] != f"a{separator}b"
+            ):
+                raise AssertionError(namespace)
 
 
 def test_partial_inlining() -> None:
