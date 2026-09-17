@@ -54,12 +54,18 @@ let
       ruff-check = {
         enable = true;
         extendSelect = [ "ALL" ];
-        includes = [ "packages/*/main.py" ];
+        includes = [
+          "packages/*/main.py"
+          "packages/*/test_main.py"
+        ];
         priority = 3;
       };
       ruff-format = {
         enable = true;
-        includes = [ "packages/*/main.py" ];
+        includes = [
+          "packages/*/main.py"
+          "packages/*/test_main.py"
+        ];
         priority = 5;
       };
       statix = {
@@ -106,7 +112,10 @@ let
         };
         mypy = {
           command = pkgs.mypy;
-          includes = [ "packages/*/main.py" ];
+          includes = [
+            "packages/*/main.py"
+            "packages/*/test_main.py"
+          ];
           options = [
             "--cache-dir=/tmp/.mypy_cache"
             "--explicit-package-bases"
@@ -152,6 +161,7 @@ let
             "hosts/*/configuration.nix"
             "hosts/*/hardware-configuration.nix"
             "packages/*/main.py"
+            "packages/*/test_main.py"
             "packages/*/index.html"
             "packages/*/script.js"
             "packages/*/style.css"
@@ -173,6 +183,7 @@ let
         };
         ruff-check.options = [
           "--cache-dir=/tmp/.ruff_cache"
+          "--per-file-ignores=test_main.py:INP001"
           "--unsafe-fixes"
         ];
         ruff-format.options = [ "--cache-dir=/tmp/.ruff_cache" ];
@@ -190,6 +201,7 @@ let
             "hosts/*/configuration.nix"
             "hosts/*/hardware-configuration.nix"
             "packages/*/main.py"
+            "packages/*/test_main.py"
             "packages/*/index.html"
             "packages/*/script.js"
             "packages/*/style.css"
