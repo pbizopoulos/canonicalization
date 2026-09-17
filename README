@@ -10,5 +10,3 @@ In a flake submodule, reserve an existing supported `prm/` tree as an escape hat
 Put untracked generated or scratch artifacts under an existing supported `tmp/` tree; they remain local but are not persistent.
 
 After changing a flake submodule, run `nix fmt` and `nix flake check`.
-
-Run `nix run .#python_inline -- FILE.py` to validate and automatically inline supported direct local function calls without executing the input, or add `--check` to report required changes without writing.
