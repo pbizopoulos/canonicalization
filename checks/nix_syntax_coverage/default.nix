@@ -22,8 +22,8 @@ let
 in
 pkgs.runCommand checkName
   {
+    inherit (packageDrv) src;
     nativeBuildInputs = dependencyInputs ++ [ pythonEnv ];
-    src = ../.. + "/packages/${packageName}";
   }
   ''
     export HOME="$(mktemp -d)"
