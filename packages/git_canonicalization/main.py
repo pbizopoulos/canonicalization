@@ -799,29 +799,22 @@ def _current_python_coverage_source() -> str:
     return """{ inputs, pkgs, ... }:
 let
   checkName = baseNameOf ./.;
-  dependencyInputs = builtins.concatLists (
-    builtins.attrValues (
-      pkgs.lib.filterAttrs (
-        name: _:
-        builtins.elem name [
-          "buildInputs"
-          "checkInputs"
-          "nativeBuildInputs"
-          "nativeCheckInputs"
-          "propagatedBuildInputs"
-          "propagatedNativeBuildInputs"
-        ]
-      ) packageDrv
-    )
-  );
+  dependencyInputs = pkgs.lib.concatMap (name: packageDrv.${name} or [ ]) [
+    "buildInputs"
+    "checkInputs"
+    "nativeBuildInputs"
+    "nativeCheckInputs"
+    "propagatedBuildInputs"
+    "propagatedNativeBuildInputs"
+  ];
   packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${packageName};
   packageName = pkgs.lib.removeSuffix "_coverage" checkName;
   pythonEnv = packageDrv.python.withPackages (
-    _:
+    ps:
     packageDrv.propagatedBuildInputs
     ++ [
-      packageDrv.python.pkgs.pytest
-      packageDrv.python.pkgs.pytest-cov
+      ps.pytest
+      ps.pytest-cov
     ]
   );
 in

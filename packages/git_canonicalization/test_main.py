@@ -601,7 +601,7 @@ def test_python_repairs_preserve_commented_inherit() -> None:
 def test_coverage_default_matches_current_template() -> None:
     """Recognize the canonical generated coverage check definition."""
     template = _current_python_coverage_source()
-    if "dependencyInputs = builtins.concatLists" not in template:
+    if "dependencyInputs = pkgs.lib.concatMap" not in template:
         raise AssertionError
     if '"nativeCheckInputs"' not in template:
         raise AssertionError
