@@ -372,7 +372,7 @@ def test_python_scaffold_installs_optional_prm_resources() -> None:  # noqa: C90
         raise AssertionError(msg)
     if not ("<nixpkgs>" not in default):
         raise AssertionError
-    if "inherit python;" not in default:
+    if "passthru.python = python;" not in default:
         msg = "Python scaffold omitted python from passthru"
         raise AssertionError(msg)
     evaluated = _run(
@@ -469,7 +469,7 @@ def test_python_default_restores_python_passthru() -> None:
         template = scaffold("python", "report", None)[
             Path("packages/report/default.nix")
         ]
-        original = "  passthru = {\n    inherit python;\n  };\n"
+        original = "  passthru.python = python;\n"
         for passthru in (
             "",
             '  passthru = { custom = "kept"; };\n',
@@ -589,8 +589,8 @@ def test_python_repairs_preserve_commented_inherit() -> None:
         package = Package("report", "python", Path(temporary_directory))
         source = scaffold("python", "report", None)[Path("packages/report/default.nix")]
         source = source.replace(
-            "inherit python;",
-            "inherit /* interpreter */ python;",
+            "passthru.python = python;",
+            "passthru = { inherit /* interpreter */ python; };",
         ).replace("inherit pname;", "inherit /* package name */ pname;")
         if _python_static_template_issues(package, source):
             raise AssertionError

@@ -69,7 +69,22 @@ def _nested_bindings(
     )
     if binding_set is None:
         return ()
-    bindings = tuple(_binding(document, child) for child in binding_set.named_children)
+    expanded: list[Binding] = []
+    for child in binding_set.named_children:
+        attrs = nix_syntax.field(child, "attrs")
+        if (
+            child.type == "inherit"
+            and attrs is not None
+            and all(attr.type == "identifier" for attr in attrs.named_children)
+            and not any(node.type == "comment" for node in nix_syntax.walk(child))
+        ):
+            expanded.extend(
+                Binding((document.text(attr),), document.text(attr), "")
+                for attr in attrs.named_children
+            )
+        else:
+            expanded.append(_binding(document, child))
+    bindings = tuple(expanded)
     return bindings if all(binding.path is not None for binding in bindings) else None
 
 

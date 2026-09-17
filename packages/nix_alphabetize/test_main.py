@@ -44,6 +44,33 @@ def test_dotted_bindings_collapse_safely() -> None:
         raise AssertionError
 
 
+def test_nested_plain_inherit_normalizes() -> None:
+    """Expand plain inherited names and converge to the explicit binding form."""
+    for source, expected in [
+        ("{ passthru = { inherit python; }; }", "{ passthru.python = python; }"),
+        ("{ a = { b = { inherit x; }; }; }", "{ a.b.x = x; }"),
+        ("{ a = { inherit z x; }; }", "{ a = { x = x; z = z; }; }"),
+        ("{ a = { inherit x; z = 1; }; }", "{ a = { x = x; z = 1; }; }"),
+    ]:
+        formatted = format_text(source)
+        if formatted != expected:
+            raise AssertionError(formatted)
+        if format_text(formatted) != formatted:
+            raise AssertionError
+
+
+def test_opaque_inherit_is_preserved() -> None:
+    """Retain recursive sets, sourced inherits, comments, and direct inherits."""
+    for source in [
+        "{ inherit python; }",
+        "{ a = rec { inherit python; }; }",
+        "{ a = { inherit (python) version; }; }",
+        "{ a = { inherit /* keep */ python; }; }",
+    ]:
+        if format_text(source) != source:
+            raise AssertionError
+
+
 def test_installed_executable_formats_files() -> None:
     """Runs the installed command on explicit file paths."""
     executable = os.environ.get("PACKAGE_E2E_EXECUTABLE")

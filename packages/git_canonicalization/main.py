@@ -1429,9 +1429,7 @@ python.pkgs.buildPythonPackage {
     description = __DESCRIPTION__;
     mainProgram = pname;
   };
-  passthru = {
-    inherit python;
-  };
+  passthru.python = python;
   propagatedBuildInputs = [ ];
   pyproject = false;
   src = ./.;

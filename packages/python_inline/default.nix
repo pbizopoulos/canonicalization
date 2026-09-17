@@ -18,9 +18,7 @@ python.pkgs.buildPythonPackage {
     description = "Inline supported direct Python calls with conservative automatic fixes";
     mainProgram = pname;
   };
-  passthru = {
-    inherit python;
-  };
+  passthru.python = python;
   pyproject = false;
   src = ./.;
   strictDeps = true;
