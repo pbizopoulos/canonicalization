@@ -3,14 +3,20 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import subprocess
 import sys
-from typing import TYPE_CHECKING
+import tempfile
+from collections import Counter
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from hypothesis import example, given
+from hypothesis import strategies as st
 
 from packages.python_mutation.main import (
     MutationError,
@@ -22,9 +28,6 @@ from packages.python_mutation.main import (
     summarize,
     target_root,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def make_target(root: Path, source: str, tests: str) -> Path:
@@ -250,3 +253,163 @@ def test_nix_literal_escapes_interpolation() -> None:
     if nix_string('a${b}"c') != '"a\\${b}\\"c"':
         message = "mutation runner expectation failed"
         raise AssertionError(message)
+
+
+_COPY_COMPONENT = st.sampled_from(
+    [
+        ("prm", True),
+        ("assets", True),
+        ("tmp_extra", True),
+        ("tmp", False),
+        (".git", False),
+        ("__pycache__", False),
+        (".pytest_cache", False),
+        (".mypy_cache", False),
+        (".ruff_cache", False),
+    ],
+)
+
+
+@given(
+    records=st.lists(
+        st.tuples(
+            st.sampled_from(["packages/example", "packages/other", "prm"]),
+            st.lists(_COPY_COMPONENT, max_size=4),
+            st.binary(max_size=40),
+            st.booleans(),
+        ),
+        max_size=15,
+    ),
+)
+@example(
+    records=[
+        ("packages/example", [("prm", True)], b"asset", False),
+        ("packages/example", [("prm", True), ("tmp", False)], b"scratch", False),
+        ("prm", [("assets", True)], b"cache", True),
+        ("packages/other", [("tmp_extra", True)], b"source", False),
+    ],
+)
+@example(records=[])
+def test_copied_workspace_matches_source_manifest(
+    records: list[tuple[str, list[tuple[str, bool]], bytes, bool]],
+) -> None:
+    """Copy support assets exactly while excluding metadata at every depth."""
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        source = root / "source"
+        (source / "packages" / "example").mkdir(parents=True)
+        original: dict[Path, bytes] = {}
+        expected: dict[Path, bytes] = {}
+        for index, (base, components, contents, cached) in enumerate(records):
+            relative = Path(base).joinpath(
+                *(name for name, _ in components),
+                f"file_{index}" + (".pyc" if cached else ".bin"),
+            )
+            path = source / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(contents)
+            original[relative] = contents
+            if not cached and all(keep for _, keep in components):
+                expected[relative] = contents
+        external = root / "external"
+        external.mkdir()
+        (external / "secret").write_bytes(b"do not copy")
+        (source / "packages" / "linked").symlink_to(external, target_is_directory=True)
+        workspace = root / "workspace"
+        copy_sources(source, workspace)
+        copied = {
+            path.relative_to(workspace): path.read_bytes()
+            for path in workspace.rglob("*")
+            if path.is_file()
+        }
+        if copied != expected:
+            msg = "copied files differ from the expected source manifest"
+            raise AssertionError(msg)
+        for relative in expected:
+            (workspace / relative).write_bytes(b"changed in workspace")
+        remaining = {
+            path.relative_to(source): path.read_bytes()
+            for path in source.rglob("*")
+            if path.is_file()
+        }
+        if (
+            remaining != original
+            or (external / "secret").read_bytes() != b"do not copy"
+        ):
+            msg = "workspace changes affected the original source"
+            raise AssertionError(msg)
+
+
+_OUTCOMES = st.sampled_from(
+    [
+        ("killed", "normal", "killed", ""),
+        ("survived", "normal", "survived", ""),
+        ("timeout", "normal", "killed", "timeout"),
+        ("error", "exception", "survived", "timeout"),
+        ("error", "normal", "incompetent", "timeout"),
+        ("pending", None, "", ""),
+    ],
+)
+
+
+@given(
+    outcomes=st.lists(_OUTCOMES, max_size=30),
+    diff=st.text(alphabet="abc +-\né", max_size=30),
+)
+@example(
+    outcomes=[
+        ("survived", "normal", "survived", ""),
+        ("error", "exception", "survived", "timeout"),
+        ("timeout", "normal", "killed", "timeout"),
+        ("pending", None, "", ""),
+    ],
+    diff="- old\n+ new",
+)
+@example(outcomes=[], diff="")
+def test_summary_matches_labeled_outcomes(
+    outcomes: list[tuple[str, str | None, str, str]],
+    diff: str,
+) -> None:
+    """Count each result once, retain survivor diffs, and distinguish engine errors."""
+    rows = []
+    survivors = []
+    counts = Counter(status for status, _, _, _ in outcomes)
+    for index, (status, worker, test, output) in enumerate(outcomes):
+        mutation_diff = f"{diff}\nmutation {index}"
+        result = (
+            None
+            if worker is None
+            else {
+                "worker_outcome": worker,
+                "test_outcome": test,
+                "output": output,
+                "diff": mutation_diff,
+            }
+        )
+        rows.append(json.dumps([{"job_id": str(index)}, result]))
+        if status == "survived":
+            survivors.append(f"Survived {index}:\n{mutation_diff}")
+    with tempfile.TemporaryDirectory() as directory:
+        workspace = Path(directory)
+        (workspace / "results.jsonl").write_text("\n".join(rows), encoding="utf-8")
+        report = io.StringIO()
+        with contextlib.redirect_stdout(report):
+            succeeded = summarize(workspace)
+        summary = json.loads((workspace / "summary.json").read_text(encoding="utf-8"))
+    if summary != dict(counts) or succeeded != (
+        not counts["error"] and not counts["pending"]
+    ):
+        msg = "mutation results were miscounted or misclassified"
+        raise AssertionError(msg)
+    header = (
+        ", ".join(
+            f"{status}: {counts[status]}"
+            for status in ("killed", "survived", "timeout", "error", "pending")
+        )
+        if outcomes
+        else "No mutations generated."
+    )
+    expected_report = header + "\n" + ("\n".join(survivors) + "\n" if survivors else "")
+    if report.getvalue() != expected_report:
+        msg = "mutation report lost a survivor or reported an error as a survivor"
+        raise AssertionError(msg)

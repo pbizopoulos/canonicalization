@@ -7,10 +7,14 @@ import ast
 import contextlib
 import io
 import json
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 import pytest
+from hypothesis import example, given
+from hypothesis import strategies as st
 
 from packages.git_canonicalization.main import (
     SCRATCH_NAME,
@@ -1217,4 +1221,136 @@ def test_python_default_does_not_require_test_metadata() -> None:
         issues = _source_package_issues(Path(temporary_directory), package)
         if issues:
             msg = f"rendered Python default was not canonical: {issues}"
+            raise AssertionError(msg)
+
+
+def test_coverage_profile_runs_only_explicit_examples(tmp_path: Path) -> None:
+    """The generated coverage bootstrap suppresses random generation."""
+    source = tmp_path / "test_property.py"
+    source.write_text(
+        "from hypothesis import given, example, strategies as st\n"
+        "from pathlib import Path\n"
+        "@given(st.integers())\n"
+        "@example(123)\n"
+        "def test_explicit(value):\n"
+        "    with Path('examples').open('a') as output:\n"
+        "        output.write(str(value) + '\\n')\n"
+        "@given(st.integers())\n"
+        "def test_no_example(value):\n"
+        "    raise AssertionError('must not generate')\n",
+        encoding="utf-8",
+    )
+    bootstrap = (
+        _current_python_coverage_source().split("python -c '", 1)[1].split("'", 1)[0]
+    )
+    result = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", bootstrap, "-p", "no:cacheprovider", str(source)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode or "1 passed, 1 skipped" not in result.stdout:
+        raise AssertionError(result.stdout + result.stderr)
+    if (tmp_path / "examples").read_text(encoding="utf-8") != "123\n":
+        message = "coverage must execute exactly the explicit input"
+        raise AssertionError(message)
+
+
+_REMOTE_PART = st.text(alphabet="abcXYZ012_-", min_size=1, max_size=12)
+
+
+@given(host=_REMOTE_PART, owner=_REMOTE_PART, repository=_REMOTE_PART)
+@example(host="Forge", owner="Owner", repository="repo_1")
+def test_remote_spellings_have_one_canonical_path(
+    host: str,
+    owner: str,
+    repository: str,
+) -> None:
+    """Transport, username, suffix, and host case do not change checkout identity."""
+    hostname = host + ".example"
+    expected = Path(hostname.lower(), owner, repository)
+    remotes = [
+        f"git@{hostname}:{owner}/{repository}.git",
+        f"{hostname}:{owner}/{repository}",
+    ]
+    remotes.extend(
+        f"{scheme}://git@{hostname.upper()}/{owner}/{repository}{suffix}"
+        for scheme in ("https", "http", "ssh", "git+ssh", "git")
+        for suffix in ("", ".git", ".git/")
+    )
+    for remote in remotes:
+        if canonical_remote_path(remote) != expected:
+            msg = "equivalent remotes mapped to different checkout paths"
+            raise AssertionError(msg)
+
+
+@given(
+    owner=_REMOTE_PART,
+    repository=_REMOTE_PART,
+    unsafe=st.sampled_from([".", "..", "", "bad name", "é"]),
+)
+@example(owner="owner", repository="repo", unsafe="..")
+def test_remote_paths_reject_unsafe_components(
+    owner: str,
+    repository: str,
+    unsafe: str,
+) -> None:
+    """Hosted paths may not traverse or introduce unsupported checkout components."""
+    for remote in (
+        f"https://forge.example/{owner}/{unsafe}/{repository}.git",
+        f"git@forge.example:{owner}/{unsafe}/{repository}.git",
+    ):
+        with pytest.raises(CommandError):
+            canonical_remote_path(remote)
+
+
+@given(
+    names=st.sets(
+        st.text(alphabet="abcxyz012", min_size=1, max_size=8),
+        min_size=1,
+        max_size=6,
+    ),
+    contents=st.binary(max_size=30),
+)
+@example(names={"a", "ab"}, contents=b"asset")
+def test_gitignore_whitelist_matches_git(names: set[str], contents: bytes) -> None:
+    """Whitelist ancestors expose selected files and opaque trees, but not siblings."""
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        _temporary_flake(root)
+        allowed = {Path("packages", name, "main.py") for name in names}
+        trees = {Path("packages", name, "prm") for name in names}
+        visible = allowed | {tree / "nested" / "asset.bin" for tree in trees}
+        hidden = {Path("unlisted.bin")}
+        for name in names:
+            hidden.update(
+                {
+                    Path("packages", name, "scratch.bin"),
+                    Path("packages", name, "prm_extra", "asset.bin"),
+                },
+            )
+        for relative in visible | hidden:
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(contents)
+        (root / ".gitignore").write_text(
+            render_gitignore(allowed, trees),
+            encoding="utf-8",
+        )
+        result = git(
+            root,
+            [
+                "-c",
+                "core.excludesFile=/dev/null",
+                "check-ignore",
+                "--no-index",
+                *sorted(str(path) for path in visible | hidden),
+            ],
+            check=False,
+        )
+        if result.returncode != 0 or set(result.stdout.splitlines()) != {
+            str(path) for path in hidden
+        }:
+            msg = "rendered whitelist disagrees with Git's ignore behavior"
             raise AssertionError(msg)

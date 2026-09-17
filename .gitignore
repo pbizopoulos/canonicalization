@@ -14,6 +14,8 @@
 !/checks/nix_remove_defaults_coverage/default.nix
 !/checks/nix_syntax_coverage/
 !/checks/nix_syntax_coverage/default.nix
+!/checks/python_hypothesis_coverage/
+!/checks/python_hypothesis_coverage/default.nix
 !/checks/python_mutation_coverage/
 !/checks/python_mutation_coverage/default.nix
 !/checks/remove_empty_lines_coverage/
@@ -40,6 +42,10 @@
 !/packages/nix_syntax/default.nix
 !/packages/nix_syntax/main.py
 !/packages/nix_syntax/test_main.py
+!/packages/python_hypothesis/
+!/packages/python_hypothesis/default.nix
+!/packages/python_hypothesis/main.py
+!/packages/python_hypothesis/test_main.py
 !/packages/python_mutation/
 !/packages/python_mutation/default.nix
 !/packages/python_mutation/main.py

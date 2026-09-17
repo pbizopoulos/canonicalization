@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026- Paschalis Bizopoulos
-"""Run Cosmic Ray against isolated copies of canonical Python packages."""
+"""Run Hypothesis against isolated copies of canonical Python packages."""
 
 from __future__ import annotations
 
@@ -15,12 +15,11 @@ import signal
 import subprocess
 import sys
 import tempfile
-from collections import Counter
 from pathlib import Path
 
 
-class MutationError(Exception):
-    """An invalid target or unsuccessful mutation campaign."""
+class HypothesisError(Exception):
+    """An invalid target or unsuccessful property test run."""
 
 
 def target_root(package: Path) -> Path:
@@ -39,7 +38,7 @@ def target_root(package: Path) -> Path:
             "expected a canonical packages/NAME with default.nix, main.py "
             "and test_main.py inside a flake"
         )
-        raise MutationError(message)
+        raise HypothesisError(message)
     return root
 
 
@@ -100,7 +99,7 @@ def run_command(
             raise
     if code:
         message = f"command failed ({code}); see {log}"
-        raise MutationError(message)
+        raise HypothesisError(message)
 
 
 def nix_string(value: str) -> str:
@@ -123,7 +122,7 @@ def build_environment(root: Path, name: str, workspace: Path) -> tuple[str, str]
         "  ];\n"
         "  python = package.python.withPackages (ps:\n"
         "    (package.propagatedBuildInputs or []) ++ [ps.hypothesis ps.pytest]);\n"
-        'in pkgs.writeText "mutation-environment.json" (builtins.toJSON {\n'
+        'in pkgs.writeText "hypothesis-environment.json" (builtins.toJSON {\n'
         '  python = "${python}/bin/python";\n'
         "  path = pkgs.lib.makeBinPath dependencies;\n"
         "})\n",
@@ -150,12 +149,18 @@ def build_environment(root: Path, name: str, workspace: Path) -> tuple[str, str]
     ]
     if len(paths) != 1:
         message = f"could not resolve target environment; see {log}"
-        raise MutationError(message)
+        raise HypothesisError(message)
     environment = json.loads(Path(paths[0]).read_text(encoding="utf-8"))
     return str(environment["python"]), str(environment["path"])
 
 
-def prepare_tests(workspace: Path, name: str, python: str, tool_path: str) -> list[str]:
+def prepare_tests(
+    workspace: Path,
+    name: str,
+    python: str,
+    tool_path: str,
+    max_examples: int,
+) -> list[str]:
     """Make both pytest and the CLI executable import the workspace source."""
     launcher = workspace / "package-executable"
     launcher.write_text(
@@ -184,11 +189,13 @@ def prepare_tests(workspace: Path, name: str, python: str, tool_path: str) -> li
         "pid = Path('active-test-pgid')\n"
         "pid.write_text(str(os.getpgrp()))\n"
         "try:\n"
-        "    from hypothesis import Phase, settings\n"
-        '    settings.register_profile("coverage", phases=[Phase.explicit])\n'
-        '    settings.load_profile("coverage")\n'
+        "    from hypothesis import settings\n"
+        f'    settings.register_profile("ondemand", max_examples={max_examples},'
+        " deadline=None)\n"
+        '    settings.load_profile("ondemand")\n'
         "    import pytest\n"
         "    sys.exit(pytest.main(['-p', 'no:cacheprovider',\n"
+        f"        '-p', '_hypothesis_pytestplugin', '--hypothesis-show-statistics',\n"
         f"        '--import-mode=importlib', '-q', 'packages/{name}/test_main.py']))\n"
         "finally:\n"
         "    pid.unlink(missing_ok=True)\n",
@@ -197,97 +204,25 @@ def prepare_tests(workspace: Path, name: str, python: str, tool_path: str) -> li
     return [python, "-B", str(bootstrap)]
 
 
-def summarize(workspace: Path) -> bool:
-    """Report engine outcomes without treating survivors as command failures."""
-    counts: Counter[str] = Counter()
-    survivors: list[str] = []
-    for line in (workspace / "results.jsonl").read_text(encoding="utf-8").splitlines():
-        item, result = json.loads(line)
-        if result is None:
-            status = "pending"
-        elif (
-            result["worker_outcome"] != "normal"
-            or result["test_outcome"] == "incompetent"
-        ):
-            status = "error"
-        elif result["output"] == "timeout":
-            status = "timeout"
-        else:
-            status = result["test_outcome"]
-        counts[status] += 1
-        if status == "survived":
-            survivors.append(f"Survived {item['job_id']}:\n{result['diff']}")
-    summary = dict(counts)
-    (workspace / "summary.json").write_text(
-        json.dumps(summary, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    if not counts:
-        sys.stdout.write("No mutations generated.\n")
-    else:
-        statuses = ("killed", "survived", "timeout", "error", "pending")
-        sys.stdout.write(", ".join(f"{key}: {counts[key]}" for key in statuses) + "\n")
-    if survivors:
-        sys.stdout.write("\n".join(survivors) + "\n")
-    return not (counts["error"] or counts["pending"])
-
-
-def campaign(
-    workspace: Path,
-    name: str,
-    python: str,
-    tool_path: str,
-    timeout: float,
-) -> bool:
-    """Baseline, mutate, and report one copied package."""
-    command = prepare_tests(workspace, name, python, tool_path)
-    sys.stdout.write("Running baseline tests...\n")
-    sys.stdout.flush()
-    run_command(command, workspace, workspace / "baseline.log", timeout=timeout)
-    config = workspace / "cosmic-ray.toml"
-    config.write_text(
-        "[cosmic-ray]\n"
-        f"module-path = {json.dumps('packages/' + name + '/main.py')}\n"
-        f"timeout = {timeout}\n"
-        "excluded-modules = []\n"
-        f"test-command = {json.dumps(shlex.join(command))}\n"
-        '[cosmic-ray.distributor]\nname = "local"\n',
-        encoding="utf-8",
-    )
-    engine = ["cosmic-ray"]
-    session = str(workspace / "session.sqlite")
-    run_command(
-        [*engine, "init", str(config), session],
-        workspace,
-        workspace / "init.log",
-    )
-    sys.stdout.write("Running mutations...\n")
-    sys.stdout.flush()
-    run_command(
-        [*engine, "exec", str(config), session],
-        workspace,
-        workspace / "engine.log",
-    )
-    run_command([*engine, "dump", session], workspace, workspace / "results.jsonl")
-    run_command(
-        ["cr-html", session],
-        workspace,
-        workspace / "report.html",
-    )
-    return summarize(workspace)
-
-
 def main() -> None:
-    """Run an explicit mutation campaign and preserve its diagnostics."""
+    """Run property tests with a suite timeout and retain diagnostics."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("package", type=Path, help="canonical packages/NAME directory")
+    parser.add_argument(
+        "--max-examples",
+        type=int,
+        default=100,
+        help="successful generated examples per property (default: 100)",
+    )
     parser.add_argument(
         "--timeout",
         type=float,
         default=60.0,
-        help="seconds per test suite (default: 60)",
+        help="seconds for the test suite, excluding environment build (default: 60)",
     )
     args = parser.parse_args()
+    if args.max_examples <= 0:
+        parser.error("--max-examples must be positive")
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         parser.error("--timeout must be positive and finite")
     try:
@@ -296,20 +231,31 @@ def main() -> None:
         scratch = root / "tmp"
         scratch.mkdir(exist_ok=True)
         workspace = Path(
-            tempfile.mkdtemp(prefix=f"python-mutation-{package.name}-", dir=scratch),
+            tempfile.mkdtemp(prefix=f"python-hypothesis-{package.name}-", dir=scratch),
         )
-        sys.stdout.write(f"Mutation workspace and reports: {workspace}\n")
+        sys.stdout.write(f"Hypothesis workspace and logs: {workspace}\n")
         sys.stdout.flush()
         copy_sources(root, workspace)
         python, tool_path = build_environment(root, package.name, workspace)
-        success = campaign(workspace, package.name, python, tool_path, args.timeout)
-    except (MutationError, OSError, subprocess.TimeoutExpired) as error:
-        sys.stderr.write(f"python_mutation: {error}\n")
+        command = prepare_tests(
+            workspace,
+            package.name,
+            python,
+            tool_path,
+            args.max_examples,
+        )
+        log = workspace / "tests.log"
+        try:
+            run_command(command, workspace, log, timeout=args.timeout)
+        finally:
+            if log.exists():
+                sys.stdout.write(log.read_text(encoding="utf-8"))
+    except (HypothesisError, OSError, subprocess.TimeoutExpired) as error:
+        sys.stderr.write(f"python_hypothesis: {error}\n")
         sys.exit(1)
     except KeyboardInterrupt:
-        sys.stderr.write("python_mutation: interrupted; diagnostics retained\n")
+        sys.stderr.write("python_hypothesis: interrupted; diagnostics retained\n")
         sys.exit(130)
-    sys.exit(0 if success else 1)
 
 
 if __name__ == "__main__":

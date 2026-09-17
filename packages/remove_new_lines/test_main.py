@@ -8,6 +8,9 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from hypothesis import example, given
+from hypothesis import strategies as st
+
 from packages.remove_new_lines.main import (
     process_file,
     remove_new_lines,
@@ -59,3 +62,39 @@ def test_main_processes_explicit_paths() -> None:
         if path.read_text(encoding="utf-8") != "firstlast":
             message = "the executable should remove only new lines"
             raise AssertionError(message)
+
+
+@given(contents=st.binary(max_size=1024))
+@example(contents=b"\r\n\x00\xff\rhello\n\r")
+@example(contents=b"")
+def test_removes_only_cr_and_lf(contents: bytes) -> None:
+    """The result is exactly the ordered subsequence of non-newline bytes."""
+    expected = bytes(value for value in contents if value not in {10, 13})
+    if remove_new_lines(contents) != expected:
+        msg = "newline removal lost or changed another byte"
+        raise AssertionError(msg)
+
+
+@given(contents=st.binary(max_size=256))
+@example(contents=b"text\r\n\xff")
+def test_generated_binary_files_and_symlinks_are_untouched(contents: bytes) -> None:
+    """Neither a binary file nor a symlink target may be rewritten."""
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        binary = root / "binary"
+        binary_contents = b"\0\r\n" + contents
+        binary.write_bytes(binary_contents)
+        target = root / "target"
+        target_contents = b"text\r\n" + contents
+        target.write_bytes(target_contents)
+        link = root / "link"
+        link.symlink_to(target)
+        process_file(binary)
+        process_file(link)
+        if (
+            binary.read_bytes() != binary_contents
+            or target.read_bytes() != target_contents
+            or not link.is_symlink()
+        ):
+            msg = "file processing changed a protected file"
+            raise AssertionError(msg)

@@ -111,7 +111,12 @@ let
           priority = 5;
         };
         mypy = {
-          command = pkgs.mypy;
+          command = "${
+            pkgs.python3.withPackages (ps: [
+              ps.hypothesis
+              ps.mypy
+            ])
+          }/bin/mypy";
           includes = [
             "packages/*/main.py"
             "packages/*/test_main.py"

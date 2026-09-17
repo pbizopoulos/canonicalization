@@ -156,6 +156,9 @@ def _render_binding(binding: Binding) -> str:
 def _render_key(key: str) -> str:
     if (
         key
+        and key.isascii()
+        and key
+        not in {"assert", "else", "if", "in", "inherit", "let", "rec", "then", "with"}
         and (key[0].isalpha() or key[0] == "_")
         and all(character.isalnum() or character in "_-'" for character in key)
     ):

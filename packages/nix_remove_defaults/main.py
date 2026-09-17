@@ -278,7 +278,7 @@ def rewrite(
             None,
         )
         if binding_set is None:
-            return document.text(node), True
+            return document.text(node), False
         rendered: list[str] = []
         for binding in binding_set.named_children:
             attrpath = nix_syntax.field(binding, "attrpath")
