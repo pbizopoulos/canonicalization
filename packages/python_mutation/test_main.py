@@ -30,9 +30,9 @@ from packages.python_mutation.main import (
 )
 
 
-def make_target(root: Path, source: str, tests: str) -> Path:
+def make_target(root: Path, source: str, tests: str, *, name: str = "example") -> Path:
     """Create a minimal canonical package for an isolated test."""
-    package = root / "packages" / "example"
+    package = root / "packages" / name
     package.mkdir(parents=True)
     (root / "flake.nix").write_text("{}", encoding="utf-8")
     (package / "default.nix").write_text("{}", encoding="utf-8")
@@ -412,4 +412,195 @@ def test_summary_matches_labeled_outcomes(
     expected_report = header + "\n" + ("\n".join(survivors) + "\n" if survivors else "")
     if report.getvalue() != expected_report:
         msg = "mutation report lost a survivor or reported an error as a survivor"
+        raise AssertionError(msg)
+
+
+@pytest.mark.parametrize(
+    "layout",
+    ["empty", "nonpython", "untested", "single_untested"],
+)
+def test_cli_repository_without_runnable_packages(tmp_path: Path, layout: str) -> None:
+    """Report empty repositories, skipped packages, and invalid explicit targets."""
+    (tmp_path / "flake.nix").write_text("{}", encoding="utf-8")
+    target = tmp_path
+    if layout == "nonpython":
+        package = tmp_path / "packages" / "web"
+        package.mkdir(parents=True)
+        (package / "default.nix").write_text("{}", encoding="utf-8")
+        (package / "index.html").write_text("hello", encoding="utf-8")
+    elif layout in {"untested", "single_untested"}:
+        package = make_target(tmp_path, "", "")
+        (package / "test_main.py").unlink()
+        if layout == "single_untested":
+            target = package
+    result = subprocess.run(  # noqa: S603
+        [os.environ["PACKAGE_E2E_EXECUTABLE"], str(target)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    expected_code = 0 if layout == "untested" else 1
+    if result.returncode != expected_code:
+        raise AssertionError(result.stdout + result.stderr)
+    if layout == "untested":
+        if (
+            "Skipping example: no test_main.py" not in result.stdout
+            or "0 passed, 0 failed, 1 skipped" not in result.stdout
+        ):
+            msg = "repository did not report its skipped package"
+            raise AssertionError(msg)
+    elif (
+        layout != "single_untested" and "no Python packages found" not in result.stderr
+    ):
+        msg = "empty repository diagnostic missing"
+        raise AssertionError(msg)
+    if (tmp_path / "tmp").exists():
+        msg = "a non-runnable target started a workspace"
+        raise AssertionError(msg)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        MutationError("environment build failed"),
+        OSError("unreadable source"),
+        subprocess.TimeoutExpired("tests", 1),
+    ],
+)
+def test_repository_continues_after_package_errors(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    failure: Exception,
+) -> None:
+    """Build, filesystem, and timeout failures do not prevent later packages running."""
+    first = make_target(tmp_path, "", "", name="alpha")
+    second = make_target(tmp_path, "", "", name="zeta")
+    with (
+        patch("sys.argv", ["python_mutation", str(tmp_path)]),
+        patch(
+            "packages.python_mutation.main.run_package",
+            side_effect=[failure, True],
+        ) as run,
+        pytest.raises(SystemExit) as error,
+    ):
+        main()
+    if error.value.code != 1 or [call.args[0] for call in run.call_args_list] != [
+        first,
+        second,
+    ]:
+        msg = "repository stopped early or hid a package failure"
+        raise AssertionError(msg)
+    captured = capsys.readouterr()
+    if (
+        "1 passed, 1 failed, 0 skipped" not in captured.out
+        or "python_mutation: alpha:" not in captured.err
+    ):
+        msg = "repository summary did not identify the failed package"
+        raise AssertionError(msg)
+
+
+def test_repository_interrupt_stops_later_packages(tmp_path: Path) -> None:
+    """An interrupt keeps exit code 130 and never starts the next package."""
+    make_target(tmp_path, "", "", name="alpha")
+    make_target(tmp_path, "", "", name="zeta")
+    with (
+        patch("sys.argv", ["python_mutation", str(tmp_path)]),
+        patch(
+            "packages.python_mutation.main.run_package",
+            side_effect=KeyboardInterrupt,
+        ) as run,
+        pytest.raises(SystemExit) as error,
+    ):
+        main()
+    interrupted_exit_code = 130
+    if error.value.code != interrupted_exit_code or run.call_count != 1:
+        msg = "repository continued after an interrupt"
+        raise AssertionError(msg)
+
+
+@pytest.mark.parametrize("first_fails", [False, True])
+def test_repository_summarizes_isolated_campaigns_and_survivors(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    first_fails: bool,
+) -> None:
+    """Aggregate campaign failures while successful campaigns may contain survivors."""
+    root = tmp_path / "repository with spaces"
+    second = make_target(root, "", "", name="zeta")
+    make_target(root, "", "", name="alpha")
+    skipped = make_target(root, "", "", name="untested")
+    (skipped / "test_main.py").unlink()
+    (root / "packages" / "linked").symlink_to(second, target_is_directory=True)
+    nested = root / "packages" / "nested" / "child"
+    nested.mkdir(parents=True)
+    (nested / "main.py").write_text("", encoding="utf-8")
+
+    def report_campaign(
+        workspace: Path,
+        name: str,
+        python: str,
+        tools: str,
+        timeout: float,
+    ) -> bool:
+        if (python, tools, timeout) != (sys.executable, "tools", 12):
+            msg = "per-package campaign settings were lost"
+            raise AssertionError(msg)
+        outcome = (
+            "survived" if name == "zeta" else "incompetent" if first_fails else "killed"
+        )
+        row = [
+            {"job_id": name},
+            {
+                "worker_outcome": "normal",
+                "test_outcome": outcome,
+                "output": "",
+                "diff": "mutation diff",
+            },
+        ]
+        (workspace / "results.jsonl").write_text(
+            json.dumps(row) + "\n",
+            encoding="utf-8",
+        )
+        return summarize(workspace)
+
+    with (
+        patch("sys.argv", ["python_mutation", str(root), "--timeout", "12"]),
+        patch(
+            "packages.python_mutation.main.build_environment",
+            return_value=(sys.executable, "tools"),
+        ) as build,
+        patch(
+            "packages.python_mutation.main.campaign",
+            side_effect=report_campaign,
+        ) as run,
+        pytest.raises(SystemExit) as error,
+    ):
+        main()
+    if error.value.code != int(first_fails):
+        msg = "repository exit status confused survivors with failures"
+        raise AssertionError(msg)
+    if [call.args[1] for call in build.call_args_list] != ["alpha", "zeta"] or [
+        call.args[1] for call in run.call_args_list
+    ] != ["alpha", "zeta"]:
+        msg = "package discovery or execution order was incorrect"
+        raise AssertionError(msg)
+    workspaces = [call.args[2] for call in build.call_args_list]
+    if len(set(workspaces)) != len(workspaces):
+        msg = "campaigns shared a workspace"
+        raise AssertionError(msg)
+    summaries = [
+        json.loads((workspace / "summary.json").read_text()) for workspace in workspaces
+    ]
+    if summaries != [{"error" if first_fails else "killed": 1}, {"survived": 1}]:
+        msg = "per-package summaries were lost"
+        raise AssertionError(msg)
+    captured = capsys.readouterr()
+    expected = (
+        "1 passed, 1 failed, 1 skipped"
+        if first_fails
+        else "2 passed, 0 failed, 1 skipped"
+    )
+    if expected not in captured.out or "Survived zeta:" not in captured.out:
+        msg = "repository summary or survivor details missing"
         raise AssertionError(msg)

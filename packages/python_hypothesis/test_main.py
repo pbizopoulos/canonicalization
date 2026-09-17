@@ -24,9 +24,9 @@ from packages.python_hypothesis.main import (
 )
 
 
-def make_target(root: Path, tests: str) -> Path:
+def make_target(root: Path, tests: str, *, name: str = "example") -> Path:
     """Create a minimal target with a CLI and property tests."""
-    package = root / "packages" / "example"
+    package = root / "packages" / name
     package.mkdir(parents=True)
     (root / "flake.nix").write_text("{}", encoding="utf-8")
     (package / "default.nix").write_text("{}", encoding="utf-8")
@@ -216,3 +216,183 @@ def test_copied_workspace_matches_source_manifest(
         ):
             msg = "workspace changes affected the original source"
             raise AssertionError(msg)
+
+
+@pytest.mark.parametrize(
+    "layout",
+    ["empty", "nonpython", "untested", "single_untested"],
+)
+def test_cli_repository_without_runnable_packages(tmp_path: Path, layout: str) -> None:
+    """Report empty repositories, skipped packages, and invalid explicit targets."""
+    (tmp_path / "flake.nix").write_text("{}", encoding="utf-8")
+    target = tmp_path
+    if layout == "nonpython":
+        package = tmp_path / "packages" / "web"
+        package.mkdir(parents=True)
+        (package / "default.nix").write_text("{}", encoding="utf-8")
+        (package / "index.html").write_text("hello", encoding="utf-8")
+    elif layout in {"untested", "single_untested"}:
+        package = make_target(tmp_path, "")
+        (package / "test_main.py").unlink()
+        if layout == "single_untested":
+            target = package
+    result = subprocess.run(  # noqa: S603
+        [os.environ["PACKAGE_E2E_EXECUTABLE"], str(target)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    expected_code = 0 if layout == "untested" else 1
+    if result.returncode != expected_code:
+        raise AssertionError(result.stdout + result.stderr)
+    if layout == "untested":
+        if (
+            "Skipping example: no test_main.py" not in result.stdout
+            or "0 passed, 0 failed, 1 skipped" not in result.stdout
+        ):
+            msg = "repository did not report its skipped package"
+            raise AssertionError(msg)
+    elif (
+        layout != "single_untested" and "no Python packages found" not in result.stderr
+    ):
+        msg = "empty repository diagnostic missing"
+        raise AssertionError(msg)
+    if (tmp_path / "tmp").exists():
+        msg = "a non-runnable target started a workspace"
+        raise AssertionError(msg)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        HypothesisError("environment build failed"),
+        OSError("unreadable source"),
+        subprocess.TimeoutExpired("tests", 1),
+    ],
+)
+def test_repository_continues_after_package_errors(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    failure: Exception,
+) -> None:
+    """Build, filesystem, and timeout failures do not prevent later packages running."""
+    first = make_target(tmp_path, "", name="alpha")
+    second = make_target(tmp_path, "", name="zeta")
+    with (
+        patch("sys.argv", ["python_hypothesis", str(tmp_path)]),
+        patch(
+            "packages.python_hypothesis.main.run_package",
+            side_effect=[failure, None],
+        ) as run,
+        pytest.raises(SystemExit) as error,
+    ):
+        main()
+    if error.value.code != 1 or [call.args[0] for call in run.call_args_list] != [
+        first,
+        second,
+    ]:
+        msg = "repository stopped early or hid a package failure"
+        raise AssertionError(msg)
+    captured = capsys.readouterr()
+    if (
+        "1 passed, 1 failed, 0 skipped" not in captured.out
+        or "python_hypothesis: alpha:" not in captured.err
+    ):
+        msg = "repository summary did not identify the failed package"
+        raise AssertionError(msg)
+
+
+def test_repository_interrupt_stops_later_packages(tmp_path: Path) -> None:
+    """An interrupt keeps exit code 130 and never starts the next package."""
+    make_target(tmp_path, "", name="alpha")
+    make_target(tmp_path, "", name="zeta")
+    with (
+        patch("sys.argv", ["python_hypothesis", str(tmp_path)]),
+        patch(
+            "packages.python_hypothesis.main.run_package",
+            side_effect=KeyboardInterrupt,
+        ) as run,
+        pytest.raises(SystemExit) as error,
+    ):
+        main()
+    interrupted_exit_code = 130
+    if error.value.code != interrupted_exit_code or run.call_count != 1:
+        msg = "repository continued after an interrupt"
+        raise AssertionError(msg)
+
+
+@pytest.mark.parametrize("first_fails", [False, True])
+def test_repository_runs_isolated_suites_and_summarizes(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    first_fails: bool,
+) -> None:
+    """Keep per-package budgets and later successful suites after a failure."""
+    root = tmp_path / "repository with spaces"
+    second = make_target(
+        root,
+        "from hypothesis import given, strategies as st\n"
+        "@given(st.integers())\n"
+        "def test_property(value):\n    pass\n",
+        name="zeta",
+    )
+    make_target(
+        root,
+        f"def test_first():\n    assert {not first_fails}\n",
+        name="alpha",
+    )
+    skipped = make_target(root, "", name="untested")
+    (skipped / "test_main.py").unlink()
+    (root / "packages" / "linked").symlink_to(second, target_is_directory=True)
+    nested = root / "packages" / "nested" / "child"
+    nested.mkdir(parents=True)
+    (nested / "main.py").write_text("", encoding="utf-8")
+    code: int | str | None = 0
+    timeout = 20
+    with (
+        patch(
+            "sys.argv",
+            ["python_hypothesis", str(root), "--max-examples", "3", "--timeout", "20"],
+        ),
+        patch(
+            "packages.python_hypothesis.main.build_environment",
+            return_value=(sys.executable, ""),
+        ) as build,
+        patch("packages.python_hypothesis.main.run_command", wraps=run_command) as run,
+    ):
+        try:
+            main()
+        except SystemExit as error:
+            code = error.code
+    if code != int(first_fails):
+        msg = "repository exit status did not reflect its suites"
+        raise AssertionError(msg)
+    if [call.args[1] for call in build.call_args_list] != ["alpha", "zeta"]:
+        msg = "package discovery or execution order was incorrect"
+        raise AssertionError(msg)
+    workspaces = [call.args[2] for call in build.call_args_list]
+    if len(set(workspaces)) != len(workspaces) or any(
+        call.kwargs["timeout"] != timeout for call in run.call_args_list
+    ):
+        msg = "package isolation or suite budgets were lost"
+        raise AssertionError(msg)
+    logs = [(workspace / "tests.log").read_text() for workspace in workspaces]
+    if (
+        "3 passing examples" not in logs[1]
+        or ("1 failed" if first_fails else "1 passed") not in logs[0]
+    ):
+        msg = "per-package results or generated-example budgets were lost"
+        raise AssertionError(msg)
+    captured = capsys.readouterr()
+    expected = (
+        "1 passed, 1 failed, 1 skipped"
+        if first_fails
+        else "2 passed, 0 failed, 1 skipped"
+    )
+    if (
+        expected not in captured.out
+        or "Skipping untested: no test_main.py" not in captured.out
+    ):
+        msg = "repository summary did not describe every package"
+        raise AssertionError(msg)

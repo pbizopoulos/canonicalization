@@ -115,6 +115,7 @@ let
             pkgs.python3.withPackages (ps: [
               ps.hypothesis
               ps.mypy
+              ps.pytest
             ])
           }/bin/mypy";
           includes = [

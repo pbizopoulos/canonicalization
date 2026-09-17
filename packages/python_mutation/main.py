@@ -277,32 +277,93 @@ def campaign(
     return summarize(workspace)
 
 
+def run_package(package: Path, timeout: float) -> bool:
+    """Run one package in its own environment and retain diagnostics."""
+    root = target_root(package)
+    scratch = root / "tmp"
+    scratch.mkdir(exist_ok=True)
+    workspace = Path(
+        tempfile.mkdtemp(prefix=f"python-mutation-{package.name}-", dir=scratch),
+    )
+    sys.stdout.write(f"Mutation workspace and reports: {workspace}\n")
+    sys.stdout.flush()
+    copy_sources(root, workspace)
+    python, tool_path = build_environment(root, package.name, workspace)
+    return campaign(workspace, package.name, python, tool_path, timeout)
+
+
+def run_repository(root: Path, timeout: float) -> bool:
+    """Run each Python package, continuing after failures and summarizing results."""
+    directory = root / "packages"
+    packages = (
+        sorted(
+            path
+            for path in directory.iterdir()
+            if path.is_dir() and not path.is_symlink() and (path / "main.py").is_file()
+        )
+        if directory.is_dir()
+        else []
+    )
+    if not packages:
+        message = f"no Python packages found under {directory}"
+        raise MutationError(message)
+    outcomes: dict[str, str] = {}
+    for package in packages:
+        if not (package / "test_main.py").is_file():
+            outcomes[package.name] = "skipped"
+            sys.stdout.write(f"Skipping {package.name}: no test_main.py\n")
+            continue
+        sys.stdout.write(f"Running {package.name}...\n")
+        sys.stdout.flush()
+        try:
+            outcomes[package.name] = (
+                "passed" if run_package(package, timeout) else "failed"
+            )
+        except (MutationError, OSError, subprocess.TimeoutExpired) as error:
+            outcomes[package.name] = "failed"
+            sys.stderr.write(f"python_mutation: {package.name}: {error}\n")
+    sys.stdout.write("\nRepository summary:\n")
+    for package_name, status in outcomes.items():
+        sys.stdout.write(f"  {package_name}: {status}\n")
+    sys.stdout.write(
+        ", ".join(
+            f"{sum(value == status for value in outcomes.values())} {status}"
+            for status in ("passed", "failed", "skipped")
+        )
+        + "\n",
+    )
+    return "failed" not in outcomes.values()
+
+
 def main() -> None:
     """Run an explicit mutation campaign and preserve its diagnostics."""
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("package", type=Path, help="canonical packages/NAME directory")
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        epilog=(
+            "Repository targets run Python packages sequentially, skip packages "
+            "without test_main.py, and summarize all results."
+        ),
+    )
+    parser.add_argument(
+        "target",
+        type=Path,
+        help="canonical packages/NAME directory or flake repository root",
+    )
     parser.add_argument(
         "--timeout",
         type=float,
         default=60.0,
-        help="seconds per test suite (default: 60)",
+        help="seconds per baseline or mutation test suite (default: 60)",
     )
     args = parser.parse_args()
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         parser.error("--timeout must be positive and finite")
     try:
-        package = args.package.resolve()
-        root = target_root(package)
-        scratch = root / "tmp"
-        scratch.mkdir(exist_ok=True)
-        workspace = Path(
-            tempfile.mkdtemp(prefix=f"python-mutation-{package.name}-", dir=scratch),
-        )
-        sys.stdout.write(f"Mutation workspace and reports: {workspace}\n")
-        sys.stdout.flush()
-        copy_sources(root, workspace)
-        python, tool_path = build_environment(root, package.name, workspace)
-        success = campaign(workspace, package.name, python, tool_path, args.timeout)
+        target = args.target.resolve()
+        if (target / "flake.nix").is_file():
+            success = run_repository(target, args.timeout)
+        else:
+            success = run_package(target, args.timeout)
     except (MutationError, OSError, subprocess.TimeoutExpired) as error:
         sys.stderr.write(f"python_mutation: {error}\n")
         sys.exit(1)
