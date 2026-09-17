@@ -1,0 +1,252 @@
+# Copyright (c) 2026- Paschalis Bizopoulos
+"""Integration tests for isolated mutation campaigns."""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from typing import TYPE_CHECKING
+from unittest.mock import patch
+
+import pytest
+
+from packages.python_mutation.main import (
+    MutationError,
+    campaign,
+    copy_sources,
+    main,
+    nix_string,
+    run_command,
+    summarize,
+    target_root,
+)
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+def make_target(root: Path, source: str, tests: str) -> Path:
+    """Create a minimal canonical package for an isolated test."""
+    package = root / "packages" / "example"
+    package.mkdir(parents=True)
+    (root / "flake.nix").write_text("{}", encoding="utf-8")
+    (package / "default.nix").write_text("{}", encoding="utf-8")
+    (package / "main.py").write_text(source, encoding="utf-8")
+    (package / "test_main.py").write_text(tests, encoding="utf-8")
+    return package
+
+
+def test_campaign_covers_subprocesses_and_reports_survivors(tmp_path: Path) -> None:
+    """CLI-only tests kill mutations while untested functions survive."""
+    root = tmp_path / "source with spaces"
+    source = (
+        "def value():\n    return 1\n\n"
+        "def unused():\n    return 2\n\n"
+        "def main():\n    print(value())\n"
+    )
+    tests = (
+        "import os, subprocess\n"
+        "def test_cli():\n"
+        "    result = subprocess.run([os.environ['PACKAGE_E2E_EXECUTABLE']],\n"
+        "        capture_output=True, text=True)\n"
+        "    assert result.returncode == 0\n"
+        "    assert result.stdout == '1\\n'\n"
+    )
+    package = make_target(root, source, tests)
+    workspace = tmp_path / "workspace with spaces"
+    copy_sources(root, workspace)
+    if not (campaign(workspace, "example", sys.executable, "", 10)):
+        message = "mutation runner expectation failed"
+        raise AssertionError(message)
+    summary = json.loads((workspace / "summary.json").read_text(encoding="utf-8"))
+    if not (summary["killed"] > 0):
+        message = "mutation runner expectation failed"
+        raise AssertionError(message)
+    if not (summary["survived"] > 0):
+        message = "mutation runner expectation failed"
+        raise AssertionError(message)
+    if not ((workspace / "report.html").stat().st_size > 0):
+        message = "mutation runner expectation failed"
+        raise AssertionError(message)
+    if not ((workspace / "session.sqlite").is_file()):
+        message = "mutation runner expectation failed"
+        raise AssertionError(message)
+    if (package / "main.py").read_text(encoding="utf-8") != source:
+        message = "mutation runner expectation failed"
+        raise AssertionError(message)
+    if (workspace / "packages/example/main.py").read_text(encoding="utf-8") != source:
+        message = "mutation runner expectation failed"
+        raise AssertionError(message)
+    if list(workspace.rglob("*.pyc")):
+        message = "mutation runner expectation failed"
+        raise AssertionError(message)
+
+
+def test_campaign_direct_import_and_no_mutations(tmp_path: Path) -> None:
+    """Tests can import canonical paths, including modules without mutations."""
+    root = tmp_path / "source"
+    make_target(
+        root,
+        "",
+        "from packages.example import main\n"
+        "def test_import():\n    assert main is not None\n",
+    )
+    workspace = tmp_path / "workspace"
+    copy_sources(root, workspace)
+    if not (campaign(workspace, "example", sys.executable, "", 10)):
+        message = "mutation runner expectation failed"
+        raise AssertionError(message)
+    if json.loads((workspace / "summary.json").read_text(encoding="utf-8")) != {}:
+        message = "mutation runner expectation failed"
+        raise AssertionError(message)
+
+
+def test_baseline_failure_aborts_before_mutation(tmp_path: Path) -> None:
+    """Failing, empty, and uncollectable suites cannot produce mutation scores."""
+    cases = [
+        "def test_failure():\n    assert False\n",
+        "",
+        "raise ImportError('missing dependency')\n",
+    ]
+    for index, tests in enumerate(cases):
+        root = tmp_path / f"source-{index}"
+        make_target(root, "answer = 1\n", tests)
+        workspace = tmp_path / f"workspace-{index}"
+        copy_sources(root, workspace)
+        with pytest.raises(MutationError, match=r"baseline\.log"):
+            campaign(workspace, "example", sys.executable, "", 10)
+        if (workspace / "session.sqlite").exists():
+            message = "baseline failures must not initialize mutations"
+            raise AssertionError(message)
+
+
+def test_timeout_terminates_process_group(tmp_path: Path) -> None:
+    """A stalled command is terminated and its log remains available."""
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_command(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            tmp_path,
+            tmp_path / "timeout.log",
+            timeout=0.1,
+        )
+    if not ((tmp_path / "timeout.log").exists()):
+        message = "mutation runner expectation failed"
+        raise AssertionError(message)
+
+
+def test_summary_distinguishes_engine_failures_and_timeouts(tmp_path: Path) -> None:
+    """Timeouts remain separate from killed tests and infrastructure failures."""
+    rows = [
+        [
+            {"job_id": "timeout"},
+            {"worker_outcome": "normal", "test_outcome": "killed", "output": "timeout"},
+        ],
+        [
+            {"job_id": "failure"},
+            {
+                "worker_outcome": "exception",
+                "test_outcome": "incompetent",
+                "output": "failure",
+            },
+        ],
+        [{"job_id": "pending"}, None],
+    ]
+    (tmp_path / "results.jsonl").write_text(
+        "\n".join(json.dumps(row) for row in rows),
+        encoding="utf-8",
+    )
+    if summarize(tmp_path):
+        message = "mutation runner expectation failed"
+        raise AssertionError(message)
+    if json.loads((tmp_path / "summary.json").read_text(encoding="utf-8")) != {
+        "timeout": 1,
+        "error": 1,
+        "pending": 1,
+    }:
+        message = "mutation runner expectation failed"
+        raise AssertionError(message)
+
+
+def test_copy_preserves_assets_and_excludes_scratch(tmp_path: Path) -> None:
+    """Copies support code without recursing into generated scratch trees."""
+    root = tmp_path / "source"
+    package = make_target(root, "", "")
+    for name in ("prm", "tmp", "__pycache__", ".git"):
+        (package / name).mkdir()
+        (package / name / "asset").write_text("data", encoding="utf-8")
+    (root / "prm").mkdir()
+    (root / "prm" / "asset").write_text("support", encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    copy_sources(root, workspace)
+    if (workspace / "packages/example/prm/asset").read_text(encoding="utf-8") != "data":
+        message = "mutation runner expectation failed"
+        raise AssertionError(message)
+    if (workspace / "prm/asset").read_text(encoding="utf-8") != "support":
+        message = "mutation runner expectation failed"
+        raise AssertionError(message)
+    for name in ("tmp", "__pycache__", ".git"):
+        if (workspace / "packages/example" / name).exists():
+            message = "mutation runner expectation failed"
+            raise AssertionError(message)
+    if target_root(package) != root:
+        message = "mutation runner expectation failed"
+        raise AssertionError(message)
+    (package / "test_main.py").unlink()
+    with pytest.raises(MutationError):
+        target_root(package)
+
+
+def test_cli_errors_and_help(tmp_path: Path) -> None:
+    """The installed CLI rejects invalid targets and nonfinite timeouts."""
+    executable = os.environ["PACKAGE_E2E_EXECUTABLE"]
+    for arguments, code in [
+        (["--help"], 0),
+        ([str(tmp_path)], 1),
+        ([str(tmp_path), "--timeout", "nan"], 2),
+    ]:
+        result = subprocess.run(  # noqa: S603
+            [executable, *arguments],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != code:
+            message = "mutation runner expectation failed"
+            raise AssertionError(message)
+
+
+def test_main_retains_workspace_and_propagates_campaign_result(tmp_path: Path) -> None:
+    """Command orchestration uses the resolved target environment and status."""
+    package = make_target(tmp_path, "", "")
+    with (
+        patch("sys.argv", ["python_mutation", str(package)]),
+        patch(
+            "packages.python_mutation.main.build_environment",
+            return_value=(sys.executable, "tools"),
+        ),
+        patch("packages.python_mutation.main.campaign", return_value=False) as run,
+        pytest.raises(SystemExit) as error,
+    ):
+        main()
+    if error.value.code != 1:
+        message = "mutation runner expectation failed"
+        raise AssertionError(message)
+    workspace, name, python, tools, timeout = run.call_args.args
+    if not (workspace.is_relative_to(tmp_path / "tmp")):
+        message = "mutation runner expectation failed"
+        raise AssertionError(message)
+    if (name, python, tools, timeout) != ("example", sys.executable, "tools", 60):
+        message = "mutation runner expectation failed"
+        raise AssertionError(message)
+    if not ((workspace / "packages/example/main.py").is_file()):
+        message = "mutation runner expectation failed"
+        raise AssertionError(message)
+
+
+def test_nix_literal_escapes_interpolation() -> None:
+    """Repository paths cannot inject expressions into the generated Nix file."""
+    if nix_string('a${b}"c') != '"a\\${b}\\"c"':
+        message = "mutation runner expectation failed"
+        raise AssertionError(message)
