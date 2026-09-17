@@ -954,8 +954,10 @@ class RenameLocals(ast.NodeTransformer):
 class Inliner:
     """Expand supported callees at eager, statement-level evaluation sites."""
 
-    def __init__(self, tree: ast.Module) -> None:
+    def __init__(self, tree: ast.Module, *, strict: bool = True) -> None:
         """Reserve every source identifier and retain original function bodies."""
+        self.strict = strict
+        self.diagnostics: list[Diagnostic] = []
         self.functions = {
             node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)
         }
@@ -974,6 +976,7 @@ class Inliner:
         )
         self.counter = 0
         self.expansions = 0
+        self.completed = 0
 
     def fresh(self) -> str:
         """Allocate a collision-free temporary without class name mangling."""
@@ -1020,7 +1023,14 @@ class Inliner:
             and node.func.id in self.functions
             and node.func.id not in caller_locals
         ):
-            return self.expand(node, caller_locals)
+            completed = self.completed
+            try:
+                return self.expand(node, caller_locals)
+            except InlineUnsupportedError as error:
+                self.completed = completed
+                if self.strict:
+                    raise
+                self.diagnostics.append(error.diagnostic)
         prefix, function = self.expression(node.func, caller_locals)
         statements.extend(prefix)
         function = self.save(function, statements)
@@ -1043,6 +1053,26 @@ class Inliner:
         node: ast.expr,
         caller_locals: set[str],
     ) -> tuple[list[ast.stmt], ast.expr]:
+        """Retain unsupported expressions while expanding independent siblings."""
+        completed = self.completed
+        try:
+            result = self.lower_expression(node, caller_locals)
+        except InlineUnsupportedError as error:
+            self.completed = completed
+            if self.strict:
+                raise
+            self.diagnostics.append(error.diagnostic)
+            return [], copy.deepcopy(node)
+        else:
+            if not self.strict and self.completed == completed:
+                return [], copy.deepcopy(node)
+            return result
+
+    def lower_expression(
+        self,
+        node: ast.expr,
+        caller_locals: set[str],
+    ) -> tuple[list[ast.stmt], ast.expr]:
         """Lower eager expressions in Python evaluation order."""
         if not self.has_call(node):
             return [], copy.deepcopy(node)
@@ -1051,7 +1081,14 @@ class Inliner:
             return self.call_expression(node, caller_locals)
         if isinstance(
             node,
-            (ast.ListComp, ast.Compare, ast.JoinedStr, ast.List, ast.Tuple),
+            (
+                ast.ListComp,
+                ast.Compare,
+                ast.JoinedStr,
+                ast.List,
+                ast.Tuple,
+                ast.Subscript,
+            ),
         ):
             return self.compound_expression(node, caller_locals)
         if isinstance(node, ast.BinOp):
@@ -1089,6 +1126,56 @@ class Inliner:
             "additional evaluation-order handling",
         )
 
+    def subscript_expression(
+        self,
+        node: ast.Subscript,
+        caller_locals: set[str],
+    ) -> tuple[list[ast.stmt], ast.expr]:
+        """Preserve the order of subscription operands."""
+        prefix, value = self.expression(node.value, caller_locals)
+        value = self.save(value, prefix)
+        suffix, index = self.subscript_index(node.slice, caller_locals)
+        return [*prefix, *suffix], ast.Subscript(
+            value=value,
+            slice=index,
+            ctx=node.ctx,
+        )
+
+    def subscript_index(
+        self,
+        node: ast.expr,
+        caller_locals: set[str],
+    ) -> tuple[list[ast.stmt], ast.expr]:
+        """Evaluate slice components and multidimensional indices in order."""
+        if not isinstance(node, (ast.Slice, ast.Tuple)):
+            return self.expression(node, caller_locals)
+        statements: list[ast.stmt] = []
+        values: list[ast.expr | None] = []
+        children = (
+            [node.lower, node.upper, node.step]
+            if isinstance(node, ast.Slice)
+            else node.elts
+        )
+        for child in children:
+            if child is None:
+                values.append(None)
+                continue
+            prefix, value = self.subscript_index(child, caller_locals)
+            statements.extend(prefix)
+            values.append(
+                value if isinstance(value, ast.Slice) else self.save(value, statements),
+            )
+        if isinstance(node, ast.Slice):
+            return statements, ast.Slice(
+                lower=values[0],
+                upper=values[1],
+                step=values[2],
+            )
+        return statements, ast.Tuple(
+            elts=[value for value in values if value is not None],
+            ctx=ast.Load(),
+        )
+
     def compound_expression(
         self,
         node: ast.expr,
@@ -1096,6 +1183,8 @@ class Inliner:
     ) -> tuple[list[ast.stmt], ast.expr]:
         """Lower eager containers and formatted values in evaluation order."""
         statements: list[ast.stmt] = []
+        if isinstance(node, ast.Subscript):
+            return self.subscript_expression(node, caller_locals)
         if isinstance(node, ast.ListComp):
             return self.list_comprehension(node, caller_locals)
         if isinstance(node, ast.Compare) and len(node.ops) == 1:
@@ -1624,6 +1713,7 @@ class Inliner:
                     ],
                 ),
             )
+        self.completed += 1
         return statements, result
 
 
@@ -1663,6 +1753,8 @@ class SourceEdits:
                 "Calls in assignment targets are not supported",
             )
         prefix, value = self.inliner.expression(statement.value, caller_locals)
+        if not prefix and ast.dump(value) == ast.dump(statement.value):
+            return
         replacement = copy.deepcopy(statement)
         replacement.value = value
         rendered = ast.unparse(
@@ -1914,7 +2006,7 @@ def inline_source(
     if diagnostics and (strict or any(d.code == "parse" for d in diagnostics)):
         return source, diagnostics
     tree = ast.parse(source)
-    inliner = Inliner(tree)
+    inliner = Inliner(tree, strict=strict)
     blocked: set[int] = set()
     if not strict:
         if namespace_hazard(tree, diagnostics):
@@ -1947,7 +2039,7 @@ def inline_source(
         source = source[:start] + replacement + source[end:]
     if failures := validate_rewrite(source, filename, inliner, strict=strict):
         return original_source, failures
-    return source, sorted({*diagnostics, *planner.diagnostics})
+    return source, sorted({*diagnostics, *planner.diagnostics, *inliner.diagnostics})
 
 
 def rewrite_file(path: Path, original: bytes, updated: bytes) -> None:
@@ -2347,6 +2439,61 @@ def test_partial_inlining() -> None:
             raise AssertionError((strict_source, strict_diagnostics))
 
 
+def test_partial_expression_siblings() -> None:
+    """Expand safe siblings and arguments of retained calls exactly once."""
+    for expression in (
+        "(bad(1), good(2))",
+        "(good(1), bad(2))",
+        "bad(good(2))",
+        "(good(1), good(*[2]))",
+        "(good(1), False and good(2))",
+        "(good(1), {good(x) for x in [2]})",
+    ):
+        source = (
+            "events=[]\n"
+            "def good(x):\n    events.append(x)\n    return x+1\n"
+            "def bad(x):\n    for y in [x]:\n        events.append(y)\n"
+            "    return x\n"
+            f"result={expression}\n"
+        )
+        updated, diagnostics = inline_source(source, strict=False)
+        if updated == source or not diagnostics:
+            raise AssertionError((updated, diagnostics))
+        outcomes = []
+        for program in (source, updated):
+            namespace: dict[str, object] = {}
+            exec(program, namespace)  # noqa: S102
+            outcomes.append((namespace["result"], namespace["events"]))
+        if outcomes[0] != outcomes[1]:
+            raise AssertionError((updated, outcomes))
+        second, errors = inline_source(updated, strict=False)
+        if second != updated or not errors:
+            raise AssertionError((updated, second, errors))
+
+
+def test_inline_subscript_order() -> None:
+    """Preserve subscript operands and slice evaluation order."""
+    for expression in (
+        "[10,20,30][f(1)]",
+        "[10,20,30][f(0):f(3):f(2)]",
+    ):
+        source = (
+            "events=[]\n"
+            "def f(x):\n    events.append(x)\n    return x\n"
+            f"result={expression}\n"
+        )
+        updated, diagnostics = inline_source(source)
+        if diagnostics or updated == source:
+            raise AssertionError((updated, diagnostics))
+        outcomes = []
+        for program in (source, updated):
+            namespace: dict[str, object] = {}
+            exec(program, namespace)  # noqa: S102
+            outcomes.append((namespace["result"], namespace["events"]))
+        if outcomes[0] != outcomes[1]:
+            raise AssertionError((updated, outcomes))
+
+
 def test_partial_safety_barriers() -> None:
     """Do not speculate about mutable namespaces or escape-sensitive scopes."""
     sources = [
@@ -2399,7 +2546,7 @@ def test_partial_safety_barriers() -> None:
 def test_partial_cli() -> None:
     """Preview partial edits, write them with diagnostics, and preserve strict mode."""
     executable = os.environ["PACKAGE_E2E_EXECUTABLE"]
-    source = b"def f(x):\n    return x+1\na=f(1)\nb=f(*[2])\n"
+    source = b"def f(x):\n    return x+1\nresult=(f(1),f(*[2]))\n"
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "input.py"
         for arguments, changed, label in [
