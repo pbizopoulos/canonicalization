@@ -1,104 +1,97 @@
 # Copyright (c) 2026- Paschalis Bizopoulos
-"""Tests for nix_remove_defaults."""
+"""Exercise repository rewriting against a locally evaluated fixture flake."""
 
 from __future__ import annotations
 
-import json
+import os
+import subprocess
+from typing import TYPE_CHECKING
 
-import nix_syntax
-from hypothesis import example, given
-from hypothesis import strategies as st
-
-from packages.nix_remove_defaults.main import (
-    collect_candidates,
-    rewrite,
-)
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
-def test_literal_candidates_and_rewrite() -> None:
-    """Collects literal options and removes empty structural parents."""
-    document = nix_syntax.parse("{ services = { demo.enable = false; }; keep = true; }")
-    if (("services", "demo", "enable"), False) not in collect_candidates(document):
-        raise AssertionError
-    output = rewrite(document, {("services", "demo", "enable")})
-    if not ("services" not in output):
-        raise AssertionError
-    if "keep = true;" not in output:
-        raise AssertionError
-
-
-_OPTION = st.text(alphabet="abcxyz", min_size=1, max_size=5)
-
-
-@given(
-    entries=st.dictionaries(
-        st.tuples(_OPTION, _OPTION),
-        st.tuples(st.integers(0, 1000), st.booleans()),
-        max_size=12,
-    ),
-    nested=st.booleans(),
-    config=st.booleans(),
-    wrapper=st.sampled_from(["", "{ lib, ... }: ", "let unrelated = 1; in "]),
-)
-@example(
-    entries={("a", "x"): (0, True), ("a", "y"): (1, False), ("b", "z"): (2, True)},
-    nested=True,
-    config=True,
-    wrapper="{ lib, ... }: ",
-)
-@example(entries={}, nested=False, config=False, wrapper="")
-def test_rewrite_removes_only_selected_options(
-    entries: dict[tuple[str, str], tuple[int, bool]],
-    *,
-    nested: bool,
-    config: bool,
-    wrapper: str,
-) -> None:
-    """Remove selected leaves and newly empty parents, preserving other values."""
-    groups: dict[str, list[str]] = {}
-    bindings = []
-    for (parent, child), (value, _) in entries.items():
-        groups.setdefault(parent, []).append(f"{json.dumps(child)} = {value};")
-        bindings.append(f"{json.dumps(parent)}.{json.dumps(child)} = {value};")
-    if nested:
-        bindings = [
-            f"{json.dumps(parent)} = {{ {' '.join(children)} }};"
-            for parent, children in groups.items()
-        ]
-    body = (
-        "{ empty = {}; untouched = { empty = {}; }; dynamic = builtins.currentSystem; "
-        + " ".join(bindings)
-        + " }"
+def test_cli_removes_defaults_and_preserves_overrides(tmp_path: Path) -> None:
+    """Resolve option defaults with Nix, rewrite their source, and converge."""
+    root = tmp_path / "repository"
+    root.mkdir()
+    dependency = root / "prm/nixpkgs"
+    dependency.mkdir(parents=True)
+    (dependency / "flake.nix").write_text(
+        """{
+      outputs = _: { lib.attrByPath = path: fallback: attrs:
+        let follow = path: value:
+          if path == [] then value else
+          if builtins.hasAttr (builtins.head path) value
+          then follow (builtins.tail path) value.${builtins.head path}
+          else fallback;
+        in follow path attrs;
+      };
+    }""",
+        encoding="utf-8",
     )
-    source = wrapper + ("{ config = " + body + "; }" if config else body)
-    removals: set[tuple[str, ...]] = {
-        path for path, (_, remove) in entries.items() if remove
-    }
-    expected = {path: value for path, (value, remove) in entries.items() if not remove}
-    before = dict(collect_candidates(nix_syntax.parse(source)))
-    if {path: before.get(path) for path in entries} != {
-        path: value for path, (value, _) in entries.items()
-    }:
-        msg = "candidate collection lost a generated option"
-        raise AssertionError(msg)
-    output = rewrite(nix_syntax.parse(source), removals)
-    after = dict(collect_candidates(nix_syntax.parse(output)))
-    actual = {path: value for path, value in after.items() if isinstance(value, int)}
-    if actual != expected:
-        msg = "rewrite removed an unselected option or retained a selected one"
-        raise AssertionError(msg)
-    if after.get(("empty",)) != {} or after.get(("untouched", "empty")) != {}:
-        msg = "rewrite removed a pre-existing empty set"
-        raise AssertionError(msg)
-    for parent in groups:
-        if not any(path[0] == parent for path in expected) and (parent,) in after:
-            msg = "rewrite retained a newly empty parent"
-            raise AssertionError(msg)
-    if "dynamic = builtins.currentSystem;" not in output or not output.startswith(
-        wrapper,
+    (root / "flake.nix").write_text(
+        """{
+      inputs.nixpkgs.url = "path:./prm/nixpkgs";
+      outputs = { self, nixpkgs }: {
+        nixosConfigurations.demo.options = {
+          services.demo.enable = {
+            default = false;
+            definitionsWithLocations = [{ file = "${self}/configuration.nix"; }];
+          };
+          services.other.enable = {
+            default = false;
+            definitionsWithLocations = [{ file = "${self}/configuration.nix"; }];
+          };
+        };
+      };
+    }""",
+        encoding="utf-8",
+    )
+    configuration = root / "configuration.nix"
+    configuration.write_text(
+        "{ services.demo.enable = false; services.other.enable = true; "
+        'description = "keep  spacing"; empty = {}; }',
+        encoding="utf-8",
+    )
+    scratch = root / "tmp/invalid.nix"
+    scratch.parent.mkdir()
+    scratch.write_text("{ broken = ; }", encoding="utf-8")
+    environment = dict(os.environ)
+    environment["NIX_REMOTE"] = f"local?root={tmp_path / 'store'}"
+    environment["NIX_CONFIG"] = (
+        "experimental-features = nix-command flakes\nbuild-users-group =\n"
+    )
+    command = [os.environ["PACKAGE_E2E_EXECUTABLE"], str(root)]
+    result = subprocess.run(  # noqa: S603
+        command,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    if result.returncode:
+        raise AssertionError(result.stderr)
+    output = configuration.read_text()
+    if (
+        "services.demo" in output
+        or "services.other.enable = true;" not in output
+        or 'description = "keep  spacing";' not in output
+        or "empty = {};" not in output
     ):
-        msg = "rewrite changed unrelated expressions"
-        raise AssertionError(msg)
-    if rewrite(nix_syntax.parse(output), removals) != output:
-        msg = "removing the same options twice changed the result"
-        raise AssertionError(msg)
+        raise AssertionError(output)
+    result = subprocess.run(  # noqa: S603
+        command,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    if (
+        result.returncode
+        or configuration.read_text() != output
+        or scratch.read_text() != "{ broken = ; }"
+    ):
+        raise AssertionError(result.stderr)

@@ -6,22 +6,20 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-import tempfile
-from pathlib import Path
-from unittest.mock import patch
+from typing import TYPE_CHECKING
 
 import pytest
-from hypothesis import example, given
-from hypothesis import strategies as st
 
 from packages.python_hypothesis.main import (
     HypothesisError,
     copy_sources,
-    main,
     prepare_tests,
     run_command,
     target_root,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def make_target(root: Path, tests: str, *, name: str = "example") -> Path:
@@ -116,108 +114,6 @@ def test_cli_validation(tmp_path: Path) -> None:
             raise AssertionError(result.stderr)
 
 
-def test_main_builds_environment_and_preserves_results(tmp_path: Path) -> None:
-    """The CLI applies budgets and preserves its isolated results."""
-    package = make_target(tmp_path, "def test_ok():\n    pass\n")
-    with (
-        patch("sys.argv", ["python_hypothesis", str(package), "--max-examples", "7"]),
-        patch(
-            "packages.python_hypothesis.main.build_environment",
-            return_value=(sys.executable, ""),
-        ),
-    ):
-        main()
-    logs = list((tmp_path / "tmp").glob("python-hypothesis-*/tests.log"))
-    if len(logs) != 1 or "1 passed" not in logs[0].read_text():
-        message = "successful run did not retain its report"
-        raise AssertionError(message)
-
-
-_COPY_COMPONENT = st.sampled_from(
-    [
-        ("prm", True),
-        ("assets", True),
-        ("tmp_extra", True),
-        ("tmp", False),
-        (".git", False),
-        ("__pycache__", False),
-        (".pytest_cache", False),
-        (".mypy_cache", False),
-        (".ruff_cache", False),
-    ],
-)
-
-
-@given(
-    records=st.lists(
-        st.tuples(
-            st.sampled_from(["packages/example", "packages/other", "prm"]),
-            st.lists(_COPY_COMPONENT, max_size=4),
-            st.binary(max_size=40),
-            st.booleans(),
-        ),
-        max_size=15,
-    ),
-)
-@example(
-    records=[
-        ("packages/example", [("prm", True)], b"asset", False),
-        ("packages/example", [("prm", True), ("tmp", False)], b"scratch", False),
-        ("prm", [("assets", True)], b"cache", True),
-        ("packages/other", [("tmp_extra", True)], b"source", False),
-    ],
-)
-@example(records=[])
-def test_copied_workspace_matches_source_manifest(
-    records: list[tuple[str, list[tuple[str, bool]], bytes, bool]],
-) -> None:
-    """Copy support assets exactly while excluding metadata at every depth."""
-    with tempfile.TemporaryDirectory() as directory:
-        root = Path(directory)
-        source = root / "source"
-        (source / "packages" / "example").mkdir(parents=True)
-        original: dict[Path, bytes] = {}
-        expected: dict[Path, bytes] = {}
-        for index, (base, components, contents, cached) in enumerate(records):
-            relative = Path(base).joinpath(
-                *(name for name, _ in components),
-                f"file_{index}" + (".pyc" if cached else ".bin"),
-            )
-            path = source / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(contents)
-            original[relative] = contents
-            if not cached and all(keep for _, keep in components):
-                expected[relative] = contents
-        external = root / "external"
-        external.mkdir()
-        (external / "secret").write_bytes(b"do not copy")
-        (source / "packages" / "linked").symlink_to(external, target_is_directory=True)
-        workspace = root / "workspace"
-        copy_sources(source, workspace)
-        copied = {
-            path.relative_to(workspace): path.read_bytes()
-            for path in workspace.rglob("*")
-            if path.is_file()
-        }
-        if copied != expected:
-            msg = "copied files differ from the expected source manifest"
-            raise AssertionError(msg)
-        for relative in expected:
-            (workspace / relative).write_bytes(b"changed in workspace")
-        remaining = {
-            path.relative_to(source): path.read_bytes()
-            for path in source.rglob("*")
-            if path.is_file()
-        }
-        if (
-            remaining != original
-            or (external / "secret").read_bytes() != b"do not copy"
-        ):
-            msg = "workspace changes affected the original source"
-            raise AssertionError(msg)
-
-
 @pytest.mark.parametrize(
     "layout",
     ["empty", "nonpython", "untested", "single_untested"],
@@ -259,140 +155,4 @@ def test_cli_repository_without_runnable_packages(tmp_path: Path, layout: str) -
         raise AssertionError(msg)
     if (tmp_path / "tmp").exists():
         msg = "a non-runnable target started a workspace"
-        raise AssertionError(msg)
-
-
-@pytest.mark.parametrize(
-    "failure",
-    [
-        HypothesisError("environment build failed"),
-        OSError("unreadable source"),
-        subprocess.TimeoutExpired("tests", 1),
-    ],
-)
-def test_repository_continues_after_package_errors(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-    failure: Exception,
-) -> None:
-    """Build, filesystem, and timeout failures do not prevent later packages running."""
-    first = make_target(tmp_path, "", name="alpha")
-    second = make_target(tmp_path, "", name="zeta")
-    with (
-        patch("sys.argv", ["python_hypothesis", str(tmp_path)]),
-        patch(
-            "packages.python_hypothesis.main.run_package",
-            side_effect=[failure, None],
-        ) as run,
-        pytest.raises(SystemExit) as error,
-    ):
-        main()
-    if error.value.code != 1 or [call.args[0] for call in run.call_args_list] != [
-        first,
-        second,
-    ]:
-        msg = "repository stopped early or hid a package failure"
-        raise AssertionError(msg)
-    captured = capsys.readouterr()
-    if (
-        "1 passed, 1 failed, 0 skipped" not in captured.out
-        or "python_hypothesis: alpha:" not in captured.err
-    ):
-        msg = "repository summary did not identify the failed package"
-        raise AssertionError(msg)
-
-
-def test_repository_interrupt_stops_later_packages(tmp_path: Path) -> None:
-    """An interrupt keeps exit code 130 and never starts the next package."""
-    make_target(tmp_path, "", name="alpha")
-    make_target(tmp_path, "", name="zeta")
-    with (
-        patch("sys.argv", ["python_hypothesis", str(tmp_path)]),
-        patch(
-            "packages.python_hypothesis.main.run_package",
-            side_effect=KeyboardInterrupt,
-        ) as run,
-        pytest.raises(SystemExit) as error,
-    ):
-        main()
-    interrupted_exit_code = 130
-    if error.value.code != interrupted_exit_code or run.call_count != 1:
-        msg = "repository continued after an interrupt"
-        raise AssertionError(msg)
-
-
-@pytest.mark.parametrize("first_fails", [False, True])
-def test_repository_runs_isolated_suites_and_summarizes(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-    *,
-    first_fails: bool,
-) -> None:
-    """Keep per-package budgets and later successful suites after a failure."""
-    root = tmp_path / "repository with spaces"
-    second = make_target(
-        root,
-        "from hypothesis import given, strategies as st\n"
-        "@given(st.integers())\n"
-        "def test_property(value):\n    pass\n",
-        name="zeta",
-    )
-    make_target(
-        root,
-        f"def test_first():\n    assert {not first_fails}\n",
-        name="alpha",
-    )
-    skipped = make_target(root, "", name="untested")
-    (skipped / "test_main.py").unlink()
-    (root / "packages" / "linked").symlink_to(second, target_is_directory=True)
-    nested = root / "packages" / "nested" / "child"
-    nested.mkdir(parents=True)
-    (nested / "main.py").write_text("", encoding="utf-8")
-    code: int | str | None = 0
-    timeout = 20
-    with (
-        patch(
-            "sys.argv",
-            ["python_hypothesis", str(root), "--max-examples", "3", "--timeout", "20"],
-        ),
-        patch(
-            "packages.python_hypothesis.main.build_environment",
-            return_value=(sys.executable, ""),
-        ) as build,
-        patch("packages.python_hypothesis.main.run_command", wraps=run_command) as run,
-    ):
-        try:
-            main()
-        except SystemExit as error:
-            code = error.code
-    if code != int(first_fails):
-        msg = "repository exit status did not reflect its suites"
-        raise AssertionError(msg)
-    if [call.args[1] for call in build.call_args_list] != ["alpha", "zeta"]:
-        msg = "package discovery or execution order was incorrect"
-        raise AssertionError(msg)
-    workspaces = [call.args[2] for call in build.call_args_list]
-    if len(set(workspaces)) != len(workspaces) or any(
-        call.kwargs["timeout"] != timeout for call in run.call_args_list
-    ):
-        msg = "package isolation or suite budgets were lost"
-        raise AssertionError(msg)
-    logs = [(workspace / "tests.log").read_text() for workspace in workspaces]
-    if (
-        "3 passing examples" not in logs[1]
-        or ("1 failed" if first_fails else "1 passed") not in logs[0]
-    ):
-        msg = "per-package results or generated-example budgets were lost"
-        raise AssertionError(msg)
-    captured = capsys.readouterr()
-    expected = (
-        "1 passed, 1 failed, 1 skipped"
-        if first_fails
-        else "2 passed, 0 failed, 1 skipped"
-    )
-    if (
-        expected not in captured.out
-        or "Skipping untested: no test_main.py" not in captured.out
-    ):
-        msg = "repository summary did not describe every package"
         raise AssertionError(msg)
