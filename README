@@ -1,12 +1,17 @@
 # Canonicalization
+High-level instructions and a tool for using canonical (conventional fixpoint state) systems based on Git and Nix flakes.
 
-Canonicalization converges `$HOME` to whitelisted, tracked state and each flake submodule to its supported layout, using `git clean` to remove disposable state.
+More specifically: impermanent NixOS with a whitelisted, tracked $HOME which contains flake Git submodules.
+Directory structure of the submodules is <hostname>/<repository-path>
 
-Use `git_canonicalization` for repository initialization, package scaffolding or removal, and layout convergence; use native Git for all other Git operations.
+`git_canonicalization` is used for repository initialization, package creation/rename/removal, and directory structure convergence.
+Native Git is used for all other Git operations.
 
-This repository provides shared tooling for other repositories.
+In a flake submodule:
+A subset of numtide/blueprint directory structure is applied.
+`prm/` is reserved as an escape hatch for tracked source code outside the package's main source tree.
+`tmp/` is reserved for generated artifacts.
+`nix fmt` and `nix flake check` is used for bringing and checking the flake submodules into canonical state.
 
-In a flake submodule, reserve an existing supported `prm/` tree as an escape hatch for tracked source code outside the package's main source tree.
-Put untracked generated or scratch artifacts under an existing supported `tmp/` tree; they remain local but are not persistent.
-
-After changing a flake submodule, run `nix fmt` and `nix flake check`.
+Use of the system may make the system non-canonical.
+If required, return to canonical state is done with running `git clean` (dangerous) for $HOME and flake Git submodules and rebooting (impermanent NixOS).
