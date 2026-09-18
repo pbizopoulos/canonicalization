@@ -7,11 +7,9 @@ Directory structure of the submodules is <hostname>/<repository-path>
 `git_canonicalization` is used for repository initialization, package creation/rename/removal, and directory structure convergence.
 Native Git is used for all other Git operations.
 
-In a flake submodule:
+In flake Git submodules:
 A subset of numtide/blueprint directory structure is applied.
 `prm/` is reserved as an escape hatch for tracked source code outside the package's main source tree.
 `tmp/` is reserved for generated artifacts.
-`nix fmt` and `nix flake check` is used for bringing and checking the flake submodules into canonical state.
-
-Use of the system may make the system non-canonical.
+`nix fmt` and `nix flake check` is used for bringing and checking the flake Git submodules into canonical state (except `tmp/` presence).
 If required, return to canonical state is done with running `git clean` (dangerous) for $HOME and flake Git submodules and rebooting (impermanent NixOS).
