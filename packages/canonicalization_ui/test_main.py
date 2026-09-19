@@ -138,6 +138,36 @@ def test_empty_or_malformed_home_metadata_is_readable(tmp_path: Path) -> None:
         raise AssertionError(msg)
 
 
+def test_unittest_classes_are_visible_without_a_test_name_prefix(
+    tmp_path: Path,
+) -> None:
+    """Discover TestCase subclasses, aliases, and local inheritance statically."""
+    package = fixture_home(tmp_path)
+    (package / "test_main.py").write_text(
+        "import unittest as unit\n"
+        "from unittest import TestCase as Case, IsolatedAsyncioTestCase\n"
+        "class ReportTests(unit.TestCase):\n"
+        "    def test_report(self): pass\n"
+        "class Base(Case): pass\n"
+        "class Derived(Base):\n"
+        "    def test_derived(self): pass\n"
+        "class AsyncChecks(IsolatedAsyncioTestCase):\n"
+        "    async def test_async(self): pass\n"
+        "class Helper:\n"
+        "    def test_hidden(self): pass\n",
+    )
+    entry = next(
+        item for item in flatten(discover(tmp_path)) if item.key == str(package)
+    )
+    labels = [child.label for child in entry.children]
+    if labels != [
+        "AsyncChecks::test_async",
+        "Derived::test_derived",
+        "ReportTests::test_report",
+    ]:
+        raise AssertionError(labels)
+
+
 def find_tree_node(tree: Tree[Entry], key: str) -> TreeNode[Entry]:
     """Find a resource in the UI by its stable key."""
     pending = [tree.root]

@@ -63,6 +63,36 @@ def hypothesis_names(module: ast.Module) -> set[str]:
     return given_names
 
 
+def unittest_classes(module: ast.Module) -> set[str]:
+    """Recognize unittest subclasses regardless of their class names."""
+    bases: set[str] = set()
+    case_types = {"TestCase", "IsolatedAsyncioTestCase"}
+    for node in module.body:
+        if isinstance(node, ast.Import):
+            bases.update(
+                (alias.asname or alias.name) + "." + case
+                for alias in node.names
+                if alias.name == "unittest"
+                for case in case_types
+            )
+        elif isinstance(node, ast.ImportFrom) and node.module == "unittest":
+            bases.update(
+                alias.asname or alias.name
+                for alias in node.names
+                if alias.name in case_types
+            )
+    classes = [node for node in module.body if isinstance(node, ast.ClassDef)]
+    found: set[str] = set()
+    while additions := {
+        node.name
+        for node in classes
+        if node.name not in found
+        and any(qualified_name(base) in bases | found for base in node.bases)
+    }:
+        found.update(additions)
+    return found
+
+
 def discover_tests(path: Path) -> list[Entry]:
     """List source-level pytest definitions and recognized Hypothesis decorators."""
     if path.is_symlink():
@@ -74,10 +104,13 @@ def discover_tests(path: Path) -> list[Entry]:
     except (OSError, SyntaxError, UnicodeError) as error:
         return [diagnostic(str(path), error)]
     given_names = hypothesis_names(module)
+    case_classes = unittest_classes(module)
     result = []
     definitions: list[tuple[str, ast.stmt]] = []
     for node in module.body:
-        if isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+        if isinstance(node, ast.ClassDef) and (
+            node.name.startswith("Test") or node.name in case_classes
+        ):
             definitions.extend((node.name + "::", child) for child in node.body)
         else:
             definitions.append(("", node))
