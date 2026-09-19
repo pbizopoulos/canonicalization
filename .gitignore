@@ -6,6 +6,8 @@
 !/LICENSE
 !/README
 !/checks/
+!/checks/canonicalization_ui_coverage/
+!/checks/canonicalization_ui_coverage/default.nix
 !/checks/git_canonicalization_coverage/
 !/checks/git_canonicalization_coverage/default.nix
 !/checks/nix_alphabetize_coverage/
@@ -26,6 +28,10 @@
 !/flake.nix
 !/formatter.nix
 !/packages/
+!/packages/canonicalization_ui/
+!/packages/canonicalization_ui/default.nix
+!/packages/canonicalization_ui/main.py
+!/packages/canonicalization_ui/test_main.py
 !/packages/git_canonicalization/
 !/packages/git_canonicalization/default.nix
 !/packages/git_canonicalization/main.py

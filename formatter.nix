@@ -5,6 +5,11 @@
   ...
 }:
 let
+  pythonPackageNames = builtins.attrNames (
+    pkgs.lib.filterAttrs (
+      name: type: type == "directory" && builtins.pathExists (./packages + "/${name}/main.py")
+    ) (builtins.readDir ./packages)
+  );
   rawFormatter = treefmtEval.config.build.wrapper;
   treefmtEval = inputs.treefmt-nix.lib.evalModule pkgs {
     programs = {
@@ -27,6 +32,34 @@ let
           "hosts/*/hardware-configuration.nix"
         ];
         priority = 3;
+      };
+      mypy = {
+        directories = pkgs.lib.genAttrs pythonPackageNames (
+          name:
+          let
+            package = inputs.self.packages.${pkgs.stdenv.system}.${name};
+          in
+          {
+            directory = "";
+            extraPythonPackages =
+              (package.propagatedBuildInputs or [ ])
+              ++ (package.checkInputs or [ ])
+              ++ (package.nativeCheckInputs or [ ])
+              ++ [
+                pkgs.python3.pkgs.hypothesis
+                pkgs.python3.pkgs.pytest
+              ];
+            modules = [ "packages/${name}" ];
+            options = [
+              "--cache-dir=/tmp/.mypy_cache/${name}"
+              "--exclude=/(prm|tmp)/"
+              "--explicit-package-bases"
+              "--ignore-missing-imports"
+              "--strict"
+            ];
+          }
+        );
+        enable = true;
       };
       nixfmt = {
         enable = true;
@@ -109,26 +142,6 @@ let
             "--v2"
           ];
           priority = 5;
-        };
-        mypy = {
-          command = "${
-            pkgs.python3.withPackages (ps: [
-              ps.hypothesis
-              ps.mypy
-              ps.pytest
-            ])
-          }/bin/mypy";
-          includes = [
-            "packages/*/main.py"
-            "packages/*/test_main.py"
-          ];
-          options = [
-            "--cache-dir=/tmp/.mypy_cache"
-            "--explicit-package-bases"
-            "--ignore-missing-imports"
-            "--strict"
-          ];
-          priority = 6;
         };
         nix-alphabetize = {
           command = inputs.self.packages.${pkgs.stdenv.system}.nix_alphabetize;
@@ -218,7 +231,10 @@ let
           ];
           priority = 1;
         };
-      };
+      }
+      // pkgs.lib.genAttrs (map (name: "mypy-${name}") pythonPackageNames) (_: {
+        priority = 6;
+      });
       global.excludes = [ "{prm,tmp,*/prm,*/tmp}/**" ];
     };
   };
