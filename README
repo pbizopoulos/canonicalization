@@ -1,14 +1,18 @@
 # Canonicalization
 High-level instructions and a tool for using canonical (conventional fixpoint state) systems based on Git and Nix flakes.
 
-More specifically: impermanent NixOS with a whitelisted, tracked $HOME which contains flake Git submodules.
-Directory structure of the submodules is <hostname>/<repository-path>
+Canonical system: impermanent NixOS with a Git-tracked, whitelisted $HOME with flake Git submodules.
 
-`git_canonicalization` is used for repository initialization, package creation/rename/removal, and directory structure convergence.
+Persistent changes in the directory structure can only be done with `git_canonicalization`.
+More specifically `git_canonicalization` is used for repository initialization, package creation/rename/removal, and directory structure convergence.
 Native Git is used for all other Git operations.
+
+Directory structure of the submodules is <hostname>/<repository-path>
 
 In flake Git submodules:
 A subset of numtide/blueprint directory structure is applied.
+`test_main.py` contains e2e tests derived by user requirements which names can also be used as a high-level specifications.
+`main.py` contains the code that satisfies `test_main.py`.
 `prm/` is reserved as an escape hatch for tracked source code outside the package's main source tree.
 `tmp/` is reserved for generated artifacts.
 `nix fmt` and `nix flake check` is used for bringing and checking the flake Git submodules into canonical state (except `tmp/` presence).
