@@ -19,7 +19,10 @@ python.pkgs.buildPythonPackage {
     mainProgram = pname;
   };
   passthru.python = python;
-  propagatedBuildInputs = [ pkgs.nix ];
+  propagatedBuildInputs = [
+    pkgs.git
+    pkgs.nix
+  ];
   pyproject = false;
   src = ./.;
   strictDeps = true;

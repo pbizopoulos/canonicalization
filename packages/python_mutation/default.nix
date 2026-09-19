@@ -61,6 +61,7 @@ python.pkgs.buildPythonPackage {
   passthru.python = python;
   propagatedBuildInputs = [
     cosmicRay
+    pkgs.git
     pkgs.nix
   ];
   pyproject = false;

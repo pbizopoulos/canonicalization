@@ -3,20 +3,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
 from typing import TYPE_CHECKING
 
 import pytest
-
-from packages.python_hypothesis.main import (
-    HypothesisError,
-    copy_sources,
-    prepare_tests,
-    run_command,
-    target_root,
-)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -36,15 +29,72 @@ def make_target(root: Path, tests: str, *, name: str = "example") -> Path:
     return package
 
 
-def test_generated_examples_and_workspace_cli(tmp_path: Path) -> None:
-    """The runner generates examples and executes the copied package CLI."""
-    package = make_target(
-        tmp_path / "source with spaces",
+def _prepare_flake(
+    root: Path,
+    tests: str,
+    source: str = "def main():\n    print('ready')\n",
+) -> dict[str, str]:
+    """Provide an offline flake backed by this check's real Python environment."""
+    package = make_target(root, tests)
+    (package / "main.py").write_text(source, encoding="utf-8")
+    dependency = root / "prm/nixpkgs"
+    dependency.mkdir(parents=True)
+    (dependency / "flake.nix").write_text("{ outputs = _: {}; }", encoding="utf-8")
+    (dependency / "default.nix").write_text(
+        "_: { lib = { concatMap = f: xs: builtins.concatLists (map f xs); "
+        'makeBinPath = _: ""; }; writeText = builtins.toFile; }',
+        encoding="utf-8",
+    )
+    (root / "flake.nix").write_text(
+        '{ inputs.nixpkgs.url = "path:./prm/nixpkgs"; '
+        "outputs = _: { packages.${builtins.currentSystem}.example.python"
+        ".withPackages = "
+        f"_ : {json.dumps(sys.prefix)}; }}; }}",
+        encoding="utf-8",
+    )
+    for args in (["init", "--quiet"], ["add", "."]):
+        subprocess.run(  # noqa: S603
+            ["git", "-C", str(root), *args],  # noqa: S607
+            check=True,
+            capture_output=True,
+            timeout=10,
+        )
+    environment = dict(os.environ)
+    store = root.parent / "nix"
+    environment["NIX_REMOTE"] = (
+        f"local?store={store / 'store'}&state={store / 'state'}&log={store / 'log'}"
+    )
+    environment["NIX_CONFIG"] = (
+        "experimental-features = nix-command flakes\nbuild-users-group =\n"
+    )
+    return environment
+
+
+def _run_cli(
+    root: Path,
+    environment: dict[str, str],
+    *arguments: str,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(  # noqa: S603
+        [os.environ["PACKAGE_E2E_EXECUTABLE"], str(root), *arguments],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+
+
+def test_repository_run_generates_examples_executes_the_package_and_preserves_source(
+    tmp_path: Path,
+) -> None:
+    """Discover a package, generate examples, and retain diagnostics through the CLI."""
+    root = tmp_path / "source with spaces"
+    tests = (
         "import os, subprocess\n"
         "from hypothesis import given, example, strategies as st\n"
         "from pathlib import Path\n"
-        "@given(st.integers())\n"
-        "@example(0)\n"
+        "@given(st.integers())\n@example(0)\n"
         "def test_property(value):\n"
         "    with Path('examples').open('a') as output:\n"
         "        output.write(str(value) + '\\n')\n"
@@ -52,47 +102,62 @@ def test_generated_examples_and_workspace_cli(tmp_path: Path) -> None:
         "    result = subprocess.run([os.environ['PACKAGE_E2E_EXECUTABLE']],\n"
         "        capture_output=True, text=True)\n"
         "    assert result.returncode == 0\n"
-        "    assert result.stdout == 'ready\\n'\n",
+        "    assert result.stdout == 'ready\\n'\n"
     )
-    workspace = tmp_path / "workspace with spaces"
-    copy_sources(target_root(package), workspace)
-    command = prepare_tests(workspace, "example", sys.executable, "", 5)
-    run_command(command, workspace, workspace / "tests.log", timeout=20)
+    environment = _prepare_flake(root, tests)
+    original = (root / "packages/example/main.py").read_bytes()
+    result = _run_cli(root, environment, "--max-examples", "5")
+    if result.returncode or "1 passed, 0 failed, 0 skipped" not in result.stdout:
+        raise AssertionError(result.stdout + result.stderr)
+    (workspace,) = (root / "tmp").glob("python-hypothesis-example-*")
     expected_examples = 6
     if len((workspace / "examples").read_text().splitlines()) != expected_examples:
-        message = "expected one explicit and five generated examples"
-        raise AssertionError(message)
+        msg = "one explicit and five generated examples must run"
+        raise AssertionError(msg)
     if "5 passing examples" not in (workspace / "tests.log").read_text():
-        message = "Hypothesis statistics missing"
-        raise AssertionError(message)
-    if (package / "examples").exists():
-        message = "source tree was modified"
-        raise AssertionError(message)
+        msg = "retained diagnostics must include Hypothesis statistics"
+        raise AssertionError(msg)
+    if (root / "packages/example/main.py").read_bytes() != original or (
+        root / "packages/example/examples"
+    ).exists():
+        msg = "running tests must leave the source untouched"
+        raise AssertionError(msg)
 
 
-def test_failures_and_timeouts_retain_logs(tmp_path: Path) -> None:
-    """Failures propagate and a stalled suite is terminated."""
-    package = make_target(
-        tmp_path / "source",
-        "from hypothesis import given, strategies as st\n"
-        "@given(st.integers())\n"
-        "def test_failure(value):\n    assert value != 0\n",
-    )
-    workspace = tmp_path / "workspace"
-    copy_sources(target_root(package), workspace)
-    command = prepare_tests(workspace, "example", sys.executable, "", 5)
-    with pytest.raises(HypothesisError):
-        run_command(command, workspace, workspace / "tests.log", timeout=20)
-    if "Falsifying example" not in (workspace / "tests.log").read_text():
-        message = "counterexample missing from retained log"
-        raise AssertionError(message)
-    with pytest.raises(subprocess.TimeoutExpired):
-        run_command(
-            [sys.executable, "-c", "import time; time.sleep(30)"],
-            workspace,
-            workspace / "timeout.log",
-            timeout=0.1,
-        )
+@pytest.mark.parametrize(
+    ("tests", "timeout", "diagnostic"),
+    [
+        (
+            (
+                "from hypothesis import given, strategies as st\n"
+                "@given(st.integers())\n"
+                "def test_failure(value):\n    assert value != 0\n"
+            ),
+            "20",
+            "Falsifying example",
+        ),
+        ("import time\ndef test_stalled():\n    time.sleep(30)\n", "0.5", "timed out"),
+    ],
+)
+def test_failed_or_stalled_suites_return_failure_and_retain_diagnostics(
+    tmp_path: Path,
+    tests: str,
+    timeout: str,
+    diagnostic: str,
+) -> None:
+    """Fail with retained diagnostics for counterexamples and stalled suites."""
+    root = tmp_path / "source"
+    environment = _prepare_flake(root, tests)
+    result = _run_cli(root, environment, "--timeout", timeout)
+    (workspace,) = (root / "tmp").glob("python-hypothesis-example-*")
+    if result.returncode != 1 or "0 passed, 1 failed, 0 skipped" not in result.stdout:
+        raise AssertionError(result.stdout + result.stderr)
+    if (
+        diagnostic
+        not in result.stdout + result.stderr + (workspace / "tests.log").read_text()
+    ):
+        msg = "failure diagnostics were not retained"
+        raise AssertionError(msg)
 
 
 def test_cli_validation(tmp_path: Path) -> None:

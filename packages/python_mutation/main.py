@@ -113,7 +113,7 @@ def build_environment(root: Path, name: str, workspace: Path) -> tuple[str, str]
     expression = workspace / "environment.nix"
     expression.write_text(
         "let\n"
-        f"  flake = builtins.getFlake {nix_string('git+file://' + str(root))};\n"
+        f"  flake = builtins.getFlake {nix_string('git+' + root.as_uri())};\n"
         "  system = builtins.currentSystem;\n"
         "  pkgs = import flake.inputs.nixpkgs { inherit system; };\n"
         f"  package = flake.packages.${{system}}.${{{nix_string(name)}}};\n"
@@ -146,7 +146,7 @@ def build_environment(root: Path, name: str, workspace: Path) -> tuple[str, str]
     paths = [
         line
         for line in log.read_text(encoding="utf-8").splitlines()
-        if line.startswith("/nix/store/")
+        if Path(line).is_absolute() and Path(line).is_file()
     ]
     if len(paths) != 1:
         message = f"could not resolve target environment; see {log}"
