@@ -197,6 +197,27 @@ def discover(home: Path) -> Entry:
     return root
 
 
+class CanonicalTree(Tree[Entry]):
+    """Navigate resources with arrow keys or Vim-style keys."""
+
+    BINDINGS: ClassVar = [
+        ("j", "cursor_down", "Down"),
+        ("k", "cursor_up", "Up"),
+        ("l", "expand_node", "Expand"),
+        ("h", "collapse_node", "Collapse"),
+    ]
+
+    def action_expand_node(self) -> None:
+        """Expand the current branch without toggling it closed."""
+        if self.cursor_node is not None and self.cursor_node.allow_expand:
+            self.cursor_node.expand()
+
+    def action_collapse_node(self) -> None:
+        """Collapse the current branch without toggling it open."""
+        if self.cursor_node is not None:
+            self.cursor_node.collapse()
+
+
 class CanonicalizationUI(App[None]):
     """A read-only tree of canonical resources and their test specifications."""
 
@@ -206,7 +227,7 @@ class CanonicalizationUI(App[None]):
 
     def compose(self) -> ComposeResult:
         """Provide the navigable tree and its key legend."""
-        yield Tree[Entry]("HOME")
+        yield CanonicalTree("HOME")
         yield Static(
             "Enter/Space: expand or collapse · [property]: Hypothesis @given",
             id="legend",

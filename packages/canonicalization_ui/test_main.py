@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import pytest
+    from textual.widgets.tree import TreeNode
 
 
 def fixture_home(home: Path) -> Path:
@@ -137,6 +138,17 @@ def test_empty_or_malformed_home_metadata_is_readable(tmp_path: Path) -> None:
         raise AssertionError(msg)
 
 
+def find_tree_node(tree: Tree[Entry], key: str) -> TreeNode[Entry]:
+    """Find a resource in the UI by its stable key."""
+    pending = [tree.root]
+    while pending:
+        node = pending.pop()
+        if node.data and node.data.key == key:
+            return node
+        pending.extend(node.children)
+    raise AssertionError(key)
+
+
 def test_tree_navigation_refresh_and_quit_use_home_from_any_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -154,18 +166,22 @@ def test_tree_navigation_refresh_and_quit_use_home_from_any_directory(
             if tree.root.data is None or tree.root.data.key != str(tmp_path):
                 msg = "UI did not use HOME"
                 raise AssertionError(msg)
-            pending = [tree.root]
-            while pending:
-                node = pending.pop()
-                if node.data and node.data.key == str(package):
-                    tree.move_cursor(node)
-                    break
-                pending.extend(node.children)
-            await pilot.press("enter")
+            tree.move_cursor(find_tree_node(tree, str(package)))
+            await pilot.press("l", "l")
             await pilot.pause()
             if tree.cursor_node is None or not tree.cursor_node.is_expanded:
                 msg = "package did not expand"
                 raise AssertionError(msg)
+            package_node = tree.cursor_node
+            await pilot.press("j")
+            if tree.cursor_node is not package_node.children[0]:
+                msg = "j did not move down to the first test"
+                raise AssertionError(msg)
+            await pilot.press("k", "h", "h")
+            if tree.cursor_node is not package_node or package_node.is_expanded:
+                msg = "k/h did not return to and collapse the package"
+                raise AssertionError(msg)
+            await pilot.press("enter")
             (package / "test_main.py").write_text("def test_new(): pass\n")
             await pilot.press("r")
             await pilot.pause()
