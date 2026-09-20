@@ -8,15 +8,15 @@ python.pkgs.buildPythonPackage {
   installPhase = ''
     install -Dm644 main.py "$out/${python.sitePackages}/$pname/__init__.py"
     mkdir -p "$out/bin"
-    printf '%s\n' '#!${python.interpreter}' "from $pname import main" 'main()' > "$out/bin/$pname"
-    chmod 755 "$out/bin/$pname"
+    printf '%s\n' '#!${python.interpreter}' "from $pname import main" 'main()' > "$out/bin/${baseNameOf ./.}"
+    chmod 755 "$out/bin/${baseNameOf ./.}"
     if [ -d prm ]; then
       cp -R prm/ "$out/${python.sitePackages}/$pname/"
     fi
   '';
   meta = {
     description = "Canonicalize home repositories and manage flake repository layouts";
-    mainProgram = pname;
+    mainProgram = baseNameOf ./.;
   };
   passthru.python = python;
   propagatedBuildInputs = [

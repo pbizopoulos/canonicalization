@@ -277,3 +277,22 @@ def test_dash_case_packages_normalize_nix_names(repository: Path, kind: str) -> 
     _run(repository, "mv", "packages/dash-case", "packages/another-name")
     _run(repository, "canonicalize")
     _run(repository, "rm", "packages/another-name")
+
+
+def test_git_discovers_canonicalization_subcommand(repository: Path) -> None:
+    """Expose the installed CLI through Git's external command lookup."""
+    environment = dict(os.environ)
+    executable_directory = os.path.dirname(environment["PACKAGE_E2E_EXECUTABLE"])  # noqa: PTH120
+    environment["PATH"] = executable_directory + os.pathsep + environment["PATH"]
+    result = subprocess.run(
+        ["git", "canonicalization", "help"],  # noqa: S607
+        cwd=repository,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    if "usage: git canonicalization" not in result.stdout:
+        msg = "Git did not discover the canonicalization CLI"
+        raise AssertionError(msg)

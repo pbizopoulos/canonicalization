@@ -124,8 +124,8 @@ def profile(root: Path, default: str | None = None) -> str:
         )
     msg = (
         "cannot determine the repository type; run "
-        "'git_canonicalization init home' or "
-        "'git_canonicalization init flake REMOTE'"
+        "'git canonicalization init home' or "
+        "'git canonicalization init flake REMOTE'"
     )
     raise CommandError(
         msg,
@@ -1005,7 +1005,7 @@ def _python_required_edits(
     required = {
         "pname": "pname",
         "installPhase": install_phase,
-        "meta.mainProgram": "pname",
+        "meta.mainProgram": "baseNameOf ./." if "-" in package.name else "pname",
         "passthru.python": "python",
         "pyproject": "false",
         "src": "./.",
@@ -1484,6 +1484,12 @@ pkgs.writeTextFile {
             "baseNameOf ./.",
             'builtins.replaceStrings [ "-" ] [ "_" ] (baseNameOf ./.)',
         )
+        if kind == "python":
+            default = default.replace("$out/bin/$pname", "$out/bin/${baseNameOf ./.}")
+            default = default.replace(
+                "mainProgram = pname;",
+                "mainProgram = baseNameOf ./.;",
+            )
     files: dict[Path, str] = {root / "default.nix": default}
     if kind == "python":
         files[root / "main.py"] = (
@@ -1792,7 +1798,7 @@ def initialize_flake(remote: str) -> None:
 def parser() -> argparse.ArgumentParser:
     """Construct the public command-line parser."""
     result = argparse.ArgumentParser(
-        prog="git_canonicalization",
+        prog="git canonicalization",
         description="Canonicalize HOME and flake repositories.",
     )
     commands = result.add_subparsers(
@@ -1932,7 +1938,7 @@ def _dispatch_add(root: Path, options: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    """Dispatch the git_canonicalization CLI."""
+    """Dispatch the git canonicalization CLI."""
     arguments = _normalize_help_arguments(sys.argv[1:])
     try:
         options = parser().parse_args(arguments)
