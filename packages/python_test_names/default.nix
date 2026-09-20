@@ -15,14 +15,11 @@ python.pkgs.buildPythonPackage {
     fi
   '';
   meta = {
-    description = "Browse canonical repositories, packages, hosts, and tests";
+    description = "Print Python test names as sentences";
     mainProgram = pname;
   };
   passthru.python = python;
-  propagatedBuildInputs = [
-    pkgs.git
-    python.pkgs.textual
-  ];
+  propagatedBuildInputs = [ ];
   pyproject = false;
   src = ./.;
   strictDeps = true;

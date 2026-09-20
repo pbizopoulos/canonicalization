@@ -6,8 +6,6 @@
 !/LICENSE
 !/README
 !/checks/
-!/checks/canonicalization_ui_coverage/
-!/checks/canonicalization_ui_coverage/default.nix
 !/checks/git_canonicalization_coverage/
 !/checks/git_canonicalization_coverage/default.nix
 !/checks/nix_alphabetize_coverage/
@@ -20,6 +18,8 @@
 !/checks/python_hypothesis_coverage/default.nix
 !/checks/python_mutation_coverage/
 !/checks/python_mutation_coverage/default.nix
+!/checks/python_test_names_coverage/
+!/checks/python_test_names_coverage/default.nix
 !/checks/remove_empty_lines_coverage/
 !/checks/remove_empty_lines_coverage/default.nix
 !/checks/remove_new_lines_coverage/
@@ -28,10 +28,6 @@
 !/flake.nix
 !/formatter.nix
 !/packages/
-!/packages/canonicalization_ui/
-!/packages/canonicalization_ui/default.nix
-!/packages/canonicalization_ui/main.py
-!/packages/canonicalization_ui/test_main.py
 !/packages/git_canonicalization/
 !/packages/git_canonicalization/default.nix
 !/packages/git_canonicalization/main.py
@@ -56,6 +52,10 @@
 !/packages/python_mutation/default.nix
 !/packages/python_mutation/main.py
 !/packages/python_mutation/test_main.py
+!/packages/python_test_names/
+!/packages/python_test_names/default.nix
+!/packages/python_test_names/main.py
+!/packages/python_test_names/test_main.py
 !/packages/remove_empty_lines/
 !/packages/remove_empty_lines/default.nix
 !/packages/remove_empty_lines/main.py
