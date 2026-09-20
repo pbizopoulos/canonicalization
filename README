@@ -6,23 +6,19 @@ Impermanent NixOS
 Git-tracked $HOME with whitelisted gitignore
 Flake Git submodules with directory structure <hostname>/<repository-path>
 A subset of numtide/blueprint directory structure is applied (packages/, hosts/, checks/).
-
-Canonical state convergence:
-rebooting for Impermanent NixOS
-`nix fmt` for flake Git submodules
-`git canonical converge` for $HOME and flake Git submodules
-`git clean` (dangerous) for $HOME and flake Git submodules
-
-$HOME:
-Persistent changes in $HOME's directory structure can only be done with `git canonical`.
-More specifically `git canonical` is used for flake Git submodule initialization, package creation/renaming/removal, and directory structure convergence.
-Native Git is used for all other Git operations.
-
-Flake Git submodules:
-`nix flake check` is used for running the checks.
-
-Packages:
 `test_main.py` contains e2e tests derived by user requirements which names can also be used as a high-level specifications.
 `main.py` contains the code that satisfies `test_main.py`.
 `prm/` is reserved as an escape hatch for tracked source code outside `main.py`.
 `tmp/` is reserved for `main.py` runtime outputs.
+
+Non-Canonical state:
+Persistent changes in $HOME's directory structure can only be done with `git canonical`.
+More specifically `git canonical` is used for flake Git submodule initialization, package creation/renaming/removal, and directory structure convergence.
+Native Git is used for all other Git operations.
+
+Canonical state convergence:
+Rebooting for Impermanent NixOS
+`nix flake check` is used for running the checks.
+`nix fmt` for flake Git submodules
+`git canonical converge` for $HOME and flake Git submodules
+`git clean` (dangerous) for $HOME and flake Git submodules
