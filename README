@@ -8,12 +8,12 @@ Flake Git submodules with directory structure <hostname>/<repository-path>
 A subset of numtide/blueprint directory structure is applied (packages/, hosts/, checks/).
 `test_main.py` contains e2e tests derived by user requirements which names can also be used as a high-level specifications.
 `main.py` contains the code that satisfies `test_main.py`.
-`prm/` is reserved as an escape hatch for tracked source code outside `main.py`.
-`tmp/` is reserved for `main.py` runtime outputs.
+`prm/` contains tracked data/code that don't fit into `main.py`.
+`tmp/` contains runtime outputs of `main.py`.
 
-Runtime constrains:
+Runtime constraints:
 Persistent changes in $HOME's directory structure can only be done with `git canonical`.
-More specifically `git canonical` is used for flake Git submodule initialization, package creation/renaming/removal, and directory structure convergence.
+More specifically, `git canonical` is used for flake Git submodule initialization, package creation/renaming/removal, and directory structure convergence.
 
 Canonical state convergence:
 Rebooting for Impermanent NixOS
