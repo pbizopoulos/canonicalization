@@ -347,13 +347,21 @@ def main() -> None:
     parser.add_argument(
         "target",
         type=Path,
-        help="canonical packages/NAME directory or flake repository root",
+        nargs="?",
+        default=Path(),
+        help=(
+            "canonical packages/NAME directory or flake repository root "
+            "(default: current directory)"
+        ),
     )
     parser.add_argument(
         "--timeout",
         type=float,
         default=60.0,
-        help="seconds per baseline or mutation test suite (default: 60)",
+        help=(
+            "seconds per test-suite invocation, excluding environment build "
+            "(default: 60)"
+        ),
     )
     args = parser.parse_args()
     if not math.isfinite(args.timeout) or args.timeout <= 0:

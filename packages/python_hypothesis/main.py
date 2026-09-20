@@ -285,7 +285,12 @@ def main() -> None:
     parser.add_argument(
         "target",
         type=Path,
-        help="canonical packages/NAME directory or flake repository root",
+        nargs="?",
+        default=Path(),
+        help=(
+            "canonical packages/NAME directory or flake repository root "
+            "(default: current directory)"
+        ),
     )
     parser.add_argument(
         "--max-examples",
@@ -298,7 +303,8 @@ def main() -> None:
         type=float,
         default=60.0,
         help=(
-            "seconds per package test suite, excluding environment build (default: 60)"
+            "seconds per test-suite invocation, excluding environment build "
+            "(default: 60)"
         ),
     )
     args = parser.parse_args()

@@ -159,6 +159,37 @@ def test_a_package_without_mutable_code_completes_with_an_empty_report(
         raise AssertionError(result.stdout + result.stderr)
 
 
+@pytest.mark.parametrize("target_directory", [".", "packages/example"])
+def test_omitted_target_runs_current_directory(
+    tmp_path: Path,
+    target_directory: str,
+) -> None:
+    """Run the current package or repository without an explicit target."""
+    root = tmp_path / "source with spaces"
+    environment = _prepare_flake(
+        root,
+        "from packages.example import main\ndef test_import():\n"
+        "    assert main is not None\n",
+        "",
+    )
+    result = subprocess.run(  # noqa: S603
+        [os.environ["PACKAGE_E2E_EXECUTABLE"]],
+        cwd=root / target_directory,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+    if result.returncode:
+        raise AssertionError(result.stdout + result.stderr)
+    if not (root / "tmp").is_dir():
+        msg = "current-directory run did not retain diagnostics"
+        raise AssertionError(msg)
+    if target_directory == "." and "1 passed, 0 failed, 0 skipped" not in result.stdout:
+        raise AssertionError(result.stdout)
+
+
 def test_cli_errors_and_help(tmp_path: Path) -> None:
     """The installed CLI rejects invalid targets and nonfinite timeouts."""
     executable = os.environ["PACKAGE_E2E_EXECUTABLE"]
