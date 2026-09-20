@@ -1,5 +1,5 @@
 # Canonical
-High-level instructions and a tool for managing canonical persistent state (conventional fixpoint state) using Git and Nix flakes.
+Instructions and a tool for managing canonical persistent state using Git and Nix flakes.
 
 Canonical system:
 impermanent NixOS with a Git-tracked, whitelisted $HOME with flake Git submodules.
