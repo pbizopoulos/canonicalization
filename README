@@ -1,20 +1,25 @@
 # Canonical
-Instructions and a tool for managing canonical persistent state using Git and Nix flakes.
+Instructions and tools for managing canonical persistent state using Git and Nix flakes.
 
-Canonical system:
-impermanent NixOS with a Git-tracked, whitelisted $HOME with flake Git submodules.
+Canonical state:
+Impermanent NixOS
+Git-tracked $HOME with whitelisted gitignore
+Flake Git submodules with directory structure <hostname>/<repository-path>
+A subset of numtide/blueprint directory structure is applied (packages/, hosts/, checks/).
+
+Canonical state convergence:
+rebooting for Impermanent NixOS
+`nix fmt` for flake Git submodules
+`git canonical converge` for $HOME and flake Git submodules
+`git clean` (dangerous) for $HOME and flake Git submodules
 
 $HOME:
 Persistent changes in $HOME's directory structure can only be done with `git canonical`.
-More specifically `git canonical` is used for flake Git submodule initialization, package creation/renaming/removal, and directory structure convergence with `git canonical converge`.
-Home convergence reconciles submodule paths and URLs without requiring clean worktrees or advancing recorded submodule commits.
-Native Git is used for all other Git operations, including staging submodule commits and cleaning home content.
-Directory structure of the flake Git submodules is <hostname>/<repository-path>
+More specifically `git canonical` is used for flake Git submodule initialization, package creation/renaming/removal, and directory structure convergence.
+Native Git is used for all other Git operations.
 
 Flake Git submodules:
-A subset of numtide/blueprint directory structure is applied (packages/, hosts/, checks/).
-`nix fmt` and `nix flake check` is used for bringing and checking the flake Git submodules into canonical state (except `tmp/` presence).
-If required, return to canonical state is done with running `git clean` (dangerous) for $HOME and flake Git submodules and rebooting (impermanent NixOS).
+`nix flake check` is used for running the checks.
 
 Packages:
 `test_main.py` contains e2e tests derived by user requirements which names can also be used as a high-level specifications.
