@@ -11,10 +11,9 @@ A subset of numtide/blueprint directory structure is applied (packages/, hosts/,
 `prm/` is reserved as an escape hatch for tracked source code outside `main.py`.
 `tmp/` is reserved for `main.py` runtime outputs.
 
-Non-Canonical state:
+Runtime constrains:
 Persistent changes in $HOME's directory structure can only be done with `git canonical`.
 More specifically `git canonical` is used for flake Git submodule initialization, package creation/renaming/removal, and directory structure convergence.
-Native Git is used for all other Git operations.
 
 Canonical state convergence:
 Rebooting for Impermanent NixOS
