@@ -1,6 +1,6 @@
 { inputs, pkgs, ... }:
 let
-  pname = baseNameOf ./.;
+  pname = builtins.replaceStrings [ "-" ] [ "_" ] (baseNameOf ./.);
   python = pkgs.python3;
 in
 python.pkgs.buildPythonPackage {

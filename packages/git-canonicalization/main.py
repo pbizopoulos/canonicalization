@@ -498,8 +498,8 @@ def detect_packages(root: Path) -> list[Package]:
 
 def validate_name(name: str) -> None:
     """Enforce package naming conventions."""
-    if not re.fullmatch(r"[a-z0-9]+(?:_[a-z0-9]+)*", name):
-        msg = f"package name must use snake_case: {name}"
+    if not re.fullmatch(r"[a-z0-9]+(?:_[a-z0-9]+)*|[a-z0-9]+(?:-[a-z0-9]+)*", name):
+        msg = f"package name must use snake_case or dash-case: {name}"
         raise CommandError(msg)
 
 
@@ -830,7 +830,7 @@ pkgs.runCommand checkName
     ln -s "$src" "packages/${packageName}"
     export PYTHONPATH="$PWD:$PYTHONPATH"
     cd "$out"
-    PACKAGE_E2E_EXECUTABLE="${packageDrv}/bin/${packageName}" python -c 'import sys; from hypothesis import Phase, settings; settings.register_profile("coverage", phases=[Phase.explicit]); settings.load_profile("coverage"); import pytest; sys.exit(pytest.main(sys.argv[1:]))' -p no:cacheprovider --import-mode=importlib --cov="packages.${packageName}.main" --cov-report "html:$out/html" "$src/test_main.py"
+    PACKAGE_E2E_EXECUTABLE="${pkgs.lib.getExe packageDrv}" python -c 'import sys; from hypothesis import Phase, settings; settings.register_profile("coverage", phases=[Phase.explicit]); settings.load_profile("coverage"); import pytest; sys.exit(pytest.main(sys.argv[1:]))' -p no:cacheprovider --import-mode=importlib --cov="packages.${packageName}.main" --cov-report "html:$out/html" "$src/test_main.py"
   ''
 """  # noqa: E501
 
@@ -1015,12 +1015,17 @@ def _python_required_edits(
         name: _nix_binding_edits(document, argument, tuple(name.split(".")), value)
         for name, value in required.items()
     }
+    pname = (
+        'builtins.replaceStrings [ "-" ] [ "_" ] (baseNameOf ./.)'
+        if "-" in package.name
+        else "baseNameOf ./."
+    )
     if scope is None:
         edits["Python let bindings"] = [
             (
                 body.start_byte,
                 body.start_byte,
-                b"let pname = baseNameOf ./.; python = pkgs.python3; in ",
+                f"let pname = {pname}; python = pkgs.python3; in ".encode(),
             ),
         ]
     else:
@@ -1028,7 +1033,7 @@ def _python_required_edits(
             document,
             scope,
             ("pname",),
-            "baseNameOf ./.",
+            pname,
         )
         bindings = next(
             (node for node in scope.named_children if node.type == "binding_set"),
@@ -1474,6 +1479,11 @@ pkgs.writeTextFile {
 """,
     }
     default = defaults[kind].replace("__DESCRIPTION__", description_literal)
+    if "-" in name:
+        default = default.replace(
+            "baseNameOf ./.",
+            'builtins.replaceStrings [ "-" ] [ "_" ] (baseNameOf ./.)',
+        )
     files: dict[Path, str] = {root / "default.nix": default}
     if kind == "python":
         files[root / "main.py"] = (

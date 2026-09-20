@@ -240,7 +240,7 @@ let
   };
   wrapper = pkgs.writeShellApplication {
     name = "treefmt";
-    runtimeInputs = [ inputs.self.packages.${pkgs.stdenv.system}.git_canonicalization ];
+    runtimeInputs = [ inputs.self.packages.${pkgs.stdenv.system}.git-canonicalization ];
     text = ''
       git_canonicalization canonicalize
       exec ${rawFormatter}/bin/treefmt "$@"

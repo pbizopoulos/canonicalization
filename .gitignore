@@ -6,8 +6,8 @@
 !/LICENSE
 !/README
 !/checks/
-!/checks/git_canonicalization_coverage/
-!/checks/git_canonicalization_coverage/default.nix
+!/checks/git-canonicalization_coverage/
+!/checks/git-canonicalization_coverage/default.nix
 !/checks/nix_alphabetize_coverage/
 !/checks/nix_alphabetize_coverage/default.nix
 !/checks/nix_remove_defaults_coverage/
@@ -28,10 +28,10 @@
 !/flake.nix
 !/formatter.nix
 !/packages/
-!/packages/git_canonicalization/
-!/packages/git_canonicalization/default.nix
-!/packages/git_canonicalization/main.py
-!/packages/git_canonicalization/test_main.py
+!/packages/git-canonicalization/
+!/packages/git-canonicalization/default.nix
+!/packages/git-canonicalization/main.py
+!/packages/git-canonicalization/test_main.py
 !/packages/nix_alphabetize/
 !/packages/nix_alphabetize/default.nix
 !/packages/nix_alphabetize/main.py

@@ -174,7 +174,7 @@ def test_invalid_source_is_rejected_before_cleanup(repository: Path) -> None:
     "arguments",
     [
         ("mv", "packages/example", "hosts/example"),
-        ("add", "packages/bad-name", "python"),
+        ("add", "packages/bad--name", "python"),
         ("add", "hosts/bad-name"),
         ("rm", "../outside"),
     ],
@@ -261,3 +261,19 @@ def test_home_convergence_records_only_clean_published_submodules(
     ):
         message = "home convergence lost the published submodule state"
         raise AssertionError(message)
+
+
+@pytest.mark.parametrize("kind", ["python", "html", "latex", "nix"])
+def test_dash_case_packages_normalize_nix_names(repository: Path, kind: str) -> None:
+    """Keep dashed resource paths and normalize generated package names."""
+    _run(repository, "add", "packages/dash-case", kind)
+    package = repository / "packages/dash-case"
+    expected = 'builtins.replaceStrings [ "-" ] [ "_" ] (baseNameOf ./.)'
+    if expected not in (package / "default.nix").read_text():
+        msg = "generated Nix package name was not normalized"
+        raise AssertionError(msg)
+    _run(repository, "canonicalize")
+    _run(repository, "canonicalize", "--dry-run")
+    _run(repository, "mv", "packages/dash-case", "packages/another-name")
+    _run(repository, "canonicalize")
+    _run(repository, "rm", "packages/another-name")
