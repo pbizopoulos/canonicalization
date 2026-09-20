@@ -124,8 +124,8 @@ def profile(root: Path, default: str | None = None) -> str:
         )
     msg = (
         "cannot determine the repository type; run "
-        "'git canonicalization init home' or "
-        "'git canonicalization init flake REMOTE'"
+        "'git canonical init home' or "
+        "'git canonical init flake REMOTE'"
     )
     raise CommandError(
         msg,
@@ -187,11 +187,6 @@ def _clean_arguments(*, dry_run: bool, exclusions: tuple[str, ...]) -> list[str]
     for exclusion in exclusions:
         arguments.extend(("-e", exclusion))
     return arguments
-
-
-def _home_clean_arguments(*, dry_run: bool) -> list[str]:
-    """Build the HOME cleanup command."""
-    return _clean_arguments(dry_run=dry_run, exclusions=(f"/{SCRATCH_NAME}/",))
 
 
 def _flake_clean_arguments(*, dry_run: bool) -> list[str]:
@@ -324,6 +319,22 @@ def _converge_home_repository(
     """Converge one home submodule record and checkout."""
     actual = Path(repository["path"])
     changed = False
+    if actual != expected:
+        _change(f"move '{actual}' to '{expected}'", dry_run=dry_run)
+        changed = True
+        if not dry_run:
+            (root / expected).parent.mkdir(parents=True, exist_ok=True)
+            git(root, ["mv", "--", str(actual), str(expected)])
+            git(
+                root,
+                [
+                    "config",
+                    "--file",
+                    ".gitmodules",
+                    f"submodule.{repository['name']}.path",
+                    expected.as_posix(),
+                ],
+            )
     if repository["name"] != expected.as_posix():
         _change(
             f"rename submodule '{repository['name']}' to '{expected.as_posix()}'",
@@ -342,22 +353,23 @@ def _converge_home_repository(
                     f"submodule.{expected.as_posix()}",
                 ],
             )
-    if actual != expected:
-        _change(f"move '{actual}' to '{expected}'", dry_run=dry_run)
-        changed = True
-        if not dry_run:
-            (root / expected).parent.mkdir(parents=True, exist_ok=True)
-            git(root, ["mv", "--", str(actual), str(expected)])
-            git(
+            configured = git(
                 root,
-                [
-                    "config",
-                    "--file",
-                    ".gitmodules",
-                    f"submodule.{expected.as_posix()}.path",
-                    expected.as_posix(),
-                ],
+                ["config", "--get", f"submodule.{repository['name']}.url"],
+                check=False,
             )
+            if configured.returncode == 0:
+                git(
+                    root,
+                    [
+                        "config",
+                        "--rename-section",
+                        f"submodule.{repository['name']}",
+                        f"submodule.{expected.as_posix()}",
+                    ],
+                )
+    if changed and not dry_run:
+        git(root, ["add", "--", ".gitmodules"])
     checkout = root / (actual if dry_run and actual != expected else expected)
     if not (checkout / ".git").exists():
         _change(f"initialize submodule '{expected}'", dry_run=dry_run)
@@ -383,7 +395,7 @@ def _converge_home_checkout(
     *,
     dry_run: bool,
 ) -> bool:
-    """Converge a present submodule's origin and indexed commit."""
+    """Synchronize a present submodule URL without changing its recorded commit."""
     changed = False
     origin = git(checkout, ["remote", "get-url", "origin"], check=False)
     if origin.returncode != 0:
@@ -404,37 +416,11 @@ def _converge_home_checkout(
             ):
                 msg = f"{expected}: origin does not match .gitmodules URL after sync"
                 raise CommandError(msg)
-    status = git(checkout, ["status", "--porcelain=v1", "--untracked-files=all"])
-    if status.stdout:
-        msg = f"{expected}: submodule worktree is dirty"
-        raise CommandError(msg)
-    head = git(checkout, ["rev-parse", "HEAD"]).stdout.strip()
-    remote_refs = git(
-        checkout,
-        [
-            "for-each-ref",
-            "--format=%(refname)",
-            "--contains",
-            head,
-            "refs/remotes/origin/",
-        ],
-    ).stdout.splitlines()
-    if not remote_refs:
-        msg = f"{expected}: HEAD is not known to an origin remote-tracking ref"
-        raise CommandError(msg)
-    indexed = git(root, ["ls-files", "--stage", "--", str(expected)]).stdout.split()
-    indexed_head = indexed[1] if len(indexed) >= 2 and indexed[0] == "160000" else None  # noqa: PLR2004
-    if indexed_head != head:
-        _change(f"stage submodule '{expected}' at {head}", dry_run=dry_run)
-        changed = True
-        if not dry_run:
-            git(root, ["add", "--", str(expected)])
     return changed
 
 
 def check_home(root: Path, dry_run: bool) -> list[dict[str, str]]:  # noqa: FBT001
     """Converge a canonical home repository."""
-    changed = _converge_home_ignore(root, dry_run=dry_run)
     repositories = home_repositories(root)
     actual_paths = [Path(repository["path"]) for repository in repositories]
     expected_paths = [
@@ -446,6 +432,21 @@ def check_home(root: Path, dry_run: bool) -> list[dict[str, str]]:  # noqa: FBT0
     if len(set(actual_paths)) != len(actual_paths):
         msg = "duplicate configured repository path"
         raise CommandError(msg)
+    for actual, expected in zip(actual_paths, expected_paths, strict=True):
+        if actual != expected and (root / expected).exists():
+            msg = f"target already exists: {expected}"
+            raise CommandError(msg)
+    if (
+        actual_paths != expected_paths
+        and git(
+            root,
+            ["diff", "--quiet", "--", ".gitmodules"],
+            check=False,
+        ).returncode
+    ):
+        msg = "stage .gitmodules with git add before moving submodules"
+        raise CommandError(msg)
+    changed = _converge_home_ignore(root, dry_run=dry_run)
     for repository, expected in zip(repositories, expected_paths, strict=True):
         changed |= _converge_home_repository(
             root,
@@ -453,14 +454,6 @@ def check_home(root: Path, dry_run: bool) -> list[dict[str, str]]:  # noqa: FBT0
             expected,
             dry_run=dry_run,
         )
-    if not dry_run and repositories:
-        git(root, ["add", "--", ".gitmodules"])
-    clean = git(root, _home_clean_arguments(dry_run=dry_run), check=False)
-    if clean.returncode != 0:
-        raise CommandError(clean.stderr.strip() or "git clean failed")
-    if clean.stdout:
-        print(clean.stdout, end="")  # noqa: T201
-        changed = True
     if dry_run and changed:
         msg_0 = "home repository would change"
         raise CommandError(msg_0)
@@ -1751,12 +1744,12 @@ def initialize_flake(remote: str) -> None:
     try:
         flake = directory / "flake.nix"
         flake.write_text(
-            '{ inputs.canonicalization.url = "github:pbizopoulos/canonicalization"; outputs = inputs: inputs.canonicalization.blueprint { inherit inputs; }; }\n',  # noqa: E501
+            '{ inputs.canonical.url = "github:pbizopoulos/canonical"; outputs = inputs: inputs.canonical.blueprint { inherit inputs; }; }\n',  # noqa: E501
             encoding="utf-8",
         )
         (directory / "README").write_text(readme, encoding="utf-8")
         _run(
-            [os.environ.get("GIT_CANONICALIZATION_NIX", "nix"), "flake", "lock"],
+            [os.environ.get("GIT_CANONICAL_NIX", "nix"), "flake", "lock"],
             cwd=directory,
         )
         detected_packages = detect_packages(directory)
@@ -1769,7 +1762,7 @@ def initialize_flake(remote: str) -> None:
             encoding="utf-8",
         )
         _run(
-            [os.environ.get("GIT_CANONICALIZATION_NIX", "nix"), "fmt"],
+            [os.environ.get("GIT_CANONICAL_NIX", "nix"), "fmt"],
             cwd=directory,
         )
         git(directory, ["add", "--all"])
@@ -1798,8 +1791,8 @@ def initialize_flake(remote: str) -> None:
 def parser() -> argparse.ArgumentParser:
     """Construct the public command-line parser."""
     result = argparse.ArgumentParser(
-        prog="git canonicalization",
-        description="Canonicalize HOME and flake repositories.",
+        prog="git canonical",
+        description="Manage canonical persistent state in HOME and flake repositories.",
     )
     commands = result.add_subparsers(
         dest="command",
@@ -1882,18 +1875,18 @@ def parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print moves without changing the repository",
     )
-    canonicalize = commands.add_parser(
-        "canonicalize",
+    converge = commands.add_parser(
+        "converge",
         help="converge the repository to its canonical layout",
         description="Converge the repository to its canonical layout.",
     )
-    canonicalize.add_argument(
+    converge.add_argument(
         "-n",
         "--dry-run",
         action="store_true",
         help="report required actions without changing the repository",
     )
-    canonicalize.add_argument("--source", type=Path, help=argparse.SUPPRESS)
+    converge.add_argument("--source", type=Path, help=argparse.SUPPRESS)
     return result
 
 
@@ -1938,13 +1931,13 @@ def _dispatch_add(root: Path, options: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    """Dispatch the git canonicalization CLI."""
+    """Dispatch the git canonical CLI."""
     arguments = _normalize_help_arguments(sys.argv[1:])
     try:
         options = parser().parse_args(arguments)
         if _dispatch_init(options):
             return
-        if options.command == "canonicalize" and options.source is not None:
+        if options.command == "converge" and options.source is not None:
             validate_flake_source(options.source.resolve())
             return
         root = repository_root()
@@ -1954,7 +1947,7 @@ def main() -> None:
             raise CommandError(  # noqa: TRY301
                 msg,
             )
-        if options.command == "canonicalize":
+        if options.command == "converge":
             check_home(
                 root,
                 options.dry_run,

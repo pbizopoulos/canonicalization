@@ -15,7 +15,7 @@ python.pkgs.buildPythonPackage {
     fi
   '';
   meta = {
-    description = "Canonicalize home repositories and manage flake repository layouts";
+    description = "Manage canonical persistent state in home and flake repositories";
     mainProgram = baseNameOf ./.;
   };
   passthru.python = python;

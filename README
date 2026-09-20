@@ -1,13 +1,14 @@
-# Canonicalization
-High-level instructions and a tool for using canonical (conventional fixpoint state) systems based on Git and Nix flakes.
+# Canonical
+High-level instructions and a tool for managing canonical persistent state (conventional fixpoint state) using Git and Nix flakes.
 
 Canonical system:
 impermanent NixOS with a Git-tracked, whitelisted $HOME with flake Git submodules.
 
 $HOME:
-Persistent changes in $HOME's directory structure can only be done with `git canonicalization`.
-More specifically `git canonicalization` is used for flake Git submodule initialization, package creation/renaming/removal, and directory structure convergence.
-Native Git is used for all other Git operations.
+Persistent changes in $HOME's directory structure can only be done with `git canonical`.
+More specifically `git canonical` is used for flake Git submodule initialization, package creation/renaming/removal, and directory structure convergence with `git canonical converge`.
+Home convergence reconciles submodule paths and URLs without requiring clean worktrees or advancing recorded submodule commits.
+Native Git is used for all other Git operations, including staging submodule commits and cleaning home content.
 Directory structure of the flake Git submodules is <hostname>/<repository-path>
 
 Flake Git submodules:

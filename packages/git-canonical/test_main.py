@@ -66,7 +66,7 @@ def test_package_and_host_lifecycle(repository: Path) -> None:
     resource.write_text("keep this resource", encoding="utf-8")
     tests.write_text("def test_result():\n    pass\n", encoding="utf-8")
     _run(root, "add", "hosts/demoHost")
-    _run(root, "canonicalize")
+    _run(root, "converge")
     tracked = _git(root, "ls-files").splitlines()
     for name in (
         "packages/report/test_main.py",
@@ -114,8 +114,8 @@ def test_package_and_host_lifecycle(repository: Path) -> None:
     ):
         message = "removed resources left package or check directories behind"
         raise AssertionError(message)
-    _run(root, "canonicalize")
-    _run(root, "canonicalize", "--dry-run")
+    _run(root, "converge")
+    _run(root, "converge", "--dry-run")
 
 
 def test_convergence_preserves_source_and_scratch_and_is_idempotent(
@@ -133,7 +133,7 @@ def test_convergence_preserves_source_and_scratch_and_is_idempotent(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(name, encoding="utf-8")
     (root / "discarded").write_text("generated artifact", encoding="utf-8")
-    _run(root, "canonicalize")
+    _run(root, "converge")
     if (root / "discarded").exists():
         message = "convergence retained an unsupported artifact"
         raise AssertionError(message)
@@ -144,7 +144,7 @@ def test_convergence_preserves_source_and_scratch_and_is_idempotent(
         raise AssertionError(tracked)
     before = {name: (root / name).read_bytes() for name in tracked}
     index = _git(root, "ls-files", "--stage")
-    _run(root, "canonicalize")
+    _run(root, "converge")
     if before != {
         name: (root / name).read_bytes() for name in tracked
     } or index != _git(root, "ls-files", "--stage"):
@@ -162,7 +162,7 @@ def test_invalid_source_is_rejected_before_cleanup(repository: Path) -> None:
     source.write_text("def test_misplaced(): pass\n", encoding="utf-8")
     artifact = repository / "work-in-progress"
     artifact.write_text("keep", encoding="utf-8")
-    result = _run(repository, "canonicalize", code=1)
+    result = _run(repository, "converge", code=1)
     if "test_main.py" not in result.stderr or artifact.read_text() != "keep":
         raise AssertionError(result.stderr)
     if source.read_text() != "def test_misplaced(): pass\n":
@@ -193,7 +193,7 @@ def test_invalid_resource_requests_do_not_change_the_checkout(
 
 def test_cli_help_and_retired_commands(tmp_path: Path) -> None:
     """Help works outside a repository and retired commands fail clearly."""
-    for command in ((), ("add",), ("mv",), ("rm",), ("init",), ("canonicalize",)):
+    for command in ((), ("add",), ("mv",), ("rm",), ("init",), ("converge",)):
         option = _run(tmp_path, *command, "--help").stdout
         alias = _run(tmp_path, "help", *command).stdout
         if option != alias or "usage:" not in option:
@@ -202,10 +202,9 @@ def test_cli_help_and_retired_commands(tmp_path: Path) -> None:
     _run(tmp_path, "check", code=2)
 
 
-def test_home_convergence_records_only_clean_published_submodules(
-    tmp_path: Path,
-) -> None:
-    """Advance a gitlink only after its checkout is clean and known to origin."""
+@pytest.fixture
+def home_repository(tmp_path: Path) -> Path:
+    """Create a home repository with a locally initialized submodule."""
     root = tmp_path
     relative = "forge.example/owner/demo"
     checkout = root / relative
@@ -233,34 +232,106 @@ def test_home_convergence_records_only_clean_published_submodules(
         encoding="utf-8",
     )
     _git(root, "add", "--force", ".gitignore", ".gitmodules", relative)
+    return root
+
+
+def test_home_convergence_preserves_dirty_and_unpublished_submodule_state(
+    home_repository: Path,
+) -> None:
+    """Leave dirty files and gitlink advancement to native Git."""
+    root = home_repository
+    relative = "forge.example/owner/demo"
+    checkout = root / relative
+    source = checkout / "README"
+    first = _git(checkout, "rev-parse", "HEAD").strip()
     source.write_text("second", encoding="utf-8")
-    rejected = _run(root, "canonicalize", code=1)
-    if "dirty" not in rejected.stderr or first not in _git(
-        root,
-        "ls-files",
-        "--stage",
-        relative,
-    ):
-        raise AssertionError(rejected.stderr)
+    _run(root, "converge")
+    if source.read_text() != "second":
+        message = "convergence changed dirty submodule content"
+        raise AssertionError(message)
     _git(checkout, "add", "README")
     _git(checkout, "commit", "--quiet", "-m", "second")
-    rejected = _run(root, "canonicalize", code=1)
-    if "remote-tracking" not in rejected.stderr or first not in _git(
-        root,
-        "ls-files",
-        "--stage",
-        relative,
-    ):
-        raise AssertionError(rejected.stderr)
     second = _git(checkout, "rev-parse", "HEAD").strip()
-    _git(checkout, "update-ref", "refs/remotes/origin/main", second)
-    _run(root, "canonicalize")
-    if (
-        second not in _git(root, "ls-files", "--stage", relative)
-        or source.read_text() != "second"
-    ):
-        message = "home convergence lost the published submodule state"
+    for published in (False, True):
+        if published:
+            _git(checkout, "update-ref", "refs/remotes/origin/main", second)
+        _run(root, "converge")
+        if first not in _git(root, "ls-files", "--stage", relative):
+            message = "convergence advanced the recorded submodule commit"
+            raise AssertionError(message)
+    _git(root, "add", relative)
+    if second not in _git(root, "ls-files", "--stage", relative):
+        message = "native Git could not advance the submodule commit"
         raise AssertionError(message)
+
+
+def test_home_rename_preserves_dirty_checkout_and_recorded_commit(
+    home_repository: Path,
+) -> None:
+    """Move dirty submodules safely and reject collisions before mutation."""
+    root = home_repository
+    relative = "forge.example/owner/demo"
+    checkout = root / relative
+    source = checkout / "README"
+    first = _git(checkout, "rev-parse", "HEAD").strip()
+    source.write_text("second", encoding="utf-8")
+    _git(checkout, "add", "README")
+    _git(checkout, "commit", "--quiet", "-m", "second")
+    _git(root, "submodule", "absorbgitdirs", relative)
+    _git(root, "config", f"submodule.{relative}.url", "git@forge.example:owner/demo")
+    destination = "forge.example/owner/renamed"
+    _git(
+        root,
+        "config",
+        "--file",
+        ".gitmodules",
+        f"submodule.{relative}.url",
+        "git@forge.example:owner/renamed",
+    )
+    source.write_text("staged", encoding="utf-8")
+    _git(checkout, "add", "README")
+    source.write_text("unstaged", encoding="utf-8")
+    (checkout / "untracked").write_text("keep", encoding="utf-8")
+    (root / "unrelated").write_text("keep home file", encoding="utf-8")
+    before = _git(checkout, "status", "--porcelain")
+    indexed = _git(checkout, "show", ":README")
+    target = root / destination
+    target.mkdir()
+    rejected = _run(root, "converge", code=1)
+    if "target already exists" not in rejected.stderr or not checkout.exists():
+        raise AssertionError(rejected.stderr)
+    if destination in _git(
+        root,
+        "config",
+        "--file",
+        ".gitmodules",
+        f"submodule.{relative}.path",
+    ):
+        message = "collision changed the submodule path"
+        raise AssertionError(message)
+    target.rmdir()
+    rejected = _run(root, "converge", code=1)
+    if "stage .gitmodules" not in rejected.stderr or not checkout.exists():
+        raise AssertionError(rejected.stderr)
+    _git(root, "add", ".gitmodules")
+    _run(root, "converge", "--dry-run", code=1)
+    if not checkout.exists() or target.exists():
+        message = "dry-run moved the checkout"
+        raise AssertionError(message)
+    _run(root, "converge")
+    if (
+        checkout.exists()
+        or _git(target, "status", "--porcelain") != before
+        or _git(target, "show", ":README") != indexed
+        or (target / "untracked").read_text() != "keep"
+        or (root / "unrelated").read_text() != "keep home file"
+        or first not in _git(root, "ls-files", "--stage", destination)
+        or _git(target, "remote", "get-url", "origin").strip()
+        != "git@forge.example:owner/renamed"
+    ):
+        message = "home rename failed to preserve Git state or synchronize the URL"
+        raise AssertionError(message)
+    _run(root, "converge", "--dry-run")
 
 
 @pytest.mark.parametrize("kind", ["python", "html", "latex", "nix"])
@@ -272,20 +343,20 @@ def test_dash_case_packages_normalize_nix_names(repository: Path, kind: str) -> 
     if expected not in (package / "default.nix").read_text():
         msg = "generated Nix package name was not normalized"
         raise AssertionError(msg)
-    _run(repository, "canonicalize")
-    _run(repository, "canonicalize", "--dry-run")
+    _run(repository, "converge")
+    _run(repository, "converge", "--dry-run")
     _run(repository, "mv", "packages/dash-case", "packages/another-name")
-    _run(repository, "canonicalize")
+    _run(repository, "converge")
     _run(repository, "rm", "packages/another-name")
 
 
-def test_git_discovers_canonicalization_subcommand(repository: Path) -> None:
+def test_git_discovers_canonical_subcommand(repository: Path) -> None:
     """Expose the installed CLI through Git's external command lookup."""
     environment = dict(os.environ)
     executable_directory = os.path.dirname(environment["PACKAGE_E2E_EXECUTABLE"])  # noqa: PTH120
     environment["PATH"] = executable_directory + os.pathsep + environment["PATH"]
     result = subprocess.run(
-        ["git", "canonicalization", "help"],  # noqa: S607
+        ["git", "canonical", "help"],  # noqa: S607
         cwd=repository,
         env=environment,
         capture_output=True,
@@ -293,6 +364,6 @@ def test_git_discovers_canonicalization_subcommand(repository: Path) -> None:
         check=True,
         timeout=30,
     )
-    if "usage: git canonicalization" not in result.stdout:
-        msg = "Git did not discover the canonicalization CLI"
+    if "usage: git canonical" not in result.stdout:
+        msg = "Git did not discover the canonical CLI"
         raise AssertionError(msg)
