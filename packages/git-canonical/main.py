@@ -812,9 +812,9 @@ let
     ps:
     packageDrv.propagatedBuildInputs
     ++ [
+      ps.coverage
       ps.hypothesis
       ps.pytest
-      ps.pytest-cov
     ]
   );
 in
@@ -825,11 +825,40 @@ pkgs.runCommand checkName
   }
   ''
     export HOME="$(mktemp -d)"
-    mkdir -p "$out/html" packages
+    mkdir -p "$out/html" packages "$TMPDIR/coverage-startup"
     ln -s "$src" "packages/${packageName}"
-    export PYTHONPATH="$PWD:$PYTHONPATH"
+    export COVERAGE_FILE="$out/.coverage"
+    export COVERAGE_PROCESS_START="$TMPDIR/coverage.ini"
+    cat > "$COVERAGE_PROCESS_START" <<EOF
+    [run]
+    parallel = true
+    data_file = $out/.coverage
+    source =
+        $src
+        ${packageDrv}/${packageDrv.python.sitePackages}/${packageDrv.pname}
+    omit =
+        */test_main.py
+        */prm/*
+    EOF
+    printf '%s\\n' 'import coverage; coverage.process_startup()' > "$TMPDIR/coverage-startup/sitecustomize.py"
+    export PYTHONPATH="$TMPDIR/coverage-startup:$PWD:${pythonEnv}/${packageDrv.python.sitePackages}:$PYTHONPATH"
     cd "$out"
-    PACKAGE_E2E_EXECUTABLE="${pkgs.lib.getExe packageDrv}" python -c 'import sys; from hypothesis import Phase, settings; settings.register_profile("coverage", phases=[Phase.explicit]); settings.load_profile("coverage"); import pytest; sys.exit(pytest.main(sys.argv[1:]))' -p no:cacheprovider --import-mode=importlib --cov="packages.${packageName}.main" --cov-report "html:$out/html" "$src/test_main.py"
+    PACKAGE_E2E_EXECUTABLE="${pkgs.lib.getExe packageDrv}" python -c 'import sys; from hypothesis import Phase, settings; settings.register_profile("coverage", phases=[Phase.explicit]); settings.load_profile("coverage"); import pytest; sys.exit(pytest.main(sys.argv[1:]))' -p no:cacheprovider --import-mode=importlib "$src/test_main.py"
+    unset COVERAGE_PROCESS_START
+    python -m coverage combine --rcfile="$TMPDIR/coverage.ini"
+    python - <<'PYTHON'
+    import os
+    import coverage
+    data = coverage.CoverageData()
+    data.read()
+    mapped = coverage.CoverageData(basename=".coverage-mapped")
+    installed = "${packageDrv}/${packageDrv.python.sitePackages}/${packageDrv.pname}/__init__.py"
+    mapped.update(data, map_path=lambda path: os.environ["src"] + "/main.py" if path == installed else path)
+    mapped.write()
+    os.replace(mapped.data_filename(), data.data_filename())
+    PYTHON
+    python -m coverage html --rcfile="$TMPDIR/coverage.ini" -d "$out/html"
+    python -m coverage json --rcfile="$TMPDIR/coverage.ini" -o "$out/coverage.json"
   ''
 """  # noqa: E501
 
@@ -2510,6 +2539,100 @@ def _dispatch_test_runner(
     sys.exit(0 if success else 1)
 
 
+def _build_package_coverage(package: Path, system: str) -> None:
+    """Build the existing Nix coverage check and print its HTML report path."""
+    root = _test_target_root(package)
+    check = root / "checks" / f"{package.name}_coverage" / "default.nix"
+    if not check.is_file():
+        message = f"missing {check}; run git canonical converge to generate checks"
+        raise CommandError(message)
+    installable = f"git+{root.as_uri()}#checks.{system}.{package.name}_coverage"
+    sys.stdout.write(f"Building coverage for {package.name}...\n")
+    sys.stdout.flush()
+    completed = subprocess.run(  # noqa: S603
+        [  # noqa: S607
+            "nix",
+            "build",
+            "--no-link",
+            "--no-write-lock-file",
+            "--print-out-paths",
+            installable,
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if completed.returncode:
+        message = f"coverage check failed for {package.name}"
+        raise CommandError(message)
+    outputs = completed.stdout.splitlines()
+    if len(outputs) != 1:
+        message = f"expected one coverage output for {package.name}"
+        raise CommandError(message)
+    report = Path(outputs[0]) / "html" / "index.html"
+    if not report.is_file():
+        message = (
+            f"coverage check produced no HTML report for {package.name}; "
+            "run git canonical converge to update the coverage checks"
+        )
+        raise CommandError(message)
+    sys.stdout.write(f"{package.name}: {report}\n")
+
+
+def _run_coverage(target: Path) -> bool:
+    """Build package checks independently, preserving caching and reporting failures."""
+    repository = (target / "flake.nix").is_file()
+    if repository:
+        directory = target / "packages"
+        packages = (
+            sorted(
+                path
+                for path in directory.iterdir()
+                if path.is_dir()
+                and not path.is_symlink()
+                and (path / "main.py").is_file()
+            )
+            if directory.is_dir()
+            else []
+        )
+        if not packages:
+            message = f"no Python packages found under {directory}"
+            raise CommandError(message)
+    else:
+        _test_target_root(target)
+        packages = [target]
+    system = _run(
+        ["nix", "eval", "--impure", "--raw", "--expr", "builtins.currentSystem"],
+    ).stdout.strip()
+    outcomes: dict[str, str] = {}
+    for package in packages:
+        try:
+            if repository and (
+                not (package / "test_main.py").is_file()
+                or not has_python_tests(package / "test_main.py")
+            ):
+                outcomes[package.name] = "skipped"
+                sys.stdout.write(f"Skipping {package.name}: no Python tests\n")
+                continue
+            _build_package_coverage(package, system)
+            outcomes[package.name] = "passed"
+        except (CommandError, OSError) as error:
+            outcomes[package.name] = "failed"
+            sys.stderr.write(f"git canonical coverage: {package.name}: {error}\n")
+    if repository:
+        sys.stdout.write("\nRepository summary:\n")
+        for name, status in outcomes.items():
+            sys.stdout.write(f"  {name}: {status}\n")
+        sys.stdout.write(
+            ", ".join(
+                f"{sum(value == status for value in outcomes.values())} {status}"
+                for status in ("passed", "failed", "skipped")
+            )
+            + "\n",
+        )
+    return "failed" not in outcomes.values()
+
+
 def parser() -> argparse.ArgumentParser:
     """Construct the public command-line parser."""
     result = argparse.ArgumentParser(
@@ -2613,6 +2736,23 @@ def parser() -> argparse.ArgumentParser:
         "test-names",
         help="list Python test sentences or inspect their Git changes",
     )
+    coverage = commands.add_parser(
+        "coverage",
+        help="build Nix coverage checks and print HTML report paths",
+        description="Build existing Nix coverage checks with explicit test examples.",
+        epilog=(
+            "Repository targets skip packages without tests and summarize results. "
+            "Builds reuse Nix's cache, leave the checkout unchanged, and store HTML "
+            "reports in the Nix store. Use converge to create or update checks."
+        ),
+    )
+    coverage.add_argument(
+        "target",
+        type=Path,
+        nargs="?",
+        default=Path(),
+        help="canonical packages/NAME or flake root (default: current directory)",
+    )
     for command, description in (
         ("hypothesis", "run generated property tests in isolated package copies"),
         ("mutation", "run Cosmic Ray mutation tests in isolated package copies"),
@@ -2658,6 +2798,13 @@ def _dispatch_standalone_command(
     cli: argparse.ArgumentParser,
 ) -> bool:
     """Dispatch commands that do not require discovering the current repository."""
+    if options.command == "coverage":
+        try:
+            success = _run_coverage(options.target.resolve())
+        except KeyboardInterrupt:
+            sys.stderr.write("git canonical coverage: interrupted\n")
+            sys.exit(130)
+        sys.exit(0 if success else 1)
     if options.command in {"hypothesis", "mutation"}:
         _dispatch_test_runner(options, cli)
         return True

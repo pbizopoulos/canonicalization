@@ -203,6 +203,7 @@ def test_cli_help_and_retired_commands(tmp_path: Path) -> None:
         ("init",),
         ("converge",),
         ("test-names",),
+        ("coverage",),
         ("hypothesis",),
         ("mutation",),
     ):
@@ -1433,3 +1434,122 @@ def test_runners_support_dash_case_and_execute_copied_git_subcommands(
     if (root / "packages/git-canonical/main.py").read_text() != source:
         message = "runner changed the original dash-case package"
         raise AssertionError(message)
+
+
+def _prepare_coverage_flake(
+    root: Path,
+    *,
+    failure: str | None = None,
+) -> dict[str, str]:
+    """Provide real offline Nix check builds without downloading dependencies."""
+    environment = _prepare_runner_flake(root, "def test_example(): pass\n")
+    environment["NIX_CONFIG"] += (
+        "sandbox = false\nsandbox-build-dir = /coverage-build\neval-cache = false\n"
+    )
+    system = subprocess.run(
+        ["nix", "eval", "--impure", "--raw", "--expr", "builtins.currentSystem"],  # noqa: S607
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    ).stdout
+    checks = []
+    for name in ("example", "z-last"):
+        if name != "example":
+            _make_runner_target(root, "", "def test_last(): pass\n", name=name)
+        directory = root / "checks" / f"{name}_coverage"
+        directory.mkdir(parents=True)
+        (directory / "default.nix").write_text("{}\n")
+        script = (
+            "import os\nfrom pathlib import Path\n"
+            "output = Path(os.environ['out'])\n"
+            "output.mkdir()\n"
+        )
+        if name == "example" and failure == "build":
+            script += "raise SystemExit(1)\n"
+        elif name != "example" or failure != "report":
+            script += (
+                "(output / 'html').mkdir()\n"
+                "(output / 'html/index.html').write_text('coverage')\n"
+            )
+        checks.append(
+            f"{json.dumps(name + '_coverage')} = builtins.derivation {{ "
+            f"name = {json.dumps(name + '-coverage')}; system = {json.dumps(system)}; "
+            f"builder = {json.dumps(sys.executable)}; "
+            f'args = [ "-c" {json.dumps(script)} ]; }};',
+        )
+    (root / "flake.nix").write_text(
+        "{ outputs = _: { checks."
+        + json.dumps(system)
+        + " = { "
+        + " ".join(checks)
+        + " }; }; }\n",
+    )
+    _git(root, "add", ".")
+    return environment
+
+
+@pytest.mark.parametrize("target", [".", "packages/example", "packages/z-last"])
+def test_coverage_builds_existing_checks_and_preserves_the_checkout(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    """Build cached HTML reports for explicit and current-directory targets."""
+    root = tmp_path / "source with spaces"
+    environment = _prepare_coverage_flake(root)
+    before = _git(root, "status", "--porcelain")
+    explicit = _run_runner_cli(root / target, environment, "coverage")
+    current = subprocess.run(  # noqa: S603
+        [os.environ["PACKAGE_E2E_EXECUTABLE"], "coverage"],
+        cwd=root / target,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+    for result in (explicit, current):
+        if result.returncode or "/html/index.html" not in result.stdout:
+            raise AssertionError(result.stdout + result.stderr)
+    if explicit.stdout != current.stdout:
+        raise AssertionError(current.stdout)
+    if _git(root, "status", "--porcelain") != before or (root / "result").exists():
+        message = "coverage changed the checkout"
+        raise AssertionError(message)
+    if (root / "tmp").exists() or (root / "flake.lock").exists():
+        message = "coverage created local campaign state"
+        raise AssertionError(message)
+
+
+@pytest.mark.parametrize("failure", ["build", "report", "check", "syntax"])
+def test_coverage_continues_after_failures_and_skips_packages_without_tests(
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    """A failed or missing report cannot hide a later package's successful check."""
+    root = tmp_path / "source"
+    environment = _prepare_coverage_flake(root, failure=failure)
+    if failure == "check":
+        (root / "checks/example_coverage/default.nix").unlink()
+    if failure == "syntax":
+        (root / "packages/example/test_main.py").write_text("def invalid(")
+    untested = _make_runner_target(root, "", "", name="untested")
+    (untested / "test_main.py").unlink()
+    (root / "flake.nix").write_text(_git(root, "show", ":flake.nix"))
+    result = _run_runner_cli(root, environment, "coverage")
+    if result.returncode != 1 or "1 passed, 1 failed, 1 skipped" not in result.stdout:
+        raise AssertionError(result.stdout + result.stderr)
+    if "z-last:" not in result.stdout or "/html/index.html" not in result.stdout:
+        raise AssertionError(result.stdout)
+    if "git canonical coverage: example:" not in result.stderr:
+        raise AssertionError(result.stderr)
+
+
+def test_coverage_rejects_invalid_targets_without_starting_a_build(
+    tmp_path: Path,
+) -> None:
+    """Coverage requires an existing canonical package or nonempty Python repository."""
+    _run(tmp_path, "coverage", code=1)
+    (tmp_path / "flake.nix").write_text("{}")
+    _run(tmp_path, "coverage", code=1)
