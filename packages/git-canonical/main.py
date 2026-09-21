@@ -631,6 +631,22 @@ def _refresh_gitignore(root: Path) -> None:
     )
 
 
+def _structure_paths(root: Path, excluded: set[Path]) -> list[Path]:
+    """List managed paths without traversing ignored repository trees."""
+    paths: list[Path] = []
+    for directory, subdirectories, filenames in root.walk():
+        relative = directory.relative_to(root)
+        subdirectories[:] = [
+            name for name in subdirectories if relative / name not in excluded
+        ]
+        paths.extend(
+            directory / name
+            for name in subdirectories + filenames
+            if relative / name not in excluded
+        )
+    return sorted(paths)
+
+
 def inspect_structure(root: Path) -> tuple[list[Package], list[str]]:
     """Validate the declared repository subset."""
     packages = detect_packages(root)
@@ -645,10 +661,8 @@ def inspect_structure(root: Path) -> tuple[list[Package], list[str]]:
                 issues.extend([f"{relative}: missing required regular file"])
     opaque = opaque_trees(root)
     scratch = scratch_trees(root)
-    for path in sorted(root.rglob("*")):
+    for path in _structure_paths(root, opaque | scratch | {Path(".git")}):
         relative = path.relative_to(root)
-        if relative.parts[0] == ".git" or beneath(relative, opaque | scratch):
-            continue
         if path.is_symlink():
             issues.append(
                 f"{relative}: expected regular file or directory, found symbolic link",
@@ -1718,6 +1732,21 @@ def initialize_home() -> None:
     _converge_home_ignore(root, dry_run=False)
 
 
+def initialize_submodule(remote: str) -> None:
+    """Add a hosted repository at its canonical home-relative path."""
+    relative = canonical_remote_path(remote)
+    home = Path.home()
+    if repository_root(home) != home or profile(home) != "home":
+        message = "$HOME must be an initialized canonical home repository"
+        raise CommandError(message)
+    completed = subprocess.run(  # noqa: S603
+        ["git", "submodule", "add", "-f", "--", remote, relative.as_posix()],  # noqa: S607
+        cwd=home,
+        check=False,
+    )
+    raise SystemExit(completed.returncode)
+
+
 def _remote_is_empty(remote: str) -> bool:
     """Return whether a hosted remote advertises no heads."""
     completed = _run(
@@ -2677,13 +2706,13 @@ def parser() -> argparse.ArgumentParser:
     )
     init = commands.add_parser(
         "init",
-        help="initialize HOME or a flake repository",
-        description="Initialize HOME or a flake repository.",
+        help="initialize HOME, create a flake, or add a remote submodule",
+        description="Initialize HOME, create a flake, or add a remote under HOME.",
     )
     init.add_argument(
         "profile",
-        choices=("flake", "home"),
-        help="repository profile to initialize",
+        metavar="home|flake|REMOTE",
+        help="home or flake profile, or a hosted Git remote to add as a submodule",
     )
     init.add_argument(
         "remote",
@@ -2845,11 +2874,15 @@ def _dispatch_standalone_command(
             msg = "init home does not accept a remote"
             raise CommandError(msg)
         initialize_home()
-    else:
+    elif options.profile == "flake":
         if options.remote is None:
             msg = "init flake requires REMOTE"
             raise CommandError(msg)
         initialize_flake(options.remote)
+    else:
+        if options.remote is not None:
+            cli.error("init REMOTE accepts exactly one remote")
+        initialize_submodule(options.profile)
     return True
 
 

@@ -8,10 +8,15 @@ import os
 import shutil
 import subprocess
 import sys
+from importlib import import_module
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import coverage
 import pytest
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 def _run(
@@ -156,6 +161,48 @@ def test_convergence_preserves_source_and_scratch_and_is_idempotent(
             raise AssertionError(name)
 
 
+def test_structure_validation_does_not_traverse_excluded_trees(
+    repository: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skip excluded subtrees while still rejecting unmanaged files and symlinks."""
+    _run(repository, "add", "packages/example", "python")
+    excluded = [
+        repository / name
+        for name in (
+            ".git",
+            "prm",
+            "tmp",
+            "packages/example/prm",
+            "packages/example/tmp",
+        )
+    ]
+    for directory in excluded[1:]:
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "ignored").write_text("unrestricted content")
+    package = repository / "packages/example"
+    (package / "stray").write_text("unsupported")
+    (package / "link").symlink_to(repository / "tmp", target_is_directory=True)
+    subject = import_module("packages.git-canonical.main")
+    original_scandir = os.scandir
+
+    def guarded_scandir(path: str | os.PathLike[str]) -> Iterator[os.DirEntry[str]]:
+        if any(Path(path).is_relative_to(directory) for directory in excluded):
+            message = f"traversed excluded tree: {path}"
+            raise AssertionError(message)
+        return original_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", guarded_scandir)
+    _, issues = subject.inspect_structure(repository)
+    expected_issues = 2
+    if len(issues) != expected_issues or not any(
+        "stray: unsupported" in issue for issue in issues
+    ):
+        raise AssertionError(issues)
+    if not any("link: expected regular" in issue for issue in issues):
+        raise AssertionError(issues)
+
+
 def test_invalid_source_is_rejected_before_cleanup(repository: Path) -> None:
     """A failed convergence preserves both source and unrelated work."""
     _run(repository, "add", "packages/example", "python")
@@ -212,6 +259,96 @@ def test_cli_help_and_retired_commands(tmp_path: Path) -> None:
             raise AssertionError(option)
     _run(tmp_path, "status", code=2)
     _run(tmp_path, "check", code=2)
+
+
+@pytest.mark.parametrize(
+    "remote",
+    [
+        "https://example.test/team/project.git",
+        "ssh://git@example.test/team/project.git",
+        "git@example.test:team/project.git",
+    ],
+)
+def test_init_remote_adds_a_home_submodule_and_preserves_git_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    remote: str,
+) -> None:
+    """Add an existing remote from any directory without creating commits."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    origin = tmp_path / "remote"
+    origin.mkdir()
+    _git(origin, "init", "--quiet")
+    (origin / "README").write_text("existing repository")
+    _git(origin, "add", "README")
+    _git(
+        origin,
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.test",
+        "commit",
+        "--quiet",
+        "-m",
+        "Existing content",
+    )
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", f"url.{origin.as_uri()}.insteadOf")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", remote)
+    monkeypatch.setenv("GIT_ALLOW_PROTOCOL", "file")
+    _run(tmp_path, "init", "home")
+    _git(
+        home,
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.test",
+        "commit",
+        "--quiet",
+        "-m",
+        "Home policy",
+    )
+    head = _git(home, "rev-parse", "HEAD")
+    relative = "example.test/team/project"
+    result = _run(tmp_path, "init", remote)
+    checkout = home / relative
+    if (checkout / "README").read_text() != "existing repository":
+        raise AssertionError(result.stdout + result.stderr)
+    if _git(home, "rev-parse", "HEAD") != head:
+        message = "init REMOTE created a home commit"
+        raise AssertionError(message)
+    if (
+        _git(
+            home,
+            "config",
+            "--file",
+            ".gitmodules",
+            f"submodule.{relative}.url",
+        ).strip()
+        != remote
+    ):
+        message = "init REMOTE changed the registered remote"
+        raise AssertionError(message)
+    if not _git(home, "ls-files", "--stage", "--", relative).startswith("160000 "):
+        message = "init REMOTE did not stage the submodule"
+        raise AssertionError(message)
+    _run(tmp_path, "init", remote)
+    (checkout / ".git").unlink()
+    native = subprocess.run(  # noqa: S603
+        ["git", "submodule", "add", "-f", "--", remote, relative],  # noqa: S607
+        cwd=home,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if native.returncode == 0:
+        message = "adding over a broken checkout should fail"
+        raise AssertionError(message)
+    duplicate = _run(tmp_path, "init", remote, code=native.returncode)
+    if duplicate.stderr != native.stderr:
+        raise AssertionError(duplicate.stderr)
 
 
 @pytest.fixture
@@ -1557,11 +1694,21 @@ def _prepare_coverage_flake(
     return environment
 
 
-def test_ordinary_checks_run_explicit_examples_without_coverage(tmp_path: Path) -> None:
+@pytest.fixture(scope="module")
+def coverage_repository(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> tuple[Path, dict[str, str]]:
+    """Reuse an unchanged flake and its cached builds across successful CLI cases."""
+    root = tmp_path_factory.mktemp("coverage") / "source with spaces"
+    return root, _prepare_coverage_flake(root)
+
+
+def test_ordinary_checks_run_explicit_examples_without_coverage(
+    coverage_repository: tuple[Path, dict[str, str]],
+) -> None:
     """The shared test invocation succeeds without producing report artifacts."""
-    root = tmp_path / "source"
-    environment = _prepare_coverage_flake(root)
-    plain = subprocess.run(
+    root, environment = coverage_repository
+    plain = subprocess.run(  # noqa: S603
         [  # noqa: S607
             "nix",
             "build",
@@ -1570,7 +1717,7 @@ def test_ordinary_checks_run_explicit_examples_without_coverage(tmp_path: Path) 
             "--impure",
             "--expr",
             (
-                'let f = builtins.getFlake ("git+file://" + toString ./.); '
+                f"let f = builtins.getFlake {json.dumps('git+' + root.as_uri())}; "
                 "in f.checks.${builtins.currentSystem}.example"
             ),
         ],
@@ -1593,12 +1740,11 @@ def test_ordinary_checks_run_explicit_examples_without_coverage(tmp_path: Path) 
 
 @pytest.mark.parametrize("target", [".", "packages/example", "packages/z-last"])
 def test_coverage_builds_instrumented_checks_and_preserves_the_checkout(
-    tmp_path: Path,
+    coverage_repository: tuple[Path, dict[str, str]],
     target: str,
 ) -> None:
     """Build cached HTML reports for explicit and current-directory targets."""
-    root = tmp_path / "source with spaces"
-    environment = _prepare_coverage_flake(root)
+    root, environment = coverage_repository
     before = _git(root, "status", "--porcelain")
     explicit = _run_runner_cli(root / target, environment, "coverage")
     current = subprocess.run(  # noqa: S603
