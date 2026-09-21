@@ -814,6 +814,7 @@ pkgs.runCommand packageName
       (packageDrv.nativeBuildInputs or [ ]) ++ packageDrv.propagatedBuildInputs ++ [ pythonEnv ];
   }
   ''
+    export src PACKAGE_E2E_EXECUTABLE
     export HOME="$(mktemp -d)"
     mkdir -p "$out" packages
     ln -s "$src" "packages/${packageName}"
