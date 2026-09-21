@@ -18,8 +18,6 @@
 !/checks/python_hypothesis_coverage/default.nix
 !/checks/python_mutation_coverage/
 !/checks/python_mutation_coverage/default.nix
-!/checks/python_test_names_coverage/
-!/checks/python_test_names_coverage/default.nix
 !/checks/remove_empty_lines_coverage/
 !/checks/remove_empty_lines_coverage/default.nix
 !/checks/remove_new_lines_coverage/
@@ -52,10 +50,6 @@
 !/packages/python_mutation/default.nix
 !/packages/python_mutation/main.py
 !/packages/python_mutation/test_main.py
-!/packages/python_test_names/
-!/packages/python_test_names/default.nix
-!/packages/python_test_names/main.py
-!/packages/python_test_names/test_main.py
 !/packages/remove_empty_lines/
 !/packages/remove_empty_lines/default.nix
 !/packages/remove_empty_lines/main.py

@@ -10,12 +10,14 @@ import contextlib
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, cast
 from urllib.parse import urlparse
 
@@ -1788,6 +1790,322 @@ def initialize_flake(remote: str) -> None:
     )
 
 
+def _test_names_qualified_name(node: ast.expr) -> str:
+    """Read a dotted Python name without evaluating it."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return _test_names_qualified_name(node.value) + "." + node.attr
+    return ""
+
+
+def _test_names_unittest_classes(module: ast.Module) -> set[str]:
+    """Recognize unittest subclasses regardless of their class names."""
+    bases: set[str] = set()
+    case_types = {"TestCase", "IsolatedAsyncioTestCase"}
+    for node in module.body:
+        if isinstance(node, ast.Import):
+            bases.update(
+                (alias.asname or alias.name) + "." + case
+                for alias in node.names
+                if alias.name == "unittest"
+                for case in case_types
+            )
+        elif isinstance(node, ast.ImportFrom) and node.module == "unittest":
+            bases.update(
+                alias.asname or alias.name
+                for alias in node.names
+                if alias.name in case_types
+            )
+    classes = [node for node in module.body if isinstance(node, ast.ClassDef)]
+    found: set[str] = set()
+    while additions := {
+        node.name
+        for node in classes
+        if node.name not in found
+        and any(
+            _test_names_qualified_name(base) in bases | found for base in node.bases
+        )
+    }:
+        found.update(additions)
+    return found
+
+
+def read_test_names(path: Path, *, source_order: bool = False) -> list[str]:
+    """Read top-level test functions and methods in recognized test classes."""
+    if path.is_symlink():
+        message = f"linked test file: {path}"
+        raise ValueError(message)
+    names = source_test_names(path.read_bytes(), str(path))
+    return names if source_order else sorted(names)
+
+
+def source_test_names(source: bytes, filename: str) -> list[str]:
+    """Convert Python source into sentences in definition order without executing it."""
+    module = ast.parse(source, filename=filename)
+    case_classes = _test_names_unittest_classes(module)
+    definitions = []
+    for node in module.body:
+        if isinstance(node, ast.ClassDef) and (
+            node.name.startswith("Test") or node.name in case_classes
+        ):
+            definitions.extend(node.body)
+        else:
+            definitions.append(node)
+    return [
+        node.name.replace("_", " ")
+        for node in definitions
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name.startswith("test_")
+    ]
+
+
+def _print_package_test_names(package: Path) -> None:
+    """Validate a canonical Python package and print its test sentences."""
+    validate_name(package.name)
+    if (
+        package.parent.name != "packages"
+        or not (package.parent.parent / "flake.nix").is_file()
+        or not all(
+            (package / name).is_file()
+            for name in ("default.nix", "main.py", "test_main.py")
+        )
+    ):
+        message = (
+            "expected a canonical packages/NAME with default.nix, main.py "
+            "and test_main.py inside a flake"
+        )
+        raise ValueError(message)
+    for name in read_test_names(package / "test_main.py"):
+        sys.stdout.write(name + "\n")
+
+
+def _print_repository_test_names(root: Path) -> bool:
+    """List packages sequentially and continue after individual parse failures."""
+    directory = root / "packages"
+    packages = (
+        sorted(
+            path
+            for path in directory.iterdir()
+            if path.is_dir() and not path.is_symlink() and (path / "main.py").is_file()
+        )
+        if directory.is_dir()
+        else []
+    )
+    if not packages:
+        message = f"no Python packages found under {directory}"
+        raise ValueError(message)
+    success = True
+    for package in packages:
+        if not (package / "test_main.py").exists():
+            sys.stderr.write(f"Skipping {package.name}: no test_main.py\n")
+            continue
+        sys.stdout.write(f"packages/{package.name}:\n")
+        try:
+            _print_package_test_names(package)
+        except (CommandError, OSError, SyntaxError, UnicodeError, ValueError) as error:
+            success = False
+            sys.stderr.write(f"git canonical test-names: {package.name}: {error}\n")
+    return success
+
+
+def _test_names_git_output(arguments: list[str], *, data: bytes | None = None) -> bytes:
+    """Read Git output while preserving its diagnostics and failures."""
+    return subprocess.run(  # noqa: S603
+        ["git", *arguments],  # noqa: S607
+        input=data,
+        stdout=subprocess.PIPE,
+        check=True,
+    ).stdout
+
+
+def _test_names_git_arguments(arguments: list[str]) -> tuple[list[str], list[str]]:
+    """Separate Git options/revisions from explicit path filters."""
+    separator = arguments.index("--") if "--" in arguments else len(arguments)
+    options = arguments[:separator]
+    paths = arguments[separator + 1 :]
+    for option in options:
+        if option in {
+            "--no-index",
+            "--no-textconv",
+            "--ext-diff",
+            "--check",
+        } or option.startswith(
+            ("--output", "--textconv=", "-L"),
+        ):
+            message = f"unsupported test-name diff option: {option}"
+            raise ValueError(message)
+    return options, paths
+
+
+def _check_test_names_diff_attributes(configuration: list[str], paths: bytes) -> None:
+    """Refuse attribute overrides that would expose unconverted source."""
+    if not paths:
+        return
+    attributes = _test_names_git_output(
+        [*configuration, "check-attr", "-z", "--stdin", "diff"],
+        data=paths,
+    ).split(b"\0")
+    for index in range(0, len(attributes) - 1, 3):
+        path, _, driver = attributes[index : index + 3]
+        if driver != b"python-test-names":
+            message = f"conflicting diff attribute for {path.decode(errors='replace')}"
+            raise ValueError(message)
+
+
+def _test_names_diff_paths(raw: bytes) -> bytes:
+    """Collect raw diff paths and reject modes that bypass Git's textconv."""
+    paths = []
+    for field in raw.split(b"\0"):
+        if not field:
+            continue
+        header = field.lstrip(b"\n")
+        if header.startswith(b":"):
+            parents = len(header) - len(header.lstrip(b":"))
+            modes = header.lstrip(b":").split()[: parents + 1]
+            if any(mode not in {b"000000", b"100644", b"100755"} for mode in modes):
+                message = (
+                    "test-name diffs require regular files, not symlinks or submodules"
+                )
+                raise ValueError(message)
+        else:
+            paths.append(field)
+    return b"\0".join(paths) + (b"\0" if paths else b"")
+
+
+def _print_test_names_git(command: str, arguments: list[str]) -> int:
+    """Let Git compare test sentences using an invocation-local textconv driver."""
+    options, paths = _test_names_git_arguments(arguments)
+    if command == "show":
+        revisions = _test_names_git_output(
+            ["rev-parse", "--revs-only", "--no-flags", *options],
+        )
+        for revision in revisions.decode().splitlines():
+            _test_names_git_output(
+                ["rev-parse", "--verify", revision.lstrip("^") + "^{commit}"],
+            )
+    root = (
+        _test_names_git_output(["rev-parse", "--show-toplevel"]).decode().rstrip("\n")
+    )
+    converter = shlex.join(
+        [str(Path(sys.argv[0]).resolve()), "test-names", "_textconv"],
+    )
+    with TemporaryDirectory(prefix="python-test-names-") as directory:
+        attributes = Path(directory) / "attributes"
+        attributes.write_text(
+            "/packages/*/test_main.py diff=python-test-names python-test-names\n",
+        )
+        configuration = [
+            "-c",
+            f"core.attributesFile={attributes}",
+            "-c",
+            f"diff.python-test-names.textconv={converter}",
+            "-c",
+            "diff.python-test-names.cachetextconv=false",
+        ]
+        filters = [*paths, ":(top,exclude,attr:!python-test-names)**"]
+        discovery = _test_names_git_output(
+            [
+                *configuration,
+                command,
+                *options,
+                "--no-patch",
+                "--raw",
+                "-z",
+                "--no-relative",
+                "--no-renames",
+                "--no-ext-diff",
+                "--textconv",
+                "--no-quiet",
+                "--no-exit-code",
+                *(["--format="] if command == "show" else []),
+                "--",
+                *filters,
+            ],
+        )
+        _check_test_names_diff_attributes(
+            ["-C", root, *configuration],
+            _test_names_diff_paths(discovery),
+        )
+        return subprocess.run(  # noqa: S603
+            [  # noqa: S607
+                "git",
+                *configuration,
+                command,
+                *options,
+                "--no-ext-diff",
+                "--textconv",
+                "--",
+                *filters,
+            ],
+            check=False,
+        ).returncode
+
+
+def _run_test_names(arguments: list[str]) -> int:
+    """Dispatch Git views separately from the original listing interface."""
+    if arguments and arguments[0] in {"diff", "show"}:
+        return _print_test_names_git(arguments[0], arguments[1:])
+    if arguments[:1] == ["_textconv"]:
+        converter_parser = argparse.ArgumentParser(
+            prog="git canonical test-names _textconv",
+        )
+        converter_parser.add_argument("file", type=Path)
+        for name in read_test_names(
+            converter_parser.parse_args(arguments[1:]).file,
+            source_order=True,
+        ):
+            sys.stdout.write(name + "\n")
+        return 0
+    parser = argparse.ArgumentParser(
+        prog="git canonical test-names",
+        description="List Python test names as sentences or inspect their Git changes.",
+        epilog=(
+            "Repository targets list Python packages sequentially and skip packages "
+            "without test_main.py. Test source is parsed, never executed. "
+            "Git views: diff [Git options/revisions] [-- paths...] or "
+            "show [Git options/revisions] [-- paths...]. Examples: diff; "
+            "diff --staged; diff HEAD; diff HEAD~1 HEAD; show HEAD. "
+            "Only packages/*/test_main.py sentences are compared. Git supplies "
+            "formatting, commit metadata and exit codes. Body-only edits have "
+            "no sentence hunks. These review diffs cannot be applied as source "
+            "patches. Show requires commits; --no-index, --no-textconv, "
+            "--ext-diff, --check, --output and -L are unsupported."
+        ),
+    )
+    parser.add_argument(
+        "target",
+        type=Path,
+        nargs="?",
+        default=Path(),
+        help=(
+            "canonical packages/NAME directory or flake repository root "
+            "(default: current directory)"
+        ),
+    )
+    args = parser.parse_args(arguments)
+    target = args.target.resolve()
+    if (target / "flake.nix").is_file():
+        return 0 if _print_repository_test_names(target) else 1
+    _print_package_test_names(target)
+    return 0
+
+
+def _dispatch_test_names(arguments: list[str]) -> None:
+    """Report errors consistently for listing, conversion and Git commands."""
+    try:
+        status = _run_test_names(arguments)
+    except subprocess.CalledProcessError as error:
+        sys.exit(error.returncode)
+    except (CommandError, OSError, SyntaxError, UnicodeError, ValueError) as error:
+        sys.stderr.write(f"git canonical test-names: {error}\n")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        sys.stderr.write("git canonical test-names: interrupted\n")
+        sys.exit(130)
+    sys.exit(status)
+
+
 def parser() -> argparse.ArgumentParser:
     """Construct the public command-line parser."""
     result = argparse.ArgumentParser(
@@ -1799,6 +2117,10 @@ def parser() -> argparse.ArgumentParser:
         required=True,
         title="commands",
         metavar="COMMAND",
+    )
+    commands.add_parser(
+        "test-names",
+        help="list Python test sentences or inspect their Git changes",
     )
     init = commands.add_parser(
         "init",
@@ -1933,6 +2255,9 @@ def _dispatch_add(root: Path, options: argparse.Namespace) -> None:
 def main() -> None:
     """Dispatch the git canonical CLI."""
     arguments = _normalize_help_arguments(sys.argv[1:])
+    if arguments[:1] == ["test-names"]:
+        _dispatch_test_names(arguments[1:])
+        return
     try:
         options = parser().parse_args(arguments)
         if _dispatch_init(options):
