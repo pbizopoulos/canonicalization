@@ -8,13 +8,17 @@ import argparse
 import ast
 import contextlib
 import json
+import math
 import os
 import re
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
+import tempfile
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -2106,6 +2110,406 @@ def _dispatch_test_names(arguments: list[str]) -> None:
     sys.exit(status)
 
 
+def _test_target_root(package: Path) -> Path:
+    """Validate the canonical target and return its flake root."""
+    validate_name(package.name)
+    root = package.parent.parent
+    if (
+        package.parent.name != "packages"
+        or not (root / "flake.nix").is_file()
+        or not all(
+            (package / name).is_file()
+            for name in ("default.nix", "main.py", "test_main.py")
+        )
+    ):
+        message = (
+            "expected a canonical packages/NAME with default.nix, main.py "
+            "and test_main.py inside a flake"
+        )
+        raise CommandError(message)
+    return root
+
+
+def _copy_test_sources(root: Path, workspace: Path) -> None:
+    """Copy package sources and supporting assets without scratch or metadata."""
+    ignored = shutil.ignore_patterns(
+        "tmp",
+        ".git",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        "*.pyc",
+    )
+    for package in sorted((root / "packages").iterdir()):
+        if package.is_dir() and not package.is_symlink():
+            shutil.copytree(
+                package,
+                workspace / "packages" / package.name,
+                ignore=ignored,
+            )
+    if (root / "prm").is_dir():
+        shutil.copytree(root / "prm", workspace / "prm", ignore=ignored)
+
+
+def _stop_test_group(pid: int) -> None:
+    """Terminate a subprocess session, including its descendants."""
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(pid, signal.SIGKILL)
+
+
+def _run_test_command(
+    command: list[str],
+    workspace: Path,
+    log: Path,
+    *,
+    timeout: float | None = None,
+) -> None:
+    """Capture command output and clean up subprocess groups on interruption."""
+    with (
+        log.open("w", encoding="utf-8") as output,
+        subprocess.Popen(  # noqa: S603
+            command,
+            cwd=workspace,
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        ) as process,
+    ):
+        try:
+            code = process.wait(timeout=timeout)
+        except (KeyboardInterrupt, subprocess.TimeoutExpired):
+            active = workspace / "active-test-pgid"
+            if active.exists():
+                _stop_test_group(int(active.read_text(encoding="utf-8")))
+            _stop_test_group(process.pid)
+            process.wait()
+            raise
+    if code:
+        message = f"command failed ({code}); see {log}"
+        raise CommandError(message)
+
+
+def _build_test_environment(root: Path, name: str, workspace: Path) -> tuple[str, str]:
+    """Build a target-specific interpreter and resolve its external tools."""
+    expression = workspace / "environment.nix"
+    expression.write_text(
+        "let\n"
+        f"  flake = builtins.getFlake {_nix_string('git+' + root.as_uri())};\n"
+        "  system = builtins.currentSystem;\n"
+        "  pkgs = import flake.inputs.nixpkgs { inherit system; };\n"
+        f"  package = flake.packages.${{system}}.${{{_nix_string(name)}}};\n"
+        "  dependencies = pkgs.lib.concatMap (name: package.${name} or []) [\n"
+        '    "buildInputs" "checkInputs" "nativeBuildInputs" "nativeCheckInputs"\n'
+        '    "propagatedBuildInputs" "propagatedNativeBuildInputs"\n'
+        "  ];\n"
+        "  python = package.python.withPackages (ps:\n"
+        "    (package.propagatedBuildInputs or []) ++ [ps.hypothesis ps.pytest]);\n"
+        'in pkgs.writeText "test-environment.json" (builtins.toJSON {\n'
+        '  python = "${python}/bin/python";\n'
+        "  path = pkgs.lib.makeBinPath dependencies;\n"
+        "})\n",
+        encoding="utf-8",
+    )
+    log = workspace / "environment.log"
+    _run_test_command(
+        [
+            "nix",
+            "build",
+            "--impure",
+            "--no-link",
+            "--print-out-paths",
+            "--file",
+            str(expression),
+        ],
+        workspace,
+        log,
+    )
+    paths = [
+        line
+        for line in log.read_text(encoding="utf-8").splitlines()
+        if Path(line).is_absolute() and Path(line).is_file()
+    ]
+    if len(paths) != 1:
+        message = f"could not resolve target environment; see {log}"
+        raise CommandError(message)
+    environment = json.loads(Path(paths[0]).read_text(encoding="utf-8"))
+    return str(environment["python"]), str(environment["path"])
+
+
+def _prepare_package_tests(
+    workspace: Path,
+    name: str,
+    python: str,
+    tool_path: str,
+    max_examples: int | None = None,
+) -> list[str]:
+    """Run pytest and package executables against the same isolated source copy."""
+    launcher = workspace / "bin" / name
+    launcher.parent.mkdir()
+    launcher.write_text(
+        "#!/bin/sh\nexec "
+        + shlex.join([python, str(workspace / "package-entry.py")])
+        + ' "$@"\n',
+        encoding="utf-8",
+    )
+    launcher.chmod(0o755)
+    (workspace / "package-entry.py").write_text(
+        "import importlib, sys\n"
+        f"sys.argv[0] = {str(launcher)!r}\n"
+        f"importlib.import_module({'packages.' + name + '.main'!r}).main()\n",
+        encoding="utf-8",
+    )
+    profile = (
+        "    from hypothesis import Phase, settings\n"
+        '    settings.register_profile("coverage", phases=[Phase.explicit])\n'
+        '    settings.load_profile("coverage")\n'
+        if max_examples is None
+        else "    from hypothesis import settings\n"
+        f'    settings.register_profile("ondemand", max_examples={max_examples},'
+        " deadline=None)\n"
+        '    settings.load_profile("ondemand")\n'
+    )
+    pytest_arguments = ["-p", "no:cacheprovider"]
+    if max_examples is not None:
+        pytest_arguments.extend(
+            ["-p", "_hypothesis_pytestplugin", "--hypothesis-show-statistics"],
+        )
+    pytest_arguments.extend(
+        ["--import-mode=importlib", "-q", f"packages/{name}/test_main.py"],
+    )
+    bootstrap = workspace / "run-tests.py"
+    bootstrap.write_text(
+        "import os, sys\n"
+        "from pathlib import Path\n"
+        "os.dup2(1, 2)\n"
+        f"os.environ['PACKAGE_E2E_EXECUTABLE'] = {str(launcher)!r}\n"
+        f"tools = {str(launcher.parent) + os.pathsep + tool_path!r}\n"
+        "os.environ['PATH'] = tools + os.pathsep + os.environ.get('PATH', '')\n"
+        "os.environ['PYTHONDONTWRITEBYTECODE'] = '1'\n"
+        "os.environ.pop('PYTHONPATH', None)\n"
+        "os.environ.pop('PYTEST_ADDOPTS', None)\n"
+        "os.environ['PYTEST_DISABLE_PLUGIN_AUTOLOAD'] = '1'\n"
+        "pid = Path('active-test-pgid')\n"
+        "pid.write_text(str(os.getpgrp()))\n"
+        "try:\n" + profile + "    import pytest\n"
+        f"    sys.exit(pytest.main({pytest_arguments!r}))\n"
+        "finally:\n"
+        "    pid.unlink(missing_ok=True)\n",
+        encoding="utf-8",
+    )
+    return [python, "-B", str(bootstrap)]
+
+
+def _summarize_mutations(workspace: Path) -> bool:
+    """Report engine outcomes without treating survivors as command failures."""
+    counts: Counter[str] = Counter()
+    survivors: list[str] = []
+    for line in (workspace / "results.jsonl").read_text(encoding="utf-8").splitlines():
+        item, result = json.loads(line)
+        if result is None:
+            status = "pending"
+        elif (
+            result["worker_outcome"] != "normal"
+            or result["test_outcome"] == "incompetent"
+        ):
+            status = "error"
+        elif result["output"] == "timeout":
+            status = "timeout"
+        else:
+            status = result["test_outcome"]
+        counts[status] += 1
+        if status == "survived":
+            survivors.append(f"Survived {item['job_id']}:\n{result['diff']}")
+    summary = dict(counts)
+    (workspace / "summary.json").write_text(
+        json.dumps(summary, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    if not counts:
+        sys.stdout.write("No mutations generated.\n")
+    else:
+        statuses = ("killed", "survived", "timeout", "error", "pending")
+        sys.stdout.write(", ".join(f"{key}: {counts[key]}" for key in statuses) + "\n")
+    if survivors:
+        sys.stdout.write("\n".join(survivors) + "\n")
+    return not (counts["error"] or counts["pending"])
+
+
+def _run_mutation_campaign(
+    workspace: Path,
+    name: str,
+    python: str,
+    tool_path: str,
+    timeout: float,
+) -> bool:
+    """Baseline, mutate, and report one copied package."""
+    command = _prepare_package_tests(workspace, name, python, tool_path)
+    sys.stdout.write("Running baseline tests...\n")
+    sys.stdout.flush()
+    _run_test_command(command, workspace, workspace / "baseline.log", timeout=timeout)
+    config = workspace / "cosmic-ray.toml"
+    config.write_text(
+        "[cosmic-ray]\n"
+        f"module-path = {json.dumps('packages/' + name + '/main.py')}\n"
+        f"timeout = {timeout}\n"
+        "excluded-modules = []\n"
+        f"test-command = {json.dumps(shlex.join(command))}\n"
+        '[cosmic-ray.distributor]\nname = "local"\n',
+        encoding="utf-8",
+    )
+    engine = ["cosmic-ray"]
+    session = str(workspace / "session.sqlite")
+    _run_test_command(
+        [*engine, "init", str(config), session],
+        workspace,
+        workspace / "init.log",
+    )
+    sys.stdout.write("Running mutations...\n")
+    sys.stdout.flush()
+    _run_test_command(
+        [*engine, "exec", str(config), session],
+        workspace,
+        workspace / "engine.log",
+    )
+    _run_test_command(
+        [*engine, "dump", session],
+        workspace,
+        workspace / "results.jsonl",
+    )
+    _run_test_command(
+        ["cr-html", session],
+        workspace,
+        workspace / "report.html",
+    )
+    return _summarize_mutations(workspace)
+
+
+def _run_test_package(
+    package: Path,
+    command: str,
+    timeout: float,
+    max_examples: int | None,
+) -> bool:
+    """Run one isolated package and retain its logs and reports."""
+    root = _test_target_root(package)
+    scratch = root / "tmp"
+    scratch.mkdir(exist_ok=True)
+    workspace = Path(
+        tempfile.mkdtemp(prefix=f"python-{command}-{package.name}-", dir=scratch),
+    )
+    label = (
+        "Mutation workspace and reports"
+        if command == "mutation"
+        else "Hypothesis workspace and logs"
+    )
+    sys.stdout.write(f"{label}: {workspace}\n")
+    sys.stdout.flush()
+    _copy_test_sources(root, workspace)
+    python, tool_path = _build_test_environment(root, package.name, workspace)
+    if command == "mutation":
+        return _run_mutation_campaign(
+            workspace,
+            package.name,
+            python,
+            tool_path,
+            timeout,
+        )
+    arguments = _prepare_package_tests(
+        workspace,
+        package.name,
+        python,
+        tool_path,
+        max_examples,
+    )
+    log = workspace / "tests.log"
+    try:
+        _run_test_command(arguments, workspace, log, timeout=timeout)
+    finally:
+        if log.exists():
+            sys.stdout.write(log.read_text(encoding="utf-8"))
+    return True
+
+
+def _run_test_repository(
+    root: Path,
+    command: str,
+    timeout: float,
+    max_examples: int | None,
+) -> bool:
+    """Run each Python package, continuing after failures and summarizing results."""
+    directory = root / "packages"
+    packages = (
+        sorted(
+            path
+            for path in directory.iterdir()
+            if path.is_dir() and not path.is_symlink() and (path / "main.py").is_file()
+        )
+        if directory.is_dir()
+        else []
+    )
+    if not packages:
+        message = f"no Python packages found under {directory}"
+        raise CommandError(message)
+    outcomes: dict[str, str] = {}
+    for package in packages:
+        if not (package / "test_main.py").is_file():
+            outcomes[package.name] = "skipped"
+            sys.stdout.write(f"Skipping {package.name}: no test_main.py\n")
+            continue
+        sys.stdout.write(f"Running {package.name}...\n")
+        sys.stdout.flush()
+        try:
+            outcomes[package.name] = (
+                "passed"
+                if _run_test_package(package, command, timeout, max_examples)
+                else "failed"
+            )
+        except (CommandError, OSError, subprocess.TimeoutExpired) as error:
+            outcomes[package.name] = "failed"
+            sys.stderr.write(f"git canonical {command}: {package.name}: {error}\n")
+    sys.stdout.write("\nRepository summary:\n")
+    for package_name, status in outcomes.items():
+        sys.stdout.write(f"  {package_name}: {status}\n")
+    sys.stdout.write(
+        ", ".join(
+            f"{sum(value == status for value in outcomes.values())} {status}"
+            for status in ("passed", "failed", "skipped")
+        )
+        + "\n",
+    )
+    return "failed" not in outcomes.values()
+
+
+def _dispatch_test_runner(
+    options: argparse.Namespace,
+    cli: argparse.ArgumentParser,
+) -> None:
+    """Validate budgets and run an explicitly requested test campaign."""
+    max_examples = getattr(options, "max_examples", None)
+    if max_examples is not None and max_examples <= 0:
+        cli.error("--max-examples must be positive")
+    if not math.isfinite(options.timeout) or options.timeout <= 0:
+        cli.error("--timeout must be positive and finite")
+    try:
+        target = options.target.resolve()
+        runner = (
+            _run_test_repository
+            if (target / "flake.nix").is_file()
+            else _run_test_package
+        )
+        success = runner(target, options.command, options.timeout, max_examples)
+    except (CommandError, OSError, subprocess.TimeoutExpired) as error:
+        sys.stderr.write(f"git canonical {options.command}: {error}\n")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        sys.stderr.write(
+            f"git canonical {options.command}: interrupted; diagnostics retained\n",
+        )
+        sys.exit(130)
+    sys.exit(0 if success else 1)
+
+
 def parser() -> argparse.ArgumentParser:
     """Construct the public command-line parser."""
     result = argparse.ArgumentParser(
@@ -2122,6 +2526,43 @@ def parser() -> argparse.ArgumentParser:
         "test-names",
         help="list Python test sentences or inspect their Git changes",
     )
+    for command, description in (
+        ("hypothesis", "run generated property tests in isolated package copies"),
+        ("mutation", "run Cosmic Ray mutation tests in isolated package copies"),
+    ):
+        runner = commands.add_parser(
+            command,
+            help=description,
+            description=description.capitalize() + ".",
+            epilog=(
+                "Repository targets run Python packages sequentially, skip packages "
+                "without test_main.py, and summarize results. Logs and reports "
+                "are retained under the flake's tmp/ directory."
+            ),
+        )
+        runner.add_argument(
+            "target",
+            type=Path,
+            nargs="?",
+            default=Path(),
+            help="canonical packages/NAME or flake root (default: current directory)",
+        )
+        runner.add_argument(
+            "--timeout",
+            type=float,
+            default=60.0,
+            help=(
+                "seconds per test-suite invocation, excluding environment build "
+                "(default: 60)"
+            ),
+        )
+        if command == "hypothesis":
+            runner.add_argument(
+                "--max-examples",
+                type=int,
+                default=100,
+                help="successful generated examples per property (default: 100)",
+            )
     init = commands.add_parser(
         "init",
         help="initialize HOME or a flake repository",
@@ -2212,8 +2653,14 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
-def _dispatch_init(options: argparse.Namespace) -> bool:
-    """Dispatch initialization and report whether it handled the command."""
+def _dispatch_standalone_command(
+    options: argparse.Namespace,
+    cli: argparse.ArgumentParser,
+) -> bool:
+    """Dispatch commands that do not require discovering the current repository."""
+    if options.command in {"hypothesis", "mutation"}:
+        _dispatch_test_runner(options, cli)
+        return True
     if options.command != "init":
         return False
     if options.profile == "home":
@@ -2259,8 +2706,9 @@ def main() -> None:
         _dispatch_test_names(arguments[1:])
         return
     try:
-        options = parser().parse_args(arguments)
-        if _dispatch_init(options):
+        cli = parser()
+        options = cli.parse_args(arguments)
+        if _dispatch_standalone_command(options, cli):
             return
         if options.command == "converge" and options.source is not None:
             validate_flake_source(options.source.resolve())

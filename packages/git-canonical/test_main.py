@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
+import sys
 from typing import TYPE_CHECKING
 
 import pytest
@@ -201,6 +203,8 @@ def test_cli_help_and_retired_commands(tmp_path: Path) -> None:
         ("init",),
         ("converge",),
         ("test-names",),
+        ("hypothesis",),
+        ("mutation",),
     ):
         option = _run(tmp_path, *command, "--help").stdout
         alias = _run(tmp_path, "help", *command).stdout
@@ -973,3 +977,459 @@ def test_names_are_available_through_gits_canonical_subcommand(
         expected.stderr,
     ):
         raise AssertionError(result)
+
+
+def _make_runner_target(
+    root: Path,
+    source: str,
+    tests: str,
+    *,
+    name: str = "example",
+) -> Path:
+    """Create a minimal canonical package for an isolated test."""
+    package = root / "packages" / name
+    package.mkdir(parents=True)
+    (root / "flake.nix").write_text("{}", encoding="utf-8")
+    (package / "default.nix").write_text("{}", encoding="utf-8")
+    (package / "main.py").write_text(source, encoding="utf-8")
+    (package / "test_main.py").write_text(tests, encoding="utf-8")
+    return package
+
+
+def _prepare_runner_flake(
+    root: Path,
+    tests: str,
+    source: str = "def main():\n    print('ready')\n",
+    *,
+    name: str = "example",
+) -> dict[str, str]:
+    """Provide an offline flake backed by this check's real Python environment."""
+    package = _make_runner_target(root, source, tests, name=name)
+    (package / "main.py").write_text(source, encoding="utf-8")
+    dependency = root / "prm/nixpkgs"
+    dependency.mkdir(parents=True)
+    (dependency / "flake.nix").write_text("{ outputs = _: {}; }", encoding="utf-8")
+    (dependency / "default.nix").write_text(
+        "_: { lib = { concatMap = f: xs: builtins.concatLists (map f xs); "
+        'makeBinPath = _: ""; }; writeText = builtins.toFile; }',
+        encoding="utf-8",
+    )
+    (root / "flake.nix").write_text(
+        '{ inputs.nixpkgs.url = "path:./prm/nixpkgs"; '
+        "outputs = _: { packages.${builtins.currentSystem}."
+        f"{json.dumps(name)}.python"
+        ".withPackages = "
+        f"_ : {json.dumps(sys.prefix)}; }}; }}",
+        encoding="utf-8",
+    )
+    for args in (["init", "--quiet"], ["add", "."]):
+        subprocess.run(  # noqa: S603
+            ["git", "-C", str(root), *args],  # noqa: S607
+            check=True,
+            capture_output=True,
+            timeout=10,
+        )
+    environment = dict(os.environ)
+    store = root.parent / "nix"
+    environment["NIX_REMOTE"] = (
+        f"local?store={store / 'store'}&state={store / 'state'}&log={store / 'log'}"
+    )
+    environment["NIX_CONFIG"] = (
+        "experimental-features = nix-command flakes\nbuild-users-group =\n"
+    )
+    return environment
+
+
+def _run_runner_cli(
+    root: Path,
+    environment: dict[str, str],
+    command: str,
+    *arguments: str,
+) -> subprocess.CompletedProcess[str]:
+    """Exercise test runners through Git's public external-command lookup."""
+    environment = dict(environment)
+    executable_directory = os.path.dirname(os.environ["PACKAGE_E2E_EXECUTABLE"])  # noqa: PTH120
+    environment["PATH"] = executable_directory + os.pathsep + environment["PATH"]
+    return subprocess.run(  # noqa: S603
+        ["git", "canonical", command, str(root), *arguments],  # noqa: S607
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+
+
+def test_hypothesis_generates_examples_and_executes_cli_without_changing_source(
+    tmp_path: Path,
+) -> None:
+    """Discover a package, generate examples, and retain diagnostics through the CLI."""
+    root = tmp_path / "source with spaces"
+    tests = (
+        "import os, subprocess\n"
+        "from hypothesis import given, example, strategies as st\n"
+        "from pathlib import Path\n"
+        "@given(st.integers())\n@example(0)\n"
+        "def test_property(value):\n"
+        "    with Path('examples').open('a') as output:\n"
+        "        output.write(str(value) + '\\n')\n"
+        "def test_cli():\n"
+        "    result = subprocess.run([os.environ['PACKAGE_E2E_EXECUTABLE']],\n"
+        "        capture_output=True, text=True)\n"
+        "    assert result.returncode == 0\n"
+        "    assert result.stdout == 'ready\\n'\n"
+    )
+    environment = _prepare_runner_flake(root, tests)
+    original = (root / "packages/example/main.py").read_bytes()
+    result = _run_runner_cli(root, environment, "hypothesis", "--max-examples", "5")
+    if result.returncode or "1 passed, 0 failed, 0 skipped" not in result.stdout:
+        raise AssertionError(result.stdout + result.stderr)
+    (workspace,) = (root / "tmp").glob("python-hypothesis-example-*")
+    expected_examples = 6
+    if len((workspace / "examples").read_text().splitlines()) != expected_examples:
+        msg = "one explicit and five generated examples must run"
+        raise AssertionError(msg)
+    if "5 passing examples" not in (workspace / "tests.log").read_text():
+        msg = "retained diagnostics must include Hypothesis statistics"
+        raise AssertionError(msg)
+    if (root / "packages/example/main.py").read_bytes() != original or (
+        root / "packages/example/examples"
+    ).exists():
+        msg = "running tests must leave the source untouched"
+        raise AssertionError(msg)
+
+
+@pytest.mark.parametrize(
+    ("tests", "timeout", "diagnostic"),
+    [
+        (
+            (
+                "from hypothesis import given, strategies as st\n"
+                "@given(st.integers())\n"
+                "def test_failure(value):\n    assert value != 0\n"
+            ),
+            "20",
+            "Falsifying example",
+        ),
+        ("import time\ndef test_stalled():\n    time.sleep(30)\n", "0.5", "timed out"),
+    ],
+)
+def test_hypothesis_failed_or_stalled_suites_return_failure_and_retain_diagnostics(
+    tmp_path: Path,
+    tests: str,
+    timeout: str,
+    diagnostic: str,
+) -> None:
+    """Fail with retained diagnostics for counterexamples and stalled suites."""
+    root = tmp_path / "source"
+    environment = _prepare_runner_flake(root, tests)
+    result = _run_runner_cli(root, environment, "hypothesis", "--timeout", timeout)
+    (workspace,) = (root / "tmp").glob("python-hypothesis-example-*")
+    if result.returncode != 1 or "0 passed, 1 failed, 0 skipped" not in result.stdout:
+        raise AssertionError(result.stdout + result.stderr)
+    if (
+        diagnostic
+        not in result.stdout + result.stderr + (workspace / "tests.log").read_text()
+    ):
+        msg = "failure diagnostics were not retained"
+        raise AssertionError(msg)
+
+
+@pytest.mark.parametrize("target_directory", [".", "packages/example"])
+def test_hypothesis_omitted_target_runs_current_directory(
+    tmp_path: Path,
+    target_directory: str,
+) -> None:
+    """Run the current package or repository without an explicit target."""
+    root = tmp_path / "source with spaces"
+    environment = _prepare_runner_flake(
+        root,
+        "from packages.example import main\ndef test_import():\n"
+        "    assert main is not None\n",
+        "",
+    )
+    result = subprocess.run(  # noqa: S603
+        [os.environ["PACKAGE_E2E_EXECUTABLE"], "hypothesis"],
+        cwd=root / target_directory,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+    if result.returncode:
+        raise AssertionError(result.stdout + result.stderr)
+    if not (root / "tmp").is_dir():
+        msg = "current-directory run did not retain diagnostics"
+        raise AssertionError(msg)
+    if target_directory == "." and "1 passed, 0 failed, 0 skipped" not in result.stdout:
+        raise AssertionError(result.stdout)
+
+
+def test_hypothesis_cli_validation(tmp_path: Path) -> None:
+    """The installed command validates its target and resource budgets."""
+    for arguments, code in [
+        (["--help"], 0),
+        ([str(tmp_path)], 1),
+        ([str(tmp_path), "--timeout", "nan"], 2),
+        ([str(tmp_path), "--timeout", "0"], 2),
+        ([str(tmp_path), "--max-examples", "0"], 2),
+    ]:
+        result = subprocess.run(  # noqa: S603
+            [os.environ["PACKAGE_E2E_EXECUTABLE"], "hypothesis", *arguments],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != code:
+            raise AssertionError(result.stderr)
+
+
+@pytest.mark.parametrize(
+    "layout",
+    ["empty", "nonpython", "untested", "single_untested"],
+)
+def test_hypothesis_cli_repository_without_runnable_packages(
+    tmp_path: Path,
+    layout: str,
+) -> None:
+    """Report empty repositories, skipped packages, and invalid explicit targets."""
+    (tmp_path / "flake.nix").write_text("{}", encoding="utf-8")
+    target = tmp_path
+    if layout == "nonpython":
+        package = tmp_path / "packages" / "web"
+        package.mkdir(parents=True)
+        (package / "default.nix").write_text("{}", encoding="utf-8")
+        (package / "index.html").write_text("hello", encoding="utf-8")
+    elif layout in {"untested", "single_untested"}:
+        package = _make_runner_target(tmp_path, "", "")
+        (package / "test_main.py").unlink()
+        if layout == "single_untested":
+            target = package
+    result = subprocess.run(  # noqa: S603
+        [os.environ["PACKAGE_E2E_EXECUTABLE"], "hypothesis", str(target)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    expected_code = 0 if layout == "untested" else 1
+    if result.returncode != expected_code:
+        raise AssertionError(result.stdout + result.stderr)
+    if layout == "untested":
+        if (
+            "Skipping example: no test_main.py" not in result.stdout
+            or "0 passed, 0 failed, 1 skipped" not in result.stdout
+        ):
+            msg = "repository did not report its skipped package"
+            raise AssertionError(msg)
+    elif (
+        layout != "single_untested" and "no Python packages found" not in result.stderr
+    ):
+        msg = "empty repository diagnostic missing"
+        raise AssertionError(msg)
+    if (tmp_path / "tmp").exists():
+        msg = "a non-runnable target started a workspace"
+        raise AssertionError(msg)
+
+
+def test_mutation_reports_killed_and_surviving_mutations_without_changing_source(
+    tmp_path: Path,
+) -> None:
+    """Discover a package and report mutations exercised by CLI-only tests."""
+    root = tmp_path / "source with spaces"
+    source = (
+        "def value():\n    return 1\n\n"
+        "def unused():\n    return 2\n\ndef main():\n    print(value())\n"
+    )
+    tests = (
+        "import os, subprocess\n"
+        "def test_cli():\n"
+        "    result = subprocess.run([os.environ['PACKAGE_E2E_EXECUTABLE']],\n"
+        "        capture_output=True, text=True)\n"
+        "    assert result.returncode == 0\n"
+        "    assert result.stdout == '1\\n'\n"
+    )
+    environment = _prepare_runner_flake(root, tests, source)
+    result = _run_runner_cli(root, environment, "mutation", "--timeout", "10")
+    if result.returncode or "1 passed, 0 failed, 0 skipped" not in result.stdout:
+        raise AssertionError(result.stdout + result.stderr)
+    (workspace,) = (root / "tmp").glob("python-mutation-example-*")
+    summary = json.loads((workspace / "summary.json").read_text())
+    if summary.get("killed", 0) <= 0 or summary.get("survived", 0) <= 0:
+        raise AssertionError(summary)
+    if not (workspace / "report.html").stat().st_size:
+        msg = "the campaign must retain a readable report"
+        raise AssertionError(msg)
+    if (root / "packages/example/main.py").read_text() != source:
+        msg = "mutations must never alter the original source"
+        raise AssertionError(msg)
+
+
+@pytest.mark.parametrize(
+    "tests",
+    [
+        "def test_failure():\n    assert False\n",
+        "",
+        "raise ImportError('missing dependency')\n",
+    ],
+)
+def test_mutation_invalid_baselines_fail_without_publishing_scores(
+    tmp_path: Path,
+    tests: str,
+) -> None:
+    """An invalid baseline cannot produce a misleading mutation report."""
+    root = tmp_path / "source"
+    environment = _prepare_runner_flake(root, tests)
+    result = _run_runner_cli(root, environment, "mutation")
+    (workspace,) = (root / "tmp").glob("python-mutation-example-*")
+    if result.returncode != 1 or "baseline.log" not in result.stderr:
+        raise AssertionError(result.stdout + result.stderr)
+    if (
+        not (workspace / "baseline.log").is_file()
+        or (workspace / "summary.json").exists()
+    ):
+        msg = "retain baseline diagnostics without publishing mutation scores"
+        raise AssertionError(msg)
+
+
+def test_mutation_a_package_without_mutable_code_completes_with_an_empty_report(
+    tmp_path: Path,
+) -> None:
+    """A passing import-only suite needs no artificial mutations to succeed."""
+    root = tmp_path / "source"
+    environment = _prepare_runner_flake(
+        root,
+        "from packages.example import main\n"
+        "from hypothesis import given, example, strategies as st\n"
+        "@given(st.just(1))\n@example(0)\n"
+        "def test_explicit_only(value):\n"
+        "    assert value == 0\n"
+        "    assert main is not None\n",
+        "",
+    )
+    result = _run_runner_cli(root, environment, "mutation")
+    (workspace,) = (root / "tmp").glob("python-mutation-example-*")
+    if result.returncode or json.loads((workspace / "summary.json").read_text()) != {}:
+        raise AssertionError(result.stdout + result.stderr)
+
+
+@pytest.mark.parametrize("target_directory", [".", "packages/example"])
+def test_mutation_omitted_target_runs_current_directory(
+    tmp_path: Path,
+    target_directory: str,
+) -> None:
+    """Run the current package or repository without an explicit target."""
+    root = tmp_path / "source with spaces"
+    environment = _prepare_runner_flake(
+        root,
+        "from packages.example import main\ndef test_import():\n"
+        "    assert main is not None\n",
+        "",
+    )
+    result = subprocess.run(  # noqa: S603
+        [os.environ["PACKAGE_E2E_EXECUTABLE"], "mutation"],
+        cwd=root / target_directory,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+    if result.returncode:
+        raise AssertionError(result.stdout + result.stderr)
+    if not (root / "tmp").is_dir():
+        msg = "current-directory run did not retain diagnostics"
+        raise AssertionError(msg)
+    if target_directory == "." and "1 passed, 0 failed, 0 skipped" not in result.stdout:
+        raise AssertionError(result.stdout)
+
+
+def test_mutation_cli_errors_and_help(tmp_path: Path) -> None:
+    """The installed CLI rejects invalid targets and nonfinite timeouts."""
+    executable = os.environ["PACKAGE_E2E_EXECUTABLE"]
+    for arguments, code in [
+        (["--help"], 0),
+        ([str(tmp_path)], 1),
+        ([str(tmp_path), "--timeout", "nan"], 2),
+    ]:
+        result = subprocess.run(  # noqa: S603
+            [executable, "mutation", *arguments],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != code:
+            message = "mutation runner expectation failed"
+            raise AssertionError(message)
+
+
+@pytest.mark.parametrize(
+    "layout",
+    ["empty", "nonpython", "untested", "single_untested"],
+)
+def test_mutation_cli_repository_without_runnable_packages(
+    tmp_path: Path,
+    layout: str,
+) -> None:
+    """Report empty repositories, skipped packages, and invalid explicit targets."""
+    (tmp_path / "flake.nix").write_text("{}", encoding="utf-8")
+    target = tmp_path
+    if layout == "nonpython":
+        package = tmp_path / "packages" / "web"
+        package.mkdir(parents=True)
+        (package / "default.nix").write_text("{}", encoding="utf-8")
+        (package / "index.html").write_text("hello", encoding="utf-8")
+    elif layout in {"untested", "single_untested"}:
+        package = _make_runner_target(tmp_path, "", "")
+        (package / "test_main.py").unlink()
+        if layout == "single_untested":
+            target = package
+    result = subprocess.run(  # noqa: S603
+        [os.environ["PACKAGE_E2E_EXECUTABLE"], "mutation", str(target)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    expected_code = 0 if layout == "untested" else 1
+    if result.returncode != expected_code:
+        raise AssertionError(result.stdout + result.stderr)
+    if layout == "untested":
+        if (
+            "Skipping example: no test_main.py" not in result.stdout
+            or "0 passed, 0 failed, 1 skipped" not in result.stdout
+        ):
+            msg = "repository did not report its skipped package"
+            raise AssertionError(msg)
+    elif (
+        layout != "single_untested" and "no Python packages found" not in result.stderr
+    ):
+        msg = "empty repository diagnostic missing"
+        raise AssertionError(msg)
+    if (tmp_path / "tmp").exists():
+        msg = "a non-runnable target started a workspace"
+        raise AssertionError(msg)
+
+
+@pytest.mark.parametrize("command", ["hypothesis", "mutation"])
+def test_runners_support_dash_case_and_execute_copied_git_subcommands(
+    tmp_path: Path,
+    command: str,
+) -> None:
+    """A copied git-canonical executable must win over the installed command."""
+    root = tmp_path / "source with spaces"
+    source = "def main():\n    print('isolated')\n"
+    tests = (
+        "import subprocess\n"
+        "def test_copied_command():\n"
+        "    result = subprocess.run(['git', 'canonical'],\n"
+        "        capture_output=True, text=True)\n"
+        "    assert result.returncode == 0\n"
+        "    assert result.stdout == 'isolated\\n'\n"
+    )
+    environment = _prepare_runner_flake(root, tests, source, name="git-canonical")
+    result = _run_runner_cli(root, environment, command)
+    if result.returncode or "1 passed, 0 failed, 0 skipped" not in result.stdout:
+        raise AssertionError(result.stdout + result.stderr)
+    if (root / "packages/git-canonical/main.py").read_text() != source:
+        message = "runner changed the original dash-case package"
+        raise AssertionError(message)
