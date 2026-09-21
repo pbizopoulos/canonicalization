@@ -2522,47 +2522,6 @@ def parser() -> argparse.ArgumentParser:
         title="commands",
         metavar="COMMAND",
     )
-    commands.add_parser(
-        "test-names",
-        help="list Python test sentences or inspect their Git changes",
-    )
-    for command, description in (
-        ("hypothesis", "run generated property tests in isolated package copies"),
-        ("mutation", "run Cosmic Ray mutation tests in isolated package copies"),
-    ):
-        runner = commands.add_parser(
-            command,
-            help=description,
-            description=description.capitalize() + ".",
-            epilog=(
-                "Repository targets run Python packages sequentially, skip packages "
-                "without test_main.py, and summarize results. Logs and reports "
-                "are retained under the flake's tmp/ directory."
-            ),
-        )
-        runner.add_argument(
-            "target",
-            type=Path,
-            nargs="?",
-            default=Path(),
-            help="canonical packages/NAME or flake root (default: current directory)",
-        )
-        runner.add_argument(
-            "--timeout",
-            type=float,
-            default=60.0,
-            help=(
-                "seconds per test-suite invocation, excluding environment build "
-                "(default: 60)"
-            ),
-        )
-        if command == "hypothesis":
-            runner.add_argument(
-                "--max-examples",
-                type=int,
-                default=100,
-                help="successful generated examples per property (default: 100)",
-            )
     init = commands.add_parser(
         "init",
         help="initialize HOME or a flake repository",
@@ -2650,6 +2609,47 @@ def parser() -> argparse.ArgumentParser:
         help="report required actions without changing the repository",
     )
     converge.add_argument("--source", type=Path, help=argparse.SUPPRESS)
+    commands.add_parser(
+        "test-names",
+        help="list Python test sentences or inspect their Git changes",
+    )
+    for command, description in (
+        ("hypothesis", "run generated property tests in isolated package copies"),
+        ("mutation", "run Cosmic Ray mutation tests in isolated package copies"),
+    ):
+        runner = commands.add_parser(
+            command,
+            help=description,
+            description=description.capitalize() + ".",
+            epilog=(
+                "Repository targets run Python packages sequentially, skip packages "
+                "without test_main.py, and summarize results. Logs and reports "
+                "are retained under the flake's tmp/ directory."
+            ),
+        )
+        runner.add_argument(
+            "target",
+            type=Path,
+            nargs="?",
+            default=Path(),
+            help="canonical packages/NAME or flake root (default: current directory)",
+        )
+        runner.add_argument(
+            "--timeout",
+            type=float,
+            default=60.0,
+            help=(
+                "seconds per test-suite invocation, excluding environment build "
+                "(default: 60)"
+            ),
+        )
+        if command == "hypothesis":
+            runner.add_argument(
+                "--max-examples",
+                type=int,
+                default=100,
+                help="successful generated examples per property (default: 100)",
+            )
     return result
 
 
