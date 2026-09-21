@@ -6,8 +6,11 @@ from __future__ import annotations
 
 import argparse
 import ast
+import shlex
+import subprocess
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 
 def qualified_name(node: ast.expr) -> str:
@@ -54,7 +57,12 @@ def read_test_names(path: Path) -> list[str]:
     if path.is_symlink():
         message = f"linked test file: {path}"
         raise ValueError(message)
-    module = ast.parse(path.read_bytes(), filename=str(path))
+    return source_test_names(path.read_bytes(), str(path))
+
+
+def source_test_names(source: bytes, filename: str) -> list[str]:
+    """Convert Python source into sorted sentences without executing it."""
+    module = ast.parse(source, filename=filename)
     case_classes = unittest_classes(module)
     definitions = []
     for node in module.body:
@@ -121,13 +129,151 @@ def print_repository(root: Path) -> bool:
     return success
 
 
-def main() -> None:
-    """Print test sentences for the selected package or repository."""
+def git_output(arguments: list[str], *, data: bytes | None = None) -> bytes:
+    """Read Git output while preserving its diagnostics and failures."""
+    return subprocess.run(  # noqa: S603
+        ["git", *arguments],  # noqa: S607
+        input=data,
+        stdout=subprocess.PIPE,
+        check=True,
+    ).stdout
+
+
+def git_arguments(arguments: list[str]) -> tuple[list[str], list[str]]:
+    """Separate Git options/revisions from explicit path filters."""
+    separator = arguments.index("--") if "--" in arguments else len(arguments)
+    options = arguments[:separator]
+    paths = arguments[separator + 1 :]
+    for option in options:
+        if option in {
+            "--no-index",
+            "--no-textconv",
+            "--ext-diff",
+            "--check",
+        } or option.startswith(
+            ("--output", "--textconv=", "-L"),
+        ):
+            message = f"unsupported test-name diff option: {option}"
+            raise ValueError(message)
+    return options, paths
+
+
+def check_diff_attributes(configuration: list[str], paths: bytes) -> None:
+    """Refuse attribute overrides that would expose unconverted source."""
+    if not paths:
+        return
+    attributes = git_output(
+        [*configuration, "check-attr", "-z", "--stdin", "diff"],
+        data=paths,
+    ).split(b"\0")
+    for index in range(0, len(attributes) - 1, 3):
+        path, _, driver = attributes[index : index + 3]
+        if driver != b"python-test-names":
+            message = f"conflicting diff attribute for {path.decode(errors='replace')}"
+            raise ValueError(message)
+
+
+def diff_paths(raw: bytes) -> bytes:
+    """Collect raw diff paths and reject modes that bypass Git's textconv."""
+    paths = []
+    for field in raw.split(b"\0"):
+        if not field:
+            continue
+        header = field.lstrip(b"\n")
+        if header.startswith(b":"):
+            parents = len(header) - len(header.lstrip(b":"))
+            modes = header.lstrip(b":").split()[: parents + 1]
+            if any(mode not in {b"000000", b"100644", b"100755"} for mode in modes):
+                message = (
+                    "test-name diffs require regular files, not symlinks or submodules"
+                )
+                raise ValueError(message)
+        else:
+            paths.append(field)
+    return b"\0".join(paths) + (b"\0" if paths else b"")
+
+
+def print_git(command: str, arguments: list[str]) -> int:
+    """Let Git compare test sentences using an invocation-local textconv driver."""
+    options, paths = git_arguments(arguments)
+    if command == "show":
+        revisions = git_output(["rev-parse", "--revs-only", "--no-flags", *options])
+        for revision in revisions.decode().splitlines():
+            git_output(["rev-parse", "--verify", revision.lstrip("^") + "^{commit}"])
+    root = git_output(["rev-parse", "--show-toplevel"]).decode().rstrip("\n")
+    converter = shlex.join([sys.executable, str(Path(__file__).resolve()), "_textconv"])
+    with TemporaryDirectory(prefix="python-test-names-") as directory:
+        attributes = Path(directory) / "attributes"
+        attributes.write_text(
+            "/packages/*/test_main.py diff=python-test-names python-test-names\n",
+        )
+        configuration = [
+            "-c",
+            f"core.attributesFile={attributes}",
+            "-c",
+            f"diff.python-test-names.textconv={converter}",
+            "-c",
+            "diff.python-test-names.cachetextconv=false",
+        ]
+        filters = [*paths, ":(top,exclude,attr:!python-test-names)**"]
+        discovery = git_output(
+            [
+                *configuration,
+                command,
+                *options,
+                "--no-patch",
+                "--raw",
+                "-z",
+                "--no-relative",
+                "--no-renames",
+                "--no-ext-diff",
+                "--textconv",
+                "--no-quiet",
+                "--no-exit-code",
+                *(["--format="] if command == "show" else []),
+                "--",
+                *filters,
+            ],
+        )
+        check_diff_attributes(["-C", root, *configuration], diff_paths(discovery))
+        return subprocess.run(  # noqa: S603
+            [  # noqa: S607
+                "git",
+                *configuration,
+                command,
+                *options,
+                "--no-ext-diff",
+                "--textconv",
+                "--",
+                *filters,
+            ],
+            check=False,
+        ).returncode
+
+
+def run() -> int:
+    """Dispatch Git views separately from the original listing interface."""
+    if len(sys.argv) > 1 and sys.argv[1] in {"diff", "show"}:
+        return print_git(sys.argv[1], sys.argv[2:])
+    if sys.argv[1:2] == ["_textconv"]:
+        converter_parser = argparse.ArgumentParser(prog="python_test_names _textconv")
+        converter_parser.add_argument("file", type=Path)
+        for name in read_test_names(converter_parser.parse_args(sys.argv[2:]).file):
+            sys.stdout.write(name + "\n")
+        return 0
     parser = argparse.ArgumentParser(
         description=__doc__,
         epilog=(
             "Repository targets list Python packages sequentially and skip packages "
-            "without test_main.py. Test source is parsed, never executed."
+            "without test_main.py. Test source is parsed, never executed. "
+            "Git views: diff [Git options/revisions] [-- paths...] or "
+            "show [Git options/revisions] [-- paths...]. Examples: diff; "
+            "diff --staged; diff HEAD; diff HEAD~1 HEAD; show HEAD. "
+            "Only packages/*/test_main.py sentences are compared. Git supplies "
+            "formatting, commit metadata and exit codes. Body-only edits have "
+            "no sentence hunks. These review diffs cannot be applied as source "
+            "patches. Show requires commits; --no-index, --no-textconv, "
+            "--ext-diff, --check, --output and -L are unsupported."
         ),
     )
     parser.add_argument(
@@ -141,20 +287,26 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
+    target = args.target.resolve()
+    if (target / "flake.nix").is_file():
+        return 0 if print_repository(target) else 1
+    print_package(target)
+    return 0
+
+
+def main() -> None:
+    """Report errors consistently for listing, conversion and Git commands."""
     try:
-        target = args.target.resolve()
-        if (target / "flake.nix").is_file():
-            success = print_repository(target)
-        else:
-            print_package(target)
-            success = True
+        status = run()
+    except subprocess.CalledProcessError as error:
+        sys.exit(error.returncode)
     except (OSError, SyntaxError, UnicodeError, ValueError) as error:
         sys.stderr.write(f"python_test_names: {error}\n")
         sys.exit(1)
     except KeyboardInterrupt:
         sys.stderr.write("python_test_names: interrupted\n")
         sys.exit(130)
-    sys.exit(0 if success else 1)
+    sys.exit(status)
 
 
 if __name__ == "__main__":
