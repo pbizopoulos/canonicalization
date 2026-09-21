@@ -5,14 +5,13 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
-from typing import TYPE_CHECKING
+from pathlib import Path
 
+import coverage
 import pytest
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _run(
@@ -60,8 +59,8 @@ def test_package_and_host_lifecycle(repository: Path) -> None:
     _run(root, "add", "packages/report", "python", 'A "quoted" report.')
     package = root / "packages/report"
     tests = package / "test_main.py"
-    if tests.exists() or (root / "checks/report_coverage").exists():
-        message = "untested packages should not receive tests or coverage checks"
+    if tests.exists() or (root / "checks/report").exists():
+        message = "untested packages should not receive tests or test checks"
         raise AssertionError(message)
     resource = package / "prm/nested/asset.txt"
     resource.parent.mkdir(parents=True)
@@ -73,7 +72,7 @@ def test_package_and_host_lifecycle(repository: Path) -> None:
     for name in (
         "packages/report/test_main.py",
         "packages/report/prm/nested/asset.txt",
-        "checks/report_coverage/default.nix",
+        "checks/report/default.nix",
         "checks/demoHostVmWithDisko/default.nix",
     ):
         if name not in tracked:
@@ -90,7 +89,7 @@ def test_package_and_host_lifecycle(repository: Path) -> None:
         message = "rename lost package resources"
         raise AssertionError(message)
     for name in (
-        "checks/renamed_coverage/default.nix",
+        "checks/renamed/default.nix",
         "checks/newHostVmWithDisko/default.nix",
     ):
         if not (root / name).is_file():
@@ -108,8 +107,8 @@ def test_package_and_host_lifecycle(repository: Path) -> None:
             "packages/renamed",
             "hosts/demoHost",
             "hosts/newHost",
-            "checks/report_coverage",
-            "checks/renamed_coverage",
+            "checks/report",
+            "checks/renamed",
             "checks/demoHostVmWithDisko",
             "checks/newHostVmWithDisko",
         )
@@ -1441,9 +1440,24 @@ def _prepare_coverage_flake(
     *,
     failure: str | None = None,
 ) -> dict[str, str]:
-    """Provide real offline Nix check builds without downloading dependencies."""
-    environment = _prepare_runner_flake(root, "def test_example(): pass\n")
-    environment["NIX_CONFIG"] += (
+    """Build generated checks and coverage variants with offline Nix inputs."""
+    root.mkdir(parents=True)
+    _git(root, "init", "--quiet")
+    for filename in (".gitignore", "flake.nix", "flake.lock", "README"):
+        (root / filename).write_text(
+            "{}" if filename.endswith((".nix", ".lock")) else "",
+        )
+    (root / "flake.lock").write_text(
+        json.dumps({"nodes": {"root": {}}, "root": "root", "version": 7}),
+    )
+    _git(root, "add", ".")
+    environment = dict(os.environ)
+    store = root.parent / "nix"
+    environment["NIX_REMOTE"] = (
+        f"local?store={store / 'store'}&state={store / 'state'}&log={store / 'log'}"
+    )
+    environment["NIX_CONFIG"] = (
+        "experimental-features = nix-command flakes\nbuild-users-group =\n"
         "sandbox = false\nsandbox-build-dir = /coverage-build\neval-cache = false\n"
     )
     system = subprocess.run(
@@ -1454,44 +1468,130 @@ def _prepare_coverage_flake(
         check=True,
         timeout=30,
     ).stdout
+    site_packages = (
+        f"lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages"
+    )
+    coverage_root = Path(coverage.__file__).resolve().parents[4]
+    bash = shutil.which("bash")
+    if bash is None:
+        message = "coverage fixtures require bash"
+        raise AssertionError(message)
+    packages = []
     checks = []
     for name in ("example", "z-last"):
-        if name != "example":
-            _make_runner_target(root, "", "def test_last(): pass\n", name=name)
-        directory = root / "checks" / f"{name}_coverage"
-        directory.mkdir(parents=True)
-        (directory / "default.nix").write_text("{}\n")
-        script = (
-            "import os\nfrom pathlib import Path\n"
-            "output = Path(os.environ['out'])\n"
-            "output.mkdir()\n"
+        _run(root, "add", f"packages/{name}", "python")
+        package = root / "packages" / name
+        source = "def main():\n    print('ready')\n"
+        tests = (
+            "import os, subprocess\n"
+            "from hypothesis import given, example, strategies as st\n"
+            "@given(st.just(1))\n@example(0)\n"
+            "def test_explicit(value):\n    assert value == 0\n"
+            "def test_cli():\n"
+            "    result = subprocess.run([os.environ['PACKAGE_E2E_EXECUTABLE']],\n"
+            "        capture_output=True, text=True)\n"
+            "    assert result.stdout == 'ready\\n'\n"
         )
         if name == "example" and failure == "build":
-            script += "raise SystemExit(1)\n"
-        elif name != "example" or failure != "report":
-            script += (
-                "(output / 'html').mkdir()\n"
-                "(output / 'html/index.html').write_text('coverage')\n"
-            )
-        checks.append(
-            f"{json.dumps(name + '_coverage')} = builtins.derivation {{ "
-            f"name = {json.dumps(name + '-coverage')}; system = {json.dumps(system)}; "
-            f"builder = {json.dumps(sys.executable)}; "
-            f'args = [ "-c" {json.dumps(script)} ]; }};',
+            tests = "def test_failure(): assert False\n"
+        (package / "main.py").write_text(source)
+        (package / "test_main.py").write_text(tests)
+        installed = root / "prm/installed" / name
+        module_name = name.replace("-", "_")
+        module = installed / site_packages / module_name
+        module.mkdir(parents=True)
+        (module / "__init__.py").write_text(source)
+        executable = installed / "bin" / name
+        executable.parent.mkdir()
+        executable.write_text(
+            f"#!{sys.executable}\nimport sys\nfrom pathlib import Path\n"
+            "sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "
+            f"{site_packages!r}))\n"
+            f"from {module_name} import main\nmain()\n",
         )
+        executable.chmod(0o755)
+        packages.append(
+            f"{json.dumps(name)} = {{ "
+            f"src = builtins.path {{ path = ./packages/{name}; "
+            f'name = "{name}-src"; }}; '
+            f"outPath = builtins.path {{ path = ./prm/installed/{name}; "
+            f'name = "{name}-installed"; }}; '
+            f"pname = {json.dumps(module_name)}; cliName = {json.dumps(name)}; "
+            "propagatedBuildInputs = []; python = { "
+            f"sitePackages = {json.dumps(site_packages)}; "
+            f"pkgs.coverage = {json.dumps(str(coverage_root))}; "
+            f"withPackages = _: {json.dumps(sys.prefix)}; }}; }};",
+        )
+        expression = (
+            f"import ./checks/{name}/default.nix {{ inherit pkgs; "
+            "inputs.self.packages.${system} = packages; }"
+        )
+        if name == "example" and failure == "report":
+            expression = (
+                f"({expression}).overrideAttrs "
+                '(_: { buildCommand = "mkdir -p $out\\n"; })'
+            )
+        checks.append(f"{json.dumps(name)} = {expression};")
+    _run(root, "converge")
     (root / "flake.nix").write_text(
-        "{ outputs = _: { checks."
-        + json.dumps(system)
-        + " = { "
-        + " ".join(checks)
-        + " }; }; }\n",
+        "{ outputs = _: let "
+        f"system = {json.dumps(system)}; "
+        "mkCheck = name: attrs: script: let build = current: (builtins.derivation { "
+        "inherit system; inherit (current) name src PACKAGE_E2E_EXECUTABLE; "
+        f"builder = {json.dumps(bash)}; "
+        f"PATH = {json.dumps(sys.prefix + '/bin:' + environment['PATH'])}; "
+        f"PYTHONPATH = {json.dumps(os.pathsep.join(sys.path))}; "
+        'args = [ "-e" (builtins.toFile "check-builder" current.buildCommand) ]; '
+        "}) // { overrideAttrs = f: build (current // f current); }; "
+        "in build (attrs // { inherit name; buildCommand = script; }); "
+        "pkgs = { stdenv.system = system; runCommand = mkCheck; lib = { "
+        "concatMap = f: xs: builtins.concatLists (map f xs); "
+        'getExe = p: "${p}/bin/${p.cliName}"; }; }; '
+        "packages = { "
+        + " ".join(packages)
+        + " }; in { packages.${system} = packages; "
+        "checks.${system} = { " + " ".join(checks) + " }; }; }\n",
     )
     _git(root, "add", ".")
     return environment
 
 
+def test_ordinary_checks_run_explicit_examples_without_coverage(tmp_path: Path) -> None:
+    """The shared test invocation succeeds without producing report artifacts."""
+    root = tmp_path / "source"
+    environment = _prepare_coverage_flake(root)
+    plain = subprocess.run(
+        [  # noqa: S607
+            "nix",
+            "build",
+            "--no-link",
+            "--print-out-paths",
+            "--impure",
+            "--expr",
+            (
+                'let f = builtins.getFlake ("git+file://" + toString ./.); '
+                "in f.checks.${builtins.currentSystem}.example"
+            ),
+        ],
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+    if plain.returncode:
+        raise AssertionError(plain.stdout + plain.stderr)
+    if any(
+        path.name.startswith(".coverage") or path.name in {"html", "coverage.json"}
+        for path in Path(plain.stdout.strip()).iterdir()
+    ):
+        message = "ordinary checks produced coverage artifacts"
+        raise AssertionError(message)
+
+
 @pytest.mark.parametrize("target", [".", "packages/example", "packages/z-last"])
-def test_coverage_builds_existing_checks_and_preserves_the_checkout(
+def test_coverage_builds_instrumented_checks_and_preserves_the_checkout(
     tmp_path: Path,
     target: str,
 ) -> None:
@@ -1512,12 +1612,21 @@ def test_coverage_builds_existing_checks_and_preserves_the_checkout(
     for result in (explicit, current):
         if result.returncode or "/html/index.html" not in result.stdout:
             raise AssertionError(result.stdout + result.stderr)
+    for line in explicit.stdout.splitlines():
+        if line.endswith("/html/index.html"):
+            report = Path(line.split(": ", 1)[1]).parents[1] / "coverage.json"
+            files = json.loads(report.read_text())["files"]
+            if len(files) != 1 or not next(iter(files)).endswith("/main.py"):
+                raise AssertionError(files)
+            if not next(iter(files.values()))["executed_lines"]:
+                message = "coverage missed the CLI subprocess"
+                raise AssertionError(message)
     if explicit.stdout != current.stdout:
         raise AssertionError(current.stdout)
     if _git(root, "status", "--porcelain") != before or (root / "result").exists():
         message = "coverage changed the checkout"
         raise AssertionError(message)
-    if (root / "tmp").exists() or (root / "flake.lock").exists():
+    if (root / "tmp").exists():
         message = "coverage created local campaign state"
         raise AssertionError(message)
 
@@ -1531,7 +1640,7 @@ def test_coverage_continues_after_failures_and_skips_packages_without_tests(
     root = tmp_path / "source"
     environment = _prepare_coverage_flake(root, failure=failure)
     if failure == "check":
-        (root / "checks/example_coverage/default.nix").unlink()
+        (root / "checks/example/default.nix").unlink()
     if failure == "syntax":
         (root / "packages/example/test_main.py").write_text("def invalid(")
     untested = _make_runner_target(root, "", "", name="untested")

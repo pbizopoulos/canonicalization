@@ -45,6 +45,7 @@ let
 in
 python.pkgs.buildPythonPackage {
   inherit pname;
+  checkInputs = [ python.pkgs.coverage ];
   installPhase = ''
     install -Dm644 main.py "$out/${python.sitePackages}/$pname/__init__.py"
     mkdir -p "$out/bin"

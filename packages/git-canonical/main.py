@@ -535,9 +535,7 @@ def required_package_files(package: Package) -> set[Path]:
 def canonical_checks(root: Path, packages: list[Package]) -> dict[Path, str]:
     """Return generated checks derived from the repository's resources."""
     checks = {
-        Path("checks") / f"{package.name}_coverage" / "default.nix": (
-            _current_python_coverage_source()
-        )
+        Path("checks") / package.name / "default.nix": (_current_python_test_source())
         for package in packages
         if package.kind == "python"
         and (package.root / "test_main.py").is_file()
@@ -776,89 +774,64 @@ def _metadata_expression(
     return document, next(iter(unique.values())) if len(unique) == 1 else None
 
 
-def _check_coverage_default(root: Path, package: Package) -> None:
-    """Ensure generated Python coverage checks retain their static definition."""
-    check = root / "checks" / f"{package.name}_coverage" / "default.nix"
+def _check_test_default(root: Path, package: Package) -> None:
+    """Ensure generated Python test checks retain their static definition."""
+    check = root / "checks" / package.name / "default.nix"
     if not check.is_file():
         return
     actual = _read_regular(check)
     if not (actual is not None):
         raise AssertionError
-    expected = _current_python_coverage_source()
+    expected = _current_python_test_source()
     if nix_syntax.compact(actual) != nix_syntax.compact(expected):
         msg = (
-            f"{check.relative_to(root)}: differs from the canonical coverage "
-            "check template"
+            f"{check.relative_to(root)}: differs from the canonical test check template"
         )
         raise CommandError(msg)
 
 
-def _current_python_coverage_source() -> str:
-    """Render the current canonical coverage-check definition."""
+def _current_python_test_source() -> str:
+    """Render the ordinary check that runs explicit examples."""
     return """{ inputs, pkgs, ... }:
 let
-  checkName = baseNameOf ./.;
-  dependencyInputs = pkgs.lib.concatMap (name: packageDrv.${name} or [ ]) [
-    "buildInputs"
-    "checkInputs"
-    "nativeBuildInputs"
-    "nativeCheckInputs"
-    "propagatedBuildInputs"
-    "propagatedNativeBuildInputs"
-  ];
   packageDrv = inputs.self.packages.${pkgs.stdenv.system}.${packageName};
-  packageName = pkgs.lib.removeSuffix "_coverage" checkName;
+  packageName = baseNameOf ./.;
   pythonEnv = packageDrv.python.withPackages (
     ps:
     packageDrv.propagatedBuildInputs
+    ++ (packageDrv.buildInputs or [ ])
     ++ [
-      ps.coverage
       ps.hypothesis
       ps.pytest
     ]
   );
 in
-pkgs.runCommand checkName
+pkgs.runCommand packageName
   {
     inherit (packageDrv) src;
-    nativeBuildInputs = dependencyInputs ++ [ pythonEnv ];
+    PACKAGE_E2E_EXECUTABLE = pkgs.lib.getExe packageDrv;
+    nativeBuildInputs =
+      (packageDrv.nativeBuildInputs or [ ]) ++ packageDrv.propagatedBuildInputs ++ [ pythonEnv ];
   }
   ''
     export HOME="$(mktemp -d)"
-    mkdir -p "$out/html" packages "$TMPDIR/coverage-startup"
+    mkdir -p "$out" packages
     ln -s "$src" "packages/${packageName}"
-    export COVERAGE_FILE="$out/.coverage"
-    export COVERAGE_PROCESS_START="$TMPDIR/coverage.ini"
-    cat > "$COVERAGE_PROCESS_START" <<EOF
-    [run]
-    parallel = true
-    data_file = $out/.coverage
-    source =
-        $src
-        ${packageDrv}/${packageDrv.python.sitePackages}/${packageDrv.pname}
-    omit =
-        */test_main.py
-        */prm/*
-    EOF
-    printf '%s\\n' 'import coverage; coverage.process_startup()' > "$TMPDIR/coverage-startup/sitecustomize.py"
-    export PYTHONPATH="$TMPDIR/coverage-startup:$PWD:${pythonEnv}/${packageDrv.python.sitePackages}:$PYTHONPATH"
+    export PYTHONPATH="$PWD:$PYTHONPATH"
     cd "$out"
-    PACKAGE_E2E_EXECUTABLE="${pkgs.lib.getExe packageDrv}" python -c 'import sys; from hypothesis import Phase, settings; settings.register_profile("coverage", phases=[Phase.explicit]); settings.load_profile("coverage"); import pytest; sys.exit(pytest.main(sys.argv[1:]))' -p no:cacheprovider --import-mode=importlib "$src/test_main.py"
-    unset COVERAGE_PROCESS_START
-    python -m coverage combine --rcfile="$TMPDIR/coverage.ini"
-    python - <<'PYTHON'
+    "${pythonEnv}/bin/python" - <<'PYTHON'
     import os
-    import coverage
-    data = coverage.CoverageData()
-    data.read()
-    mapped = coverage.CoverageData(basename=".coverage-mapped")
-    installed = "${packageDrv}/${packageDrv.python.sitePackages}/${packageDrv.pname}/__init__.py"
-    mapped.update(data, map_path=lambda path: os.environ["src"] + "/main.py" if path == installed else path)
-    mapped.write()
-    os.replace(mapped.data_filename(), data.data_filename())
+    import sys
+    from hypothesis import Phase, settings
+    settings.register_profile("explicit", phases=[Phase.explicit])
+    settings.load_profile("explicit")
+    import pytest
+    sys.exit(pytest.main([
+        "-p", "no:cacheprovider",
+        "--import-mode=importlib",
+        os.environ["src"] + "/test_main.py",
+    ]))
     PYTHON
-    python -m coverage html --rcfile="$TMPDIR/coverage.ini" -d "$out/html"
-    python -m coverage json --rcfile="$TMPDIR/coverage.ini" -o "$out/coverage.json"
   ''
 """  # noqa: E501
 
@@ -1376,7 +1349,7 @@ def validate_flake_source(root: Path) -> list[Package]:  # noqa: C901
         if default.is_file():
             nix_syntax.parse(default.read_bytes(), str(default))
         if package.kind == "python":
-            _check_coverage_default(root, package)
+            _check_test_default(root, package)
     checks_root = root / "checks"
     if checks_root.is_dir():
         for check in checks_root.iterdir():
@@ -1634,11 +1607,7 @@ def remove_resource(root: Path, value: str, dry_run: bool) -> None:  # noqa: FBT
     ):
         msg = f"{kind} does not exist: {name}"
         raise CommandError(msg)
-    check_root = (
-        root
-        / "checks"
-        / (f"{name}_coverage" if kind == "package" else f"{name}VmWithDisko")
-    )
+    check_root = root / "checks" / (name if kind == "package" else f"{name}VmWithDisko")
     targets = [
         resource_root,
         *([check_root] if check_root.exists() else []),
@@ -1703,7 +1672,7 @@ def rename_resource(root: Path, source: str, destination: str, dry_run: bool) ->
         msg = f"destination already exists: {destination_relative}"
         raise CommandError(msg)
     moves = [(source_relative, destination_relative)]
-    check_suffix = "_coverage" if source_kind == "package" else "VmWithDisko"
+    check_suffix = "" if source_kind == "package" else "VmWithDisko"
     source_check = Path("checks") / f"{source_name}{check_suffix}"
     destination_name = destination_relative.name
     destination_check = Path("checks") / f"{destination_name}{check_suffix}"
@@ -2539,14 +2508,72 @@ def _dispatch_test_runner(
     sys.exit(0 if success else 1)
 
 
+def _coverage_expression(root: Path, name: str, system: str) -> str:
+    """Instrument the ordinary check while reusing its environment and test command."""
+    expression = """let
+  flake = builtins.getFlake FLAKE;
+  system = SYSTEM;
+  packageName = PACKAGE;
+  packageDrv = flake.packages.${system}.${packageName};
+  check = flake.checks.${system}.${packageName};
+in
+check.overrideAttrs (previous: {
+  name = "${previous.name}-coverage";
+  buildCommand = ''
+    mkdir -p "$out/html" "$TMPDIR/coverage-startup"
+    export COVERAGE_FILE="$out/.coverage"
+    export COVERAGE_PROCESS_START="$TMPDIR/coverage.ini"
+    cat > "$COVERAGE_PROCESS_START" <<EOF
+    [run]
+    parallel = true
+    data_file = $out/.coverage
+    source =
+        $src
+        ${packageDrv}/${packageDrv.python.sitePackages}/${packageDrv.pname}
+    omit =
+        */test_main.py
+        */prm/*
+    EOF
+    printf '%s\\n' 'import coverage; coverage.process_startup()' > "$TMPDIR/coverage-startup/sitecustomize.py"
+    export PYTHONPATH="$TMPDIR/coverage-startup:$PWD:${packageDrv.python.pkgs.coverage}/${packageDrv.python.sitePackages}:$PYTHONPATH"
+  '' + previous.buildCommand + ''
+    unset COVERAGE_PROCESS_START
+    python -m coverage combine --rcfile="$TMPDIR/coverage.ini"
+    python - <<'PYTHON'
+    import os
+    import coverage
+    data = coverage.CoverageData()
+    data.read()
+    mapped = coverage.CoverageData(basename=".coverage-mapped")
+    installed = "${packageDrv}/${packageDrv.python.sitePackages}/${packageDrv.pname}/__init__.py"
+    mapped.update(data, map_path=lambda path: os.environ["src"] + "/main.py" if path == installed else path)
+    mapped.write()
+    os.replace(mapped.data_filename(), data.data_filename())
+    PYTHON
+    python -m coverage html --rcfile="$TMPDIR/coverage.ini" -d "$out/html"
+    python -m coverage json --rcfile="$TMPDIR/coverage.ini" -o "$out/coverage.json"
+  '';
+})
+"""  # noqa: E501
+    substitutions = {
+        "FLAKE": _nix_string("git+" + root.as_uri()),
+        "SYSTEM": _nix_string(system),
+        "PACKAGE": _nix_string(name),
+    }
+    return re.sub(
+        r"\b(?:FLAKE|SYSTEM|PACKAGE)\b",
+        lambda match: substitutions[match[0]],
+        expression,
+    )
+
+
 def _build_package_coverage(package: Path, system: str) -> None:
-    """Build the existing Nix coverage check and print its HTML report path."""
+    """Build an instrumented variant of the test check and print its report path."""
     root = _test_target_root(package)
-    check = root / "checks" / f"{package.name}_coverage" / "default.nix"
+    check = root / "checks" / package.name / "default.nix"
     if not check.is_file():
         message = f"missing {check}; run git canonical converge to generate checks"
         raise CommandError(message)
-    installable = f"git+{root.as_uri()}#checks.{system}.{package.name}_coverage"
     sys.stdout.write(f"Building coverage for {package.name}...\n")
     sys.stdout.flush()
     completed = subprocess.run(  # noqa: S603
@@ -2556,7 +2583,9 @@ def _build_package_coverage(package: Path, system: str) -> None:
             "--no-link",
             "--no-write-lock-file",
             "--print-out-paths",
-            installable,
+            "--impure",
+            "--expr",
+            _coverage_expression(root, package.name, system),
         ],
         stdout=subprocess.PIPE,
         text=True,
@@ -2573,7 +2602,7 @@ def _build_package_coverage(package: Path, system: str) -> None:
     if not report.is_file():
         message = (
             f"coverage check produced no HTML report for {package.name}; "
-            "run git canonical converge to update the coverage checks"
+            "run git canonical converge to update the test checks"
         )
         raise CommandError(message)
     sys.stdout.write(f"{package.name}: {report}\n")
@@ -2738,8 +2767,8 @@ def parser() -> argparse.ArgumentParser:
     )
     coverage = commands.add_parser(
         "coverage",
-        help="build Nix coverage checks and print HTML report paths",
-        description="Build existing Nix coverage checks with explicit test examples.",
+        help="build instrumented test checks and print HTML report paths",
+        description="Measure explicit test examples in a separate cached Nix build.",
         epilog=(
             "Repository targets skip packages without tests and summarize results. "
             "Builds reuse Nix's cache, leave the checkout unchanged, and store HTML "
