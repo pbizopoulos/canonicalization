@@ -52,16 +52,17 @@ def unittest_classes(module: ast.Module) -> set[str]:
     return found
 
 
-def read_test_names(path: Path) -> list[str]:
+def read_test_names(path: Path, *, source_order: bool = False) -> list[str]:
     """Read top-level test functions and methods in recognized test classes."""
     if path.is_symlink():
         message = f"linked test file: {path}"
         raise ValueError(message)
-    return source_test_names(path.read_bytes(), str(path))
+    names = source_test_names(path.read_bytes(), str(path))
+    return names if source_order else sorted(names)
 
 
 def source_test_names(source: bytes, filename: str) -> list[str]:
-    """Convert Python source into sorted sentences without executing it."""
+    """Convert Python source into sentences in definition order without executing it."""
     module = ast.parse(source, filename=filename)
     case_classes = unittest_classes(module)
     definitions = []
@@ -72,12 +73,12 @@ def source_test_names(source: bytes, filename: str) -> list[str]:
             definitions.extend(node.body)
         else:
             definitions.append(node)
-    return sorted(
+    return [
         node.name.replace("_", " ")
         for node in definitions
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         and node.name.startswith("test_")
-    )
+    ]
 
 
 def print_package(package: Path) -> None:
@@ -258,7 +259,10 @@ def run() -> int:
     if sys.argv[1:2] == ["_textconv"]:
         converter_parser = argparse.ArgumentParser(prog="python_test_names _textconv")
         converter_parser.add_argument("file", type=Path)
-        for name in read_test_names(converter_parser.parse_args(sys.argv[2:]).file):
+        for name in read_test_names(
+            converter_parser.parse_args(sys.argv[2:]).file,
+            source_order=True,
+        ):
             sys.stdout.write(name + "\n")
         return 0
     parser = argparse.ArgumentParser(

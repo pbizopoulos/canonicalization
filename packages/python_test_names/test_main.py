@@ -500,3 +500,34 @@ def test_staged_diff_works_before_the_first_commit(tmp_path: Path) -> None:
     result = run_cli(tmp_path, "diff", "--staged")
     if result.returncode != 0 or "+test first" not in result.stdout:
         raise AssertionError(result)
+
+
+def test_git_views_preserve_definition_order_while_listings_remain_sorted(
+    tmp_path: Path,
+) -> None:
+    """Appended tests remain appended in patches, including methods and async tests."""
+    git(tmp_path, "init", "-q")
+    package = make_package(tmp_path, "example", "def test_zebra(): pass\n")
+    git(tmp_path, "add", ".")
+    git(tmp_path, "commit", "-qm", "Initial test")
+    source = package / "test_main.py"
+    source.write_text(
+        "def test_zebra(): pass\n"
+        "class TestBehavior:\n    def test_middle(self): pass\n"
+        "async def test_alpha(): pass\n",
+    )
+    expected = " test zebra\n+test middle\n+test alpha\n"
+    working = run_cli(tmp_path, "diff", "--color=never")
+    git(tmp_path, "add", ".")
+    staged = run_cli(tmp_path, "diff", "--staged", "--color=never")
+    git(tmp_path, "commit", "-qm", "Append tests")
+    committed = run_cli(tmp_path, "show", "--color=never")
+    for result in (working, staged, committed):
+        if result.returncode != 0 or expected not in result.stdout:
+            raise AssertionError(result)
+    listing = run_cli(package)
+    if (
+        listing.returncode != 0
+        or listing.stdout != "test alpha\ntest middle\ntest zebra\n"
+    ):
+        raise AssertionError(listing)
