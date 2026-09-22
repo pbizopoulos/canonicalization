@@ -8,12 +8,14 @@ import curses
 import glob
 import json
 import os
+import re
 import readline
 import shlex
 import signal
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -333,7 +335,30 @@ class Viewer:  # noqa: D101
         self.direction = 1
         self.match: int | None = None
         self.notice = ""
-        self.follow = True
+        self.follow = False
+        self.pattern: re.Pattern[str] | None = None
+        self.highlight = True
+        self.wrap_search = False
+        self.literal_search = False
+        self.keep_search = False
+        self.search_history: list[str] = []
+        self.search_history_index = 0
+        self.number = ""
+        self.pending = ""
+        self.search_count = 1
+        self.search_modifiers: dict[str, bool] = {}
+        self.half_window = 0
+        self.window = 0
+        self.horizontal = 0
+        self.horizontal_step = 0
+        self.chop = False
+        self.ignore_case = ""
+        self.marks: dict[str, int] = {}
+        self.previous_top = 0
+        self.help_offset: int | None = None
+        self.invert_search = False
+        self.displayed_line = 0
+        self.displayed_offset = 0
 
     def append(self, text: str) -> None:  # noqa: D102
         self.lines.extend(
@@ -342,53 +367,107 @@ class Viewer:  # noqa: D101
         )
         self.draw()
 
+    def page_size(self) -> int:  # noqa: D102
+        return max(1, int(self.screen.getmaxyx()[0]) - 1)
+
+    @staticmethod
+    def cell_width(text: str) -> int:  # noqa: D102
+        return sum(
+            0
+            if unicodedata.combining(char)
+            else 2
+            if unicodedata.east_asian_width(char) in {"W", "F"}
+            else 1
+            for char in text
+        )
+
+    def layout(self) -> list[tuple[int, int, str]]:  # noqa: D102
+        width = max(1, self.screen.getmaxyx()[1])
+        rows = []
+        for number, line in enumerate(self.lines):
+            start = 0
+            column = 0
+            for index, char in enumerate(line):
+                size = self.cell_width(char)
+                if self.horizontal and column < self.horizontal:
+                    column += size
+                    start = index + 1
+                    continue
+                if column + size > self.horizontal + width:
+                    rows.append((number, start, line[start:index]))
+                    if self.chop or self.horizontal:
+                        break
+                    start, column = index, 0
+                column += size
+            else:
+                rows.append((number, start, line[start:]))
+        return rows
+
     def rows(self) -> list[str]:  # noqa: D102
-        width = max(1, self.screen.getmaxyx()[1] - 1)
-        return [
-            line[start : start + width]
-            for line in self.lines
-            for start in range(0, max(1, len(line)), width)
-        ]
+        return [text for _, _, text in self.layout()]
 
     def draw(self) -> None:  # noqa: D102
+        if self.help_offset is not None:
+            self.draw_help()
+            return
         height, width = self.screen.getmaxyx()
-        page = max(1, height - 2)
-        rows = self.rows()
-        end = max(0, len(rows) - page)
-        self.top = end if self.follow else min(self.top, end)
+        page = self.page_size()
+        rows = self.layout()
+        if self.follow:
+            self.top = max(0, len(rows) - page)
+        self.top = min(self.top, max(0, len(rows) - 1))
+        if rows:
+            self.displayed_line, self.displayed_offset, _ = rows[self.top]
         self.screen.erase()
-        for y, line in enumerate(rows[self.top : self.top + page]):
+        for y in range(page):
+            if self.top + y >= len(rows):
+                with contextlib.suppress(curses.error):
+                    self.screen.addstr(y, 0, "~")
+                continue
+            number, start, text = rows[self.top + y]
             with contextlib.suppress(curses.error):
-                self.screen.addnstr(
-                    y,
-                    0,
-                    line,
-                    max(0, width - 1),
-                    curses.A_REVERSE
-                    if self.query and self.query in line
-                    else curses.A_NORMAL,
-                )
-        status = (
-            f"{self.mode.upper()}  {self.top + 1}/{max(1, len(rows))}  "
-            ": chat  Esc view  / ? search  n N repeat  j k scroll  g G ends  q quit"
+                self.screen.addstr(y, 0, text, curses.A_NORMAL)
+            if self.pattern is not None and self.highlight:
+                for match in self.pattern.finditer(self.lines[number]):
+                    left = max(start, match.start())
+                    right = min(start + len(text), match.end())
+                    if left < right:
+                        with contextlib.suppress(curses.error):
+                            self.screen.addstr(
+                                y,
+                                self.cell_width(self.lines[number][start:left]),
+                                self.lines[number][left:right],
+                                curses.A_REVERSE,
+                            )
+        status = self.notice or (
+            "Waiting for data... (Ctrl+C to interrupt)"
+            if self.follow
+            else "(END)"
+            if self.top + page >= len(rows)
+            else ":"
+        )
+        search_prefix = self.mode + "".join(
+            label + " "
+            for attribute, label in (
+                ("wrap_search", "WRAP"),
+                ("literal_search", "LITERAL"),
+                ("keep_search", "KEEP"),
+                ("invert_search", "NOT"),
+            )
+            if self.search_modifiers.get(attribute)
         )
         prompt = (
             "> " + self.draft
             if self.mode == "chat"
-            else self.mode + self.entry
+            else search_prefix + self.entry
             if self.mode in {"/", "?"}
-            else self.notice
+            else self.number
+            or ("ESC" if self.pending == "\x1b" else self.pending)
+            or status
         )
-        position = self.cursor + (2 if self.mode == "chat" else 1)
+        position = self.cursor + (2 if self.mode == "chat" else len(search_prefix))
         offset = max(0, position - max(1, width - 2)) if self.mode != "view" else 0
         with contextlib.suppress(curses.error):
-            self.screen.addnstr(
-                max(0, height - 2),
-                0,
-                status,
-                max(0, width - 1),
-                curses.A_REVERSE,
-            )
             self.screen.addnstr(
                 max(0, height - 1),
                 0,
@@ -403,20 +482,121 @@ class Viewer:  # noqa: D101
             curses.curs_set(int(self.mode != "view"))
         self.screen.refresh()
 
-    def search(self, direction: int) -> None:  # noqa: D102
-        rows = self.rows()
-        if not self.query or not rows:
+    def draw_help(self) -> None:  # noqa: D102
+        lines = [
+            "VIEWER COMMANDS (q returns to transcript)",
+            "Commands accept a numeric prefix N where appropriate.",
+            "j e Enter Down Ctrl+N Ctrl+E  Forward N lines",
+            "k y Up Ctrl+P Ctrl+Y         Backward N lines",
+            "Space f PgDn Ctrl+F Ctrl+V   Forward N lines (default a page)",
+            "b PgUp Ctrl+B Esc-v          Backward N lines (default a page)",
+            "d Ctrl+D / u Ctrl+U          Forward / backward half a page",
+            "z / w                       Like f / b; N sets page size",
+            "g < Home / G > End           First / last line, or line N",
+            "N% or Np                    Jump to N percent",
+            "F                           Follow output; Ctrl+C stops",
+            "Left / Right                Scroll horizontally",
+            "/pattern / ?pattern         Forward / backward regex search",
+            "n / N                       Repeat search / reverse direction",
+            "Search prefixes: Ctrl+W wrap; Ctrl+R literal; Ctrl+K highlight only",
+            "Search prefix: Ctrl+N or !   Find nonmatching lines",
+            "Esc-u / Esc-U               Toggle highlights / clear search",
+            "-i / -I                     Smart / unconditional ignore case",
+            "-S                          Toggle long-line chopping",
+            "ma / 'a / ''                Set mark a / jump to a / previous jump",
+            "r Ctrl+L Ctrl+R              Redraw",
+            "= Ctrl+G                    Transcript position",
+            "q Q ZZ                      Quit",
+            ":                           Enter chat (application extension)",
+            "Esc                         Leave chat; keep unfinished draft",
+        ]
+        height, width = self.screen.getmaxyx()
+        self.screen.erase()
+        for row, text in enumerate(lines[self.help_offset or 0 :][: self.page_size()]):
+            with contextlib.suppress(curses.error):
+                self.screen.addnstr(row, 0, text, max(0, width - 1))
+        with contextlib.suppress(curses.error):
+            self.screen.addnstr(
+                height - 1,
+                0,
+                "HELP -- Space: next, b: back, q: close",
+                max(0, width - 1),
+            )
+            curses.curs_set(0)
+        self.screen.refresh()
+
+    def compile_search(self) -> bool:  # noqa: D102
+        flags = (
+            re.IGNORECASE
+            if (
+                self.ignore_case == "I"
+                or (
+                    self.ignore_case == "i" and not any(c.isupper() for c in self.query)
+                )
+            )
+            else 0
+        )
+        try:
+            self.pattern = re.compile(
+                re.escape(self.query) if self.literal_search else self.query,
+                flags,
+            )
+        except re.error as exc:
+            self.notice = f"Invalid pattern: {exc}"
+            return False
+        return True
+
+    def search(self, direction: int, count: int = 1, *, initial: bool = False) -> None:  # noqa: D102
+        if not self.query:
+            self.notice = "No previous regular expression"
             return
-        origin = self.top if self.match is None else self.match
-        for step in range(1, len(rows) + 1):
-            index = (origin + direction * step) % len(rows)
-            if self.query in rows[index]:
-                self.top = index
-                self.match = index
-                self.follow = False
-                self.notice = f"Search: {self.query}"
-                return
-        self.notice = f"Pattern not found: {self.query}"
+        if not self.compile_search():
+            return
+        self.highlight = True
+        rows = self.layout()
+        if not rows or (self.keep_search and initial):
+            return
+        anchor = min(self.top, len(rows) - 1)
+        if initial and direction < 0:
+            anchor = min(anchor + self.page_size() - 1, len(rows) - 1)
+        origin = rows[anchor][0]
+        start = origin if initial else origin + direction
+        candidates = list(
+            range(start, len(self.lines) if direction > 0 else -1, direction),
+        )
+        if self.wrap_search:
+            candidates += list(
+                range(0 if direction > 0 else len(self.lines) - 1, start, direction),
+            )
+        for number in candidates:
+            match = self.pattern.search(self.lines[number]) if self.pattern else None
+            if (match is not None) == self.invert_search:
+                continue
+            count -= 1
+            if count:
+                continue
+            self.previous_top = self.top
+            self.top = next(
+                index
+                for index, (line, offset, text) in enumerate(rows)
+                if line == number
+                and (
+                    self.chop
+                    or self.horizontal
+                    or (
+                        offset
+                        <= min(match.start(), max(0, len(self.lines[number]) - 1))
+                        < offset + max(1, len(text))
+                        if match
+                        else offset == 0
+                    )
+                )
+            )
+            self.match = number
+            self.follow = False
+            self.notice = ""
+            return
+        self.notice = "Pattern not found"
 
     def submit(self) -> None:  # noqa: D102
         prompt = self.draft
@@ -440,7 +620,7 @@ class Viewer:  # noqa: D101
         finally:
             self.notice = ""
 
-    def edit(self, key: str | int) -> None:  # noqa: C901, D102, PLR0912
+    def edit(self, key: str | int) -> None:  # noqa: C901, D102, PLR0912, PLR0915
         value = self.draft if self.mode == "chat" else self.entry
         if key == curses.KEY_LEFT:
             self.cursor = max(0, self.cursor - 1)
@@ -472,6 +652,16 @@ class Viewer:  # noqa: D101
         elif key == "\x15":
             value = value[self.cursor :]
             self.cursor = 0
+        elif key == "\x0b":
+            value = value[: self.cursor]
+        elif key == "\x17":
+            start = self.cursor
+            while start and value[start - 1].isspace():
+                start -= 1
+            while start and not value[start - 1].isspace():
+                start -= 1
+            value = value[:start] + value[self.cursor :]
+            self.cursor = start
         elif key == "\t" and self.mode == "chat":
             start = self.cursor
             while start and not value[start - 1].isspace():
@@ -492,8 +682,102 @@ class Viewer:  # noqa: D101
         else:
             self.entry = value
 
-    def key(self, key: str | int) -> bool:  # noqa: C901, D102, PLR0912
+    def move(self, top: int) -> None:  # noqa: D102
+        self.follow = False
+        end = max(0, len(self.rows()) - self.page_size())
+        limit = max(self.top, end) if top > self.top else max(0, len(self.rows()) - 1)
+        self.top = max(0, min(top, limit))
+        self.match = None
+
+    def prefix_key(self, key: str | int, count: int) -> bool:  # noqa: C901, D102, PLR0912
+        prefix, self.pending = self.pending, ""
+        if prefix == "\x1b":
+            if key == "u":
+                self.highlight = not self.highlight
+            elif key == "U":
+                self.query = ""
+                self.pattern = None
+                self.match = None
+            elif key == "v":
+                self.move(self.top - (count or self.window or self.page_size()))
+            elif key in {"<", ">"}:
+                self.key("g" if key == "<" else "G")
+            else:
+                return self.key(key)
+        elif prefix == "-":
+            if key in {"i", "I"}:
+                self.ignore_case = "" if self.ignore_case == key else str(key)
+                if self.query:
+                    self.compile_search()
+                self.notice = (
+                    "Case-sensitive search"
+                    if not self.ignore_case
+                    else "Ignore case in searches"
+                )
+            elif key == "S":
+                self.chop = not self.chop
+            else:
+                self.notice = "Supported options: -i -I -S"
+        elif prefix == "m" and isinstance(key, str) and key.isalpha():
+            rows = self.layout()
+            self.marks[key] = rows[min(self.top, len(rows) - 1)][0] if rows else 0
+        elif prefix == "'":
+            if key == "'":
+                self.top, self.previous_top = self.previous_top, self.top
+                self.follow = False
+            elif key in self.marks:
+                self.previous_top = self.top
+                self.top = next(
+                    (
+                        i
+                        for i, row in enumerate(self.layout())
+                        if row[0] == self.marks[str(key)]
+                    ),
+                    0,
+                )
+                self.follow = False
+            else:
+                self.notice = "Mark not set"
+        elif prefix == "Z":
+            return key != "Z"
+        return True
+
+    def key(self, key: str | int) -> bool:  # noqa: C901, D102, PLR0911, PLR0912, PLR0915
+        if self.help_offset is not None:
+            if key in {"q", "Q", "\x1b"}:
+                self.help_offset = None
+            elif key in {" ", "f", curses.KEY_NPAGE}:
+                self.help_offset = min(24, self.help_offset + self.page_size())
+            elif key in {"b", curses.KEY_PPAGE}:
+                self.help_offset = max(0, self.help_offset - self.page_size())
+            return True
+        if key == "\x03":
+            self.mode = "view"
+            self.follow = False
+            self.pending = self.number = ""
+            return True
+        if key == curses.KEY_RESIZE:
+            self.top = next(
+                (
+                    index
+                    for index, (line, offset, text) in enumerate(self.layout())
+                    if line == self.displayed_line
+                    and (
+                        self.chop
+                        or self.horizontal
+                        or offset <= self.displayed_offset < offset + max(1, len(text))
+                    )
+                ),
+                self.top,
+            )
+            return True
+        if key == "\x07" and self.mode != "view":
+            self.mode = "view"
+            return True
         if key == "\x1b":
+            self.pending = "\x1b" if self.mode == "view" else ""
+            if self.mode != "view":
+                self.number = ""
             self.mode = "view"
             return True
         if self.mode != "view":
@@ -502,45 +786,175 @@ class Viewer:  # noqa: D101
                     self.submit()
                 else:
                     self.direction = 1 if self.mode == "/" else -1
+                    for attribute in (
+                        "wrap_search",
+                        "literal_search",
+                        "keep_search",
+                        "invert_search",
+                    ):
+                        if self.entry or attribute in self.search_modifiers:
+                            setattr(
+                                self,
+                                attribute,
+                                self.search_modifiers.get(attribute, False),
+                            )
                     self.query = self.entry or self.query
-                    self.match = None
+                    if self.entry:
+                        self.search_history.append(self.entry)
                     self.mode = "view"
-                    self.search(self.direction)
+                    self.search(self.direction, self.search_count, initial=True)
+            elif (
+                self.mode in {"/", "?"}
+                and key in {"\x17", "\x12", "\x0b", "\x0e", "!"}
+                and not self.entry
+            ):
+                attribute = {
+                    "\x17": "wrap_search",
+                    "\x12": "literal_search",
+                    "\x0b": "keep_search",
+                    "\x0e": "invert_search",
+                    "!": "invert_search",
+                }[str(key)]
+                self.search_modifiers[attribute] = not self.search_modifiers.get(
+                    attribute,
+                    False,
+                )
+            elif self.mode in {"/", "?"} and key in {curses.KEY_UP, curses.KEY_DOWN}:
+                self.search_history_index = min(
+                    len(self.search_history),
+                    max(
+                        0,
+                        self.search_history_index + (-1 if key == curses.KEY_UP else 1),
+                    ),
+                )
+                self.entry = (
+                    self.search_history[self.search_history_index]
+                    if self.search_history_index < len(self.search_history)
+                    else ""
+                )
+                self.cursor = len(self.entry)
+            elif (
+                self.mode in {"/", "?"}
+                and not self.entry
+                and key in {"\b", "\x7f", curses.KEY_BACKSPACE}
+            ):
+                self.mode = "view"
             else:
                 self.edit(key)
             return True
-        page = max(1, self.screen.getmaxyx()[0] - 2)
-        if key in {"q", "\x04"}:
+        if (
+            isinstance(key, str)
+            and key.isascii()
+            and key.isdigit()
+            and not self.pending
+        ):
+            self.number = (self.number + key)[:9]
+            return True
+        count = int(self.number) if self.number else 0
+        self.number = ""
+        self.notice = ""
+        if self.pending:
+            return self.prefix_key(key, count)
+        if key in {"q", "Q"}:
             return False
-        if key == ":":
+        if key in {"-", "m", "'", "Z"}:
+            self.pending = str(key)
+        elif key == ":":
             self.mode = "chat"
             self.cursor = len(self.draft)
         elif key in {"/", "?"}:
             self.mode = str(key)
             self.entry = ""
             self.cursor = 0
+            self.search_count = count or 1
+            self.search_history_index = len(self.search_history)
+            self.search_modifiers = {}
         elif key in {"n", "N"}:
-            self.search(self.direction * (1 if key == "n" else -1))
-        elif key == "G":
-            self.follow = True
-        elif key in {"g", curses.KEY_HOME}:
-            self.top = 0
-            self.follow = False
-        else:
-            movement = {
-                "j": 1,
-                curses.KEY_DOWN: 1,
-                "k": -1,
-                curses.KEY_UP: -1,
-                " ": page,
-                "f": page,
-                curses.KEY_NPAGE: page,
-                "b": -page,
-                curses.KEY_PPAGE: -page,
-            }.get(key, 0)
-            if movement:
-                self.top = max(0, self.top + movement)
+            self.search(self.direction * (1 if key == "n" else -1), count or 1)
+        elif key in {"g", "<", curses.KEY_HOME, "G", ">", curses.KEY_END, "F"}:
+            self.previous_top = self.top
+            if count:
+                self.top = next(
+                    (i for i, row in enumerate(self.layout()) if row[0] >= count - 1),
+                    max(0, len(self.rows()) - 1),
+                )
                 self.follow = False
+            else:
+                self.top = (
+                    0
+                    if key in {"g", "<", curses.KEY_HOME}
+                    else max(0, len(self.rows()) - self.page_size())
+                )
+                self.follow = key == "F"
+        elif key in {"p", "%"}:
+            self.previous_top = self.top
+            self.move((len(self.rows()) - 1) * min(count, 100) // 100)
+        elif key in {curses.KEY_RIGHT, curses.KEY_LEFT}:
+            rows = self.layout()
+            line = rows[min(self.top, len(rows) - 1)][0] if rows else 0
+            self.horizontal_step = (
+                count or self.horizontal_step or max(1, self.screen.getmaxyx()[1] // 2)
+            )
+            self.horizontal = max(
+                0,
+                self.horizontal
+                + (1 if key == curses.KEY_RIGHT else -1) * self.horizontal_step,
+            )
+            self.top = next(
+                (i for i, row in enumerate(self.layout()) if row[0] == line),
+                0,
+            )
+            self.follow = False
+        elif key in {"d", "\x04", "u", "\x15"}:
+            self.half_window = (
+                count or self.half_window or max(1, self.page_size() // 2)
+            )
+            self.move(self.top + (1 if key in {"d", "\x04"} else -1) * self.half_window)
+        elif key in {
+            " ",
+            "f",
+            "\x06",
+            "\x16",
+            curses.KEY_NPAGE,
+            "b",
+            "\x02",
+            curses.KEY_PPAGE,
+            "z",
+            "w",
+        }:
+            if key in {"z", "w"} and count:
+                self.window = count
+            direction = -1 if key in {"b", "\x02", curses.KEY_PPAGE, "w"} else 1
+            self.move(self.top + direction * (count or self.window or self.page_size()))
+        elif key in {
+            "j",
+            "e",
+            "\n",
+            "\r",
+            "\x0e",
+            "\x05",
+            curses.KEY_ENTER,
+            curses.KEY_DOWN,
+            "k",
+            "y",
+            "\x19",
+            "\x10",
+            "\x0b",
+            curses.KEY_UP,
+        }:
+            direction = (
+                -1 if key in {"k", "y", "\x19", "\x10", "\x0b", curses.KEY_UP} else 1
+            )
+            self.move(self.top + direction * (count or 1))
+        elif key in {"=", "\x07"}:
+            self.notice = (
+                f"Transcript: {len(self.lines)} lines; "
+                f"screen row {self.top + 1}/{len(self.rows())}"
+            )
+        elif key in {"h", "H"}:
+            self.help_offset = 0
+        elif key not in {"r", "R", "\x12", "\x0c", curses.KEY_RESIZE}:
+            self.notice = "Unknown command (press h for help)"
         return True
 
     def run(self) -> None:  # noqa: D102
@@ -554,6 +968,8 @@ class Viewer:  # noqa: D101
                     key = self.screen.get_wch()
                 except KeyboardInterrupt:
                     self.mode = "view"
+                    self.follow = False
+                    self.pending = self.number = ""
                     continue
                 if not self.key(key):
                     return

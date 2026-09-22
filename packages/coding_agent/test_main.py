@@ -474,42 +474,283 @@ class TestViewer(unittest.TestCase):  # noqa: D101
             msg = 'not viewer.key("q")'
             raise AssertionError(msg)
 
-    def test_search_scroll_and_wrap(self) -> None:  # noqa: D102
+    def test_search_defaults_match_less_and_wrap_is_opt_in(self) -> None:  # noqa: D102, C901
         viewer = self.viewer
         viewer.lines = ["first hit", "plain", "second hit", "last hit"]
         for key in "/hit\n":
             viewer.key(key)
-        if viewer.match != 2:  # noqa: PLR2004
-            msg = "viewer.match == 2"
-            raise AssertionError(msg)
-        viewer.draw()
-        viewer.key("n")
-        if viewer.match != 3:  # noqa: PLR2004
-            msg = "viewer.match == 3"
-            raise AssertionError(msg)
-        viewer.key("n")
         if viewer.match != 0:
-            msg = "viewer.match == 0"
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        viewer.key("n")
+        if viewer.match != 2:  # noqa: PLR2004
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        viewer.key("n")
+        viewer.draw()
+        if (viewer.match, viewer.top) != (3, 3):
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        viewer.key("n")
+        if viewer.notice != "Pattern not found":
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        if viewer.top != 3:  # noqa: PLR2004
+            msg = "Viewer behavior differs from less"
             raise AssertionError(msg)
         viewer.key("N")
-        if viewer.match != 3:  # noqa: PLR2004
-            msg = "viewer.match == 3"
+        if viewer.match != 2:  # noqa: PLR2004
+            msg = "Viewer behavior differs from less"
             raise AssertionError(msg)
-        for key in "?missing\n":
+        for key in "G/\x17hit\nn":
             viewer.key(key)
-        if viewer.notice != "Pattern not found: missing":
-            msg = 'viewer.notice == "Pattern not found: missing"'
+        viewer.key("n")
+        viewer.key("n")
+        if viewer.match != 0:
+            msg = "Viewer behavior differs from less"
             raise AssertionError(msg)
-        viewer.lines.extend(["more"] * 20)
-        viewer.key("g")
-        viewer.key(" ")
-        if viewer.top != 4:  # noqa: PLR2004
-            msg = "viewer.top == 4"
+        for key in "g?hit\n":
+            viewer.key(key)
+        if viewer.match != 3:  # noqa: PLR2004
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+
+    def test_regex_highlights_only_matching_spans_across_wrapped_lines(self) -> None:  # noqa: D102
+        viewer = self.viewer
+        self.screen.getmaxyx.return_value = (6, 12)
+        viewer.lines = ["prefix abc123 abc456 tail", "no match"]
+        for key in r"/abc[0-9]+" + "\n":
+            viewer.key(key)
+        self.screen.reset_mock()
+        viewer.draw()
+        highlights = [
+            call.args
+            for call in self.screen.addstr.call_args_list
+            if call.args[-1] == curses.A_REVERSE
+        ]
+        if highlights != [
+            (0, 7, "abc12", curses.A_REVERSE),
+            (1, 0, "3", curses.A_REVERSE),
+            (1, 2, "abc456", curses.A_REVERSE),
+        ]:
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        for key in "\x1bu":
+            viewer.key(key)
+        self.screen.reset_mock()
+        viewer.draw()
+        if any(
+            call.args[-1] == curses.A_REVERSE
+            for call in self.screen.addstr.call_args_list
+        ):
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        viewer.key("n")
+        if not (viewer.highlight):
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        for key in "\x1bU":
+            viewer.key(key)
+        if viewer.query != "":
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        if viewer.pattern is not None:
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+
+    def test_search_navigation_uses_current_position_and_logical_lines(self) -> None:  # noqa: D102, C901, PLR0912
+        viewer = self.viewer
+        self.screen.getmaxyx.return_value = (4, 8)
+        viewer.lines = ["first match wraps", "plain", "last match wraps"]
+        for key in "/match\n":
+            viewer.key(key)
+        if viewer.match != 0:
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        viewer.key("n")
+        if viewer.match != 2:  # noqa: PLR2004
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        for key in "gn":
+            viewer.key(key)
+        if viewer.match != 2:  # noqa: PLR2004
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        for key in "g2/match\n":
+            viewer.key(key)
+        if viewer.match != 2:  # noqa: PLR2004
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        for key in "g/last match\n":
+            viewer.key(key)
+        if viewer.match != 2:  # noqa: PLR2004
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        for key in "/$\n":
+            viewer.key(key)
+        if viewer.notice != "":
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        for key in "/[\n":
+            viewer.key(key)
+        if not (viewer.notice.startswith("Invalid pattern:")):
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+
+    def test_less_movement_counts_half_pages_and_follow(self) -> None:  # noqa: D102, C901, PLR0912
+        viewer = self.viewer
+        viewer.lines = [str(i) for i in range(40)]
+        viewer.key("\x04")
+        if viewer.top != 2:  # noqa: PLR2004
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        for key in "3d":
+            viewer.key(key)
+        if viewer.top != 5:  # noqa: PLR2004
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        viewer.key("u")
+        if viewer.top != 2:  # noqa: PLR2004
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        for key in "g10j":
+            viewer.key(key)
+        if viewer.top != 10:  # noqa: PLR2004
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        viewer.key("\n")
+        if viewer.top != 11:  # noqa: PLR2004
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        for key in "20g":
+            viewer.key(key)
+        if viewer.top != 19:  # noqa: PLR2004
+            msg = "Viewer behavior differs from less"
             raise AssertionError(msg)
         viewer.key("G")
+        if viewer.follow:
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        if viewer.top != 35:  # noqa: PLR2004
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        viewer.key("F")
+        if not (viewer.follow):
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        viewer.key("\x03")
+        if viewer.follow:
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        for key in "g ":
+            viewer.key(key)
+        if viewer.top != 5:  # noqa: PLR2004
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        for key in "\x1bv":
+            viewer.key(key)
+        if viewer.top != 0:
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+
+    def test_search_modifiers_history_and_case_options(self) -> None:  # noqa: D102, C901
+        viewer = self.viewer
+        viewer.lines = ["ABC", "a.c", "abc", "plain"]
+        for key in "/abc\n":
+            viewer.key(key)
+        if viewer.match != 2:  # noqa: PLR2004
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        for key in "g-i/abc\n":
+            viewer.key(key)
+        if viewer.match != 0:
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        for key in "g/\x12a.c\n":
+            viewer.key(key)
+        if viewer.match != 1:
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        viewer.key("/")
+        viewer.key(curses.KEY_UP)
+        if viewer.entry != "a.c":
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        viewer.key("\x1b")
+        for key in "g/\x0bplain\n":
+            viewer.key(key)
+        if viewer.top != 0:
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        for key in "g/!abc\n":
+            viewer.key(key)
+        if viewer.match != 1:
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        viewer.key("/")
+        viewer.key(curses.KEY_BACKSPACE)
+        if viewer.mode != "view":
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+
+    def test_horizontal_scrolling_marks_and_help(self) -> None:  # noqa: D102, C901
+        viewer = self.viewer
+        self.screen.getmaxyx.return_value = (4, 8)
+        viewer.lines = ["0123456789abcdef", "second", "third", "fourth"]
+        viewer.key(curses.KEY_RIGHT)
+        if viewer.rows()[0] != "456789ab":
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        viewer.key(curses.KEY_LEFT)
+        if viewer.rows()[:2] != ["01234567", "89abcdef"]:
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        for key in "-S":
+            viewer.key(key)
+        if viewer.rows()[0] != "01234567":
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        for key in "2gmaG'a":
+            viewer.key(key)
+        if viewer.top != 1:
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        viewer.key("h")
         viewer.draw()
-        if viewer.top != 20:  # noqa: PLR2004
-            msg = "viewer.top == 20"
+        if viewer.help_offset != 0:
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        if not (viewer.key("q")):
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        if viewer.help_offset is not None:
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        if not (viewer.key("Z")):
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+        if viewer.key("Z"):
+            msg = "Viewer behavior differs from less"
+            raise AssertionError(msg)
+
+    def test_unicode_highlighting_uses_terminal_columns(self) -> None:  # noqa: D102
+        viewer = self.viewer
+        self.screen.getmaxyx.return_value = (6, 8)
+        viewer.lines = ["界é hit hit"]
+        for key in "/hit\n":
+            viewer.key(key)
+        self.screen.reset_mock()
+        viewer.draw()
+        highlights = [
+            call.args
+            for call in self.screen.addstr.call_args_list
+            if call.args[-1] == curses.A_REVERSE
+        ]
+        if highlights != [
+            (0, 4, "hit", curses.A_REVERSE),
+            (1, 0, "hit", curses.A_REVERSE),
+        ]:
+            msg = "Viewer behavior differs from less"
             raise AssertionError(msg)
 
     def test_transcript_keeps_tool_output_after_failure(self) -> None:  # noqa: D102
