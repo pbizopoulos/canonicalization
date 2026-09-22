@@ -6,6 +6,8 @@
 !/LICENSE
 !/README
 !/checks/
+!/checks/coding_agent/
+!/checks/coding_agent/default.nix
 !/checks/git-canonical/
 !/checks/git-canonical/default.nix
 !/checks/nix_alphabetize/
@@ -22,6 +24,10 @@
 !/flake.nix
 !/formatter.nix
 !/packages/
+!/packages/coding_agent/
+!/packages/coding_agent/default.nix
+!/packages/coding_agent/main.py
+!/packages/coding_agent/test_main.py
 !/packages/git-canonical/
 !/packages/git-canonical/default.nix
 !/packages/git-canonical/main.py

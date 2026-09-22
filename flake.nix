@@ -17,5 +17,16 @@
     }
     // {
       inherit (inputs) blueprint;
+      formatter = inputs.self.lib.mkFormatter { inherit (inputs) self; };
+      lib.mkFormatter =
+        { self }:
+        inputs.nixpkgs.lib.genAttrs (builtins.attrNames inputs.self.packages) (
+          system:
+          import ./formatter.nix {
+            inherit inputs self;
+            flake = self.outPath;
+            pkgs = inputs.nixpkgs.legacyPackages.${system};
+          }
+        );
     };
 }

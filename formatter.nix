@@ -2,13 +2,15 @@
   flake,
   inputs,
   pkgs,
+  self ? inputs.self,
   ...
 }:
 let
+  packagesPath = self.outPath + "/packages";
   pythonPackageNames = builtins.attrNames (
     pkgs.lib.filterAttrs (
-      name: type: type == "directory" && builtins.pathExists (./packages + "/${name}/main.py")
-    ) (builtins.readDir ./packages)
+      name: type: type == "directory" && builtins.pathExists (packagesPath + "/${name}/main.py")
+    ) (if builtins.pathExists packagesPath then builtins.readDir packagesPath else { })
   );
   rawFormatter = treefmtEval.config.build.wrapper;
   treefmtEval = inputs.treefmt-nix.lib.evalModule pkgs {
@@ -37,12 +39,13 @@ let
         directories = pkgs.lib.genAttrs pythonPackageNames (
           name:
           let
-            package = inputs.self.packages.${pkgs.stdenv.system}.${name};
+            package = self.packages.${pkgs.stdenv.system}.${name};
           in
           {
             directory = "";
             extraPythonPackages =
               (package.propagatedBuildInputs or [ ])
+              ++ (package.buildInputs or [ ])
               ++ (package.checkInputs or [ ])
               ++ (package.nativeCheckInputs or [ ])
               ++ [
