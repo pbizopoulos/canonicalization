@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-# Copyright (c) 2026 VALAB/ITI
+# Copyright (c) 2026- Paschalis Bizopoulos
 """An interactive or single-prompt client for a local llama.cpp coding model."""
 
 import argparse
 import contextlib
+import ctypes
 import curses
-import glob
 import json
 import os
 import re
 import readline
+import select
 import shlex
 import signal
 import subprocess
@@ -327,9 +328,6 @@ class Viewer:  # noqa: D101
         self.mode = "chat"
         self.draft = ""
         self.cursor = 0
-        self.history: list[str] = []
-        self.history_index = 0
-        self.saved_draft = ""
         self.entry = ""
         self.query = ""
         self.direction = 1
@@ -360,12 +358,16 @@ class Viewer:  # noqa: D101
         self.displayed_line = 0
         self.displayed_offset = 0
 
-    def append(self, text: str) -> None:  # noqa: D102
+    def append(self, text: str, *, display: bool = True) -> None:  # noqa: D102
         self.lines.extend(
             "".join(char if char.isprintable() else repr(char)[1:-1] for char in line)
             for line in text.expandtabs(8).splitlines()
         )
-        self.draw()
+        if self.mode == "chat":
+            if display:
+                print(text, flush=True)  # noqa: T201
+        else:
+            self.draw()
 
     def page_size(self) -> int:  # noqa: D102
         return max(1, int(self.screen.getmaxyx()[0]) - 1)
@@ -406,7 +408,9 @@ class Viewer:  # noqa: D101
     def rows(self) -> list[str]:  # noqa: D102
         return [text for _, _, text in self.layout()]
 
-    def draw(self) -> None:  # noqa: D102
+    def draw(self) -> None:  # noqa: C901, D102
+        if self.mode == "chat":
+            return
         if self.help_offset is not None:
             self.draw_help()
             return
@@ -508,7 +512,7 @@ class Viewer:  # noqa: D101
             "= Ctrl+G                    Transcript position",
             "q Q ZZ                      Close viewer and return to chat",
             ":                           Enter chat (application extension)",
-            "Esc                         Leave chat; keep unfinished draft",
+            "Esc (twice in vi insert)    View transcript; keep unfinished draft",
             "Ctrl+D (empty chat prompt)   Exit coding_agent",
         ]
         height, width = self.screen.getmaxyx()
@@ -605,10 +609,8 @@ class Viewer:  # noqa: D101
             return
         self.draft = ""
         self.cursor = 0
-        self.history.append(prompt)
-        self.history_index = len(self.history)
         self.follow = True
-        self.append("> " + prompt)
+        self.append("> " + prompt, display=False)
         self.notice = "Working..."
         self.draw()
         try:
@@ -621,8 +623,8 @@ class Viewer:  # noqa: D101
         finally:
             self.notice = ""
 
-    def edit(self, key: str | int) -> None:  # noqa: C901, D102, PLR0912, PLR0915
-        value = self.draft if self.mode == "chat" else self.entry
+    def edit(self, key: str | int) -> None:  # noqa: C901, D102, PLR0912
+        value = self.entry
         if key == curses.KEY_LEFT:
             self.cursor = max(0, self.cursor - 1)
         elif key == curses.KEY_RIGHT:
@@ -630,19 +632,6 @@ class Viewer:  # noqa: D101
         elif key in {curses.KEY_HOME, "\x01"}:
             self.cursor = 0
         elif key in {curses.KEY_END, "\x05"}:
-            self.cursor = len(value)
-        elif key in {curses.KEY_UP, curses.KEY_DOWN} and self.mode == "chat":
-            if self.history_index == len(self.history):
-                self.saved_draft = value
-            self.history_index = min(
-                len(self.history),
-                max(0, self.history_index + (-1 if key == curses.KEY_UP else 1)),
-            )
-            value = (
-                self.saved_draft
-                if self.history_index == len(self.history)
-                else self.history[self.history_index]
-            )
             self.cursor = len(value)
         elif key in {"\x7f", "\b", curses.KEY_BACKSPACE}:
             if self.cursor:
@@ -663,25 +652,10 @@ class Viewer:  # noqa: D101
                 start -= 1
             value = value[:start] + value[self.cursor :]
             self.cursor = start
-        elif key == "\t" and self.mode == "chat":
-            start = self.cursor
-            while start and not value[start - 1].isspace():
-                start -= 1
-            prefix = value[start : self.cursor]
-            matches = sorted(glob.glob(glob.escape(os.path.expanduser(prefix)) + "*"))  # noqa: PTH111, PTH207
-            if matches:
-                replacement = os.path.commonprefix(matches)
-                if len(matches) == 1 and Path(replacement).is_dir():
-                    replacement += "/"
-                value = value[:start] + replacement + value[self.cursor :]
-                self.cursor = start + len(replacement)
         elif isinstance(key, str) and key.isprintable():
             value = value[: self.cursor] + key + value[self.cursor :]
             self.cursor += len(key)
-        if self.mode == "chat":
-            self.draft = value
-        else:
-            self.entry = value
+        self.entry = value
 
     def move(self, top: int) -> None:  # noqa: D102
         self.follow = False
@@ -786,31 +760,28 @@ class Viewer:  # noqa: D101
                 self.number = ""
             self.mode = "view"
             return True
+        if self.mode == "chat":
+            return True
         if self.mode != "view":
-            if self.mode == "chat" and key == "\x04" and not self.draft:
-                return False
             if key in {"\n", "\r", curses.KEY_ENTER}:
-                if self.mode == "chat":
-                    self.submit()
-                else:
-                    self.direction = 1 if self.mode == "/" else -1
-                    for attribute in (
-                        "wrap_search",
-                        "literal_search",
-                        "keep_search",
-                        "invert_search",
-                    ):
-                        if self.entry or attribute in self.search_modifiers:
-                            setattr(
-                                self,
-                                attribute,
-                                self.search_modifiers.get(attribute, False),
-                            )
-                    self.query = self.entry or self.query
-                    if self.entry:
-                        self.search_history.append(self.entry)
-                    self.mode = "view"
-                    self.search(self.direction, self.search_count, initial=True)
+                self.direction = 1 if self.mode == "/" else -1
+                for attribute in (
+                    "wrap_search",
+                    "literal_search",
+                    "keep_search",
+                    "invert_search",
+                ):
+                    if self.entry or attribute in self.search_modifiers:
+                        setattr(
+                            self,
+                            attribute,
+                            self.search_modifiers.get(attribute, False),
+                        )
+                self.query = self.entry or self.query
+                if self.entry:
+                    self.search_history.append(self.entry)
+                self.mode = "view"
+                self.search(self.direction, self.search_count, initial=True)
             elif (
                 self.mode in {"/", "?"}
                 and key in {"\x17", "\x12", "\x0b", "\x0e", "!"}
@@ -962,24 +933,94 @@ class Viewer:  # noqa: D101
             self.notice = "Unknown command (press h for help)"
         return True
 
+    def view(self) -> None:  # noqa: D102
+        self.mode = "view"
+        curses.reset_prog_mode()
+        self.screen.touchwin()
+        try:
+            while self.mode != "chat":
+                self.draw()
+                try:
+                    self.key(self.screen.get_wch())
+                except KeyboardInterrupt:
+                    self.follow = False
+                    self.pending = self.number = ""
+        finally:
+            curses.endwin()
+            self.mode = "chat"
+
+    def read_chat(self) -> str:  # noqa: D102
+        library = ctypes.CDLL(readline.__file__)
+        getter_type = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p)
+        slot = ctypes.c_void_p.in_dll(library, "rl_getc_function")
+        previous = slot.value
+        if previous is None:
+            msg = "GNU readline has no character input function"
+            raise RuntimeError(msg)
+        original = getter_type(previous)
+        library.rl_get_keymap.restype = ctypes.c_void_p
+        library.rl_get_keymap_by_name.argtypes = [ctypes.c_char_p]
+        library.rl_get_keymap_by_name.restype = ctypes.c_void_p
+        vi_insert = library.rl_get_keymap_by_name(b"vi-insert")
+        failure: BaseException | None = None
+
+        def get_character(stream: int) -> int:
+            nonlocal failure
+            try:
+                while True:
+                    char = original(stream)
+                    if char != ord("\x1b") or library.rl_get_keymap() == vi_insert:
+                        return int(char)
+                    if select.select([sys.stdin], [], [], 0.15)[0]:
+                        return int(char)
+                    library.rl_deprep_terminal()
+                    try:
+                        self.draft = readline.get_line_buffer()
+                        self.view()
+                    finally:
+                        library.rl_prep_terminal(1)
+                        library.rl_redisplay()
+            except BaseException as exc:  # noqa: BLE001
+                failure = exc
+                ctypes.c_int.in_dll(library, "rl_done").value = 1
+                return ord("\n")
+
+        callback = getter_type(get_character)
+        slot.value = ctypes.cast(callback, ctypes.c_void_p).value
+        history_length = readline.get_current_history_length()
+        try:
+            prompt = input("> ")
+            if failure is not None:
+                if readline.get_current_history_length() > history_length:
+                    readline.remove_history_item(
+                        readline.get_current_history_length() - 1,
+                    )
+                raise failure
+            return prompt
+        finally:
+            slot.value = previous
+
     def run(self) -> None:  # noqa: D102
         self.screen.keypad(True)  # noqa: FBT003
+        configure_filename_completion()
+        curses.endwin()
         previous = self.agent.output
         self.agent.output = self.append
         try:
             while True:
-                self.draw()
                 try:
-                    key = self.screen.get_wch()
-                except KeyboardInterrupt:
-                    self.mode = "view"
-                    self.follow = False
-                    self.pending = self.number = ""
-                    continue
-                if not self.key(key):
+                    self.draft = self.read_chat()
+                    self.submit()
+                except EOFError:  # noqa: PERF203
+                    print()  # noqa: T201
                     return
+                except KeyboardInterrupt:
+                    self.draft = ""
+                    print("\nCancelled.", flush=True)  # noqa: T201
         finally:
             self.agent.output = previous
+            curses.reset_prog_mode()
+            self.screen.refresh()
 
 
 def main(argv: list[str] | None = None) -> None:  # noqa: C901, D103

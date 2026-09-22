@@ -2,14 +2,20 @@
 """Verify tool execution, model protocol, and the interactive entry point."""
 
 import contextlib
+import ctypes
 import curses
 import io
 import json
 import os
+import pty
+import readline
+import select
+import signal
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -449,64 +455,38 @@ class TestViewer(unittest.TestCase):  # noqa: D101
         self.viewer = app.Viewer(self.screen, self.agent)
         self.viewer.key("\x1b")
 
-    def test_starts_in_chat_and_empty_prompt_eof_exits(self) -> None:  # noqa: D102
+    def test_chat_uses_builtin_input_and_restores_readline_hook(self) -> None:  # noqa: D102
         viewer = app.Viewer(self.screen, self.agent)
         if viewer.mode != "chat":
-            msg = "The agent must start ready for chat input"
+            msg = "The agent must start in chat mode"
             raise AssertionError(msg)
-        for key in "hello":
-            viewer.key(key)
-        if not viewer.key("\x04") or viewer.draft != "hello":
-            msg = "EOF with a draft must not exit or discard it"
+        library = ctypes.CDLL(readline.__file__)
+        slot = ctypes.c_void_p.in_dll(library, "rl_getc_function")
+        previous = slot.value
+        with patch("builtins.input", return_value="hello") as read:
+            prompt = viewer.read_chat()
+        read.assert_called_once_with("> ")
+        if prompt != "hello" or slot.value != previous:
+            msg = "Chat must use readline input and restore its input hook"
             raise AssertionError(msg)
-        viewer.key(curses.KEY_HOME)
-        viewer.key("\x04")
-        if viewer.draft != "ello":
-            msg = "Ctrl+D with text must delete the character under the cursor"
-            raise AssertionError(msg)
-        viewer.key(curses.KEY_END)
-        viewer.key("\x15")
-        if viewer.key("\x04"):
-            msg = "Ctrl+D at an empty chat prompt must exit"
+        with patch("builtins.input", side_effect=EOFError), pytest.raises(EOFError):
+            viewer.read_chat()
+        if slot.value != previous:
+            msg = "Readline hooks must also be restored on EOF"
             raise AssertionError(msg)
 
     def test_pager_quit_commands_return_to_chat_with_draft(self) -> None:  # noqa: D102
         for command in ("q", "Q", "ZZ", ":"):
             with self.subTest(command=command):
                 viewer = app.Viewer(self.screen, self.agent)
-                for key in "draft\x1b" + command:
+                viewer.draft = "draft"
+                for key in "\x1b" + command:
                     if not viewer.key(key):
                         msg = "Closing the pager must not exit the agent"
                         raise AssertionError(msg)
                 if (viewer.mode, viewer.draft, viewer.cursor) != ("chat", "draft", 5):
                     msg = "Returning to chat must restore the draft and cursor"
                     raise AssertionError(msg)
-
-    def test_modes_preserve_draft_and_submit_only_on_enter(self) -> None:  # noqa: D102
-        viewer = self.viewer
-        with patch.object(self.agent, "turn") as turn:
-            for key in ":hello\x1b":
-                viewer.key(key)
-            if viewer.mode != "view":
-                msg = 'viewer.mode == "view"'
-                raise AssertionError(msg)
-            if viewer.draft != "hello":
-                msg = 'viewer.draft == "hello"'
-                raise AssertionError(msg)
-            turn.assert_not_called()
-            viewer.key(":")
-            viewer.key("\n")
-            turn.assert_called_once_with("hello")
-        if "> hello" not in viewer.lines:
-            msg = '"> hello" in viewer.lines'
-            raise AssertionError(msg)
-        if viewer.mode != "chat":
-            msg = 'viewer.mode == "chat"'
-            raise AssertionError(msg)
-        viewer.key("\x1b")
-        if not viewer.key("q") or viewer.mode != "chat":
-            msg = "q must return to chat without exiting"
-            raise AssertionError(msg)
 
     def test_search_defaults_match_less_and_wrap_is_opt_in(self) -> None:  # noqa: D102, C901
         viewer = self.viewer
@@ -840,34 +820,113 @@ class TestViewer(unittest.TestCase):  # noqa: D101
             app.main([])
         wrapper.assert_called_once()
 
-    def test_chat_editing_history_and_completion(self) -> None:  # noqa: D102
-        viewer = self.viewer
-        for key in ":helo":
-            viewer.key(key)
-        viewer.key(curses.KEY_LEFT)
-        viewer.key("l")
-        if viewer.draft != "hello":
-            msg = 'viewer.draft == "hello"'
-            raise AssertionError(msg)
-        with patch.object(self.agent, "turn"):
-            viewer.key("\n")
-        viewer.key(curses.KEY_UP)
-        if viewer.draft != "hello":
-            msg = 'viewer.draft == "hello"'
-            raise AssertionError(msg)
-        viewer.key(curses.KEY_DOWN)
-        if viewer.draft != "":
-            msg = 'viewer.draft == ""'
-            raise AssertionError(msg)
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "example"
-            path.touch()
-            for key in directory + "/exam":
-                viewer.key(key)
-            viewer.key("\t")
-            if viewer.draft != str(path):
-                msg = "viewer.draft == str(path)"
+
+class TestReadlineTerminal(unittest.TestCase):  # noqa: D101
+    def setUp(self) -> None:  # noqa: D102
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        inputrc = Path(self.directory.name) / "inputrc"
+        inputrc.write_text(
+            'set editing-mode emacs\n"\\C-xj": "configured"\n'
+            '"\\C-xv": vi-editing-mode\n',
+        )
+        self.completion_path = Path(self.directory.name) / "completion-example"
+        self.completion_path.touch()
+        self.master, slave = pty.openpty()
+        self.addCleanup(os.close, self.master)
+        code = """
+import curses
+import json
+from packages.coding_agent.main import Agent, Viewer
+agent = Agent()
+def turn(prompt):
+    agent.emit("RESULT:" + json.dumps(prompt))
+    return ""
+agent.turn = turn
+curses.set_escdelay(25)
+curses.wrapper(lambda screen: Viewer(screen, agent).run())
+"""
+        try:
+            self.process = subprocess.Popen(  # noqa: S603
+                [sys.executable, "-c", code],
+                stdin=slave,
+                stdout=slave,
+                stderr=slave,
+                env={**os.environ, "TERM": "xterm", "INPUTRC": str(inputrc)},
+            )
+        finally:
+            os.close(slave)
+        self.addCleanup(self.stop)
+        self.buffer = b""
+        self.wait_for(b"> ")
+
+    def stop(self) -> None:  # noqa: D102
+        if self.process.poll() is None:
+            self.process.kill()
+        self.process.wait(timeout=5)
+
+    def wait_for(self, marker: bytes) -> None:  # noqa: D102
+        deadline = time.monotonic() + 5
+        while marker not in self.buffer:
+            if time.monotonic() >= deadline:
+                msg = f"Terminal did not display {marker!r}: {self.buffer!r}"
                 raise AssertionError(msg)
+            if select.select([self.master], [], [], 0.1)[0]:
+                self.buffer += os.read(self.master, 65536)
+        self.buffer = self.buffer.split(marker, 1)[1]
+
+    def send(self, keys: bytes, expected: str) -> None:  # noqa: D102
+        os.write(self.master, keys)
+        self.wait_for(b"RESULT:" + json.dumps(expected).encode())
+        self.wait_for(b"> ")
+
+    def test_native_editing_history_completion_and_inputrc(self) -> None:  # noqa: D102
+        self.send(b"hello world\x01X\x05\n", "Xhello world")
+        self.send(b"\x1b[A\n", "Xhello world")
+        self.send(b"\x12hello\n\n", "Xhello world")
+        self.send(b"one two\x17\x19\n", "one two")
+        self.send(b"one two\x1bbX\n", "one Xtwo")
+        self.send(b"\x18j\n", "configured")
+        self.send(
+            str(self.completion_path)[:-3].encode() + b"\t\n",
+            str(self.completion_path),
+        )
+        os.write(self.master, b"\x04")
+        if self.process.wait(timeout=5) != 0:
+            msg = "EOF at an empty native readline prompt must exit cleanly"
+            raise AssertionError(msg)
+
+    def test_viewer_roundtrip_preserves_readline_draft_cursor_and_undo(self) -> None:  # noqa: D102
+        os.write(self.master, b"hello\x01X\x1b")
+        self.wait_for(b"\x1b[?1049h")
+        os.write(self.master, b"q")
+        self.wait_for(b"\x1b[?1049l")
+        self.send(b"\x1f\n", "hello")
+        os.write(self.master, b"hello\x01\x1b")
+        self.wait_for(b"\x1b[?1049h")
+        os.write(self.master, b":")
+        self.wait_for(b"\x1b[?1049l")
+        self.send(b"X\n", "Xhello")
+
+    def test_vi_escape_keeps_native_command_mode(self) -> None:  # noqa: D102
+        os.write(self.master, b"\x18vhello\x1b")
+        self.wait_for(b"\x08")
+        self.send(b"0x\n", "ello")
+        os.write(self.master, b"world\x1b")
+        self.wait_for(b"\x08")
+        os.write(self.master, b"\x1b")
+        self.wait_for(b"\x1b[?1049h")
+        os.write(self.master, b"q")
+        self.wait_for(b"\x1b[?1049l")
+        self.send(b"x\n", "worl")
+
+    def test_interrupt_cancels_readline_and_next_prompt_works(self) -> None:  # noqa: D102
+        os.write(self.master, b"discard")
+        self.wait_for(b"discard")
+        os.kill(self.process.pid, signal.SIGINT)
+        self.wait_for(b"Cancelled.")
+        self.wait_for(b"> ")
+        self.send(b"next\n", "next")
 
 
 if __name__ == "__main__":
