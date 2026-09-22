@@ -4,6 +4,8 @@
 
 import argparse
 import contextlib
+import curses
+import glob
 import json
 import os
 import readline
@@ -15,8 +17,10 @@ import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
 BASE_URL = "http://127.0.0.1:8080"
 OUTPUT_LIMIT = 16_000
 BASH_TIMEOUT = 60
@@ -94,12 +98,17 @@ class Agent:  # noqa: D101
         self.cwd = Path(cwd or Path.cwd()).resolve()
         self.base_url = base_url.rstrip("/")
         self.model: str | None = None
+        self.output: Callable[[str], None] | None = None
         self.messages = [
             {
                 "role": "system",
                 "content": README.read_text(encoding="utf-8"),
             },
         ]
+
+    def emit(self, text: str) -> None:  # noqa: D102
+        if self.output is not None:
+            self.output(text)
 
     def request(self, endpoint: str, body: dict[str, Any] | None = None) -> Any:  # noqa: ANN401, D102
         request = urllib.request.Request(  # noqa: S310
@@ -143,10 +152,13 @@ class Agent:  # noqa: D101
                 start_new_session=True,
             )
             timed_out = False
+            cancelled = False
             try:
                 process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 timed_out = True
+            except KeyboardInterrupt:
+                cancelled = True
             finally:
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(process.pid, signal.SIGKILL)
@@ -159,6 +171,11 @@ class Agent:  # noqa: D101
             status = f"exit status: {process.returncode}\n"
             if timed_out:
                 status = f"timed out after {timeout} seconds; " + status
+            if self.output is not None:
+                output.seek(0)
+                self.output(status + output.read().decode("utf-8", errors="replace"))
+            if cancelled:
+                raise KeyboardInterrupt
             return bounded(status + captured)
 
     def execute(self, name: str, arguments: str) -> str:  # noqa: D102
@@ -189,7 +206,9 @@ class Agent:  # noqa: D101
                 )
             path = self.cwd / args["path"]
             if name == "read":
-                return bounded(path.read_text(encoding="utf-8"))
+                content = path.read_text(encoding="utf-8")
+                self.emit(content)
+                return bounded(content)
             if name == "write":
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(args["content"], encoding="utf-8")
@@ -262,13 +281,25 @@ class Agent:  # noqa: D101
             for _ in range(MAX_REQUESTS):
                 message = self.completion()
                 self.messages.append(message)
+                if message.get("content"):
+                    self.emit("assistant> " + message["content"])
                 if not message.get("tool_calls"):
                     return cast("str", message["content"])
                 for call in message["tool_calls"]:
+                    self.emit(
+                        f"tool> {call['function']['name']} "
+                        f"{call['function']['arguments']}",
+                    )
                     result = self.execute(
                         call["function"]["name"],
                         call["function"]["arguments"],
                     )
+                    if call["function"]["name"] not in {
+                        "bash",
+                        "nix",
+                        "read",
+                    } or result.startswith("Tool error"):
+                        self.emit(result)
                     self.messages.append(
                         {"role": "tool", "tool_call_id": call["id"], "content": result},
                     )
@@ -285,7 +316,252 @@ def configure_filename_completion() -> None:  # noqa: D103
     readline.parse_and_bind("tab: complete")
 
 
-def main(argv: list[str] | None = None) -> None:  # noqa: D103
+class Viewer:  # noqa: D101
+    def __init__(self, screen: Any, agent: Agent) -> None:  # noqa: ANN401, D107
+        self.screen = screen
+        self.agent = agent
+        self.lines: list[str] = []
+        self.top = 0
+        self.mode = "view"
+        self.draft = ""
+        self.cursor = 0
+        self.history: list[str] = []
+        self.history_index = 0
+        self.saved_draft = ""
+        self.entry = ""
+        self.query = ""
+        self.direction = 1
+        self.match: int | None = None
+        self.notice = ""
+        self.follow = True
+
+    def append(self, text: str) -> None:  # noqa: D102
+        self.lines.extend(
+            "".join(char if char.isprintable() else repr(char)[1:-1] for char in line)
+            for line in text.expandtabs(8).splitlines()
+        )
+        self.draw()
+
+    def rows(self) -> list[str]:  # noqa: D102
+        width = max(1, self.screen.getmaxyx()[1] - 1)
+        return [
+            line[start : start + width]
+            for line in self.lines
+            for start in range(0, max(1, len(line)), width)
+        ]
+
+    def draw(self) -> None:  # noqa: D102
+        height, width = self.screen.getmaxyx()
+        page = max(1, height - 2)
+        rows = self.rows()
+        end = max(0, len(rows) - page)
+        self.top = end if self.follow else min(self.top, end)
+        self.screen.erase()
+        for y, line in enumerate(rows[self.top : self.top + page]):
+            with contextlib.suppress(curses.error):
+                self.screen.addnstr(
+                    y,
+                    0,
+                    line,
+                    max(0, width - 1),
+                    curses.A_REVERSE
+                    if self.query and self.query in line
+                    else curses.A_NORMAL,
+                )
+        status = (
+            f"{self.mode.upper()}  {self.top + 1}/{max(1, len(rows))}  "
+            ": chat  Esc view  / ? search  n N repeat  j k scroll  g G ends  q quit"
+        )
+        prompt = (
+            "> " + self.draft
+            if self.mode == "chat"
+            else self.mode + self.entry
+            if self.mode in {"/", "?"}
+            else self.notice
+        )
+        position = self.cursor + (2 if self.mode == "chat" else 1)
+        offset = max(0, position - max(1, width - 2)) if self.mode != "view" else 0
+        with contextlib.suppress(curses.error):
+            self.screen.addnstr(
+                max(0, height - 2),
+                0,
+                status,
+                max(0, width - 1),
+                curses.A_REVERSE,
+            )
+            self.screen.addnstr(
+                max(0, height - 1),
+                0,
+                prompt[offset:],
+                max(0, width - 1),
+            )
+            if self.mode != "view":
+                self.screen.move(
+                    max(0, height - 1),
+                    min(max(0, width - 1), position - offset),
+                )
+            curses.curs_set(int(self.mode != "view"))
+        self.screen.refresh()
+
+    def search(self, direction: int) -> None:  # noqa: D102
+        rows = self.rows()
+        if not self.query or not rows:
+            return
+        origin = self.top if self.match is None else self.match
+        for step in range(1, len(rows) + 1):
+            index = (origin + direction * step) % len(rows)
+            if self.query in rows[index]:
+                self.top = index
+                self.match = index
+                self.follow = False
+                self.notice = f"Search: {self.query}"
+                return
+        self.notice = f"Pattern not found: {self.query}"
+
+    def submit(self) -> None:  # noqa: D102
+        prompt = self.draft
+        if not prompt.strip():
+            return
+        self.draft = ""
+        self.cursor = 0
+        self.history.append(prompt)
+        self.history_index = len(self.history)
+        self.follow = True
+        self.append("> " + prompt)
+        self.notice = "Working..."
+        self.draw()
+        try:
+            self.agent.turn(prompt)
+        except (AgentError, KeyboardInterrupt) as exc:
+            self.append(
+                f"{str(exc) or 'Cancelled'}. Completed tool effects remain; "
+                "incomplete turn history discarded.",
+            )
+        finally:
+            self.notice = ""
+
+    def edit(self, key: str | int) -> None:  # noqa: C901, D102, PLR0912
+        value = self.draft if self.mode == "chat" else self.entry
+        if key == curses.KEY_LEFT:
+            self.cursor = max(0, self.cursor - 1)
+        elif key == curses.KEY_RIGHT:
+            self.cursor = min(len(value), self.cursor + 1)
+        elif key in {curses.KEY_HOME, "\x01"}:
+            self.cursor = 0
+        elif key in {curses.KEY_END, "\x05"}:
+            self.cursor = len(value)
+        elif key in {curses.KEY_UP, curses.KEY_DOWN} and self.mode == "chat":
+            if self.history_index == len(self.history):
+                self.saved_draft = value
+            self.history_index = min(
+                len(self.history),
+                max(0, self.history_index + (-1 if key == curses.KEY_UP else 1)),
+            )
+            value = (
+                self.saved_draft
+                if self.history_index == len(self.history)
+                else self.history[self.history_index]
+            )
+            self.cursor = len(value)
+        elif key in {"\x7f", "\b", curses.KEY_BACKSPACE}:
+            if self.cursor:
+                value = value[: self.cursor - 1] + value[self.cursor :]
+                self.cursor -= 1
+        elif key == curses.KEY_DC:
+            value = value[: self.cursor] + value[self.cursor + 1 :]
+        elif key == "\x15":
+            value = value[self.cursor :]
+            self.cursor = 0
+        elif key == "\t" and self.mode == "chat":
+            start = self.cursor
+            while start and not value[start - 1].isspace():
+                start -= 1
+            prefix = value[start : self.cursor]
+            matches = sorted(glob.glob(glob.escape(os.path.expanduser(prefix)) + "*"))  # noqa: PTH111, PTH207
+            if matches:
+                replacement = os.path.commonprefix(matches)
+                if len(matches) == 1 and Path(replacement).is_dir():
+                    replacement += "/"
+                value = value[:start] + replacement + value[self.cursor :]
+                self.cursor = start + len(replacement)
+        elif isinstance(key, str) and key.isprintable():
+            value = value[: self.cursor] + key + value[self.cursor :]
+            self.cursor += len(key)
+        if self.mode == "chat":
+            self.draft = value
+        else:
+            self.entry = value
+
+    def key(self, key: str | int) -> bool:  # noqa: C901, D102, PLR0912
+        if key == "\x1b":
+            self.mode = "view"
+            return True
+        if self.mode != "view":
+            if key in {"\n", "\r", curses.KEY_ENTER}:
+                if self.mode == "chat":
+                    self.submit()
+                else:
+                    self.direction = 1 if self.mode == "/" else -1
+                    self.query = self.entry or self.query
+                    self.match = None
+                    self.mode = "view"
+                    self.search(self.direction)
+            else:
+                self.edit(key)
+            return True
+        page = max(1, self.screen.getmaxyx()[0] - 2)
+        if key in {"q", "\x04"}:
+            return False
+        if key == ":":
+            self.mode = "chat"
+            self.cursor = len(self.draft)
+        elif key in {"/", "?"}:
+            self.mode = str(key)
+            self.entry = ""
+            self.cursor = 0
+        elif key in {"n", "N"}:
+            self.search(self.direction * (1 if key == "n" else -1))
+        elif key == "G":
+            self.follow = True
+        elif key in {"g", curses.KEY_HOME}:
+            self.top = 0
+            self.follow = False
+        else:
+            movement = {
+                "j": 1,
+                curses.KEY_DOWN: 1,
+                "k": -1,
+                curses.KEY_UP: -1,
+                " ": page,
+                "f": page,
+                curses.KEY_NPAGE: page,
+                "b": -page,
+                curses.KEY_PPAGE: -page,
+            }.get(key, 0)
+            if movement:
+                self.top = max(0, self.top + movement)
+                self.follow = False
+        return True
+
+    def run(self) -> None:  # noqa: D102
+        self.screen.keypad(True)  # noqa: FBT003
+        previous = self.agent.output
+        self.agent.output = self.append
+        try:
+            while True:
+                self.draw()
+                try:
+                    key = self.screen.get_wch()
+                except KeyboardInterrupt:
+                    self.mode = "view"
+                    continue
+                if not self.key(key):
+                    return
+        finally:
+            self.agent.output = previous
+
+
+def main(argv: list[str] | None = None) -> None:  # noqa: C901, D103
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "-p",
@@ -305,6 +581,10 @@ def main(argv: list[str] | None = None) -> None:  # noqa: D103
         except KeyboardInterrupt as exc:
             print("\nCancelled. Completed tool effects remain.", file=sys.stderr)  # noqa: T201
             raise SystemExit(130) from exc
+        return
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        curses.set_escdelay(25)
+        curses.wrapper(lambda screen: Viewer(screen, agent).run())
         return
     configure_filename_completion()
     while True:
