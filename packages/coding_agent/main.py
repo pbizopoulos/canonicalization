@@ -23,6 +23,9 @@ BASH_TIMEOUT = 60
 NIX_TIMEOUT = 600
 HTTP_TIMEOUT = 300
 MAX_REQUESTS = 20
+README = Path(__file__).with_name("prm") / "README"
+if not README.is_file():
+    README = Path(__file__).resolve().parents[2] / "README"
 
 
 def tool(name: str, description: str, **properties: str) -> dict[str, Any]:  # noqa: D103
@@ -94,17 +97,7 @@ class Agent:  # noqa: D101
         self.messages = [
             {
                 "role": "system",
-                "content": (
-                    "You are a coding assistant. Use the provided tools "
-                    "to complete tasks. "
-                    "Relative paths and Bash commands use this startup directory: "
-                    f"{self.cwd}. "
-                    "Tool execution is automatic with the user's permissions. "
-                    "Use standard shell commands, pipes, and redirection "
-                    "through bash for "
-                    "listing, searching, and other shell operations. "
-                    "Report tool failures honestly and give a concise final answer."
-                ),
+                "content": README.read_text(encoding="utf-8"),
             },
         ]
 

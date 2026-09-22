@@ -27,6 +27,8 @@
 !/packages/coding_agent/
 !/packages/coding_agent/default.nix
 !/packages/coding_agent/main.py
+!/packages/coding_agent/prm/
+!/packages/coding_agent/prm/**
 !/packages/coding_agent/test_main.py
 !/packages/git-canonical/
 !/packages/git-canonical/default.nix
