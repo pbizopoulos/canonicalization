@@ -6,6 +6,8 @@ import argparse
 import contextlib
 import ctypes
 import curses
+import fcntl
+import hashlib
 import json
 import os
 import re
@@ -20,9 +22,9 @@ import tempfile
 import unicodedata
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, Self, cast
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -99,9 +101,214 @@ class AgentError(Exception):  # noqa: D101
     pass
 
 
+class HistoryError(Exception):
+    """History could not be read or safely persisted."""
+
+
+class History:
+    """Own one directory's locked, atomically checkpointed history."""
+
+    def __init__(self, cwd: Path) -> None:
+        """Select state storage using the resolved startup directory."""
+        self.cwd = str(cwd.resolve())
+        root = os.environ.get("XDG_STATE_HOME", "")
+        base = (
+            Path(root)
+            if root and Path(root).is_absolute()
+            else Path.home() / ".local/state"
+        )
+        self.directory = (
+            base / "coding_agent" / hashlib.sha256(os.fsencode(self.cwd)).hexdigest()
+        )
+        self.path = self.directory / "history.json"
+        self.prompts: list[str] = []
+        self.messages: list[dict[str, Any]] = []
+        self.entries: list[Entry] = []
+        self.lock: int | None = None
+
+    def __enter__(self) -> Self:
+        """Acquire exclusive ownership before loading or clearing state."""
+        try:
+            self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            self.lock = os.open(self.directory / "lock", os.O_CREAT | os.O_RDWR, 0o600)
+            fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            self.close()
+            msg = (
+                f"Cannot lock history at {self.directory} "
+                f"(another instance may be running): {exc}"
+            )
+            raise HistoryError(msg) from exc
+        return self
+
+    def close(self) -> None:
+        """Release the process lock, including after failed initialization."""
+        if self.lock is not None:
+            os.close(self.lock)
+            self.lock = None
+
+    def __exit__(self, *args: object) -> None:
+        """Release ownership on normal exit or an exception."""
+        self.close()
+
+    def load(self) -> None:
+        """Validate stored data before exposing any of it to the agent."""
+        try:
+            try:
+                content = self.path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                return
+            data = json.loads(content)
+            if data["version"] != 1 or data["cwd"] != self.cwd:
+                msg = "unsupported version or directory mismatch"
+                raise ValueError(msg)  # noqa: TRY301
+            prompts, messages, entries = (
+                data["prompts"],
+                data["messages"],
+                data["entries"],
+            )
+            if not isinstance(prompts, list) or not all(
+                isinstance(p, str) for p in prompts
+            ):
+                msg = "invalid prompts"
+                raise ValueError(msg)  # noqa: TRY301
+            self.validate_messages(messages)
+            if not isinstance(entries, list):
+                msg = "invalid transcript"
+                raise TypeError(msg)  # noqa: TRY301
+            restored = []
+            for item in entries:
+                entry = Entry(**item)
+                if (
+                    not isinstance(entry.title, str)
+                    or not isinstance(entry.body, str)
+                    or type(entry.tool) is not bool
+                    or type(entry.expanded) is not bool
+                    or (entry.success is not None and type(entry.success) is not bool)
+                ):
+                    msg = "invalid transcript entry"
+                    raise ValueError(msg)  # noqa: TRY301
+                entry.expanded = False
+                if entry.tool and entry.success is None:
+                    entry.success = False
+                    entry.body += "\nInterrupted before completion was recorded."
+                restored.append(entry)
+            self.prompts, self.messages, self.entries = prompts, messages, restored
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            msg = (
+                f"Cannot load history {self.path}: {exc}. "
+                "Use --clear-history to reset it."
+            )
+            raise HistoryError(msg) from exc
+
+    @staticmethod
+    def validate_messages(messages: Any) -> None:  # noqa: ANN401, C901, PLR0912
+        """Reject malformed conversations and unmatched tool responses."""
+        if not isinstance(messages, list):
+            msg = "invalid messages"
+            raise TypeError(msg)
+        pending: set[str] = set()
+        expected = "user"
+        for message in messages:
+            if not isinstance(message, dict):
+                msg = "invalid message"
+                raise TypeError(msg)
+            role = message["role"]
+            content = message.get("content")
+            if role != ("tool" if pending else expected):
+                msg = "invalid message order"
+                raise ValueError(msg)
+            if role == "assistant":
+                calls = message.get("tool_calls", [])
+                if not isinstance(calls, list) or (
+                    content is not None and not isinstance(content, str)
+                ):
+                    msg = "invalid assistant message"
+                    raise ValueError(msg)
+                for call in calls:
+                    identifier = call["id"]
+                    if (
+                        call["type"] != "function"
+                        or not isinstance(identifier, str)
+                        or not identifier
+                        or identifier in pending
+                        or not isinstance(call["function"]["name"], str)
+                        or not isinstance(call["function"]["arguments"], str)
+                    ):
+                        msg = "invalid tool call"
+                        raise ValueError(msg)
+                    pending.add(identifier)
+                if not calls and not isinstance(content, str):
+                    msg = "missing assistant content"
+                    raise ValueError(msg)
+                expected = "assistant" if calls else "user"
+            else:
+                if not isinstance(content, str):
+                    msg = "invalid message content"
+                    raise ValueError(msg)
+                if role == "tool":
+                    pending.remove(message["tool_call_id"])
+                else:
+                    expected = "assistant"
+        if pending or expected != "user":
+            msg = "incomplete conversation"
+            raise ValueError(msg)
+
+    def save(self) -> None:
+        """Replace the checkpoint only after a complete write succeeds."""
+        temporary: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self.directory,
+                delete=False,
+            ) as stream:
+                temporary = stream.name
+                json.dump(
+                    {
+                        "version": 1,
+                        "cwd": self.cwd,
+                        "prompts": self.prompts,
+                        "messages": self.messages,
+                        "entries": [asdict(e) for e in self.entries],
+                    },
+                    stream,
+                )
+                stream.flush()
+                os.fsync(stream.fileno())
+            Path(temporary).replace(self.path)
+        except OSError as exc:
+            msg = f"Cannot save history {self.path}: {exc}"
+            raise HistoryError(msg) from exc
+        finally:
+            if temporary is not None:
+                with contextlib.suppress(OSError):
+                    Path(temporary).unlink(missing_ok=True)
+
+    def clear(self) -> None:
+        """Remove the checkpoint while retaining the locked inode."""
+        try:
+            self.path.unlink(missing_ok=True)
+        except OSError as exc:
+            msg = f"Cannot clear history {self.path}: {exc}"
+            raise HistoryError(msg) from exc
+
+    def event(self, kind: str, text: str, success: bool | None) -> None:  # noqa: FBT001
+        """Persist transcript events separately from committed model context."""
+        record_event(self.entries, kind, text, success)
+        self.save()
+
+
 class Agent:  # noqa: D101
-    def __init__(self, cwd: str | Path | None = None, base_url: str = BASE_URL) -> None:  # noqa: D107
+    def __init__(  # noqa: D107
+        self,
+        cwd: str | Path | None = None,
+        base_url: str = BASE_URL,
+        history: History | None = None,
+    ) -> None:
         self.cwd = Path(cwd or Path.cwd()).resolve()
+        self.history = history
         self.base_url = base_url.rstrip("/")
         self.model: str | None = None
         self.output: Callable[[str], None] | None = None
@@ -114,8 +321,12 @@ class Agent:  # noqa: D101
                 "content": README.read_text(encoding="utf-8"),
             },
         ]
+        if history is not None:
+            self.messages.extend(history.messages)
 
     def emit(self, text: str, kind: str = "chat") -> None:  # noqa: D102
+        if self.history is not None:
+            self.history.event(kind, text, None)
         if kind == "output":
             self.tool_output = True
         if self.output is not None:
@@ -187,7 +398,11 @@ class Agent:  # noqa: D101
             self.tool_success = (
                 process.returncode == 0 and not timed_out and not cancelled
             )
-            if self.output is not None or self.event is not None:
+            if (
+                self.history is not None
+                or self.output is not None
+                or self.event is not None
+            ):
                 output.seek(0)
                 self.emit(
                     status + output.read().decode("utf-8", errors="replace"),
@@ -292,7 +507,12 @@ class Agent:  # noqa: D101
             msg = f"Protocol error: invalid assistant response: {exc}"
             raise AgentError(msg) from exc
 
-    def turn(self, prompt: str) -> str:  # noqa: D102
+    def turn(self, prompt: str) -> str:  # noqa: C901, D102, PLR0912
+        if self.history is not None and prompt.strip():
+            self.history.prompts.append(prompt)
+            self.history.event("chat", "user> " + prompt, None)
+            if self.event is not None:
+                self.event("chat", "user> " + prompt, None)
         if self.model is None:
             self.discover()
         start = len(self.messages)
@@ -304,6 +524,9 @@ class Agent:  # noqa: D101
                 if message.get("content"):
                     self.emit("assistant> " + message["content"])
                 if not message.get("tool_calls"):
+                    if self.history is not None:
+                        self.history.messages = self.messages[1:]
+                        self.history.save()
                     return cast("str", message["content"])
                 for call in message["tool_calls"]:
                     self.emit(
@@ -325,6 +548,8 @@ class Agent:  # noqa: D101
                         self.emit("Cancelled", "output")
                         raise
                     finally:
+                        if self.history is not None:
+                            self.history.event("finish", "", self.tool_success)
                         if self.event is not None:
                             self.event("finish", "", self.tool_success)
                     self.messages.append(
@@ -361,6 +586,25 @@ class Entry:  # noqa: D101
     expanded: bool = False
 
 
+def record_event(
+    entries: list[Entry],
+    kind: str,
+    text: str,
+    success: bool | None,  # noqa: FBT001
+) -> None:
+    """Apply an event to either a persistent or an in-memory transcript."""
+    if kind == "finish":
+        entries[-1].success = success
+    elif kind == "output" and entries and entries[-1].tool:
+        entry = entries[-1]
+        entry.body += ("\n" if entry.body else "") + text
+    elif kind == "tool":
+        entries.append(Entry(text, "", tool=True))
+    else:
+        preview = next((line for line in text.splitlines() if line.strip()), "chat")
+        entries.append(Entry(preview, text))
+
+
 class Row(NamedTuple):  # noqa: D101
     owner: int
     line: int
@@ -372,7 +616,9 @@ class Viewer:  # noqa: D101
     def __init__(self, agent: Agent) -> None:  # noqa: D107
         self.agent = agent
         self.lines: list[str] = []
-        self.entries: list[Entry] = []
+        self.entries: list[Entry] = (
+            agent.history.entries if agent.history is not None else []
+        )
         self.selected = 0
         self.top = 0
         self.pattern = ""
@@ -384,16 +630,8 @@ class Viewer:  # noqa: D101
         self.chat_active = False
 
     def event(self, kind: str, text: str, success: bool | None) -> None:  # noqa: D102, FBT001
-        if kind == "finish":
-            self.entries[-1].success = success
-        elif kind == "output" and self.entries and self.entries[-1].tool:
-            entry = self.entries[-1]
-            entry.body += ("\n" if entry.body else "") + text
-        elif kind == "tool":
-            self.entries.append(Entry(text, "", tool=True))
-        else:
-            preview = next((line for line in text.splitlines() if line.strip()), "chat")
-            self.entries.append(Entry(preview, text))
+        if self.agent.history is None:
+            record_event(self.entries, kind, text, success)
         if self.chat_active:
             self.selected = max(0, len(self.entries) - 1)
             self.match = None
@@ -766,7 +1004,8 @@ class Viewer:  # noqa: D101
                     prompt = self.read_chat()
                     if prompt.strip():
                         self.lines.append("> " + prompt)
-                        self.event("chat", "user> " + prompt, None)
+                        if self.agent.history is None:
+                            self.event("chat", "user> " + prompt, None)
                         self.agent.turn(prompt)
                 except EOFError:  # noqa: PERF203
                     print()  # noqa: T201
@@ -782,24 +1021,62 @@ class Viewer:  # noqa: D101
             self.agent.event = previous_event
 
 
-def main(argv: list[str] | None = None) -> None:  # noqa: C901, D103
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
+def main(argv: list[str] | None = None) -> None:  # noqa: D103
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        epilog=(
+            "Prompt and chat history resume automatically for the resolved startup "
+            "directory, including --prompt runs. Stored under "
+            "$XDG_STATE_HOME/coding_agent (default: ~/.local/state/coding_agent)."
+        ),
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "-p",
         "--prompt",
         help="Run a single prompt non-interactively and exit",
     )
+    mode.add_argument(
+        "--clear-history",
+        action="store_true",
+        help="Clear this directory's prompt and chat history and exit",
+    )
     args = parser.parse_args(argv)
     if args.prompt is not None and not args.prompt.strip():
         parser.error("--prompt must not be empty or whitespace")
-    agent = Agent()
-    if args.prompt is not None:
+    try:
+        with History(Path.cwd()) as history:
+            if args.clear_history:
+                history.clear()
+                return
+            history.load()
+            agent = Agent(history=history)
+            readline.clear_history()
+            for prompt in history.prompts:
+                readline.add_history(prompt)
+            run_cli(agent, args.prompt)
+    except HistoryError as exc:
+        print(f"Error: {exc}", file=sys.stderr)  # noqa: T201
+        raise SystemExit(1) from exc
+
+
+def run_cli(agent: Agent, prompt: str | None) -> None:  # noqa: C901, PLR0912
+    """Run either CLI mode with the directory's history already loaded."""
+    if prompt is not None:
         try:
-            print(agent.turn(args.prompt))  # noqa: T201
+            print(agent.turn(prompt))  # noqa: T201
         except AgentError as exc:
+            if agent.history is not None:
+                agent.history.event("chat", f"Error: {exc}", None)
             print(f"Error: {exc}", file=sys.stderr)  # noqa: T201
             raise SystemExit(1) from exc
         except KeyboardInterrupt as exc:
+            if agent.history is not None:
+                agent.history.event(
+                    "chat",
+                    "Cancelled. Incomplete turn history discarded.",
+                    None,
+                )
             print("\nCancelled. Completed tool effects remain.", file=sys.stderr)  # noqa: T201
             raise SystemExit(130) from exc
         return
@@ -816,11 +1093,19 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901, D103
             print()  # noqa: T201
             return
         except KeyboardInterrupt:
+            if agent.history is not None:
+                agent.history.event(
+                    "chat",
+                    "Cancelled. Incomplete turn history discarded.",
+                    None,
+                )
             print(  # noqa: T201
                 "\nCancelled. Completed tool effects remain; "
                 "incomplete turn history discarded.",
             )
         except AgentError as exc:
+            if agent.history is not None:
+                agent.history.event("chat", f"Error: {exc}", None)
             print(  # noqa: T201
                 f"Error: {exc}. Completed tool effects remain; "
                 "incomplete turn history discarded.",

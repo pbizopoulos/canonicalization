@@ -33,6 +33,395 @@ import pytest
 from packages.coding_agent import main as app
 
 
+@pytest.fixture(autouse=True)
+def isolated_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never read or modify the developer's real history."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+
+
+class TestHistory(unittest.TestCase):
+    """Exercise persistent histories through restarts and failure paths."""
+
+    def setUp(self) -> None:  # noqa: D102
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.cwd = Path(self.directory.name)
+
+    def test_xdg_paths_and_directory_identity(self) -> None:  # noqa: D102
+        alias = self.cwd / "alias"
+        alias.symlink_to(self.cwd, target_is_directory=True)
+        if app.History(self.cwd).path != app.History(alias).path:
+            msg = "Expected app.History(self.cwd).path == app.History(alias).path"
+            raise AssertionError(msg)
+        if app.History(self.cwd).path == app.History(self.cwd / "child").path:
+            msg = "Child directories must have separate histories"
+            raise AssertionError(msg)
+        for value in ("", "relative", None):
+            with patch.dict(os.environ, {"HOME": str(self.cwd)}):
+                if value is None:
+                    os.environ.pop("XDG_STATE_HOME", None)
+                else:
+                    os.environ["XDG_STATE_HOME"] = value
+                if not (
+                    app.History(self.cwd).path.is_relative_to(self.cwd / ".local/state")
+                ):
+                    msg = (
+                        "Invalid or absent XDG_STATE_HOME must use the default location"
+                    )
+                    raise AssertionError(msg)
+        with patch.dict(os.environ, {"XDG_STATE_HOME": str(self.cwd / "custom")}):
+            if not (app.History(self.cwd).path.is_relative_to(self.cwd / "custom")):
+                msg = "Absolute XDG_STATE_HOME must override the default location"
+                raise AssertionError(msg)
+
+    def test_restart_restores_context_and_full_searchable_transcript(self) -> None:  # noqa: C901, D102
+        with app.History(self.cwd) as history:
+            history.load()
+            agent = app.Agent(self.cwd, history=history)
+            agent.model = "old-model"
+            viewer = app.Viewer(agent)
+            agent.event = viewer.event
+            output = "x" * (app.OUTPUT_LIMIT + 50) + "needle"
+            with patch.object(
+                agent,
+                "completion",
+                side_effect=[
+                    answer(calls=[call("read", "read", path="large")])["choices"][0][
+                        "message"
+                    ],
+                    answer("done")["choices"][0]["message"],
+                ],
+            ):
+                (self.cwd / "large").write_text(output)
+                agent.turn("read it")
+            if len(viewer.entries) != 3:  # noqa: PLR2004
+                msg = "Expected len(viewer.entries) == 3"
+                raise AssertionError(msg)
+            if history.path.stat().st_mode & 0o777 != 0o600:  # noqa: PLR2004
+                msg = "Expected history.path.stat().st_mode & 511 == 384"
+                raise AssertionError(msg)
+            if history.directory.stat().st_mode & 0o777 != 0o700:  # noqa: PLR2004
+                msg = "Expected history.directory.stat().st_mode & 511 == 448"
+                raise AssertionError(msg)
+        with app.History(self.cwd) as history:
+            history.load()
+            agent = app.Agent(self.cwd, history=history)
+            if agent.model is not None:
+                msg = "Expected agent.model is None"
+                raise AssertionError(msg)
+            if history.prompts != ["read it"]:
+                msg = "Expected history.prompts == ['read it']"
+                raise AssertionError(msg)
+            if agent.messages[-1]["content"] != "done":
+                msg = "Expected agent.messages[-1]['content'] == 'done'"
+                raise AssertionError(msg)
+            if agent.messages[0]["content"] != app.README.read_text():
+                msg = "Expected agent.messages[0]['content'] == app.README.read_text()"
+                raise AssertionError(msg)
+            if not (len(agent.messages[-2]["content"]) < len(output)):
+                msg = "Expected len(agent.messages[-2]['content']) < len(output)"
+                raise AssertionError(msg)
+            viewer = app.Viewer(agent)
+            if not (all(not entry.expanded for entry in viewer.entries)):
+                msg = "Expected all((not entry.expanded for entry in viewer.entries))"
+                raise AssertionError(msg)
+            viewer.pattern = "needle"
+            viewer.search(1)
+            if not (viewer.match is not None):
+                msg = "Expected viewer.match is not None"
+                raise AssertionError(msg)
+            if output not in viewer.entries[viewer.selected].body:
+                msg = "Expected output in viewer.entries[viewer.selected].body"
+                raise AssertionError(msg)
+
+    def test_failed_and_cancelled_turns_keep_only_completed_context(self) -> None:  # noqa: D102
+        for failure in (app.AgentError("offline"), KeyboardInterrupt()):
+            with self.subTest(failure=type(failure)), app.History(self.cwd) as history:
+                history.clear()
+                agent = app.Agent(self.cwd, history=history)
+                agent.model = "local"
+                with patch.object(
+                    agent,
+                    "completion",
+                    return_value=answer("done")["choices"][0]["message"],
+                ):
+                    agent.turn("first")
+                with (
+                    patch.object(
+                        agent,
+                        "completion",
+                        side_effect=[
+                            answer(
+                                calls=[call("shell", "bash", command="printf kept")],
+                            )["choices"][0]["message"],
+                            failure,
+                        ],
+                    ),
+                    pytest.raises(type(failure)),
+                ):
+                    agent.turn("second")
+                history.load()
+                if history.prompts != ["first", "second"]:
+                    msg = "Expected history.prompts == ['first', 'second']"
+                    raise AssertionError(msg)
+                if len(history.messages) != 2:  # noqa: PLR2004
+                    msg = "Expected len(history.messages) == 2"
+                    raise AssertionError(msg)
+                if not (any("kept" in entry.body for entry in history.entries)):
+                    msg = "Failed turns must retain completed tool output"
+                    raise AssertionError(msg)
+
+    def test_abrupt_exit_keeps_prompt_and_marks_tool_interrupted(self) -> None:  # noqa: D102
+        code = """
+import os
+from pathlib import Path
+from packages.coding_agent.main import History
+with History(Path.cwd()) as history:
+    history.prompts.append('pending')
+    history.event('chat', 'user> pending', None)
+    history.event('tool', 'tool> bash', None)
+    os._exit(0)
+"""
+        result = subprocess.run([sys.executable, "-c", code], check=False)  # noqa: S603
+        if result.returncode != 0:
+            msg = "Expected result.returncode == 0"
+            raise AssertionError(msg)
+        with app.History(Path.cwd()) as history:
+            history.load()
+            if history.prompts != ["pending"]:
+                msg = "Expected history.prompts == ['pending']"
+                raise AssertionError(msg)
+            if history.messages != []:
+                msg = "Expected history.messages == []"
+                raise AssertionError(msg)
+            if history.entries[-1].success:
+                msg = "Expected not history.entries[-1].success"
+                raise AssertionError(msg)
+            if "Interrupted" not in history.entries[-1].body:
+                msg = "Expected 'Interrupted' in history.entries[-1].body"
+                raise AssertionError(msg)
+
+    def test_lock_and_failed_atomic_save_preserve_checkpoint(self) -> None:  # noqa: D102
+        with app.History(self.cwd) as history:
+            history.save()
+            previous = history.path.read_bytes()
+            with pytest.raises(app.HistoryError), app.History(self.cwd):
+                self.fail("Concurrent history ownership was allowed")
+            history.prompts.append("new")
+            with (
+                patch.object(Path, "replace", side_effect=OSError("disk error")),
+                pytest.raises(app.HistoryError),
+            ):
+                history.save()
+            if history.path.read_bytes() != previous:
+                msg = "Expected history.path.read_bytes() == previous"
+                raise AssertionError(msg)
+            if {p.name for p in history.directory.iterdir()} != {
+                "history.json",
+                "lock",
+            }:
+                msg = "Failed saves must clean up temporary files"
+                raise AssertionError(msg)
+        with app.History(self.cwd) as history:
+            history.load()
+            if history.prompts != []:
+                msg = "Expected history.prompts == []"
+                raise AssertionError(msg)
+
+    def test_invalid_history_is_preserved_and_can_be_cleared(self) -> None:  # noqa: D102
+        with app.History(Path.cwd()) as history:
+            history.save()
+            valid = json.loads(history.path.read_text())
+            invalid = [
+                "{",
+                json.dumps({**valid, "version": 2}),
+                json.dumps({**valid, "messages": [None]}),
+                json.dumps(
+                    {**valid, "messages": [{"role": "user", "content": "unfinished"}]},
+                ),
+                json.dumps({**valid, "entries": [{"body": 5}]}),
+            ]
+            for content in invalid:
+                history.path.write_text(content)
+                with pytest.raises(app.HistoryError):
+                    history.load()
+                if history.path.read_text() != content:
+                    msg = "Expected history.path.read_text() == content"
+                    raise AssertionError(msg)
+        with app.History(self.cwd) as other:
+            other.save()
+        with patch.object(
+            app.Agent,
+            "request",
+            side_effect=AssertionError("Unexpected HTTP"),
+        ):
+            app.main(["--clear-history"])
+        if history.path.exists():
+            msg = "Expected not history.path.exists()"
+            raise AssertionError(msg)
+        if not (other.path.exists()):
+            msg = "Expected other.path.exists()"
+            raise AssertionError(msg)
+        with (
+            contextlib.redirect_stderr(io.StringIO()),
+            pytest.raises(SystemExit) as error,
+        ):
+            app.main(["--clear-history", "--prompt", "hello"])
+        if error.value.code != 2:  # noqa: PLR2004
+            msg = "Expected error.value.code == 2"
+            raise AssertionError(msg)
+
+    def test_cli_modes_share_context_and_restore_readline(self) -> None:  # noqa: D102
+        with (
+            patch.object(app.Agent, "discover"),
+            patch.object(
+                app.Agent,
+                "completion",
+                return_value=answer("reply")["choices"][0]["message"],
+            ),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            app.main(["--prompt", "first"])
+            if output.getvalue() != "reply\n":
+                msg = "Expected output.getvalue() == 'reply\\n'"
+                raise AssertionError(msg)
+            with patch("builtins.input", side_effect=["second", EOFError()]):
+                app.main([])
+        if readline.get_history_item(1) != "first":
+            msg = "Expected readline.get_history_item(1) == 'first'"
+            raise AssertionError(msg)
+        with app.History(Path.cwd()) as history:
+            history.load()
+            if history.prompts != ["first", "second"]:
+                msg = "Expected history.prompts == ['first', 'second']"
+                raise AssertionError(msg)
+            if [message["content"] for message in history.messages] != [
+                "first",
+                "reply",
+                "second",
+                "reply",
+            ]:
+                msg = "CLI modes must continue the same conversation"
+                raise AssertionError(msg)
+
+    def test_terminal_recalls_saved_prompts_after_restart(self) -> None:  # noqa: C901, D102
+        with app.History(Path.cwd()) as history:
+            history.prompts = ["saved prompt"]
+            history.save()
+        code = """
+from packages.coding_agent import main as app
+app.Agent.discover = lambda self: None
+app.Agent.completion = lambda self: {'role': 'assistant', 'content': 'replied'}
+app.main([])
+"""
+        for keys in (b"\x1b[A\n", b"\x12saved\n\n"):
+            master, slave = pty.openpty()
+            fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+            try:
+                with subprocess.Popen(  # noqa: S603
+                    [sys.executable, "-c", code],
+                    stdin=slave,
+                    stdout=slave,
+                    stderr=slave,
+                    env={**os.environ, "TERM": "xterm", "INPUTRC": "/dev/null"},
+                ) as process:
+                    try:
+                        buffer = b""
+                        deadline = time.monotonic() + 5
+                        while b"\x1b[24;1H> " not in buffer:
+                            if time.monotonic() >= deadline:
+                                msg = f"History terminal did not start: {buffer!r}"
+                                raise AssertionError(msg)
+                            if select.select([master], [], [], 0.1)[0]:
+                                buffer += os.read(master, 65536)
+                        os.write(master, keys)
+                        buffer = b""
+                        while (
+                            b"assistant> replied" not in buffer
+                            or not buffer.endswith(b"> ")
+                        ):
+                            if time.monotonic() >= deadline:
+                                msg = f"Recalled prompt was not answered: {buffer!r}"
+                                raise AssertionError(msg)
+                            if select.select([master], [], [], 0.1)[0]:
+                                buffer += os.read(master, 65536)
+                        os.write(master, b"\x04")
+                        process.wait(timeout=5)
+                        if process.returncode != 0:
+                            msg = "History terminal did not exit successfully"
+                            raise AssertionError(msg)
+                    finally:
+                        if process.poll() is None:
+                            process.kill()
+            finally:
+                os.close(master)
+                os.close(slave)
+        with app.History(Path.cwd()) as history:
+            history.load()
+            if history.prompts != ["saved prompt"] * 3:
+                msg = "Up and Ctrl-R must recall prompts from previous processes"
+                raise AssertionError(msg)
+
+    def test_cli_reports_storage_errors_without_contacting_model(self) -> None:  # noqa: D102
+        for operation in ("load", "save"):
+            with (
+                patch.object(
+                    app.History,
+                    operation,
+                    side_effect=app.HistoryError("disk error"),
+                ),
+                patch.object(
+                    app.Agent,
+                    "request",
+                    side_effect=AssertionError("Unexpected HTTP"),
+                ),
+                contextlib.redirect_stderr(io.StringIO()) as error,
+                pytest.raises(SystemExit) as exited,
+            ):
+                app.main(["--prompt", "hello"])
+            if exited.value.code != 1 or "disk error" not in error.getvalue():
+                msg = "Storage errors must stop the CLI with an actionable message"
+                raise AssertionError(msg)
+
+    def test_single_prompt_saves_full_command_output(self) -> None:  # noqa: D102
+        command = f"printf '%{app.OUTPUT_LIMIT + 50}s' ''; printf needle"
+        with (
+            patch.object(app.Agent, "discover"),
+            patch.object(
+                app.Agent,
+                "completion",
+                side_effect=[
+                    answer(
+                        calls=[
+                            call(
+                                "shell",
+                                "bash",
+                                command=command,
+                            ),
+                        ],
+                    )["choices"][0]["message"],
+                    answer("done")["choices"][0]["message"],
+                ],
+            ),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            app.main(["--prompt", "print a long output"])
+        with app.History(Path.cwd()) as history:
+            history.load()
+            if (
+                len(history.entries[1].body) <= app.OUTPUT_LIMIT
+                or "needle" not in history.entries[1].body
+            ):
+                msg = "Single-prompt history must retain full command output"
+                raise AssertionError(msg)
+            if "needle" in history.messages[-2]["content"]:
+                msg = "Model context must still bound command output"
+                raise AssertionError(msg)
+        if output.getvalue() != "done\n":
+            msg = "Saving command output must not change single-prompt stdout"
+            raise AssertionError(msg)
+
+
 @contextlib.contextmanager
 def server(responses: list[Any]) -> Iterator[tuple[str, list[tuple[str, Any]]]]:  # noqa: D103
     requests = []
