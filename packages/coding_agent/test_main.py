@@ -3,7 +3,6 @@
 
 import contextlib
 import ctypes
-import curses
 import io
 import json
 import os
@@ -448,340 +447,44 @@ class TestAgent(unittest.TestCase):  # noqa: D101
 
 
 class TestViewer(unittest.TestCase):  # noqa: D101
-    def setUp(self) -> None:  # noqa: D102
-        self.agent = app.Agent()
-        self.screen = unittest.mock.Mock()
-        self.screen.getmaxyx.return_value = (6, 80)
-        self.viewer = app.Viewer(self.screen, self.agent)
-        self.viewer.key("\x1b")
-
-    def test_chat_uses_builtin_input_and_restores_readline_hook(self) -> None:  # noqa: D102
-        viewer = app.Viewer(self.screen, self.agent)
-        if viewer.mode != "chat":
-            msg = "The agent must start in chat mode"
-            raise AssertionError(msg)
+    def test_chat_restores_readline_hook(self) -> None:  # noqa: D102
+        viewer = app.Viewer(app.Agent())
         library = ctypes.CDLL(readline.__file__)
         slot = ctypes.c_void_p.in_dll(library, "rl_getc_function")
         previous = slot.value
         with patch("builtins.input", return_value="hello") as read:
-            prompt = viewer.read_chat()
+            if viewer.read_chat() != "hello":
+                msg = "Chat must use native readline input"
+                raise AssertionError(msg)
         read.assert_called_once_with("> ")
-        if prompt != "hello" or slot.value != previous:
-            msg = "Chat must use readline input and restore its input hook"
+        if slot.value != previous:
+            msg = "Readline input hook must be restored"
             raise AssertionError(msg)
         with patch("builtins.input", side_effect=EOFError), pytest.raises(EOFError):
             viewer.read_chat()
         if slot.value != previous:
-            msg = "Readline hooks must also be restored on EOF"
+            msg = "Readline input hook must be restored"
             raise AssertionError(msg)
 
-    def test_pager_quit_commands_return_to_chat_with_draft(self) -> None:  # noqa: D102
-        for command in ("q", "Q", "ZZ", ":"):
-            with self.subTest(command=command):
-                viewer = app.Viewer(self.screen, self.agent)
-                viewer.draft = "draft"
-                for key in "\x1b" + command:
-                    if not viewer.key(key):
-                        msg = "Closing the pager must not exit the agent"
-                        raise AssertionError(msg)
-                if (viewer.mode, viewer.draft, viewer.cursor) != ("chat", "draft", 5):
-                    msg = "Returning to chat must restore the draft and cursor"
-                    raise AssertionError(msg)
-
-    def test_search_defaults_match_less_and_wrap_is_opt_in(self) -> None:  # noqa: D102, C901
-        viewer = self.viewer
-        viewer.lines = ["first hit", "plain", "second hit", "last hit"]
-        for key in "/hit\n":
-            viewer.key(key)
-        if viewer.match != 0:
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        viewer.key("n")
-        if viewer.match != 2:  # noqa: PLR2004
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        viewer.key("n")
-        viewer.draw()
-        if (viewer.match, viewer.top) != (3, 3):
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        viewer.key("n")
-        if viewer.notice != "Pattern not found":
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        if viewer.top != 3:  # noqa: PLR2004
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        viewer.key("N")
-        if viewer.match != 2:  # noqa: PLR2004
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        for key in "G/\x17hit\nn":
-            viewer.key(key)
-        viewer.key("n")
-        viewer.key("n")
-        if viewer.match != 0:
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        for key in "g?hit\n":
-            viewer.key(key)
-        if viewer.match != 3:  # noqa: PLR2004
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-
-    def test_regex_highlights_only_matching_spans_across_wrapped_lines(self) -> None:  # noqa: D102
-        viewer = self.viewer
-        self.screen.getmaxyx.return_value = (6, 12)
-        viewer.lines = ["prefix abc123 abc456 tail", "no match"]
-        for key in r"/abc[0-9]+" + "\n":
-            viewer.key(key)
-        self.screen.reset_mock()
-        viewer.draw()
-        highlights = [
-            call.args
-            for call in self.screen.addstr.call_args_list
-            if call.args[-1] == curses.A_REVERSE
-        ]
-        if highlights != [
-            (0, 7, "abc12", curses.A_REVERSE),
-            (1, 0, "3", curses.A_REVERSE),
-            (1, 2, "abc456", curses.A_REVERSE),
-        ]:
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        for key in "\x1bu":
-            viewer.key(key)
-        self.screen.reset_mock()
-        viewer.draw()
-        if any(
-            call.args[-1] == curses.A_REVERSE
-            for call in self.screen.addstr.call_args_list
-        ):
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        viewer.key("n")
-        if not (viewer.highlight):
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        for key in "\x1bU":
-            viewer.key(key)
-        if viewer.query != "":
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        if viewer.pattern is not None:
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-
-    def test_search_navigation_uses_current_position_and_logical_lines(self) -> None:  # noqa: D102, C901, PLR0912
-        viewer = self.viewer
-        self.screen.getmaxyx.return_value = (4, 8)
-        viewer.lines = ["first match wraps", "plain", "last match wraps"]
-        for key in "/match\n":
-            viewer.key(key)
-        if viewer.match != 0:
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        viewer.key("n")
-        if viewer.match != 2:  # noqa: PLR2004
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        for key in "gn":
-            viewer.key(key)
-        if viewer.match != 2:  # noqa: PLR2004
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        for key in "g2/match\n":
-            viewer.key(key)
-        if viewer.match != 2:  # noqa: PLR2004
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        for key in "g/last match\n":
-            viewer.key(key)
-        if viewer.match != 2:  # noqa: PLR2004
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        for key in "/$\n":
-            viewer.key(key)
-        if viewer.notice != "":
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        for key in "/[\n":
-            viewer.key(key)
-        if not (viewer.notice.startswith("Invalid pattern:")):
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-
-    def test_less_movement_counts_half_pages_and_follow(self) -> None:  # noqa: D102, C901, PLR0912
-        viewer = self.viewer
-        viewer.lines = [str(i) for i in range(40)]
-        viewer.key("\x04")
-        if viewer.top != 2:  # noqa: PLR2004
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        for key in "3d":
-            viewer.key(key)
-        if viewer.top != 5:  # noqa: PLR2004
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        viewer.key("u")
-        if viewer.top != 2:  # noqa: PLR2004
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        for key in "g10j":
-            viewer.key(key)
-        if viewer.top != 10:  # noqa: PLR2004
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        viewer.key("\n")
-        if viewer.top != 11:  # noqa: PLR2004
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        for key in "20g":
-            viewer.key(key)
-        if viewer.top != 19:  # noqa: PLR2004
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        viewer.key("G")
-        if viewer.follow:
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        if viewer.top != 35:  # noqa: PLR2004
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        viewer.key("F")
-        if not (viewer.follow):
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        viewer.key("\x03")
-        if viewer.follow:
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        for key in "g ":
-            viewer.key(key)
-        if viewer.top != 5:  # noqa: PLR2004
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        for key in "\x1bv":
-            viewer.key(key)
-        if viewer.top != 0:
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-
-    def test_search_modifiers_history_and_case_options(self) -> None:  # noqa: D102, C901
-        viewer = self.viewer
-        viewer.lines = ["ABC", "a.c", "abc", "plain"]
-        for key in "/abc\n":
-            viewer.key(key)
-        if viewer.match != 2:  # noqa: PLR2004
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        for key in "g-i/abc\n":
-            viewer.key(key)
-        if viewer.match != 0:
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        for key in "g/\x12a.c\n":
-            viewer.key(key)
-        if viewer.match != 1:
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        viewer.key("/")
-        viewer.key(curses.KEY_UP)
-        if viewer.entry != "a.c":
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        viewer.key("\x1b")
-        for key in "g/\x0bplain\n":
-            viewer.key(key)
-        if viewer.top != 0:
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        for key in "g/!abc\n":
-            viewer.key(key)
-        if viewer.match != 1:
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        viewer.key("/")
-        viewer.key(curses.KEY_BACKSPACE)
-        if viewer.mode != "view":
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-
-    def test_horizontal_scrolling_marks_and_help(self) -> None:  # noqa: D102, C901
-        viewer = self.viewer
-        self.screen.getmaxyx.return_value = (4, 8)
-        viewer.lines = ["0123456789abcdef", "second", "third", "fourth"]
-        viewer.key(curses.KEY_RIGHT)
-        if viewer.rows()[0] != "456789ab":
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        viewer.key(curses.KEY_LEFT)
-        if viewer.rows()[:2] != ["01234567", "89abcdef"]:
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        for key in "-S":
-            viewer.key(key)
-        if viewer.rows()[0] != "01234567":
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        for key in "2gmaG'a":
-            viewer.key(key)
-        if viewer.top != 1:
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        viewer.key("h")
-        viewer.draw()
-        if viewer.help_offset != 0:
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        if not (viewer.key("q")):
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        if viewer.help_offset is not None:
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        if not (viewer.key("Z")):
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-        if not viewer.key("Z") or viewer.mode != "chat":
-            msg = "ZZ must close the viewer and return to chat"
-            raise AssertionError(msg)
-
-    def test_unicode_highlighting_uses_terminal_columns(self) -> None:  # noqa: D102
-        viewer = self.viewer
-        self.screen.getmaxyx.return_value = (6, 8)
-        viewer.lines = ["界é hit hit"]
-        for key in "/hit\n":
-            viewer.key(key)
-        self.screen.reset_mock()
-        viewer.draw()
-        highlights = [
-            call.args
-            for call in self.screen.addstr.call_args_list
-            if call.args[-1] == curses.A_REVERSE
-        ]
-        if highlights != [
-            (0, 4, "hit", curses.A_REVERSE),
-            (1, 0, "hit", curses.A_REVERSE),
-        ]:
-            msg = "Viewer behavior differs from less"
-            raise AssertionError(msg)
-
-    def test_transcript_keeps_tool_output_after_failure(self) -> None:  # noqa: D102
-        self.agent.model = "local"
-        self.agent.output = self.viewer.append
+    def test_transcript_keeps_output_after_failure(self) -> None:  # noqa: D102
+        agent = app.Agent()
+        viewer = app.Viewer(agent)
+        agent.model = "local"
         response = answer(
             "Running command",
             [call("shell", "bash", command="printf hello; printf error >&2")],
         )["choices"][0]["message"]
-        self.viewer.draft = "do it"
-        with patch.object(
-            self.agent,
-            "completion",
-            side_effect=[response, app.AgentError("offline")],
+        with (
+            patch.object(viewer, "read_chat", side_effect=["do it", EOFError()]),
+            patch.object(
+                agent,
+                "completion",
+                side_effect=[response, app.AgentError("offline")],
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
         ):
-            self.viewer.submit()
-        transcript = "\n".join(self.viewer.lines)
+            viewer.run()
+        transcript = "\n".join(viewer.lines)
         for expected in (
             "> do it",
             "assistant> Running command",
@@ -791,34 +494,13 @@ class TestViewer(unittest.TestCase):  # noqa: D101
             "offline",
         ):
             if expected not in transcript:
-                msg = "expected in transcript"
-                raise AssertionError(msg)
-        if len(self.agent.messages) != 1:
-            msg = "len(self.agent.messages) == 1"
+                raise AssertionError(expected)
+        if len(agent.messages) != 1:
+            msg = "Failed turn history must be discarded"
             raise AssertionError(msg)
-
-    def test_full_command_output_is_visible_but_model_result_is_bounded(self) -> None:  # noqa: D102
-        self.agent.output = self.viewer.append
-        result = self.agent.bash("printf '%20000s' x; printf tail")
-        if len(result) != app.OUTPUT_LIMIT:
-            msg = "len(result) == app.OUTPUT_LIMIT"
+        if agent.output is not None:
+            msg = "Output hook must be restored"
             raise AssertionError(msg)
-        if not ("tail" not in result):
-            msg = '"tail" not in result'
-            raise AssertionError(msg)
-        if not ("\n".join(self.viewer.lines).endswith("xtail")):
-            msg = '"\\n".join(self.viewer.lines).endswith("xtail")'
-            raise AssertionError(msg)
-
-    def test_terminal_uses_viewer(self) -> None:  # noqa: D102
-        with (
-            patch.object(sys.stdin, "isatty", return_value=True),
-            patch.object(sys.stdout, "isatty", return_value=True),
-            patch.object(curses, "wrapper") as wrapper,
-            patch.object(curses, "set_escdelay"),
-        ):
-            app.main([])
-        wrapper.assert_called_once()
 
 
 class TestReadlineTerminal(unittest.TestCase):  # noqa: D101
@@ -835,7 +517,6 @@ class TestReadlineTerminal(unittest.TestCase):  # noqa: D101
         self.master, slave = pty.openpty()
         self.addCleanup(os.close, self.master)
         code = """
-import curses
 import json
 from packages.coding_agent.main import Agent, Viewer
 agent = Agent()
@@ -843,8 +524,7 @@ def turn(prompt):
     agent.emit("RESULT:" + json.dumps(prompt))
     return ""
 agent.turn = turn
-curses.set_escdelay(25)
-curses.wrapper(lambda screen: Viewer(screen, agent).run())
+Viewer(agent).run()
 """
         try:
             self.process = subprocess.Popen(  # noqa: S603
@@ -901,12 +581,31 @@ curses.wrapper(lambda screen: Viewer(screen, agent).run())
         self.wait_for(b"\x1b[?1049h")
         os.write(self.master, b"q")
         self.wait_for(b"\x1b[?1049l")
+        self.wait_for(b"> ")
         self.send(b"\x1f\n", "hello")
         os.write(self.master, b"hello\x01\x1b")
         self.wait_for(b"\x1b[?1049h")
-        os.write(self.master, b":")
+        os.write(self.master, b":q")
         self.wait_for(b"\x1b[?1049l")
+        self.wait_for(b"> ")
         self.send(b"X\n", "Xhello")
+
+    def test_empty_prompt_repeated_viewing_and_search(self) -> None:  # noqa: D102
+        self.send(b"searchable transcript\n", "searchable transcript")
+        for quit_keys in (b"q", b":q", b"ZZ"):
+            os.write(self.master, b"\x1b")
+            self.wait_for(b"\x1b[?1049h")
+            self.wait_for(b"searchable transcript")
+            os.write(self.master, b"/searchable\n")
+            self.wait_for(b"(END)")
+            os.write(self.master, quit_keys)
+            self.wait_for(b"\x1b[?1049l")
+            self.wait_for(b"> ")
+        self.send(b"after viewing\n", "after viewing")
+        os.write(self.master, b"\x04")
+        if self.process.wait(timeout=5) != 0:
+            msg = "EOF after viewing must exit cleanly"
+            raise AssertionError(msg)
 
     def test_vi_escape_keeps_native_command_mode(self) -> None:  # noqa: D102
         os.write(self.master, b"\x18vhello\x1b")
@@ -918,11 +617,15 @@ curses.wrapper(lambda screen: Viewer(screen, agent).run())
         self.wait_for(b"\x1b[?1049h")
         os.write(self.master, b"q")
         self.wait_for(b"\x1b[?1049l")
+        self.wait_for(b"> ")
         self.send(b"x\n", "worl")
 
     def test_interrupt_cancels_readline_and_next_prompt_works(self) -> None:  # noqa: D102
-        os.write(self.master, b"discard")
-        self.wait_for(b"discard")
+        os.write(self.master, b"\x1b")
+        self.wait_for(b"\x1b[?1049h")
+        os.write(self.master, b"q")
+        self.wait_for(b"\x1b[?1049l")
+        self.wait_for(b"> ")
         os.kill(self.process.pid, signal.SIGINT)
         self.wait_for(b"Cancelled.")
         self.wait_for(b"> ")

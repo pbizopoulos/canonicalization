@@ -2,6 +2,11 @@
 let
   pname = baseNameOf ./.;
   python = pkgs.python3;
+  runtimeInputs = [
+    pkgs.bash
+    pkgs.less
+    pkgs.nix
+  ];
 in
 python.pkgs.buildPythonPackage {
   inherit pname;
@@ -21,13 +26,9 @@ python.pkgs.buildPythonPackage {
   nativeBuildInputs = [ pkgs.makeWrapper ];
   passthru.python = python;
   postFixup = ''
-    wrapProgram "$out/bin/${pname}" --prefix PATH : "${
-      pkgs.lib.makeBinPath [
-        pkgs.bash
-        pkgs.nix
-      ]
-    }"
+    wrapProgram "$out/bin/${pname}" --prefix PATH : "${pkgs.lib.makeBinPath runtimeInputs}"
   '';
+  propagatedBuildInputs = runtimeInputs;
   pyproject = false;
   src = ./.;
   strictDeps = true;
