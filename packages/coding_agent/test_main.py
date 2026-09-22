@@ -493,6 +493,46 @@ class TestAgent(unittest.TestCase):  # noqa: D101
     def execute(self, name: str, **args: object) -> str:  # noqa: D102
         return self.agent.execute(name, json.dumps(args))
 
+    def test_background_tool_cancellation(self) -> None:
+        """Cancel a real running process group and discard its incomplete turn."""
+        started = threading.Event()
+        processes: list[subprocess.Popen[bytes]] = []
+        original = subprocess.Popen
+
+        def spawn(*args: Any, **kwargs: Any) -> subprocess.Popen[bytes]:  # noqa: ANN401
+            process = original(*args, **kwargs)
+            processes.append(process)
+            started.set()
+            return process
+
+        viewer = app.Viewer(self.agent)
+        self.agent.event = viewer.enqueue
+        self.agent.model = "local"
+        response = answer(calls=[call("slow", "bash", command="sleep 60")])["choices"][
+            0
+        ]["message"]
+        with (
+            patch.object(self.agent, "completion", return_value=response),
+            patch.object(subprocess, "Popen", side_effect=spawn),
+            patch.object(os, "killpg", wraps=os.killpg) as kill,
+        ):
+            try:
+                viewer.start_turn("run tool")
+                if not started.wait(timeout=5):
+                    msg = "Tool process did not start"
+                    raise AssertionError(msg)
+            finally:
+                viewer.stop_turn()
+        kill.assert_called_once_with(processes[0].pid, signal.SIGKILL)
+        if (
+            processes[0].poll() != -signal.SIGKILL
+            or len(self.agent.messages) != 1
+            or not any(e.tool and e.success is False for e in viewer.entries)
+            or not any("Cancelled" in e.body for e in viewer.entries)
+        ):
+            msg = "Cancellation must reap the process and mark its tool as failed"
+            raise AssertionError(msg)
+
     def test_files(self) -> None:  # noqa: C901, D102, PLR0912
         if self.execute("write", path="nested/a", content="héllo") != "OK":
             msg = (
@@ -842,6 +882,110 @@ class TestAgent(unittest.TestCase):  # noqa: D101
 
 
 class TestViewer(unittest.TestCase):  # noqa: D101
+    def test_background_history_and_late_cancelled_response(self) -> None:  # noqa: C901, PLR0915
+        """Late HTTP results cannot write files or change a later conversation."""
+        started, release, delivered = (
+            threading.Event(),
+            threading.Event(),
+            threading.Event(),
+        )
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            app.History(
+                Path(directory),
+            ) as history,
+        ):
+            agent = app.Agent(directory, history=history)
+            agent.model = "local"
+            viewer = app.Viewer(agent)
+            agent.event = viewer.enqueue
+
+            def receive(_request: object) -> dict[str, Any]:
+                if started.is_set():
+                    return answer("second answer")
+                started.set()
+                if not release.wait(timeout=5):
+                    msg = "Test did not release the HTTP response"
+                    raise AssertionError(msg)
+                delivered.set()
+                return answer(calls=[call("late", "write", path="late", content="bad")])
+
+            with patch.object(agent, "receive", side_effect=receive):
+                try:
+                    viewer.start_turn("first")
+                    if not started.wait(timeout=5):
+                        msg = "HTTP request did not start"
+                        raise AssertionError(msg)
+                    if viewer.entries or len(history.entries) != 1:
+                        msg = "Worker must not mutate the viewer's transcript"
+                        raise AssertionError(msg)
+                    viewer.poll()
+                    viewer.entries[0].expanded = True
+                    if history.entries[0].expanded or not viewer.waiting():
+                        msg = "Display state must be separate from persisted history"
+                        raise AssertionError(msg)
+                    viewer.stop_turn()
+                    if viewer.waiting() or history.messages or len(agent.messages) != 1:
+                        msg = "Cancellation must clear pending UI and model context"
+                        raise AssertionError(msg)
+                    viewer.start_turn("second")
+                    if viewer.worker is None:
+                        msg = "Second turn did not start"
+                        raise AssertionError(msg)
+                    viewer.worker.join(timeout=5)
+                    if viewer.worker.is_alive():
+                        msg = "Second turn waited for the cancelled HTTP response"
+                        raise AssertionError(msg)
+                    viewer.poll()
+                    checkpoint = history.path.read_text()
+                    release.set()
+                    if not delivered.wait(timeout=5):
+                        msg = "Cancelled response did not finish"
+                        raise AssertionError(msg)
+                    viewer.poll()
+                    if (
+                        (Path(directory) / "late").exists()
+                        or history.path.read_text() != checkpoint
+                        or viewer.waiting()
+                        or [m["content"] for m in history.messages]
+                        != ["second", "second answer"]
+                        or any(
+                            e.title.startswith("assistant> .") for e in history.entries
+                        )
+                    ):
+                        msg = "Late responses and placeholders must not persist"
+                        raise AssertionError(msg)
+                finally:
+                    release.set()
+                    viewer.stop_turn()
+
+    def test_background_events_preserve_browsing_and_search(self) -> None:
+        """Incoming output follows only when the user is following the tail."""
+        viewer = app.Viewer(app.Agent())
+        for index in range(30):
+            viewer.event("chat", f"assistant> entry {index}\ndetail {index}", None)
+        viewer.chat_active = True
+        viewer.height = 5
+        viewer.pattern = "detail 2$"
+        viewer.search(1)
+        position = viewer.selected, viewer.top, viewer.match
+        viewer.enqueue("chat", "assistant> new answer", None)
+        viewer.poll()
+        if (viewer.selected, viewer.top, viewer.match) != position:
+            msg = "New output must preserve browsing position and search match"
+            raise AssertionError(msg)
+        viewer.match = None
+        viewer.selected = len(viewer.entries) - 1
+        viewer.top = len(viewer.rows(viewer.width)) - viewer.height
+        viewer.enqueue("chat", "assistant> following", None)
+        viewer.poll()
+        if (
+            viewer.selected != len(viewer.entries) - 1
+            or viewer.top != len(viewer.rows(viewer.width)) - viewer.height
+        ):
+            msg = "Following the transcript tail must reveal arriving output"
+            raise AssertionError(msg)
+
     def test_chat_and_view_render_the_same_tree(self) -> None:  # noqa: D102
         viewer = app.Viewer(app.Agent())
         viewer.event("chat", "assistant> preview\nfull response", None)
@@ -1065,19 +1209,18 @@ class TestViewer(unittest.TestCase):  # noqa: D101
 
     def test_chat_restores_readline_hook(self) -> None:  # noqa: D102
         viewer = app.Viewer(app.Agent())
-        library = ctypes.CDLL(readline.__file__)
+        library = app.readline_library()
         slot = ctypes.c_void_p.in_dll(library, "rl_getc_function")
         previous = slot.value
-        with patch("builtins.input", return_value="hello") as read:
-            if viewer.read_chat() != "hello":
-                msg = "Chat must use native readline input"
-                raise AssertionError(msg)
-        read.assert_called_once_with("> ")
-        if slot.value != previous:
-            msg = "Readline input hook must be restored"
-            raise AssertionError(msg)
-        with patch("builtins.input", side_effect=EOFError), pytest.raises(EOFError):
+        with (
+            patch.object(app, "readline_library", return_value=library),
+            patch.object(library, "rl_callback_handler_install"),
+            patch.object(library, "rl_callback_handler_remove") as remove,
+            patch.object(viewer, "poll", side_effect=app.HistoryError("disk error")),
+            pytest.raises(app.HistoryError, match="disk error"),
+        ):
             viewer.read_chat()
+        remove.assert_called_once_with()
         if slot.value != previous:
             msg = "Readline input hook must be restored"
             raise AssertionError(msg)
@@ -1090,8 +1233,22 @@ class TestViewer(unittest.TestCase):  # noqa: D101
             "Running command",
             [call("shell", "bash", command="printf hello; printf error >&2")],
         )["choices"][0]["message"]
+        submitted = False
+
+        def read_chat() -> str:
+            nonlocal submitted
+            if not submitted:
+                submitted = True
+                return "do it"
+            if viewer.worker is not None:
+                viewer.worker.join(timeout=5)
+                if viewer.worker.is_alive():
+                    msg = "Turn did not finish"
+                    raise AssertionError(msg)
+            raise EOFError
+
         with (
-            patch.object(viewer, "read_chat", side_effect=["do it", EOFError()]),
+            patch.object(viewer, "read_chat", side_effect=read_chat),
             patch.object(
                 agent,
                 "completion",
@@ -1133,6 +1290,7 @@ class TestReadlineTerminal(unittest.TestCase):  # noqa: D101
         inputrc = Path(self.directory.name) / "inputrc"
         inputrc.write_text(
             'set editing-mode emacs\n"\\C-xj": "configured"\n'
+            '"\\C-xa": accept-line\n'
             '"\\C-xv": vi-editing-mode\n',
         )
         self.completion_path = Path(self.directory.name) / "completion-example"
@@ -1142,9 +1300,20 @@ class TestReadlineTerminal(unittest.TestCase):  # noqa: D101
         self.addCleanup(os.close, self.master)
         code = """
 import json
-from packages.coding_agent.main import Agent, Viewer
+import sys
+from pathlib import Path
+from packages.coding_agent.main import Agent, AgentError, Viewer
 agent = Agent()
 def turn(prompt):
+    if prompt.startswith("wait"):
+        agent.emit("assistant> working\\nsearchable detail")
+        while not Path(sys.argv[1], "release").exists():
+            agent.check_cancelled()
+            agent.cancel.wait(0.02)
+        if prompt == "wait error":
+            raise AgentError("offline")
+    if prompt == "tool":
+        agent.run([sys.executable, "-c", "import time; time.sleep(60)"], 60)
     agent.emit("RESULT:" + json.dumps(prompt))
     return ""
 agent.turn = turn
@@ -1152,7 +1321,7 @@ Viewer(agent).run()
 """
         try:
             self.process = subprocess.Popen(  # noqa: S603
-                [sys.executable, "-c", code],
+                [sys.executable, "-c", code, self.directory.name],
                 stdin=slave,
                 stdout=slave,
                 stderr=slave,
@@ -1176,7 +1345,14 @@ Viewer(agent).run()
                 msg = f"Terminal did not display {marker!r}: {self.buffer!r}"
                 raise AssertionError(msg)
             if select.select([self.master], [], [], 0.1)[0]:
-                self.buffer += os.read(self.master, 65536)
+                try:
+                    self.buffer += os.read(self.master, 65536)
+                except OSError as exc:
+                    msg = (
+                        f"Terminal exited ({self.process.poll()}) before "
+                        f"{marker!r}: {self.buffer!r}"
+                    )
+                    raise AssertionError(msg) from exc
         self.buffer = self.buffer.split(marker, 1)[1]
 
     def wait_prompt(self) -> None:
@@ -1299,6 +1475,78 @@ Viewer(agent).run()
         self.wait_for(b"Cancelled.")
         self.wait_prompt()
         self.send(b"next\n", "next")
+
+    def test_waiting_draft_enter_resize_and_completion(self) -> None:
+        """Busy turns preserve editing, cursor position and unsubmitted drafts."""
+        os.write(self.master, b"wait\n")
+        self.wait_for(b"assistant> working")
+        os.write(self.master, b"draft\x01X\n")
+        self.wait_for(b"Waiting for the current answer")
+        self.wait_for(b"Xdraft")
+        fcntl.ioctl(self.master, termios.TIOCSWINSZ, struct.pack("HHHH", 12, 60, 0, 0))
+        os.kill(self.process.pid, signal.SIGWINCH)
+        self.wait_prompt()
+        self.wait_for(b"Xdraft")
+        self.buffer = b""
+        self.wait_for(b"assistant> ... Waiting")
+        self.wait_for(b"assistant> . Waiting")
+        Path(self.directory.name, "release").touch()
+        self.wait_for(b'RESULT:"wait"')
+        self.wait_prompt()
+        self.wait_for(b"Xdraft")
+        self.send(b"Y\n", "XYdraft")
+        self.send(b"\x1b[A\x1b[A\n", "wait")
+
+    def test_waiting_viewer_search_and_answer_preserve_draft(self) -> None:
+        """The transcript remains usable and receives answers while open."""
+        os.write(self.master, b"wait\n")
+        self.wait_for(b"assistant> working")
+        os.write(self.master, b"draft\x01\x1b")
+        self.wait_for(b"\x1b[?1049h")
+        os.write(self.master, b"/searchable\n")
+        self.wait_for(b"searchable")
+        self.wait_for(b"detail")
+        Path(self.directory.name, "release").touch()
+        self.wait_for(b'RESULT:"wait"')
+        os.write(self.master, b"q")
+        self.wait_for(b"\x1b[?1049l")
+        self.wait_prompt()
+        self.wait_for(b"draft")
+        self.send(b"X\n", "Xdraft")
+
+    def test_waiting_filename_completion_and_error(self) -> None:
+        """A failed answer leaves the completed draft available for submission."""
+        os.write(self.master, b"wait error\n")
+        self.wait_for(b"assistant> working")
+        os.write(self.master, str(self.completion_path)[:-3].encode() + b"\t")
+        self.wait_for(b"completion-example")
+        Path(self.directory.name, "release").touch()
+        self.wait_for(b"offline")
+        self.wait_prompt()
+        self.send(b"\n", str(self.completion_path))
+
+    def test_waiting_interrupt_and_eof_cleanup(self) -> None:
+        """Ctrl-C cancels from either UI; EOF also joins an active worker."""
+        for index, prompt in enumerate((b"wait", b"tool")):
+            os.write(self.master, prompt + b"\n")
+            self.wait_for(b"assistant> .")
+            os.write(self.master, b"\x1b")
+            self.wait_for(b"\x1b[?1049h")
+            os.kill(self.process.pid, signal.SIGINT)
+            self.wait_for(b"Cancelled.")
+            self.wait_prompt()
+            self.send(f"next {index}\n".encode(), f"next {index}")
+        os.write(self.master, b"wait eof\n")
+        self.wait_for(b"user> wait eof")
+        self.wait_prompt()
+        os.write(self.master, b"draft\x18a")
+        self.wait_for(b"Waiting for the current answer")
+        self.wait_prompt()
+        self.wait_for(b"draft")
+        os.write(self.master, b"\x15\x04")
+        if self.process.wait(timeout=5) != 0:
+            msg = "EOF during a turn must clean up and exit successfully"
+            raise AssertionError(msg)
 
 
 if __name__ == "__main__":

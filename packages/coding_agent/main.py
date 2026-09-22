@@ -10,6 +10,7 @@ import fcntl
 import hashlib
 import json
 import os
+import queue
 import re
 import readline
 import select
@@ -19,10 +20,13 @@ import signal
 import subprocess
 import sys
 import tempfile
+import termios
+import threading
+import time
 import unicodedata
 import urllib.error
 import urllib.request
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, Self, cast
 
@@ -35,6 +39,7 @@ NIX_TIMEOUT = 600
 HTTP_TIMEOUT = 300
 MAX_REQUESTS = 20
 READLINE_GETTER = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p)
+READLINE_HANDLER = ctypes.CFUNCTYPE(None, ctypes.c_void_p)
 README = Path(__file__).with_name("prm") / "README"
 if not README.is_file():
     README = Path(__file__).resolve().parents[2] / "README"
@@ -315,6 +320,7 @@ class Agent:  # noqa: D101
         self.event: Callable[[str, str, bool | None], None] | None = None
         self.tool_success = True
         self.tool_output = False
+        self.cancel: threading.Event | None = None
         self.messages = [
             {
                 "role": "system",
@@ -340,6 +346,37 @@ class Agent:  # noqa: D101
             data=None if body is None else json.dumps(body).encode("utf-8"),
             headers={"Content-Type": "application/json"},
         )
+        if self.cancel is None:
+            return self.receive(request)
+        result: queue.Queue[tuple[Any, BaseException | None]] = queue.Queue()
+
+        def receive() -> None:
+            try:
+                result.put((self.receive(request), None))
+            except BaseException as exc:  # noqa: BLE001
+                result.put((None, exc))
+
+        self.check_cancelled()
+        threading.Thread(target=receive, daemon=True).start()
+        while True:
+            self.check_cancelled()
+            try:
+                value, error = result.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            self.check_cancelled()
+            if error is not None:
+                raise error
+            return value
+
+    def check_cancelled(self) -> None:
+        """Stop a background turn at a boundary before further effects."""
+        if self.cancel is not None and self.cancel.is_set():
+            raise KeyboardInterrupt
+
+    @staticmethod
+    def receive(request: urllib.request.Request) -> Any:  # noqa: ANN401
+        """Read a response without mutating conversation or terminal state."""
         try:
             with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as response:  # noqa: S310
                 return json.load(response)
@@ -366,6 +403,7 @@ class Agent:  # noqa: D101
         return self.run(["bash", "-c", command], BASH_TIMEOUT)
 
     def run(self, command: list[str], timeout: int) -> str:  # noqa: D102
+        self.check_cancelled()
         with tempfile.TemporaryFile() as output:
             process = subprocess.Popen(  # noqa: S603
                 command,
@@ -378,7 +416,21 @@ class Agent:  # noqa: D101
             timed_out = False
             cancelled = False
             try:
-                process.wait(timeout=timeout)
+                deadline = time.monotonic() + timeout
+                while True:
+                    self.check_cancelled()
+                    remaining = deadline - time.monotonic()
+                    try:
+                        process.wait(
+                            timeout=max(0, remaining)
+                            if self.cancel is None
+                            else min(0.1, max(0, remaining)),
+                        )
+                        self.check_cancelled()
+                        break
+                    except subprocess.TimeoutExpired:
+                        if time.monotonic() >= deadline:
+                            raise
             except subprocess.TimeoutExpired:
                 timed_out = True
             except KeyboardInterrupt:
@@ -413,6 +465,7 @@ class Agent:  # noqa: D101
             return bounded(status + captured)
 
     def execute(self, name: str, arguments: str) -> str:  # noqa: D102
+        self.check_cancelled()
         try:
             args = json.loads(arguments)
             definition = next(
@@ -508,6 +561,7 @@ class Agent:  # noqa: D101
             raise AgentError(msg) from exc
 
     def turn(self, prompt: str) -> str:  # noqa: C901, D102, PLR0912
+        self.check_cancelled()
         if self.history is not None and prompt.strip():
             self.history.prompts.append(prompt)
             self.history.event("chat", "user> " + prompt, None)
@@ -520,15 +574,18 @@ class Agent:  # noqa: D101
         try:
             for _ in range(MAX_REQUESTS):
                 message = self.completion()
+                self.check_cancelled()
                 self.messages.append(message)
                 if message.get("content"):
                     self.emit("assistant> " + message["content"])
                 if not message.get("tool_calls"):
+                    self.check_cancelled()
                     if self.history is not None:
                         self.history.messages = self.messages[1:]
                         self.history.save()
                     return cast("str", message["content"])
                 for call in message["tool_calls"]:
+                    self.check_cancelled()
                     self.emit(
                         f"tool> {call['function']['name']} "
                         f"{call['function']['arguments']}",
@@ -541,6 +598,7 @@ class Agent:  # noqa: D101
                             call["function"]["name"],
                             call["function"]["arguments"],
                         )
+                        self.check_cancelled()
                         if not self.tool_output:
                             self.emit(result, "output")
                     except KeyboardInterrupt:
@@ -574,6 +632,12 @@ def readline_library() -> ctypes.CDLL:
     library.rl_get_keymap.restype = ctypes.c_void_p
     library.rl_get_keymap_by_name.argtypes = [ctypes.c_char_p]
     library.rl_get_keymap_by_name.restype = ctypes.c_void_p
+    library.rl_callback_handler_install.argtypes = [ctypes.c_char_p, READLINE_HANDLER]
+    library.rl_callback_handler_install.restype = None
+    library.rl_callback_handler_remove.restype = None
+    library.rl_callback_read_char.restype = None
+    library.rl_replace_line.argtypes = [ctypes.c_char_p, ctypes.c_int]
+    library.rl_replace_line.restype = None
     return library
 
 
@@ -617,7 +681,9 @@ class Viewer:  # noqa: D101
         self.agent = agent
         self.lines: list[str] = []
         self.entries: list[Entry] = (
-            agent.history.entries if agent.history is not None else []
+            [replace(entry) for entry in agent.history.entries]
+            if agent.history is not None
+            else []
         )
         self.selected = 0
         self.top = 0
@@ -628,14 +694,101 @@ class Viewer:  # noqa: D101
         self.width = 80
         self.height = 23
         self.chat_active = False
+        self.worker: threading.Thread | None = None
+        self.events: queue.Queue[
+            tuple[str, str, bool | None] | BaseException | None
+        ] = queue.Queue()
+        self.waiting_notice = False
 
     def event(self, kind: str, text: str, success: bool | None) -> None:  # noqa: D102, FBT001
-        if self.agent.history is None:
-            record_event(self.entries, kind, text, success)
-        if self.chat_active:
+        follow = (
+            self.chat_active
+            and self.selected == max(0, len(self.entries) - 1)
+            and self.match is None
+            and self.top >= max(0, len(self.rows(self.width)) - self.height)
+        )
+        record_event(self.entries, kind, text, success)
+        if follow:
             self.selected = max(0, len(self.entries) - 1)
-            self.match = None
-            self.render_chat(follow=True)
+            self.top = max(0, len(self.rows(self.width)) - self.height)
+
+    def enqueue(self, kind: str, text: str, success: bool | None) -> None:  # noqa: FBT001
+        """Transfer worker events without touching terminal-owned state."""
+        self.events.put((kind, text, success))
+
+    def start_turn(self, prompt: str) -> None:
+        """Start one turn; all agent and history mutations belong to its worker."""
+        if self.worker is not None:
+            msg = "A turn is already running"
+            raise RuntimeError(msg)
+        self.agent.cancel = threading.Event()
+        self.lines.append("> " + prompt)
+        if self.agent.history is None:
+            self.event("chat", "user> " + prompt, None)
+        self.selected = max(0, len(self.entries) - 1)
+        self.match = None
+        self.top = max(0, len(self.rows(self.width)) - self.height)
+
+        def turn() -> None:
+            try:
+                try:
+                    self.agent.turn(prompt)
+                except (AgentError, KeyboardInterrupt) as exc:
+                    self.agent.emit(
+                        f"\n{str(exc) or 'Cancelled'}. Completed tool effects remain; "
+                        "incomplete turn history discarded.",
+                    )
+            except BaseException as exc:  # noqa: BLE001
+                self.events.put(exc)
+            finally:
+                self.events.put(None)
+
+        self.worker = threading.Thread(target=turn)
+        self.worker.start()
+
+    def poll(self) -> bool:
+        """Apply queued events on the UI thread and reap finished turns."""
+        changed = False
+        failure: BaseException | None = None
+        while True:
+            try:
+                event = self.events.get_nowait()
+            except queue.Empty:
+                break
+            changed = True
+            if event is None:
+                if self.worker is not None:
+                    self.worker.join()
+                self.worker = None
+                self.agent.cancel = None
+                self.waiting_notice = False
+            elif isinstance(event, BaseException):
+                failure = event
+            elif event[0] == "line":
+                self.lines.append(event[1])
+            else:
+                self.event(*event)
+        if failure is not None:
+            raise failure
+        return changed
+
+    def stop_turn(self) -> None:
+        """Cancel and join before restoring callbacks or releasing history."""
+        if self.worker is not None:
+            if self.agent.cancel is not None:
+                self.agent.cancel.set()
+            while self.worker.is_alive():
+                with contextlib.suppress(KeyboardInterrupt):
+                    self.worker.join(timeout=0.1)
+        self.poll()
+
+    def waiting(self) -> str:
+        """Return an ephemeral answer placeholder, never a transcript entry."""
+        if self.worker is None:
+            return ""
+        dots = "." * (1 + int(time.monotonic() * 5) % 3)
+        notice = " Waiting for the current answer" if self.waiting_notice else ""
+        return f"assistant> {dots}{notice}"
 
     @staticmethod
     def safe(text: str) -> str:  # noqa: D102
@@ -729,8 +882,20 @@ class Viewer:  # noqa: D101
         """Paint the shared tree above native readline's input row."""
         if not sys.stdout.isatty():
             return
+        follow = follow or (
+            self.selected == max(0, len(self.entries) - 1)
+            and self.match is None
+            and self.top >= max(0, len(self.rows(self.width)) - self.height)
+        )
         size = shutil.get_terminal_size()
-        self.width, self.height = max(1, size.columns - 1), max(1, size.lines - 1)
+        waiting = self.waiting()
+        self.width, self.height = (
+            max(1, size.columns - 1),
+            max(
+                1,
+                size.lines - 1 - bool(waiting),
+            ),
+        )
         rows = self.rows(self.width)
         if follow:
             self.top = max(0, len(rows) - self.height)
@@ -739,6 +904,8 @@ class Viewer:  # noqa: D101
         for y, row in enumerate(rows[self.top : self.top + self.height], 1):
             styles = ";".join(map(str, self.styles(row))) or "0"
             output.append(f"\x1b[{y};1H\x1b[{styles}m{row.text}\x1b[0m")
+        if waiting and size.lines > 1:
+            output.append(f"\x1b[{size.lines - 1};1H{waiting[: self.width]}")
         output.append(f"\x1b[{size.lines};1H")
         sys.stdout.write("".join(output))
         sys.stdout.flush()
@@ -851,6 +1018,7 @@ class Viewer:  # noqa: D101
             print(f"Viewer error: {exc}", flush=True)  # noqa: T201
 
     def screen(self, screen: curses.window) -> None:  # noqa: C901, D102, PLR0912, PLR0915
+        screen.timeout(100)
         with contextlib.suppress(curses.error):
             curses.curs_set(0)
         colors = curses.has_colors()
@@ -866,9 +1034,11 @@ class Viewer:  # noqa: D101
         query = ""
         prefix = ""
         while True:
+            self.poll()
+            waiting = self.waiting()
             height, width = screen.getmaxyx()
             self.width = max(1, width - 1)
-            page = self.height = max(1, height - 1)
+            page = self.height = max(1, height - 1 - bool(waiting))
             rows = self.rows(self.width)
             self.top = max(0, min(self.top, max(0, len(rows) - page)))
             screen.erase()
@@ -885,6 +1055,9 @@ class Viewer:  # noqa: D101
                     attr |= attributes[style]
                 with contextlib.suppress(curses.error):
                     screen.addstr(y, 0, row.text, attr)
+            if waiting and height > 1:
+                with contextlib.suppress(curses.error):
+                    screen.addnstr(height - 2, 0, waiting, self.width)
             footer = (
                 editing + query
                 if editing
@@ -929,7 +1102,7 @@ class Viewer:  # noqa: D101
             else:
                 self.navigate(key, page, rows)
 
-    def read_chat(self) -> str:  # noqa: D102
+    def read_chat(self) -> str:  # noqa: C901, D102, PLR0915
         library = readline_library()
         slot = ctypes.c_void_p.in_dll(library, "rl_getc_function")
         previous = slot.value
@@ -938,8 +1111,40 @@ class Viewer:  # noqa: D101
             raise RuntimeError(msg)
         original = READLINE_GETTER(previous)
         vi_insert = library.rl_get_keymap_by_name(b"vi-insert")
+        catch_signals = ctypes.c_int.in_dll(library, "rl_catch_signals")
+        catch_resize = ctypes.c_int.in_dll(library, "rl_catch_sigwinch")
+        previous_signals, previous_catch_resize = (
+            catch_signals.value,
+            catch_resize.value,
+        )
         failure: BaseException | None = None
+        finished = False
+        resize_pending = False
+        prompt: str | None = None
+        allocator = ctypes.CDLL(None)
+        allocator.free.argtypes = [ctypes.c_void_p]
+        allocator.free.restype = None
         previous_resize = signal.getsignal(signal.SIGWINCH)
+        terminal = termios.tcgetattr(sys.stdin) if sys.stdin.isatty() else None
+
+        def restore_terminal() -> None:
+            if terminal is not None:
+                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, terminal)
+
+        def accept_line(address: int | None) -> None:
+            nonlocal finished, prompt, failure
+            finished = True
+            prompt = None
+            if address is not None:
+                try:
+                    prompt = ctypes.string_at(address).decode(
+                        sys.stdin.encoding or "utf-8",
+                        sys.stdin.errors or "strict",
+                    )
+                except BaseException as exc:  # noqa: BLE001
+                    failure = exc
+                finally:
+                    allocator.free(address)
 
         def redisplay() -> None:
             self.render_chat()
@@ -947,14 +1152,18 @@ class Viewer:  # noqa: D101
             library.rl_forced_update_display()
 
         def resize_chat(_signum: int, _frame: object) -> None:
-            library.rl_resize_terminal()
-            redisplay()
+            nonlocal resize_pending
+            resize_pending = True
 
         def get_character(stream: int) -> int:
             nonlocal failure
             try:
                 select.select([sys.stdin], [], [])
                 char = original(stream)
+                if char in (ord("\n"), ord("\r")) and self.worker is not None:
+                    self.waiting_notice = True
+                    redisplay()
+                    return 0
                 if char != ord("\x1b") or library.rl_get_keymap() == vi_insert:
                     return int(char)
                 if select.select([sys.stdin], [], [], 0.15)[0]:
@@ -965,6 +1174,7 @@ class Viewer:  # noqa: D101
                     self.view()
                 finally:
                     signal.signal(signal.SIGWINCH, resize_chat)
+                    restore_terminal()
                     library.rl_prep_terminal(1)
                     redisplay()
             except BaseException as exc:  # noqa: BLE001
@@ -975,18 +1185,49 @@ class Viewer:  # noqa: D101
 
         callback = READLINE_GETTER(get_character)
         slot.value = ctypes.cast(callback, ctypes.c_void_p).value
+        catch_signals.value = catch_resize.value = 0
         signal.signal(signal.SIGWINCH, resize_chat)
-        history_length = readline.get_current_history_length()
+        handler = READLINE_HANDLER(accept_line)
         try:
-            prompt = input("> ")
-            if failure is not None:
-                if readline.get_current_history_length() > history_length:
-                    readline.remove_history_item(
-                        readline.get_current_history_length() - 1,
+            library.rl_callback_handler_install(b"> ", handler)
+            while not finished:
+                changed = self.poll()
+                if resize_pending:
+                    resize_pending = False
+                    library.rl_resize_terminal()
+                    changed = True
+                if changed or self.worker is not None:
+                    redisplay()
+                if not select.select([sys.stdin], [], [], 0.1)[0]:
+                    continue
+                library.rl_callback_read_char()
+                if failure is not None:
+                    raise failure
+                if finished and prompt is not None and self.worker is not None:
+                    library.rl_callback_handler_remove()
+                    restore_terminal()
+                    library.rl_callback_handler_install(b"> ", handler)
+                    library.rl_replace_line(prompt.encode(sys.stdin.encoding), 0)
+                    ctypes.c_int.in_dll(library, "rl_point").value = len(
+                        prompt.encode(sys.stdin.encoding),
                     )
-                raise failure
+                    finished = False
+                    self.waiting_notice = True
+                    redisplay()
+            if prompt is None:
+                raise EOFError
+            if prompt and prompt != readline.get_history_item(
+                readline.get_current_history_length(),
+            ):
+                readline.add_history(prompt)
             return prompt
         finally:
+            library.rl_callback_handler_remove()
+            restore_terminal()
+            catch_signals.value, catch_resize.value = (
+                previous_signals,
+                previous_catch_resize,
+            )
             signal.signal(signal.SIGWINCH, previous_resize)
             slot.value = previous
 
@@ -994,31 +1235,36 @@ class Viewer:  # noqa: D101
         configure_filename_completion()
         previous = self.agent.output
         previous_event = self.agent.event
-        self.agent.output = self.lines.append
+        self.agent.output = lambda text: self.enqueue("line", text, None)
         self.chat_active = True
-        self.agent.event = self.event
+        self.agent.event = self.enqueue
         try:
             while True:
                 try:
+                    self.poll()
                     self.render_chat()
                     prompt = self.read_chat()
                     if prompt.strip():
-                        self.lines.append("> " + prompt)
-                        if self.agent.history is None:
-                            self.event("chat", "user> " + prompt, None)
-                        self.agent.turn(prompt)
+                        self.start_turn(prompt)
                 except EOFError:  # noqa: PERF203
                     print()  # noqa: T201
                     return
                 except (AgentError, KeyboardInterrupt) as exc:
-                    self.agent.emit(
-                        f"\n{str(exc) or 'Cancelled'}. Completed tool effects remain; "
-                        "incomplete turn history discarded.",
-                    )
+                    if self.worker is not None:
+                        self.stop_turn()
+                    else:
+                        self.agent.emit(
+                            f"\n{str(exc) or 'Cancelled'}. "
+                            "Completed tool effects remain; "
+                            "incomplete turn history discarded.",
+                        )
         finally:
-            self.chat_active = False
-            self.agent.output = previous
-            self.agent.event = previous_event
+            try:
+                self.stop_turn()
+            finally:
+                self.chat_active = False
+                self.agent.output = previous
+                self.agent.event = previous_event
 
 
 def main(argv: list[str] | None = None) -> None:  # noqa: D103
