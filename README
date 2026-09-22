@@ -13,7 +13,7 @@ packages/package-name contain:
 `tmp/` contains runtime outputs of `main.py`
 
 Runtime constraints:
-Persistent changes in $HOME's directory structure should only be done with `git canonical` (except changes in `prm/`).
+Persistent changes in $HOME's directory structure should only be done with `git canonical` (`prm/` can be used as an escape hatch).
 More specifically, `git canonical` is used for Nix flake Git submodule initialization, package/host creation/renaming/removal, and directory structure convergence.
 
 Canonical state convergence:

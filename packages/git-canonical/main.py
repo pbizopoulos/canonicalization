@@ -1937,7 +1937,7 @@ def _print_repository_test_names(root: Path) -> bool:
             _print_package_test_names(package)
         except (CommandError, OSError, SyntaxError, UnicodeError, ValueError) as error:
             success = False
-            sys.stderr.write(f"git canonical test-names: {package.name}: {error}\n")
+            sys.stderr.write(f"git canonical test names: {package.name}: {error}\n")
     return success
 
 
@@ -2020,7 +2020,7 @@ def _print_test_names_git(command: str, arguments: list[str]) -> int:
         _test_names_git_output(["rev-parse", "--show-toplevel"]).decode().rstrip("\n")
     )
     converter = shlex.join(
-        [str(Path(sys.argv[0]).resolve()), "test-names", "_textconv"],
+        [str(Path(sys.argv[0]).resolve()), "test", "names", "_textconv"],
     )
     with TemporaryDirectory(prefix="python-test-names-") as directory:
         attributes = Path(directory) / "attributes"
@@ -2080,7 +2080,7 @@ def _run_test_names(arguments: list[str]) -> int:
         return _print_test_names_git(arguments[0], arguments[1:])
     if arguments[:1] == ["_textconv"]:
         converter_parser = argparse.ArgumentParser(
-            prog="git canonical test-names _textconv",
+            prog="git canonical test names _textconv",
         )
         converter_parser.add_argument("file", type=Path)
         for name in read_test_names(
@@ -2090,7 +2090,7 @@ def _run_test_names(arguments: list[str]) -> int:
             sys.stdout.write(name + "\n")
         return 0
     parser = argparse.ArgumentParser(
-        prog="git canonical test-names",
+        prog="git canonical test names",
         description="List Python test names as sentences or inspect their Git changes.",
         epilog=(
             "Repository targets list Python packages sequentially and skip packages "
@@ -2130,10 +2130,10 @@ def _dispatch_test_names(arguments: list[str]) -> None:
     except subprocess.CalledProcessError as error:
         sys.exit(error.returncode)
     except (CommandError, OSError, SyntaxError, UnicodeError, ValueError) as error:
-        sys.stderr.write(f"git canonical test-names: {error}\n")
+        sys.stderr.write(f"git canonical test names: {error}\n")
         sys.exit(1)
     except KeyboardInterrupt:
-        sys.stderr.write("git canonical test-names: interrupted\n")
+        sys.stderr.write("git canonical test names: interrupted\n")
         sys.exit(130)
     sys.exit(status)
 
@@ -2495,7 +2495,7 @@ def _run_test_repository(
             )
         except (CommandError, OSError, subprocess.TimeoutExpired) as error:
             outcomes[package.name] = "failed"
-            sys.stderr.write(f"git canonical {command}: {package.name}: {error}\n")
+            sys.stderr.write(f"git canonical test {command}: {package.name}: {error}\n")
     sys.stdout.write("\nRepository summary:\n")
     for package_name, status in outcomes.items():
         sys.stdout.write(f"  {package_name}: {status}\n")
@@ -2526,13 +2526,14 @@ def _dispatch_test_runner(
             if (target / "flake.nix").is_file()
             else _run_test_package
         )
-        success = runner(target, options.command, options.timeout, max_examples)
+        success = runner(target, options.test_command, options.timeout, max_examples)
     except (CommandError, OSError, subprocess.TimeoutExpired) as error:
-        sys.stderr.write(f"git canonical {options.command}: {error}\n")
+        sys.stderr.write(f"git canonical test {options.test_command}: {error}\n")
         sys.exit(1)
     except KeyboardInterrupt:
         sys.stderr.write(
-            f"git canonical {options.command}: interrupted; diagnostics retained\n",
+            f"git canonical test {options.test_command}: "
+            "interrupted; diagnostics retained\n",
         )
         sys.exit(130)
     sys.exit(0 if success else 1)
@@ -2677,7 +2678,7 @@ def _run_coverage(target: Path) -> bool:
             outcomes[package.name] = "passed"
         except (CommandError, OSError) as error:
             outcomes[package.name] = "failed"
-            sys.stderr.write(f"git canonical coverage: {package.name}: {error}\n")
+            sys.stderr.write(f"git canonical test coverage: {package.name}: {error}\n")
     if repository:
         sys.stdout.write("\nRepository summary:\n")
         for name, status in outcomes.items():
@@ -2791,11 +2792,18 @@ def parser() -> argparse.ArgumentParser:
         help="report required actions without changing the repository",
     )
     converge.add_argument("--source", type=Path, help=argparse.SUPPRESS)
-    commands.add_parser(
-        "test-names",
+    test = commands.add_parser(
+        "test",
+        help="inspect tests, measure coverage, or run test campaigns",
+        description="Inspect tests, measure coverage, or run test campaigns.",
+    )
+    test.set_defaults(test_command=None, test_parser=test)
+    test_commands = test.add_subparsers(dest="test_command", metavar="COMMAND")
+    test_commands.add_parser(
+        "names",
         help="list Python test sentences or inspect their Git changes",
     )
-    coverage = commands.add_parser(
+    coverage = test_commands.add_parser(
         "coverage",
         help="build instrumented test checks and print HTML report paths",
         description="Measure explicit test examples in a separate cached Nix build.",
@@ -2816,7 +2824,7 @@ def parser() -> argparse.ArgumentParser:
         ("hypothesis", "run generated property tests in isolated package copies"),
         ("mutation", "run Cosmic Ray mutation tests in isolated package copies"),
     ):
-        runner = commands.add_parser(
+        runner = test_commands.add_parser(
             command,
             help=description,
             description=description.capitalize() + ".",
@@ -2852,21 +2860,34 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
+def _dispatch_test_command(
+    options: argparse.Namespace,
+    cli: argparse.ArgumentParser,
+) -> bool:
+    """Show testing help or dispatch the selected test operation."""
+    if options.test_command is None:
+        options.test_parser.print_help()
+        return True
+    if options.test_command == "coverage":
+        try:
+            success = _run_coverage(options.target.resolve())
+        except KeyboardInterrupt:
+            sys.stderr.write("git canonical test coverage: interrupted\n")
+            sys.exit(130)
+        sys.exit(0 if success else 1)
+    if options.test_command in {"hypothesis", "mutation"}:
+        _dispatch_test_runner(options, cli)
+        return True
+    return False
+
+
 def _dispatch_standalone_command(
     options: argparse.Namespace,
     cli: argparse.ArgumentParser,
 ) -> bool:
     """Dispatch commands that do not require discovering the current repository."""
-    if options.command == "coverage":
-        try:
-            success = _run_coverage(options.target.resolve())
-        except KeyboardInterrupt:
-            sys.stderr.write("git canonical coverage: interrupted\n")
-            sys.exit(130)
-        sys.exit(0 if success else 1)
-    if options.command in {"hypothesis", "mutation"}:
-        _dispatch_test_runner(options, cli)
-        return True
+    if options.command == "test":
+        return _dispatch_test_command(options, cli)
     if options.command != "init":
         return False
     if options.profile == "home":
@@ -2889,7 +2910,7 @@ def _dispatch_standalone_command(
 def _normalize_help_arguments(arguments: list[str]) -> list[str]:
     """Translate the help convenience command to argparse's help option."""
     if arguments[:1] == ["help"]:
-        return [arguments[1], "--help"] if len(arguments) > 1 else ["--help"]
+        return [*arguments[1:], "--help"]
     return arguments
 
 
@@ -2912,8 +2933,8 @@ def _dispatch_add(root: Path, options: argparse.Namespace) -> None:
 def main() -> None:
     """Dispatch the git canonical CLI."""
     arguments = _normalize_help_arguments(sys.argv[1:])
-    if arguments[:1] == ["test-names"]:
-        _dispatch_test_names(arguments[1:])
+    if arguments[:2] == ["test", "names"]:
+        _dispatch_test_names(arguments[2:])
         return
     try:
         cli = parser()

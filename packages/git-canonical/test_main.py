@@ -248,10 +248,11 @@ def test_cli_help_and_retired_commands(tmp_path: Path) -> None:
         ("rm",),
         ("init",),
         ("converge",),
-        ("test-names",),
-        ("coverage",),
-        ("hypothesis",),
-        ("mutation",),
+        ("test",),
+        ("test", "names"),
+        ("test", "coverage"),
+        ("test", "hypothesis"),
+        ("test", "mutation"),
     ):
         option = _run(tmp_path, *command, "--help").stdout
         alias = _run(tmp_path, "help", *command).stdout
@@ -259,6 +260,13 @@ def test_cli_help_and_retired_commands(tmp_path: Path) -> None:
             raise AssertionError(option)
     _run(tmp_path, "status", code=2)
     _run(tmp_path, "check", code=2)
+    for retired_command in ("test-names", "coverage", "hypothesis", "mutation"):
+        _run(tmp_path, retired_command, code=2)
+    help_output = _run(tmp_path, "test", "--help").stdout
+    if _run(tmp_path, "test").stdout != help_output:
+        message = "bare test should show help without running tests"
+        raise AssertionError(message)
+    _run(tmp_path, "test", "unknown", code=2)
 
 
 @pytest.mark.parametrize(
@@ -532,7 +540,7 @@ def _make_test_names_package(root: Path, name: str, source: str) -> Path:
 def _run_test_names(cwd: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
     """Invoke the installed command from a chosen working directory."""
     return subprocess.run(  # noqa: S603
-        [os.environ["PACKAGE_E2E_EXECUTABLE"], "test-names", *arguments],
+        [os.environ["PACKAGE_E2E_EXECUTABLE"], "test", "names", *arguments],
         cwd=cwd,
         capture_output=True,
         text=True,
@@ -641,8 +649,8 @@ def names_repository_continues_after_a_malformed_test_file(tmp_path: Path) -> No
     if "test still listed\n" not in result.stdout:
         msg = "Expectation failed: 'test still listed\\n' in result.stdout"
         raise AssertionError(msg)
-    if "git canonical test-names: broken:" not in result.stderr:
-        msg = "Expectation failed: 'git canonical test-names: broken:' in result.stderr"
+    if "git canonical test names: broken:" not in result.stderr:
+        msg = "Expectation failed: 'git canonical test names: broken:' in result.stderr"
         raise AssertionError(msg)
 
 
@@ -664,8 +672,8 @@ def test_names_invalid_test_files_return_failure(tmp_path: Path, layout: str) ->
     if result.returncode != 1:
         msg = "Expectation failed: result.returncode == 1"
         raise AssertionError(msg)
-    if "git canonical test-names:" not in result.stderr:
-        msg = "Expectation failed: 'git canonical test-names:' in result.stderr"
+    if "git canonical test names:" not in result.stderr:
+        msg = "Expectation failed: 'git canonical test names:' in result.stderr"
         raise AssertionError(msg)
     if result.stdout != "":
         msg = "Expectation failed: result.stdout == ''"
@@ -887,7 +895,7 @@ def test_names_git_preserves_exit_codes_and_reports_parse_and_revision_errors(
         raise AssertionError(missing)
     (names_repository / "packages/example/test_main.py").write_text("def invalid(")
     malformed = _run_test_names(names_repository, "diff")
-    if malformed.returncode == 0 or "git canonical test-names:" not in malformed.stderr:
+    if malformed.returncode == 0 or "git canonical test names:" not in malformed.stderr:
         raise AssertionError(malformed)
 
 
@@ -1100,7 +1108,7 @@ def test_names_are_available_through_gits_canonical_subcommand(
     environment["PATH"] = executable_directory + os.pathsep + environment["PATH"]
     expected = _run_test_names(names_repository, *arguments)
     result = subprocess.run(  # noqa: S603
-        ["git", "canonical", "test-names", *arguments],  # noqa: S607
+        ["git", "canonical", "test", "names", *arguments],  # noqa: S607
         cwd=names_repository,
         env=environment,
         capture_output=True,
@@ -1188,7 +1196,7 @@ def _run_runner_cli(
     executable_directory = os.path.dirname(os.environ["PACKAGE_E2E_EXECUTABLE"])  # noqa: PTH120
     environment["PATH"] = executable_directory + os.pathsep + environment["PATH"]
     return subprocess.run(  # noqa: S603
-        ["git", "canonical", command, str(root), *arguments],  # noqa: S607
+        ["git", "canonical", "test", command, str(root), *arguments],  # noqa: S607
         env=environment,
         capture_output=True,
         text=True,
@@ -1286,7 +1294,7 @@ def test_hypothesis_omitted_target_runs_current_directory(
         "",
     )
     result = subprocess.run(  # noqa: S603
-        [os.environ["PACKAGE_E2E_EXECUTABLE"], "hypothesis"],
+        [os.environ["PACKAGE_E2E_EXECUTABLE"], "test", "hypothesis"],
         cwd=root / target_directory,
         env=environment,
         capture_output=True,
@@ -1313,7 +1321,7 @@ def test_hypothesis_cli_validation(tmp_path: Path) -> None:
         ([str(tmp_path), "--max-examples", "0"], 2),
     ]:
         result = subprocess.run(  # noqa: S603
-            [os.environ["PACKAGE_E2E_EXECUTABLE"], "hypothesis", *arguments],
+            [os.environ["PACKAGE_E2E_EXECUTABLE"], "test", "hypothesis", *arguments],
             capture_output=True,
             text=True,
             check=False,
@@ -1344,7 +1352,7 @@ def test_hypothesis_cli_repository_without_runnable_packages(
         if layout == "single_untested":
             target = package
     result = subprocess.run(  # noqa: S603
-        [os.environ["PACKAGE_E2E_EXECUTABLE"], "hypothesis", str(target)],
+        [os.environ["PACKAGE_E2E_EXECUTABLE"], "test", "hypothesis", str(target)],
         capture_output=True,
         text=True,
         check=False,
@@ -1464,7 +1472,7 @@ def test_mutation_omitted_target_runs_current_directory(
         "",
     )
     result = subprocess.run(  # noqa: S603
-        [os.environ["PACKAGE_E2E_EXECUTABLE"], "mutation"],
+        [os.environ["PACKAGE_E2E_EXECUTABLE"], "test", "mutation"],
         cwd=root / target_directory,
         env=environment,
         capture_output=True,
@@ -1490,7 +1498,7 @@ def test_mutation_cli_errors_and_help(tmp_path: Path) -> None:
         ([str(tmp_path), "--timeout", "nan"], 2),
     ]:
         result = subprocess.run(  # noqa: S603
-            [executable, "mutation", *arguments],
+            [executable, "test", "mutation", *arguments],
             capture_output=True,
             text=True,
             check=False,
@@ -1522,7 +1530,7 @@ def test_mutation_cli_repository_without_runnable_packages(
         if layout == "single_untested":
             target = package
     result = subprocess.run(  # noqa: S603
-        [os.environ["PACKAGE_E2E_EXECUTABLE"], "mutation", str(target)],
+        [os.environ["PACKAGE_E2E_EXECUTABLE"], "test", "mutation", str(target)],
         capture_output=True,
         text=True,
         check=False,
@@ -1748,7 +1756,7 @@ def test_coverage_builds_instrumented_checks_and_preserves_the_checkout(
     before = _git(root, "status", "--porcelain")
     explicit = _run_runner_cli(root / target, environment, "coverage")
     current = subprocess.run(  # noqa: S603
-        [os.environ["PACKAGE_E2E_EXECUTABLE"], "coverage"],
+        [os.environ["PACKAGE_E2E_EXECUTABLE"], "test", "coverage"],
         cwd=root / target,
         env=environment,
         capture_output=True,
@@ -1798,7 +1806,7 @@ def test_coverage_continues_after_failures_and_skips_packages_without_tests(
         raise AssertionError(result.stdout + result.stderr)
     if "z-last:" not in result.stdout or "/html/index.html" not in result.stdout:
         raise AssertionError(result.stdout)
-    if "git canonical coverage: example:" not in result.stderr:
+    if "git canonical test coverage: example:" not in result.stderr:
         raise AssertionError(result.stderr)
 
 
@@ -1806,6 +1814,6 @@ def test_coverage_rejects_invalid_targets_without_starting_a_build(
     tmp_path: Path,
 ) -> None:
     """Coverage requires an existing canonical package or nonempty Python repository."""
-    _run(tmp_path, "coverage", code=1)
+    _run(tmp_path, "test", "coverage", code=1)
     (tmp_path / "flake.nix").write_text("{}")
-    _run(tmp_path, "coverage", code=1)
+    _run(tmp_path, "test", "coverage", code=1)
