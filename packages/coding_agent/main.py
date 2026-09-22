@@ -324,7 +324,7 @@ class Viewer:  # noqa: D101
         self.agent = agent
         self.lines: list[str] = []
         self.top = 0
-        self.mode = "view"
+        self.mode = "chat"
         self.draft = ""
         self.cursor = 0
         self.history: list[str] = []
@@ -506,9 +506,10 @@ class Viewer:  # noqa: D101
             "ma / 'a / ''                Set mark a / jump to a / previous jump",
             "r Ctrl+L Ctrl+R              Redraw",
             "= Ctrl+G                    Transcript position",
-            "q Q ZZ                      Quit",
+            "q Q ZZ                      Close viewer and return to chat",
             ":                           Enter chat (application extension)",
             "Esc                         Leave chat; keep unfinished draft",
+            "Ctrl+D (empty chat prompt)   Exit coding_agent",
         ]
         height, width = self.screen.getmaxyx()
         self.screen.erase()
@@ -647,7 +648,7 @@ class Viewer:  # noqa: D101
             if self.cursor:
                 value = value[: self.cursor - 1] + value[self.cursor :]
                 self.cursor -= 1
-        elif key == curses.KEY_DC:
+        elif key in {curses.KEY_DC, "\x04"}:
             value = value[: self.cursor] + value[self.cursor + 1 :]
         elif key == "\x15":
             value = value[self.cursor :]
@@ -738,16 +739,21 @@ class Viewer:  # noqa: D101
                 self.follow = False
             else:
                 self.notice = "Mark not set"
-        elif prefix == "Z":
-            return key != "Z"
+        elif prefix == "Z" and key == "Z":
+            self.enter_chat()
         return True
+
+    def enter_chat(self) -> None:  # noqa: D102
+        self.mode = "chat"
+        self.cursor = len(self.draft)
+        self.pending = self.number = self.notice = ""
 
     def key(self, key: str | int) -> bool:  # noqa: C901, D102, PLR0911, PLR0912, PLR0915
         if self.help_offset is not None:
             if key in {"q", "Q", "\x1b"}:
                 self.help_offset = None
             elif key in {" ", "f", curses.KEY_NPAGE}:
-                self.help_offset = min(24, self.help_offset + self.page_size())
+                self.help_offset = min(25, self.help_offset + self.page_size())
             elif key in {"b", curses.KEY_PPAGE}:
                 self.help_offset = max(0, self.help_offset - self.page_size())
             return True
@@ -781,6 +787,8 @@ class Viewer:  # noqa: D101
             self.mode = "view"
             return True
         if self.mode != "view":
+            if self.mode == "chat" and key == "\x04" and not self.draft:
+                return False
             if key in {"\n", "\r", curses.KEY_ENTER}:
                 if self.mode == "chat":
                     self.submit()
@@ -855,13 +863,10 @@ class Viewer:  # noqa: D101
         self.notice = ""
         if self.pending:
             return self.prefix_key(key, count)
-        if key in {"q", "Q"}:
-            return False
         if key in {"-", "m", "'", "Z"}:
             self.pending = str(key)
-        elif key == ":":
-            self.mode = "chat"
-            self.cursor = len(self.draft)
+        elif key in {":", "q", "Q"}:
+            self.enter_chat()
         elif key in {"/", "?"}:
             self.mode = str(key)
             self.entry = ""

@@ -447,6 +447,40 @@ class TestViewer(unittest.TestCase):  # noqa: D101
         self.screen = unittest.mock.Mock()
         self.screen.getmaxyx.return_value = (6, 80)
         self.viewer = app.Viewer(self.screen, self.agent)
+        self.viewer.key("\x1b")
+
+    def test_starts_in_chat_and_empty_prompt_eof_exits(self) -> None:  # noqa: D102
+        viewer = app.Viewer(self.screen, self.agent)
+        if viewer.mode != "chat":
+            msg = "The agent must start ready for chat input"
+            raise AssertionError(msg)
+        for key in "hello":
+            viewer.key(key)
+        if not viewer.key("\x04") or viewer.draft != "hello":
+            msg = "EOF with a draft must not exit or discard it"
+            raise AssertionError(msg)
+        viewer.key(curses.KEY_HOME)
+        viewer.key("\x04")
+        if viewer.draft != "ello":
+            msg = "Ctrl+D with text must delete the character under the cursor"
+            raise AssertionError(msg)
+        viewer.key(curses.KEY_END)
+        viewer.key("\x15")
+        if viewer.key("\x04"):
+            msg = "Ctrl+D at an empty chat prompt must exit"
+            raise AssertionError(msg)
+
+    def test_pager_quit_commands_return_to_chat_with_draft(self) -> None:  # noqa: D102
+        for command in ("q", "Q", "ZZ", ":"):
+            with self.subTest(command=command):
+                viewer = app.Viewer(self.screen, self.agent)
+                for key in "draft\x1b" + command:
+                    if not viewer.key(key):
+                        msg = "Closing the pager must not exit the agent"
+                        raise AssertionError(msg)
+                if (viewer.mode, viewer.draft, viewer.cursor) != ("chat", "draft", 5):
+                    msg = "Returning to chat must restore the draft and cursor"
+                    raise AssertionError(msg)
 
     def test_modes_preserve_draft_and_submit_only_on_enter(self) -> None:  # noqa: D102
         viewer = self.viewer
@@ -470,8 +504,8 @@ class TestViewer(unittest.TestCase):  # noqa: D101
             msg = 'viewer.mode == "chat"'
             raise AssertionError(msg)
         viewer.key("\x1b")
-        if viewer.key("q"):
-            msg = 'not viewer.key("q")'
+        if not viewer.key("q") or viewer.mode != "chat":
+            msg = "q must return to chat without exiting"
             raise AssertionError(msg)
 
     def test_search_defaults_match_less_and_wrap_is_opt_in(self) -> None:  # noqa: D102, C901
@@ -729,8 +763,8 @@ class TestViewer(unittest.TestCase):  # noqa: D101
         if not (viewer.key("Z")):
             msg = "Viewer behavior differs from less"
             raise AssertionError(msg)
-        if viewer.key("Z"):
-            msg = "Viewer behavior differs from less"
+        if not viewer.key("Z") or viewer.mode != "chat":
+            msg = "ZZ must close the viewer and return to chat"
             raise AssertionError(msg)
 
     def test_unicode_highlighting_uses_terminal_columns(self) -> None:  # noqa: D102
