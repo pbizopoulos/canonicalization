@@ -5,19 +5,24 @@
 import argparse
 import contextlib
 import ctypes
+import curses
 import json
 import os
+import re
 import readline
 import select
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -27,6 +32,7 @@ BASH_TIMEOUT = 60
 NIX_TIMEOUT = 600
 HTTP_TIMEOUT = 300
 MAX_REQUESTS = 20
+READLINE_GETTER = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p)
 README = Path(__file__).with_name("prm") / "README"
 if not README.is_file():
     README = Path(__file__).resolve().parents[2] / "README"
@@ -99,6 +105,9 @@ class Agent:  # noqa: D101
         self.base_url = base_url.rstrip("/")
         self.model: str | None = None
         self.output: Callable[[str], None] | None = None
+        self.event: Callable[[str, str, bool | None], None] | None = None
+        self.tool_success = True
+        self.tool_output = False
         self.messages = [
             {
                 "role": "system",
@@ -106,9 +115,13 @@ class Agent:  # noqa: D101
             },
         ]
 
-    def emit(self, text: str) -> None:  # noqa: D102
+    def emit(self, text: str, kind: str = "chat") -> None:  # noqa: D102
+        if kind == "output":
+            self.tool_output = True
         if self.output is not None:
             self.output(text)
+        if self.event is not None:
+            self.event(kind, text, None)
 
     def request(self, endpoint: str, body: dict[str, Any] | None = None) -> Any:  # noqa: ANN401, D102
         request = urllib.request.Request(  # noqa: S310
@@ -171,9 +184,15 @@ class Agent:  # noqa: D101
             status = f"exit status: {process.returncode}\n"
             if timed_out:
                 status = f"timed out after {timeout} seconds; " + status
-            if self.output is not None:
+            self.tool_success = (
+                process.returncode == 0 and not timed_out and not cancelled
+            )
+            if self.output is not None or self.event is not None:
                 output.seek(0)
-                self.output(status + output.read().decode("utf-8", errors="replace"))
+                self.emit(
+                    status + output.read().decode("utf-8", errors="replace"),
+                    "output",
+                )
             if cancelled:
                 raise KeyboardInterrupt
             return bounded(status + captured)
@@ -207,7 +226,7 @@ class Agent:  # noqa: D101
             path = self.cwd / args["path"]
             if name == "read":
                 content = path.read_text(encoding="utf-8")
-                self.emit(content)
+                self.emit(content, "output")
                 return bounded(content)
             if name == "write":
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -225,6 +244,7 @@ class Agent:  # noqa: D101
                 )
             return "OK"  # noqa: TRY300
         except (OSError, ValueError, TypeError, StopIteration) as exc:
+            self.tool_success = False
             return bounded(f"Tool error ({name}): {exc}")
 
     def completion(self) -> dict[str, Any]:  # noqa: D102
@@ -289,17 +309,24 @@ class Agent:  # noqa: D101
                     self.emit(
                         f"tool> {call['function']['name']} "
                         f"{call['function']['arguments']}",
+                        "tool",
                     )
-                    result = self.execute(
-                        call["function"]["name"],
-                        call["function"]["arguments"],
-                    )
-                    if call["function"]["name"] not in {
-                        "bash",
-                        "nix",
-                        "read",
-                    } or result.startswith("Tool error"):
-                        self.emit(result)
+                    self.tool_success = True
+                    self.tool_output = False
+                    try:
+                        result = self.execute(
+                            call["function"]["name"],
+                            call["function"]["arguments"],
+                        )
+                        if not self.tool_output:
+                            self.emit(result, "output")
+                    except KeyboardInterrupt:
+                        self.tool_success = False
+                        self.emit("Cancelled", "output")
+                        raise
+                    finally:
+                        if self.event is not None:
+                            self.event("finish", "", self.tool_success)
                     self.messages.append(
                         {"role": "tool", "tool_call_id": call["id"], "content": result},
                     )
@@ -316,66 +343,401 @@ def configure_filename_completion() -> None:  # noqa: D103
     readline.parse_and_bind("tab: complete")
 
 
+def readline_library() -> ctypes.CDLL:
+    """Load GNU readline with pointer-returning functions typed correctly."""
+    library = ctypes.CDLL(readline.__file__)
+    library.rl_get_keymap.restype = ctypes.c_void_p
+    library.rl_get_keymap_by_name.argtypes = [ctypes.c_char_p]
+    library.rl_get_keymap_by_name.restype = ctypes.c_void_p
+    return library
+
+
+@dataclass
+class Entry:  # noqa: D101
+    title: str
+    body: str
+    tool: bool = False
+    success: bool | None = None
+    expanded: bool = False
+
+
+class Row(NamedTuple):  # noqa: D101
+    owner: int
+    line: int
+    text: str
+    start: int = 0
+
+
 class Viewer:  # noqa: D101
     def __init__(self, agent: Agent) -> None:  # noqa: D107
         self.agent = agent
         self.lines: list[str] = []
+        self.entries: list[Entry] = []
+        self.selected = 0
+        self.top = 0
+        self.pattern = ""
+        self.direction = 1
+        self.match: tuple[int, int, int] | None = None
+        self.status = ""
+        self.width = 80
+        self.height = 23
+        self.chat_active = False
 
-    def append(self, text: str, *, display: bool = True) -> None:  # noqa: D102
-        self.lines.append(text)
-        if display:
-            print(text, flush=True)  # noqa: T201
+    def event(self, kind: str, text: str, success: bool | None) -> None:  # noqa: D102, FBT001
+        if kind == "finish":
+            self.entries[-1].success = success
+        elif kind == "output" and self.entries and self.entries[-1].tool:
+            entry = self.entries[-1]
+            entry.body += ("\n" if entry.body else "") + text
+        elif kind == "tool":
+            self.entries.append(Entry(text, "", tool=True))
+        else:
+            preview = next((line for line in text.splitlines() if line.strip()), "chat")
+            self.entries.append(Entry(preview, text))
+        if self.chat_active:
+            self.selected = max(0, len(self.entries) - 1)
+            self.match = None
+            self.render_chat(follow=True)
+
+    @staticmethod
+    def safe(text: str) -> str:  # noqa: D102
+        return "".join(
+            char if char.isprintable() else "?" for char in text.expandtabs(4)
+        )
+
+    @staticmethod
+    def wrap(text: str, width: int) -> list[tuple[int, str]]:
+        """Wrap by terminal cells, retaining character offsets for search."""
+        parts = []
+        start = 0
+        used = 0
+        content = ""
+        for offset, char in enumerate(text):
+            cells = (
+                0
+                if unicodedata.combining(char)
+                else (2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1)
+            )
+            if used + cells > width and content:
+                parts.append((start, content))
+                start, used, content = offset, 0, ""
+            content += "?" if cells > width else char
+            used += min(cells, width)
+        parts.append((start, content))
+        return parts
+
+    def rows(self, width: int) -> list[Row]:  # noqa: D102
+        width = max(1, width)
+        rows = []
+        indent = " " * min(2, width - 1)
+        for index, entry in enumerate(self.entries):
+            marker = "[-]" if entry.expanded else "[+]"
+            status = ""
+            if entry.tool:
+                status = {True: " [OK]", False: " [FAILED]", None: " [pending]"}[
+                    entry.success
+                ]
+            title = f"{marker}{status} {self.safe(entry.title)}"
+            rows.append(Row(index, -1, self.wrap(title, width)[0][1]))
+            if entry.expanded:
+                for line, content in enumerate(entry.body.splitlines() or [""]):
+                    rows.extend(
+                        Row(index, line, indent + part, start)
+                        for start, part in self.wrap(
+                            self.safe(content),
+                            width - len(indent),
+                        )
+                    )
+        return rows
+
+    def matched(self, row: Row) -> bool:
+        """Identify the wrapped row containing the current search hit."""
+        if self.match is None or self.match[:2] != (row.owner, row.line):
+            return False
+        if row.line == -1:
+            return True
+        indent = min(2, self.width - 1)
+        end = row.start + len(row.text) - indent
+        content = self.entries[row.owner].body.splitlines()[row.line]
+        return row.start <= self.match[2] < end or (
+            self.match[2] == end and end == len(self.safe(content))
+        )
+
+    def styles(self, row: Row) -> list[int]:
+        """Share terminal styling between the readline and curses displays."""
+        styles = []
+        entry = self.entries[row.owner]
+        if row.line == -1:
+            if entry.tool and entry.success is not None:
+                styles.append(32 if entry.success else 31)
+            if row.owner == self.selected:
+                styles.append(7)
+        if self.matched(row):
+            styles.extend((1, 4))
+        return styles
+
+    def reveal(self, position: int) -> None:
+        """Keep a target row visible without jumping or overscrolling."""
+        if position < self.top:
+            self.top = position
+        elif position >= self.top + self.height:
+            self.top = position - self.height + 1
+        self.top = max(
+            0,
+            min(self.top, max(0, len(self.rows(self.width)) - self.height)),
+        )
+
+    def render_chat(self, *, follow: bool = False) -> None:
+        """Paint the shared tree above native readline's input row."""
+        if not sys.stdout.isatty():
+            return
+        size = shutil.get_terminal_size()
+        self.width, self.height = max(1, size.columns - 1), max(1, size.lines - 1)
+        rows = self.rows(self.width)
+        if follow:
+            self.top = max(0, len(rows) - self.height)
+        self.top = min(self.top, max(0, len(rows) - self.height))
+        output = ["\x1b[0m\x1b[H\x1b[2J"]
+        for y, row in enumerate(rows[self.top : self.top + self.height], 1):
+            styles = ";".join(map(str, self.styles(row))) or "0"
+            output.append(f"\x1b[{y};1H\x1b[{styles}m{row.text}\x1b[0m")
+        output.append(f"\x1b[{size.lines};1H")
+        sys.stdout.write("".join(output))
+        sys.stdout.flush()
+
+    def search(self, direction: int, *, repeat: bool = False) -> None:  # noqa: D102
+        try:
+            pattern = re.compile(self.pattern)
+        except re.error as exc:
+            self.match = None
+            self.status = f"Invalid pattern: {exc}"
+            return
+        candidates = [
+            (index, line, found.start())
+            for index, entry in enumerate(self.entries)
+            for line, content in [
+                (-1, entry.title),
+                *enumerate(entry.body.splitlines()),
+            ]
+            for found in pattern.finditer(self.safe(content))
+        ]
+        if not candidates:
+            self.match = None
+            self.status = "Pattern not found"
+            return
+        anchor = (
+            self.match
+            if repeat and self.match is not None
+            else (
+                self.selected,
+                -2
+                if direction > 0
+                else len(self.entries[self.selected].body.splitlines()),
+                -1,
+            )
+        )
+        ordered = candidates if direction > 0 else candidates[::-1]
+        match = next(
+            (
+                item
+                for item in ordered
+                if (item > anchor if direction > 0 else item < anchor)
+            ),
+            ordered[0],
+        )
+        self.match = match
+        self.selected = match[0]
+        self.entries[self.selected].expanded = True
+        self.status = ""
+        self.reveal(
+            next(i for i, row in enumerate(self.rows(self.width)) if self.matched(row)),
+        )
+
+    def navigate(  # noqa: D102
+        self,
+        key: str | int,
+        height: int,
+        rows: list[Row],
+    ) -> None:
+        self.height = height
+        if not rows:
+            return
+        if key in ("j", "k"):
+            self.selected = max(
+                0,
+                min(len(self.entries) - 1, self.selected + (1 if key == "j" else -1)),
+            )
+            self.reveal(
+                next(i for i, row in enumerate(rows) if row.owner == self.selected),
+            )
+            self.match = None
+        elif key in ("h", "l"):
+            self.match = None
+            self.entries[self.selected].expanded = key == "l"
+            self.reveal(
+                next(
+                    i
+                    for i, row in enumerate(self.rows(self.width))
+                    if row.owner == self.selected
+                ),
+            )
+        else:
+            offsets = {
+                " ": height,
+                "f": height,
+                curses.KEY_NPAGE: height,
+                "b": -height,
+                curses.KEY_PPAGE: -height,
+                "d": max(1, height // 2),
+                "u": -max(1, height // 2),
+                curses.KEY_DOWN: 1,
+                "\n": 1,
+                curses.KEY_UP: -1,
+            }
+            if key in ("g", "G"):
+                self.top = 0 if key == "g" else max(0, len(rows) - height)
+            elif key in offsets:
+                self.top = max(
+                    0,
+                    min(max(0, len(rows) - height), self.top + offsets[key]),
+                )
+            else:
+                return
+            self.selected = rows[self.top][0]
+            self.match = None
 
     def view(self) -> None:  # noqa: D102
-        with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8") as transcript:
-            transcript.write("\n".join(self.lines) + "\n")
-            transcript.flush()
-            try:
-                subprocess.run(  # noqa: S603
-                    ["less", "--", transcript.name],  # noqa: S607
-                    check=False,
+        try:
+            curses.wrapper(self.screen)
+        except curses.error as exc:
+            print(f"Viewer error: {exc}", flush=True)  # noqa: T201
+
+    def screen(self, screen: curses.window) -> None:  # noqa: C901, D102, PLR0912, PLR0915
+        with contextlib.suppress(curses.error):
+            curses.curs_set(0)
+        colors = curses.has_colors()
+        if colors:
+            curses.start_color()
+            background = curses.COLOR_BLACK
+            with contextlib.suppress(curses.error):
+                curses.use_default_colors()
+                background = -1
+            curses.init_pair(1, curses.COLOR_GREEN, background)
+            curses.init_pair(2, curses.COLOR_RED, background)
+        editing: str | None = None
+        query = ""
+        prefix = ""
+        while True:
+            height, width = screen.getmaxyx()
+            self.width = max(1, width - 1)
+            page = self.height = max(1, height - 1)
+            rows = self.rows(self.width)
+            self.top = max(0, min(self.top, max(0, len(rows) - page)))
+            screen.erase()
+            attributes = {
+                1: curses.A_BOLD,
+                4: curses.A_UNDERLINE,
+                7: curses.A_REVERSE,
+                31: curses.color_pair(2) if colors else 0,
+                32: curses.color_pair(1) if colors else 0,
+            }
+            for y, row in enumerate(rows[self.top : self.top + page]):
+                attr = curses.A_NORMAL
+                for style in self.styles(row):
+                    attr |= attributes[style]
+                with contextlib.suppress(curses.error):
+                    screen.addstr(y, 0, row.text, attr)
+            footer = (
+                editing + query
+                if editing
+                else self.status
+                or (
+                    f"{'(END) ' if self.top + page >= len(rows) else ''}"
+                    "j/k parent  l/h open/close  space/b page  "
+                    "/? search  n/N next  q quit"
                 )
-            except OSError as exc:
-                print(f"Viewer error: {exc}", flush=True)  # noqa: T201
+            )
+            with contextlib.suppress(curses.error):
+                screen.addnstr(height - 1, 0, footer, self.width, curses.A_REVERSE)
+            screen.refresh()
+            try:
+                key = screen.get_wch()
+            except curses.error:
+                continue
+            if key == curses.KEY_RESIZE:
+                continue
+            if editing:
+                if key == "\x1b":
+                    editing = None
+                elif key in ("\n", "\r", curses.KEY_ENTER):
+                    self.pattern = query or self.pattern
+                    self.direction = 1 if editing == "/" else -1
+                    editing = None
+                    if self.pattern and self.entries:
+                        self.search(self.direction)
+                elif key in ("\x7f", "\b", curses.KEY_BACKSPACE):
+                    query = query[:-1]
+                elif isinstance(key, str) and key.isprintable():
+                    query += key
+                continue
+            if key == "q" or (prefix == "Z" and key == "Z"):
+                return
+            prefix = key if key in (":", "Z") else ""
+            self.status = ""
+            if key in ("/", "?"):
+                editing, query = str(key), ""
+            elif key in ("n", "N") and self.pattern and self.entries:
+                self.search(self.direction * (1 if key == "n" else -1), repeat=True)
+            else:
+                self.navigate(key, page, rows)
 
     def read_chat(self) -> str:  # noqa: D102
-        library = ctypes.CDLL(readline.__file__)
-        getter_type = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p)
+        library = readline_library()
         slot = ctypes.c_void_p.in_dll(library, "rl_getc_function")
         previous = slot.value
         if previous is None:
             msg = "GNU readline has no character input function"
             raise RuntimeError(msg)
-        original = getter_type(previous)
-        library.rl_get_keymap.restype = ctypes.c_void_p
-        library.rl_get_keymap_by_name.argtypes = [ctypes.c_char_p]
-        library.rl_get_keymap_by_name.restype = ctypes.c_void_p
+        original = READLINE_GETTER(previous)
         vi_insert = library.rl_get_keymap_by_name(b"vi-insert")
         failure: BaseException | None = None
+        previous_resize = signal.getsignal(signal.SIGWINCH)
+
+        def redisplay() -> None:
+            self.render_chat()
+            library.rl_on_new_line()
+            library.rl_forced_update_display()
+
+        def resize_chat(_signum: int, _frame: object) -> None:
+            library.rl_resize_terminal()
+            redisplay()
 
         def get_character(stream: int) -> int:
             nonlocal failure
             try:
+                select.select([sys.stdin], [], [])
                 char = original(stream)
                 if char != ord("\x1b") or library.rl_get_keymap() == vi_insert:
                     return int(char)
                 if select.select([sys.stdin], [], [], 0.15)[0]:
                     return int(char)
                 library.rl_deprep_terminal()
+                signal.signal(signal.SIGWINCH, previous_resize)
                 try:
                     self.view()
                 finally:
+                    signal.signal(signal.SIGWINCH, resize_chat)
                     library.rl_prep_terminal(1)
-                    library.rl_on_new_line()
-                    library.rl_forced_update_display()
+                    redisplay()
             except BaseException as exc:  # noqa: BLE001
                 failure = exc
                 ctypes.c_int.in_dll(library, "rl_done").value = 1
                 return ord("\n")
             return 0
 
-        callback = getter_type(get_character)
+        callback = READLINE_GETTER(get_character)
         slot.value = ctypes.cast(callback, ctypes.c_void_p).value
+        signal.signal(signal.SIGWINCH, resize_chat)
         history_length = readline.get_current_history_length()
         try:
             prompt = input("> ")
@@ -387,29 +749,37 @@ class Viewer:  # noqa: D101
                 raise failure
             return prompt
         finally:
+            signal.signal(signal.SIGWINCH, previous_resize)
             slot.value = previous
 
     def run(self) -> None:  # noqa: D102
         configure_filename_completion()
         previous = self.agent.output
-        self.agent.output = self.append
+        previous_event = self.agent.event
+        self.agent.output = self.lines.append
+        self.chat_active = True
+        self.agent.event = self.event
         try:
             while True:
                 try:
+                    self.render_chat()
                     prompt = self.read_chat()
                     if prompt.strip():
-                        self.append("> " + prompt, display=False)
+                        self.lines.append("> " + prompt)
+                        self.event("chat", "user> " + prompt, None)
                         self.agent.turn(prompt)
                 except EOFError:  # noqa: PERF203
                     print()  # noqa: T201
                     return
                 except (AgentError, KeyboardInterrupt) as exc:
-                    self.append(
+                    self.agent.emit(
                         f"\n{str(exc) or 'Cancelled'}. Completed tool effects remain; "
                         "incomplete turn history discarded.",
                     )
         finally:
+            self.chat_active = False
             self.agent.output = previous
+            self.agent.event = previous_event
 
 
 def main(argv: list[str] | None = None) -> None:  # noqa: C901, D103

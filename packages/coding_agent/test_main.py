@@ -3,24 +3,30 @@
 
 import contextlib
 import ctypes
+import curses
+import fcntl
 import io
 import json
 import os
 import pty
 import readline
 import select
+import shutil
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
+import termios
 import threading
 import time
+import unicodedata
 import unittest
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -447,6 +453,227 @@ class TestAgent(unittest.TestCase):  # noqa: D101
 
 
 class TestViewer(unittest.TestCase):  # noqa: D101
+    def test_chat_and_view_render_the_same_tree(self) -> None:  # noqa: D102
+        viewer = app.Viewer(app.Agent())
+        viewer.event("chat", "assistant> preview\nfull response", None)
+        viewer.event("tool", "tool> bash false", None)
+        viewer.event("output", "exit status: 1\nfailed output", None)
+        viewer.event("finish", "", False)  # noqa: FBT003
+        viewer.entries[0].expanded = True
+        viewer.entries[1].expanded = True
+        screen = MagicMock()
+        screen.getmaxyx.return_value = (12, 60)
+        screen.get_wch.return_value = "q"
+        output = io.StringIO()
+        with (
+            contextlib.redirect_stdout(output),
+            patch.object(output, "isatty", return_value=True),
+            patch.object(
+                shutil,
+                "get_terminal_size",
+                return_value=os.terminal_size((60, 12)),
+            ),
+            patch.object(curses, "has_colors", return_value=False),
+            patch.object(curses, "curs_set"),
+        ):
+            viewer.render_chat()
+            viewer.screen(screen)
+        chat = output.getvalue()
+        rendered = [call.args[2] for call in screen.addstr.call_args_list]
+        if rendered != [row.text for row in viewer.rows(59)]:
+            msg = "Both modes must render identical tree rows"
+            raise AssertionError(msg)
+        if any(text not in chat for text in rendered) or "\x1b[31m" not in chat:
+            msg = "Chat must include expanded children and failed command color"
+            raise AssertionError(msg)
+
+    def test_search_reveals_wrapped_matches_and_repeats_on_same_line(self) -> None:  # noqa: D102
+        viewer = app.Viewer(app.Agent())
+        viewer.width, viewer.height = 20, 3
+        viewer.event("chat", "assistant> long\n" + "x" * 90 + "needle needle", None)
+        viewer.pattern = "needle"
+        viewer.search(1)
+        first = viewer.match
+        visible = viewer.rows(viewer.width)[viewer.top : viewer.top + viewer.height]
+        if not any(viewer.matched(row) and "needle" in row.text for row in visible):
+            msg = "Search must scroll to the matching wrapped segment"
+            raise AssertionError(msg)
+        viewer.search(1, repeat=True)
+        if viewer.match is None or first is None or viewer.match <= first:
+            msg = "n must advance to later matches on the same line"
+            raise AssertionError(msg)
+        viewer.pattern = "$"
+        viewer.search(1)
+        viewer.search(1, repeat=True)
+        if viewer.match is None:
+            msg = "Zero-width matches at line ends must remain navigable"
+            raise AssertionError(msg)
+
+    def test_paging_at_last_parent_does_not_jump_backwards(self) -> None:  # noqa: D102
+        viewer = app.Viewer(app.Agent())
+        for index in range(30):
+            viewer.event("chat", f"assistant> {index}", None)
+        for _ in viewer.entries:
+            viewer.navigate("j", 10, viewer.rows(80))
+        top = viewer.top
+        viewer.navigate(" ", 10, viewer.rows(80))
+        if viewer.top < top:
+            msg = "Forward paging at the final parent must not scroll backwards"
+            raise AssertionError(msg)
+
+    def test_read_output_resembling_error_is_not_duplicated(self) -> None:  # noqa: D102
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "example").write_text("Tool error is ordinary file content")
+            agent = app.Agent(directory)
+            viewer = app.Viewer(agent)
+            agent.event = viewer.event
+            agent.model = "local"
+            with patch.object(
+                agent,
+                "completion",
+                side_effect=[
+                    answer(None, [call("read", "read", path="example")])["choices"][0][
+                        "message"
+                    ],
+                    answer("done")["choices"][0]["message"],
+                ],
+            ):
+                agent.turn("read example")
+            entry = viewer.entries[0]
+            if (
+                entry.body != "Tool error is ordinary file content"
+                or entry.success is not True
+            ):
+                msg = "Successful file output must be retained exactly once"
+                raise AssertionError(msg)
+
+    def test_unicode_and_tiny_terminals(self) -> None:  # noqa: D102
+        viewer = app.Viewer(app.Agent())
+        viewer.event("chat", "assistant> 界\ne\u0301界界", None)
+        viewer.entries[0].expanded = True
+        for width in (1, 2, 4, 20):
+            for row in viewer.rows(width):
+                cells = sum(
+                    0
+                    if unicodedata.combining(char)
+                    else 2
+                    if unicodedata.east_asian_width(char) in {"W", "F"}
+                    else 1
+                    for char in row.text
+                )
+                if cells > width:
+                    msg = "Wide characters and indentation must fit the terminal"
+                    raise AssertionError(msg)
+
+    def test_tree_navigation_and_paging(self) -> None:  # noqa: D102
+        page_height = 10
+        viewer = app.Viewer(app.Agent())
+        viewer.event("chat", "assistant> preview\n" + "detail\n" * 40, None)
+        viewer.event("chat", "user> next", None)
+        if len(viewer.rows(80)) != len(viewer.entries):
+            msg = "New entries must be collapsed"
+            raise AssertionError(msg)
+        viewer.navigate("l", 10, viewer.rows(80))
+        viewer.navigate(" ", 10, viewer.rows(80))
+        if viewer.top != page_height or viewer.selected != 0:
+            msg = "Paging must scroll inside an expanded child"
+            raise AssertionError(msg)
+        viewer.navigate("b", 10, viewer.rows(80))
+        if viewer.top != 0:
+            msg = "Backward paging must return to the first row"
+            raise AssertionError(msg)
+        viewer.navigate("j", 10, viewer.rows(80))
+        if viewer.selected != 1 or not any(
+            row.owner == 1 and row.line == -1
+            for row in viewer.rows(80)[viewer.top : viewer.top + page_height]
+        ):
+            msg = "j must skip output and select the next parent"
+            raise AssertionError(msg)
+        viewer.navigate("k", 10, viewer.rows(80))
+        viewer.navigate("h", 10, viewer.rows(80))
+        if viewer.entries[0].expanded or len(viewer.rows(80)) != len(viewer.entries):
+            msg = "h must hide the selected output"
+            raise AssertionError(msg)
+        viewer.navigate("g", 10, viewer.rows(80))
+        viewer.navigate("k", 10, viewer.rows(80))
+        if viewer.selected != 0:
+            msg = "Parent navigation must stop at the start"
+            raise AssertionError(msg)
+
+    def test_search_expands_hidden_output_and_repeats(self) -> None:  # noqa: D102
+        viewer = app.Viewer(app.Agent())
+        for text in ("assistant> one\nhidden 1", "assistant> two\nhidden 2"):
+            viewer.event("chat", text, None)
+        viewer.pattern = r"hidden \d"
+        viewer.search(1)
+        if viewer.match != (0, 1, 0) or not viewer.entries[0].expanded:
+            msg = "Search must reveal hidden output"
+            raise AssertionError(msg)
+        viewer.search(1, repeat=True)
+        if viewer.match != (1, 1, 0) or not viewer.entries[1].expanded:
+            msg = "Repeated search must advance to the next entry"
+            raise AssertionError(msg)
+        viewer.search(-1, repeat=True)
+        if viewer.match != (0, 1, 0):
+            msg = "Reverse repeat must find the previous match"
+            raise AssertionError(msg)
+        viewer.pattern = "["
+        viewer.search(1)
+        if "Invalid pattern" not in viewer.status or viewer.match is not None:
+            msg = "Invalid patterns must clear stale matches without crashing"
+            raise AssertionError(msg)
+        viewer.pattern = "missing"
+        viewer.search(1)
+        if viewer.status != "Pattern not found":
+            msg = "Missing patterns must be reported"
+            raise AssertionError(msg)
+
+    def test_tool_entries_use_execution_status_and_full_output(self) -> None:  # noqa: D102
+        agent = app.Agent()
+        viewer = app.Viewer(agent)
+        agent.event = viewer.event
+        agent.model = "local"
+        calls = [
+            call("ok", "bash", command="printf 'Tool error fake'; printf '%20000s' x"),
+            call("bad", "bash", command="printf 'exit status: 0'; exit 7"),
+            call("missing", "read", path="/nonexistent-coding-agent-test-file"),
+        ]
+        with patch.object(
+            agent,
+            "completion",
+            side_effect=[
+                answer("Running", calls)["choices"][0]["message"],
+                answer("Finished")["choices"][0]["message"],
+            ],
+        ):
+            agent.turn("test")
+        entries = [entry for entry in viewer.entries if entry.tool]
+        if [entry.success for entry in entries] != [True, False, False]:
+            msg = "Tool status must come from execution, regardless of output text"
+            raise AssertionError(msg)
+        if len(entries[0].body) <= app.OUTPUT_LIMIT:
+            msg = "Viewer must retain output beyond the model's truncation limit"
+            raise AssertionError(msg)
+        if (
+            "exit status: 7" not in entries[1].body
+            or "Tool error" not in entries[2].body
+        ):
+            msg = "Each tool must retain its own output"
+            raise AssertionError(msg)
+        if any(entry.expanded for entry in entries):
+            msg = "Completed tools must start collapsed"
+            raise AssertionError(msg)
+
+    def test_wrapping_and_control_characters(self) -> None:  # noqa: D102
+        viewer = app.Viewer(app.Agent())
+        viewer.event("chat", "assistant> preview\n\x1b[31m" + "x" * 100, None)
+        viewer.entries[0].expanded = True
+        width = 20
+        rows = viewer.rows(width)
+        if any(len(row[2]) > width or "\x1b" in row[2] for row in rows):
+            msg = "Output must wrap and must not execute terminal escape sequences"
+            raise AssertionError(msg)
+
     def test_chat_restores_readline_hook(self) -> None:  # noqa: D102
         viewer = app.Viewer(app.Agent())
         library = ctypes.CDLL(readline.__file__)
@@ -501,6 +728,13 @@ class TestViewer(unittest.TestCase):  # noqa: D101
         if agent.output is not None:
             msg = "Output hook must be restored"
             raise AssertionError(msg)
+        if agent.event is not None or not any(
+            entry.tool and entry.success for entry in viewer.entries
+        ):
+            msg = (
+                "Failed turns must retain completed entries and restore the event hook"
+            )
+            raise AssertionError(msg)
 
 
 class TestReadlineTerminal(unittest.TestCase):  # noqa: D101
@@ -515,6 +749,7 @@ class TestReadlineTerminal(unittest.TestCase):  # noqa: D101
         self.completion_path = Path(self.directory.name) / "completion-example"
         self.completion_path.touch()
         self.master, slave = pty.openpty()
+        fcntl.ioctl(self.master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
         self.addCleanup(os.close, self.master)
         code = """
 import json
@@ -538,7 +773,7 @@ Viewer(agent).run()
             os.close(slave)
         self.addCleanup(self.stop)
         self.buffer = b""
-        self.wait_for(b"> ")
+        self.wait_prompt()
 
     def stop(self) -> None:  # noqa: D102
         if self.process.poll() is None:
@@ -555,10 +790,15 @@ Viewer(agent).run()
                 self.buffer += os.read(self.master, 65536)
         self.buffer = self.buffer.split(marker, 1)[1]
 
+    def wait_prompt(self) -> None:
+        """Wait for the input row, not a role label in a transcript redraw."""
+        height = os.get_terminal_size(self.master).lines
+        self.wait_for(f"\x1b[{height};1H> ".encode())
+
     def send(self, keys: bytes, expected: str) -> None:  # noqa: D102
         os.write(self.master, keys)
         self.wait_for(b"RESULT:" + json.dumps(expected).encode())
-        self.wait_for(b"> ")
+        self.wait_prompt()
 
     def test_native_editing_history_completion_and_inputrc(self) -> None:  # noqa: D102
         self.send(b"hello world\x01X\x05\n", "Xhello world")
@@ -581,13 +821,13 @@ Viewer(agent).run()
         self.wait_for(b"\x1b[?1049h")
         os.write(self.master, b"q")
         self.wait_for(b"\x1b[?1049l")
-        self.wait_for(b"> ")
+        self.wait_prompt()
         self.send(b"\x1f\n", "hello")
         os.write(self.master, b"hello\x01\x1b")
         self.wait_for(b"\x1b[?1049h")
         os.write(self.master, b":q")
         self.wait_for(b"\x1b[?1049l")
-        self.wait_for(b"> ")
+        self.wait_prompt()
         self.send(b"X\n", "Xhello")
 
     def test_empty_prompt_repeated_viewing_and_search(self) -> None:  # noqa: D102
@@ -600,12 +840,52 @@ Viewer(agent).run()
             self.wait_for(b"(END)")
             os.write(self.master, quit_keys)
             self.wait_for(b"\x1b[?1049l")
-            self.wait_for(b"> ")
+            self.wait_prompt()
         self.send(b"after viewing\n", "after viewing")
         os.write(self.master, b"\x04")
         if self.process.wait(timeout=5) != 0:
             msg = "EOF after viewing must exit cleanly"
             raise AssertionError(msg)
+
+    def test_tree_expand_collapse_resize_and_reopen(self) -> None:  # noqa: D102
+        self.send(b"tree example\n", "tree example")
+        os.write(self.master, b"\x1b")
+        self.wait_for(b"\x1b[?1049h")
+        self.wait_for(b"[+]")
+        os.write(self.master, b"gl")
+        self.wait_for(b"-")
+        self.wait_for(b"user> tree example")
+        os.write(self.master, b"h")
+        self.wait_for(b"+")
+        fcntl.ioctl(self.master, termios.TIOCSWINSZ, struct.pack("HHHH", 12, 50, 0, 0))
+        os.kill(self.process.pid, signal.SIGWINCH)
+        os.write(self.master, b"jlq")
+        self.wait_for(b"\x1b[?1049l")
+        self.wait_prompt()
+        os.write(self.master, b"\x1b")
+        self.wait_for(b"\x1b[?1049h")
+        self.wait_for(b"[-]")
+        os.write(self.master, b"q")
+        self.wait_for(b"\x1b[?1049l")
+        self.wait_prompt()
+        self.send(b"still working\n", "still working")
+
+    def test_chat_resize_preserves_tree_and_draft(self) -> None:  # noqa: D102
+        self.send(b"resize example\n", "resize example")
+        os.write(self.master, b"draft\x1b")
+        self.wait_for(b"\x1b[?1049h")
+        os.write(self.master, b"glq")
+        self.wait_for(b"\x1b[?1049l")
+        self.wait_for(b"[-] user> resize example")
+        self.wait_for(b"  user> resize example")
+        self.wait_prompt()
+        self.wait_for(b"draft")
+        fcntl.ioctl(self.master, termios.TIOCSWINSZ, struct.pack("HHHH", 12, 50, 0, 0))
+        os.kill(self.process.pid, signal.SIGWINCH)
+        self.wait_for(b"  user> resize example")
+        self.wait_prompt()
+        self.wait_for(b"draft")
+        self.send(b"\x01X\n", "Xdraft")
 
     def test_vi_escape_keeps_native_command_mode(self) -> None:  # noqa: D102
         os.write(self.master, b"\x18vhello\x1b")
@@ -617,7 +897,7 @@ Viewer(agent).run()
         self.wait_for(b"\x1b[?1049h")
         os.write(self.master, b"q")
         self.wait_for(b"\x1b[?1049l")
-        self.wait_for(b"> ")
+        self.wait_prompt()
         self.send(b"x\n", "worl")
 
     def test_interrupt_cancels_readline_and_next_prompt_works(self) -> None:  # noqa: D102
@@ -625,10 +905,10 @@ Viewer(agent).run()
         self.wait_for(b"\x1b[?1049h")
         os.write(self.master, b"q")
         self.wait_for(b"\x1b[?1049l")
-        self.wait_for(b"> ")
+        self.wait_prompt()
         os.kill(self.process.pid, signal.SIGINT)
         self.wait_for(b"Cancelled.")
-        self.wait_for(b"> ")
+        self.wait_prompt()
         self.send(b"next\n", "next")
 
 
