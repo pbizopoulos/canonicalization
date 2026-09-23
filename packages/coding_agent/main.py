@@ -774,10 +774,25 @@ class Viewer:  # noqa: D101
         return [
             entry
             for name in sorted(names)
-            if (entry := self.package_entry(root, name, diff=has_history)) is not None
+            if (
+                entry := self.package_entry(
+                    root,
+                    name,
+                    diff=has_history,
+                    only_changes=diff,
+                )
+            )
+            is not None
         ]
 
-    def package_entry(self, root: Path, name: str, *, diff: bool) -> TreeNode | None:
+    def package_entry(
+        self,
+        root: Path,
+        name: str,
+        *,
+        diff: bool,
+        only_changes: bool = False,
+    ) -> TreeNode | None:
         """Build one package summary or its high-level changes."""
         directory = root / "packages" / name
         filenames = ("default.nix", "main.py", "test_main.py")
@@ -803,7 +818,7 @@ class Viewer:  # noqa: D101
                 previous_files[filename] = completed.stdout
         previous = self.package_summary(name, previous_files)
         current = self.package_summary(name, current_files)
-        if previous == current:
+        if only_changes and previous == current:
             return None
         summary_tree = self.merged_summary_tree(previous, current)
         return TreeNode(f"packages/{name}", summary_tree or None)

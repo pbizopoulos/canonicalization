@@ -1286,6 +1286,10 @@ class TestViewer(unittest.TestCase):  # noqa: D101
                 encoding="utf-8",
             )
             viewer = app.Viewer(app.Agent(root))
+            overview = viewer.package_entries()
+            if not overview or overview[0].title != "packages/same":
+                msg = "The regular high-level view must retain unchanged summaries"
+                raise AssertionError(msg)
             if viewer.package_entries(diff=True):
                 msg = "Source-only changes must not appear in a high-level diff"
                 raise AssertionError(msg)
