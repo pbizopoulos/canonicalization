@@ -7,10 +7,13 @@ Git-tracked $HOME with whitelisted gitignore
 $HOME contains Nix flake Git submodules with directory structure <hostname>/<repository-path>
 Nix flake Git submodules contain a specific directory structure (packages/, hosts/, checks/)
 packages/package-name contain:
-`test_main.py` contains tests derived by external requirements (test names can be used as a high-level specification)
-`main.py` contains code that satisfies `test_main.py`
+`test_main.py` contains tests derived by external requirements. Test names provide a finer-grained behavioral specification than CLI help.
+`main.py` contains code that satisfies `test_main.py` and provides a conventional CLI.
 `prm/` contains tracked data/code that don't fit into `main.py`
 `tmp/` contains runtime outputs of `main.py`
+
+CLI discovery:
+`git canonical args` statically reads conventional argparse, Click, Fire, and Typer declarations in `main.py`; dynamic declarations are unsupported. Help text describes the interface, while test names describe behavior in finer detail.
 
 Runtime constraints:
 Persistent changes in $HOME's directory structure should only be done with `git canonical` (`prm/` can be used as an escape hatch).

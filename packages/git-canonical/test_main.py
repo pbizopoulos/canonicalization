@@ -583,6 +583,53 @@ def test_args_lists_static_interfaces_without_execution(
 
 
 @pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (
+            (
+                "import click\n"
+                "@click.command()\n"
+                "@click.option('--count', default=1, help='Number')\n"
+                "def cli(count): pass\n"
+            ),
+            "cli: command\ncli: --count  help=Number\n",
+        ),
+        (
+            (
+                "import typer\n"
+                "app = typer.Typer()\n"
+                "@app.command()\n"
+                "def greet(name: str, formal: bool = False): pass\n"
+            ),
+            (
+                "greet: command\n"
+                "greet: name  required; type=str\n"
+                "greet: --formal  default=False; type=bool\n"
+            ),
+        ),
+        (
+            "import fire\ndef greet(name='world'): pass\nfire.Fire(greet)\n",
+            "greet: command\ngreet: name  default='world'\n",
+        ),
+    ],
+)
+def test_args_support_click_fire_and_typer_static_interfaces(
+    tmp_path: Path,
+    source: str,
+    expected: str,
+) -> None:
+    """Describe common Click, Fire, and Typer declarations without execution."""
+    package = _make_test_names_package(tmp_path, "example", "")
+    (package / "main.py").write_text(source)
+    actual = _run(package, "args")
+    if actual.stdout != expected:
+        message = (
+            f"Unexpected argument review result: {actual.stdout!r} {actual.stderr!r}"
+        )
+        raise AssertionError(message)
+
+
+@pytest.mark.parametrize(
     "source",
     [
         "import sys\nprint(sys.argv)\n",

@@ -2134,8 +2134,8 @@ def _run_test_names(arguments: list[str]) -> int:
     return 0
 
 
-def source_package_args(source: bytes, filename: str) -> list[str]:  # noqa: C901, PLR0915
-    """Describe literal argparse declarations without importing package code."""
+def _source_argparse_args(source: bytes, filename: str) -> list[str]:  # noqa: C901, PLR0915
+    """Describe the supported static argparse declarations."""
     module = ast.parse(source, filename=filename)
     lines: list[str] = []
     found = False
@@ -2187,10 +2187,16 @@ def source_package_args(source: bytes, filename: str) -> list[str]:  # noqa: C90
                 "metavar",
                 "const",
                 "type",
+                "help",
             }:
                 values[keyword.arg] = (
-                    ast.unparse(keyword.value)
-                    if keyword.arg == "type"
+                    (
+                        repr(keyword.value.id)
+                        if keyword.arg == "action"
+                        and isinstance(keyword.value, ast.Name)
+                        else ast.unparse(keyword.value)
+                    )
+                    if keyword.arg in {"type", "action"}
                     else repr(literal(keyword.value))
                 )
         positional = not str(names[0]).startswith("-")
@@ -2201,10 +2207,18 @@ def source_package_args(source: bytes, filename: str) -> list[str]:  # noqa: C90
         details.extend(
             f"{key}={value}"
             for key, value in sorted(values.items())
-            if key != "required"
+            if key not in {"required", "help"}
         )
         prefix = f"{path}: " if path else ""
-        return prefix + ", ".join(str(arg) for arg in names) + "  " + "; ".join(details)
+        help_text = values.get("help", "")
+        suffix = f"; help={help_text}" if help_text else ""
+        return (
+            prefix
+            + ", ".join(str(arg) for arg in names)
+            + "  "
+            + "; ".join(details)
+            + suffix
+        )
 
     def visit(  # noqa: C901, PLR0912
         statements: list[ast.stmt],
@@ -2285,6 +2299,295 @@ def source_package_args(source: bytes, filename: str) -> list[str]:  # noqa: C90
     return lines
 
 
+def source_package_args(  # noqa: C901, PLR0912, PLR0915
+    source: bytes,
+    filename: str,
+) -> list[str]:
+    """Describe conventional CLI declarations without importing package code."""
+    module = ast.parse(source, filename=filename)
+    imports: set[str] = set()
+    for node in ast.walk(module):
+        if isinstance(node, ast.Import):
+            imports.update(alias.name.split(".", 1)[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imports.add(node.module.split(".", 1)[0])
+    if "argparse" in imports:
+        return _source_argparse_args(source, filename)
+
+    def unsupported(node: ast.AST, library: str) -> ValueError:
+        return ValueError(
+            f"unsupported CLI interface at {filename}:{getattr(node, 'lineno', 0)}: "
+            f"expected conventional static {library} declarations",
+        )
+
+    def labels(call: ast.Call) -> list[str]:
+        values = [*call.args]
+        values.extend(
+            keyword.value
+            for keyword in call.keywords
+            if keyword.arg in {"param_decls", "name", "help", "default", "required"}
+        )
+        result = []
+        for value in values:
+            try:
+                rendered = ast.literal_eval(value)
+            except (ValueError, TypeError):
+                continue
+            if isinstance(rendered, str) and rendered.startswith(("-", "<")):
+                result.append(rendered)
+        return result
+
+    lines: list[str] = []
+    found = False
+    if "click" in imports:
+        for node in ast.walk(module):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            command = any(
+                isinstance(decorator, ast.Call)
+                and isinstance(decorator.func, ast.Attribute)
+                and decorator.func.attr in {"command", "group"}
+                for decorator in node.decorator_list
+            )
+            if command:
+                found = True
+                lines.append(f"{node.name}: command")
+            for decorator in node.decorator_list:
+                if not isinstance(decorator, ast.Call) or not isinstance(
+                    decorator.func,
+                    ast.Attribute,
+                ):
+                    continue
+                if decorator.func.attr not in {"option", "argument"}:
+                    continue
+                names = labels(decorator)
+                if not names:
+                    raise unsupported(decorator, "Click")
+                found = True
+                help_text = next(
+                    (
+                        ast.literal_eval(item.value)
+                        for item in decorator.keywords
+                        if item.arg == "help"
+                        and isinstance(item.value, ast.Constant)
+                        and isinstance(item.value.value, str)
+                    ),
+                    "",
+                )
+                suffix = f"  help={help_text}" if help_text else ""
+                lines.append(f"{node.name}: {', '.join(names)}{suffix}")
+        if found:
+            return lines
+    if "typer" in imports:
+        functions = {
+            node.name: node
+            for node in module.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+
+        def typer_function(  # noqa: C901, PLR0912
+            node: ast.FunctionDef | ast.AsyncFunctionDef,
+            path: str,
+        ) -> None:
+            arguments = [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]
+            defaults: list[ast.expr | None] = [None] * (
+                len(arguments) - len(node.args.defaults)
+            )
+            defaults.extend(node.args.defaults)
+            defaults.extend(node.args.kw_defaults)
+            for argument, parameter_default in zip(
+                arguments,
+                defaults,
+                strict=True,
+            ):
+                if argument.arg in {"self", "cls"}:
+                    continue
+                annotation = argument.annotation
+                if isinstance(annotation, ast.Subscript) and ast.unparse(
+                    annotation.value,
+                ).endswith("Annotated"):
+                    annotation_parts = (
+                        annotation.slice.elts
+                        if isinstance(annotation.slice, ast.Tuple)
+                        else [annotation.slice]
+                    )
+                    annotation = annotation_parts[0]
+                    for metadata_part in annotation_parts[1:]:
+                        if isinstance(metadata_part, ast.Call) and isinstance(
+                            metadata_part.func,
+                            ast.Attribute,
+                        ):
+                            parameter_default = metadata_part  # noqa: PLW2901
+                annotation_text = ast.unparse(annotation) if annotation else "str"
+                parameter_kind = (
+                    "Option" if parameter_default is not None else "Argument"
+                )
+                help_text = ""
+                option_names: list[str] = []
+                if isinstance(parameter_default, ast.Call):
+                    parameter_kind = (
+                        parameter_default.func.attr
+                        if isinstance(parameter_default.func, ast.Attribute)
+                        else ast.unparse(parameter_default.func)
+                    )
+                    if parameter_kind not in {"Option", "Argument"}:
+                        raise unsupported(parameter_default, "Typer")
+                    option_names.extend(
+                        item.value
+                        for item in parameter_default.args
+                        if isinstance(item, ast.Constant)
+                        and isinstance(item.value, str)
+                        and item.value.startswith("-")
+                    )
+                    for keyword in parameter_default.keywords:
+                        if keyword.arg == "help" and isinstance(
+                            keyword.value,
+                            ast.Constant,
+                        ):
+                            help_text = str(keyword.value.value)
+                optional = parameter_default is not None
+                name = ", ".join(option_names) if option_names else argument.arg
+                if parameter_kind == "Option" and not option_names:
+                    name = f"--{argument.arg.replace('_', '-')}"
+                if parameter_kind == "Argument" and optional:
+                    name = f"[{argument.arg}]"
+                if parameter_default is not None and not isinstance(
+                    parameter_default,
+                    ast.Call,
+                ):
+                    try:
+                        default_text = repr(ast.literal_eval(parameter_default))
+                    except (ValueError, TypeError):
+                        raise unsupported(parameter_default, "Typer") from None
+                else:
+                    default_text = "required" if not optional else "optional"
+                parameter_detail = (
+                    default_text
+                    if parameter_default is None
+                    else f"default={default_text}"
+                )
+                suffix = f"; {parameter_detail}; type={annotation_text}"
+                if help_text:
+                    suffix += f"; help={help_text}"
+                lines.append(f"{path}: {name}  {suffix.lstrip('; ')}")
+
+        run_targets = {
+            call.args[0].id
+            for call in ast.walk(module)
+            if isinstance(call, ast.Call)
+            and _test_names_qualified_name(call.func).endswith("run")
+            and call.args
+            and isinstance(call.args[0], ast.Name)
+        }
+        for name in sorted(run_targets):
+            if name not in functions:
+                continue
+            found = True
+            typer_function(functions[name], "")
+        for node in ast.walk(module):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            decorators = [
+                item
+                for item in node.decorator_list
+                if isinstance(item, ast.Call)
+                and isinstance(item.func, ast.Attribute)
+                and item.func.attr in {"command", "callback"}
+            ]
+            if not decorators:
+                continue
+            found = True
+            command_name = node.name
+            for decorator in decorators:
+                if decorator.args and isinstance(decorator.args[0], ast.Constant):
+                    command_name = str(decorator.args[0].value)
+            lines.append(f"{command_name}: command")
+            typer_function(node, command_name)
+        if found:
+            return lines
+    if "fire" in imports:
+        fire_calls = [
+            node
+            for node in ast.walk(module)
+            if isinstance(node, ast.Call)
+            and _test_names_qualified_name(node.func).endswith("Fire")
+        ]
+        if fire_calls:
+            found = True
+            targets = {
+                node.name: node
+                for node in module.body
+                if isinstance(
+                    node,
+                    (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
+                )
+            }
+            target = fire_calls[-1].args[0] if fire_calls[-1].args else None
+            target_name = target.id if isinstance(target, ast.Name) else None
+            for name, node in targets.items():
+                if target_name is not None and name != target_name:
+                    continue
+                if isinstance(node, ast.ClassDef):
+                    for method in node.body:
+                        if isinstance(
+                            method,
+                            (ast.FunctionDef, ast.AsyncFunctionDef),
+                        ) and not method.name.startswith("_"):
+                            callable_node = method
+                            method_name = method.name
+                            lines.append(f"{method_name}: command")
+                            parameters = [
+                                *callable_node.args.posonlyargs,
+                                *callable_node.args.args,
+                            ]
+                            method_defaults: list[ast.expr | None] = [None] * (
+                                len(parameters) - len(callable_node.args.defaults)
+                            )
+                            method_defaults.extend(callable_node.args.defaults)
+                            for parameter, default in zip(
+                                parameters,
+                                method_defaults,
+                                strict=True,
+                            ):
+                                if parameter.arg in {"self", "cls"}:
+                                    continue
+                                value = (
+                                    "required"
+                                    if default is None
+                                    else repr(ast.literal_eval(default))
+                                )
+                                lines.append(
+                                    f"{method_name}: {parameter.arg}  default={value}",
+                                )
+                else:
+                    lines.append(f"{name}: command")
+                    parameters = [*node.args.posonlyargs, *node.args.args]
+                    function_defaults: list[ast.expr | None] = [None] * (
+                        len(parameters) - len(node.args.defaults)
+                    )
+                    function_defaults.extend(node.args.defaults)
+                    for parameter, default in zip(
+                        parameters,
+                        function_defaults,
+                        strict=True,
+                    ):
+                        value = (
+                            "required"
+                            if default is None
+                            else repr(ast.literal_eval(default))
+                        )
+                        lines.append(f"{name}: {parameter.arg}  default={value}")
+            return lines
+    library = next(
+        (name for name in ("click", "typer", "fire") if name in imports),
+        None,
+    )
+    if library:
+        raise unsupported(module, library)
+    msg = f"unsupported CLI interface in {filename}: no supported static parser found"
+    raise ValueError(msg)
+
+
 def _print_package_args(package: Path) -> None:
     """Validate a package and print its declared CLI interface."""
     validate_name(package.name)
@@ -2313,15 +2616,15 @@ def _run_package_args(arguments: list[str]) -> int:
     cli = argparse.ArgumentParser(
         prog="git canonical args",
         description=(
-            "List statically declared Python argparse interfaces "
+            "List statically declared argparse, Click, Fire, or Typer interfaces "
             "without executing source."
         ),
         epilog=(
             "Git views: diff [Git options/revisions] [-- paths...] or "
             "show [Git options/revisions] [-- paths...]. "
             "Only packages/*/main.py declarations are compared, in source order. "
-            "Implicit help options and help prose are omitted. "
-            "Dynamic declarations and non-argparse interfaces are unsupported. "
+            "Help text is included when declared statically. Dynamic declarations "
+            "and non-conventional library patterns are unsupported. "
             "Review diffs cannot be applied as source patches. "
             "Show requires commits; --no-index, --no-textconv, --ext-diff, "
             "--check, --output and -L are unsupported."
