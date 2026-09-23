@@ -42,7 +42,7 @@ from git_canonical import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-BASE_URL = "http://127.0.0.1:8080"
+BASE_URL = os.environ.get("CODING_AGENT_BASE_URL", "http://127.0.0.1:8080")
 OUTPUT_LIMIT = 16_000
 BASH_TIMEOUT = 60
 NIX_TIMEOUT = 600

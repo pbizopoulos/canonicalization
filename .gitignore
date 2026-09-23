@@ -30,6 +30,9 @@
 !/packages/coding_agent/prm/
 !/packages/coding_agent/prm/**
 !/packages/coding_agent/test_main.py
+!/packages/coding_agent_video/
+!/packages/coding_agent_video/default.nix
+!/packages/coding_agent_video/main.py
 !/packages/git-canonical/
 !/packages/git-canonical/default.nix
 !/packages/git-canonical/main.py
