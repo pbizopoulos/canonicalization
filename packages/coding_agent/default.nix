@@ -4,6 +4,7 @@ let
   python = pkgs.python3;
   runtimeInputs = [
     pkgs.bash
+    pkgs.git
     pkgs.nix
   ];
 in

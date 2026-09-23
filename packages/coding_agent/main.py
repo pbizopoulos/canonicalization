@@ -651,6 +651,14 @@ class Entry:  # noqa: D101
     expanded: bool = False
 
 
+@dataclass
+class TreeNode:  # noqa: D101
+    title: str
+    children: list["TreeNode"] | None = None
+    expanded: bool = False
+    style: int | None = None
+
+
 def record_event(
     entries: list[Entry],
     kind: str,
@@ -701,70 +709,163 @@ class Viewer:  # noqa: D101
         ] = queue.Queue()
         self.waiting_notice = False
         self.mode = "chat"
+        self.overview: list[TreeNode] = []
+        self.overview_visible: list[TreeNode] = []
 
-    def package_entries(self, *, diff: bool = False) -> list[Entry]:
-        """Build the package tree and optionally attach each package's Git diff."""
+    def package_entries(self, *, diff: bool = False) -> list[TreeNode]:
+        """Build a collapsible package tree or its high-level changes."""
         root = self.agent.cwd
         packages = root / "packages"
-        result: list[Entry] = []
-        if not packages.is_dir():
-            return [Entry("packages/ (not found)", "")]
-        for directory in sorted(path for path in packages.iterdir() if path.is_dir()):
-            main = directory / "main.py"
-            default = directory / "default.nix"
-            tests = directory / "test_main.py"
-            description = ""
-            if default.is_file():
-                match = re.search(
-                    r'description\s*=\s*"((?:[^"\\]|\\.)*)"',
-                    default.read_text(encoding="utf-8"),
+        current_names = (
+            {path.name for path in packages.iterdir() if path.is_dir()}
+            if packages.is_dir()
+            else set()
+        )
+        if not diff and not packages.is_dir():
+            return [TreeNode("packages/ (not found)")]
+        if diff:
+            historic = subprocess.run(  # noqa: S603
+                [  # noqa: S607
+                    "git",
+                    "-C",
+                    str(root),
+                    "ls-tree",
+                    "-d",
+                    "--name-only",
+                    "HEAD:packages",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if historic.returncode:
+                self.status = (
+                    historic.stderr.strip()
+                    or "Could not read package summaries at HEAD"
                 )
-                if match:
-                    description = bytes(match.group(1), "utf-8").decode(
-                        "unicode_escape",
-                    )
-            help_text = ""
-            if main.is_file():
-                with contextlib.suppress(SyntaxError, OSError):
-                    module = ast.parse(main.read_text(encoding="utf-8"))
-                    help_text = ast.get_docstring(module) or ""
-            test_names: list[str] = []
-            if tests.is_file():
-                with contextlib.suppress(SyntaxError, OSError):
-                    module = ast.parse(tests.read_text(encoding="utf-8"))
-                    test_names = [
-                        node.name
-                        for node in ast.walk(module)
-                        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                        and node.name.startswith("test_")
-                    ]
-            details = [
-                f"Description: {description or '(not declared)'}",
-                f"Help: {help_text or '(module docstring not declared)'}",
-                "Tests:",
-            ]
-            details.extend(f"  {name}" for name in test_names or ["(none)"])
-            body = "\n".join(details)
+                return []
+            names = current_names | set(historic.stdout.splitlines())
+        else:
+            names = current_names
+        result: list[TreeNode] = []
+        for name in sorted(names):
+            directory = packages / name
             if diff:
-                completed = subprocess.run(  # noqa: S603
-                    [  # noqa: S607
-                        "git",
-                        "-C",
-                        str(root),
-                        "diff",
-                        "HEAD",
-                        "--",
-                        f"packages/{directory.name}",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    check=False,
+                previous_files = {}
+                for filename in ("default.nix", "main.py", "test_main.py"):
+                    completed = subprocess.run(  # noqa: S603
+                        [  # noqa: S607
+                            "git",
+                            "-C",
+                            str(root),
+                            "show",
+                            f"HEAD:packages/{name}/{filename}",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    if completed.returncode == 0:
+                        previous_files[filename] = completed.stdout
+                previous = self.package_summary(name, previous_files)
+                current = self.package_summary(
+                    name,
+                    {
+                        filename: (directory / filename).read_text(encoding="utf-8")
+                        for filename in ("default.nix", "main.py", "test_main.py")
+                        if (directory / filename).is_file()
+                    },
                 )
-                body += "\n\nGit diff:\n" + (completed.stdout or "(no tracked changes)")
-                if completed.returncode:
-                    body += f"\nGit diff failed: {completed.stderr.strip()}"
-            result.append(Entry(f"packages/{directory.name}", body))
+                children = self.summary_changes(previous, current)
+                if children:
+                    result.append(TreeNode(f"packages/{name}", children))
+                continue
+            summary = self.package_summary(
+                name,
+                {
+                    filename: (directory / filename).read_text(encoding="utf-8")
+                    for filename in ("default.nix", "main.py", "test_main.py")
+                    if (directory / filename).is_file()
+                },
+            )
+            result.append(TreeNode(f"packages/{name}", self.summary_tree(summary)))
         return result
+
+    @staticmethod
+    def summary_tree(summary: str) -> list[TreeNode]:
+        """Convert the displayed summary into field and test child nodes."""
+        lines = summary.splitlines()
+        tests_start = next(
+            (index for index, line in enumerate(lines) if line == "Tests:"),
+            len(lines),
+        )
+        fields = [TreeNode(line) for line in lines[:tests_start]]
+        tests = [TreeNode(line.strip()) for line in lines[tests_start + 1 :]]
+        fields.append(TreeNode("Tests", tests))
+        return fields
+
+    @classmethod
+    def summary_changes(cls, previous: str, current: str) -> list[TreeNode]:
+        """Build collapsible field changes, with test names nested under Tests."""
+        old_lines, new_lines = previous.splitlines(), current.splitlines()
+        changes: list[TreeNode] = []
+        old_fields = {line.partition(":")[0]: line for line in old_lines if ":" in line}
+        new_fields = {line.partition(":")[0]: line for line in new_lines if ":" in line}
+        for field in ("Name", "Description", "Help"):
+            before, after = old_fields.get(field), new_fields.get(field)
+            if before != after:
+                if before is not None:
+                    changes.append(TreeNode(f"- {before}", style=31))
+                if after is not None:
+                    changes.append(TreeNode(f"+ {after}", style=32))
+        old_tests = [line.strip() for line in old_lines if line.startswith("  test_")]
+        new_tests = [line.strip() for line in new_lines if line.startswith("  test_")]
+        test_changes = [
+            TreeNode(f"- {name}", style=31)
+            for name in old_tests
+            if name not in new_tests
+        ]
+        test_changes.extend(
+            TreeNode(f"+ {name}", style=32)
+            for name in new_tests
+            if name not in old_tests
+        )
+        if test_changes:
+            changes.append(TreeNode("Tests", test_changes))
+        return changes
+
+    @staticmethod
+    def package_summary(name: str, files: dict[str, str]) -> str:
+        """Render the user-facing package fields from source file contents."""
+        if not files:
+            return ""
+        description = ""
+        match = re.search(
+            r'description\s*=\s*"((?:[^"\\]|\\.)*)"',
+            files.get("default.nix", ""),
+        )
+        if match:
+            description = bytes(match.group(1), "utf-8").decode("unicode_escape")
+        help_text = ""
+        with contextlib.suppress(SyntaxError):
+            help_text = ast.get_docstring(ast.parse(files.get("main.py", ""))) or ""
+        test_names: list[str] = []
+        with contextlib.suppress(SyntaxError):
+            module = ast.parse(files.get("test_main.py", ""))
+            test_names = [
+                node.name
+                for node in ast.walk(module)
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name.startswith("test_")
+            ]
+        details = [
+            f"Name: {name}",
+            f"Description: {description or '(not declared)'}",
+            f"Help: {help_text or '(module docstring not declared)'}",
+            "Tests:",
+        ]
+        details.extend(f"  {test_name}" for test_name in test_names or ["(none)"])
+        return "\n".join(details)
 
     def event(self, kind: str, text: str, success: bool | None) -> None:  # noqa: D102, FBT001
         follow = (
@@ -885,6 +986,8 @@ class Viewer:  # noqa: D101
 
     def rows(self, width: int) -> list[Row]:  # noqa: D102
         width = max(1, width)
+        if self.mode != "chat":
+            return self.overview_rows(width)
         rows = []
         indent = " " * min(2, width - 1)
         for index, entry in enumerate(self.entries):
@@ -907,6 +1010,29 @@ class Viewer:  # noqa: D101
                     )
         return rows
 
+    def overview_rows(self, width: int) -> list[Row]:
+        """Flatten the expanded package and test groups into visible tree rows."""
+        rows: list[Row] = []
+        self.overview_visible = []
+
+        def visit(nodes: list[TreeNode], depth: int) -> None:
+            for node in nodes:
+                owner = len(self.overview_visible)
+                self.overview_visible.append(node)
+                marker = "[-]" if node.expanded else "[+]" if node.children else "   "
+                prefix = "  " * depth + marker + " "
+                continuation = " " * len(prefix)
+                wrapped = self.wrap(self.safe(node.title), max(1, width - len(prefix)))
+                rows.append(Row(owner, -1, prefix + wrapped[0][1]))
+                rows.extend(
+                    Row(owner, -1, continuation + part) for _start, part in wrapped[1:]
+                )
+                if node.expanded and node.children:
+                    visit(node.children, depth + 1)
+
+        visit(self.overview, 0)
+        return rows
+
     def matched(self, row: Row) -> bool:
         """Identify the wrapped row containing the current search hit."""
         if self.match is None or self.match[:2] != (row.owner, row.line):
@@ -922,8 +1048,20 @@ class Viewer:  # noqa: D101
 
     def styles(self, row: Row) -> list[int]:
         """Share terminal styling between the readline and curses displays."""
+        if self.mode != "chat":
+            node = self.overview_visible[row.owner]
+            styles = [node.style] if node.style is not None else []
+            if row.owner == self.selected:
+                styles.append(7)
+            return styles
         styles = []
         entry = self.entries[row.owner]
+        if self.mode == "high-level diff" and row.line >= 0:
+            line = entry.body.splitlines()[row.line]
+            if line.startswith("+"):
+                styles.append(32)
+            elif line.startswith("-"):
+                styles.append(31)
         if row.line == -1:
             if entry.tool and entry.success is not None:
                 styles.append(32 if entry.success else 31)
@@ -983,6 +1121,33 @@ class Viewer:  # noqa: D101
             self.match = None
             self.status = f"Invalid pattern: {exc}"
             return
+        if self.mode != "chat":
+            tree_candidates = [
+                index
+                for index, node in enumerate(self.overview_visible)
+                if pattern.search(self.safe(node.title))
+            ]
+            if not tree_candidates:
+                self.match = None
+                self.status = "Pattern not found"
+                return
+            ordered_tree = tree_candidates if direction > 0 else tree_candidates[::-1]
+            selected_index = next(
+                (
+                    index
+                    for index in ordered_tree
+                    if (
+                        index > self.selected
+                        if direction > 0
+                        else index < self.selected
+                    )
+                ),
+                ordered_tree[0],
+            )
+            self.selected = selected_index
+            self.status = ""
+            self.reveal(selected_index)
+            return
         candidates = [
             (index, line, found.start())
             for index, entry in enumerate(self.entries)
@@ -1033,6 +1198,9 @@ class Viewer:  # noqa: D101
         self.height = height
         if not rows:
             return
+        if self.mode != "chat":
+            self.navigate_overview(key, height, rows)
+            return
         if key in ("j", "k"):
             self.selected = max(
                 0,
@@ -1042,7 +1210,8 @@ class Viewer:  # noqa: D101
                 next(i for i, row in enumerate(rows) if row.owner == self.selected),
             )
             self.match = None
-        elif key in ("h", "l"):
+            return
+        if key in ("h", "l"):
             self.match = None
             self.entries[self.selected].expanded = key == "l"
             self.reveal(
@@ -1052,29 +1221,68 @@ class Viewer:  # noqa: D101
                     if row.owner == self.selected
                 ),
             )
-        else:
-            offsets = {
-                " ": height,
-                "f": height,
-                curses.KEY_NPAGE: height,
-                "b": -height,
-                curses.KEY_PPAGE: -height,
-                "d": max(1, height // 2),
-                "u": -max(1, height // 2),
-                curses.KEY_DOWN: 1,
-                "\n": 1,
-                curses.KEY_UP: -1,
-            }
-            if key in ("g", "G"):
-                self.top = 0 if key == "g" else max(0, len(rows) - height)
-            elif key in offsets:
-                self.top = max(
+            return
+        self.navigate_page(key, height, rows)
+
+    def navigate_overview(
+        self,
+        key: str | int,
+        height: int,
+        rows: list[Row],
+    ) -> None:
+        """Navigate and expand package and test groups in an overview tree."""
+        if not self.overview_visible:
+            return
+        if key in ("j", "k"):
+            self.selected = max(
+                0,
+                min(
+                    len(self.overview_visible) - 1,
+                    self.selected + (1 if key == "j" else -1),
+                ),
+            )
+            self.match = None
+            self.reveal(self.selected)
+            return
+        if key in ("h", "l"):
+            node = self.overview_visible[self.selected]
+            if node.children:
+                node.expanded = key == "l"
+            self.match = None
+            refreshed = self.overview_rows(self.width)
+            self.reveal(
+                next(
+                    (
+                        i
+                        for i, row in enumerate(refreshed)
+                        if row.owner == self.selected
+                    ),
                     0,
-                    min(max(0, len(rows) - height), self.top + offsets[key]),
-                )
-            else:
-                return
-            self.selected = rows[self.top][0]
+                ),
+            )
+            return
+        self.navigate_page(key, height, rows)
+
+    def navigate_page(self, key: str | int, height: int, rows: list[Row]) -> None:
+        """Handle page movement shared by chat and overview views."""
+        offsets = {
+            " ": height,
+            "f": height,
+            curses.KEY_NPAGE: height,
+            "b": -height,
+            curses.KEY_PPAGE: -height,
+            "d": max(1, height // 2),
+            "u": -max(1, height // 2),
+            curses.KEY_DOWN: 1,
+            "\n": 1,
+            curses.KEY_UP: -1,
+        }
+        if key in ("g", "G"):
+            self.top = 0 if key == "g" else max(0, len(rows) - height)
+            self.selected = rows[self.top].owner
+        elif key in offsets:
+            self.top = max(0, min(max(0, len(rows) - height), self.top + offsets[key]))
+            self.selected = rows[self.top].owner
             self.match = None
 
     def view(self) -> None:  # noqa: D102
@@ -1150,7 +1358,9 @@ class Viewer:  # noqa: D101
                     self.pattern = query or self.pattern
                     self.direction = 1 if editing == "/" else -1
                     editing = None
-                    if self.pattern and self.entries:
+                    if self.pattern and (
+                        self.entries if self.mode == "chat" else self.overview
+                    ):
                         self.search(self.direction)
                 elif key in ("\x7f", "\b", curses.KEY_BACKSPACE):
                     query = query[:-1]
@@ -1167,7 +1377,7 @@ class Viewer:  # noqa: D101
                 if next_mode == "chat":
                     self.entries = self.chat_entries
                 else:
-                    self.entries = self.package_entries(
+                    self.overview = self.package_entries(
                         diff=next_mode == "high-level diff",
                     )
                 self.mode = next_mode
@@ -1178,7 +1388,11 @@ class Viewer:  # noqa: D101
             self.status = ""
             if key in ("/", "?"):
                 editing, query = str(key), ""
-            elif key in ("n", "N") and self.pattern and self.entries:
+            elif (
+                key in ("n", "N")
+                and self.pattern
+                and (self.entries if self.mode == "chat" else self.overview)
+            ):
                 self.search(self.direction * (1 if key == "n" else -1), repeat=True)
             else:
                 self.navigate(key, page, rows)

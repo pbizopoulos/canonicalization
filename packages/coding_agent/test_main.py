@@ -1,4 +1,5 @@
 # Copyright (c) 2026 VALAB/ITI
+# ruff: noqa: S603, S607
 """Verify tool execution, model protocol, and the interactive entry point."""
 
 import contextlib
@@ -182,7 +183,7 @@ with History(Path.cwd()) as history:
     history.event('tool', 'tool> bash', None)
     os._exit(0)
 """
-        result = subprocess.run([sys.executable, "-c", code], check=False)  # noqa: S603
+        result = subprocess.run([sys.executable, "-c", code], check=False)
         if result.returncode != 0:
             msg = "Expected result.returncode == 0"
             raise AssertionError(msg)
@@ -318,7 +319,7 @@ app.main([])
             master, slave = pty.openpty()
             fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
             try:
-                with subprocess.Popen(  # noqa: S603
+                with subprocess.Popen(
                     [sys.executable, "-c", code],
                     stdin=slave,
                     stdout=slave,
@@ -865,7 +866,7 @@ class TestAgent(unittest.TestCase):  # noqa: D101
         executable = os.environ.get("PACKAGE_E2E_EXECUTABLE")
         if not executable:
             self.skipTest("Nix package executable not supplied")
-        result = subprocess.run(  # noqa: S603
+        result = subprocess.run(
             [executable],
             input="",
             text=True,
@@ -882,6 +883,217 @@ class TestAgent(unittest.TestCase):  # noqa: D101
 
 
 class TestViewer(unittest.TestCase):  # noqa: D101
+    def test_package_summary_fields_and_test_name_children(self) -> None:  # noqa: D102
+        files = {
+            "default.nix": 'meta.description = "Useful package";\n',
+            "main.py": '"""Package help."""\n',
+            "test_main.py": "def test_alpha(): pass\ndef test_beta(): pass\n",
+        }
+        summary = app.Viewer.package_summary("sample", files)
+        if not all(
+            value in summary
+            for value in (
+                "Name: sample",
+                "Description: Useful package",
+                "Help: Package help.",
+                "  test_alpha",
+                "  test_beta",
+            )
+        ):
+            msg = "Package summary must show metadata and test names"
+            raise AssertionError(msg)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = root / "packages/sample"
+            package.mkdir(parents=True)
+            for filename, content in files.items():
+                (package / filename).write_text(content, encoding="utf-8")
+            viewer = app.Viewer(app.Agent(root))
+            viewer.mode = "high-level"
+            viewer.overview = viewer.package_entries()
+            if len(viewer.rows(80)) != 1:
+                msg = "Package children must be collapsed by default"
+                raise AssertionError(msg)
+            viewer.navigate("l", 20, viewer.rows(80))
+            visible = "\n".join(row.text for row in viewer.rows(80))
+            if "Tests" not in visible or "test_alpha" in visible:
+                msg = "Expanding a package must reveal a collapsed Tests group"
+                raise AssertionError(msg)
+            tests_row = next(
+                row for row in viewer.rows(80) if row.text.rstrip().endswith("Tests")
+            )
+            viewer.selected = tests_row.owner
+            viewer.navigate("l", 20, viewer.rows(80))
+            visible = "\n".join(row.text for row in viewer.rows(80))
+            if "test_alpha" not in visible or "test_beta" not in visible:
+                msg = "Expanding Tests must reveal each test name"
+                raise AssertionError(msg)
+            viewer.navigate("h", 20, viewer.rows(80))
+            visible = "\n".join(row.text for row in viewer.rows(80))
+            if "test_alpha" in visible or "test_beta" in visible:
+                msg = "Collapsing Tests must hide its test-name children"
+                raise AssertionError(msg)
+            viewer.selected = 0
+            viewer.navigate("h", 20, viewer.rows(80))
+            if len(viewer.rows(80)) != 1:
+                msg = "Collapsing a package must hide all package children"
+                raise AssertionError(msg)
+
+    def test_high_level_diff_compares_summaries_not_source_code(self) -> None:  # noqa: D102, PLR0915
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(
+                ["git", "-C", str(root), "config", "user.email", "test@example.com"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(root), "config", "user.name", "Test"],
+                check=True,
+            )
+            package = root / "packages/sample"
+            package.mkdir(parents=True)
+            (package / "default.nix").write_text(
+                'meta.description = "Before";\n',
+                encoding="utf-8",
+            )
+            (package / "main.py").write_text(
+                '"""Same help."""\nvalue = 1\n',
+                encoding="utf-8",
+            )
+            (package / "test_main.py").write_text(
+                "def test_old(): pass\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "-C", str(root), "add", "packages"], check=True)
+            subprocess.run(
+                ["git", "-C", str(root), "commit", "-qm", "baseline"],
+                check=True,
+            )
+            (package / "default.nix").write_text(
+                'meta.description = "After";\n',
+                encoding="utf-8",
+            )
+            (package / "main.py").write_text(
+                '"""Same help."""\nvalue = 2\n',
+                encoding="utf-8",
+            )
+            (package / "test_main.py").write_text(
+                "def test_new(): pass\n",
+                encoding="utf-8",
+            )
+            added = root / "packages/added"
+            added.mkdir()
+            (added / "main.py").write_text('"""New package."""\n', encoding="utf-8")
+            removed = root / "packages/removed"
+            removed.mkdir()
+            (removed / "default.nix").write_text(
+                'meta.description = "Gone";\n',
+                encoding="utf-8",
+            )
+            subprocess.run(
+                ["git", "-C", str(root), "add", "packages/removed"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(root), "commit", "-qm", "add removed"],
+                check=True,
+            )
+            shutil.rmtree(removed)
+            viewer = app.Viewer(app.Agent(root))
+            entries = {node.title: node for node in viewer.package_entries(diff=True)}
+            sample_diff = entries["packages/sample"]
+            changed_fields = {node.title for node in sample_diff.children or []}
+            if (
+                "- Description: Before" not in changed_fields
+                or "+ Description: After" not in changed_fields
+            ):
+                msg = "Diff must include changed summary metadata"
+                raise AssertionError(msg)
+            tests = next(
+                node for node in sample_diff.children or [] if node.title == "Tests"
+            )
+            if {node.title for node in tests.children or []} != {
+                "- test_old",
+                "+ test_new",
+            }:
+                msg = "Diff must show removed and added test names"
+                raise AssertionError(msg)
+            viewer.mode = "high-level diff"
+            viewer.overview = [sample_diff]
+            viewer.selected = 0
+            viewer.navigate("l", 20, viewer.rows(80))
+            visible = "\n".join(row.text for row in viewer.rows(80))
+            if "test_old" in visible or "test_new" in visible:
+                msg = "Test-name diff children must be collapsed under Tests"
+                raise AssertionError(msg)
+            tests_row = next(
+                row for row in viewer.rows(80) if row.text.rstrip().endswith("Tests")
+            )
+            viewer.selected = tests_row.owner
+            viewer.navigate("l", 20, viewer.rows(80))
+            visible = "\n".join(row.text for row in viewer.rows(80))
+            if "test_old" not in visible or "test_new" not in visible:
+                msg = "Expanding Tests in a diff must show changed test names"
+                raise AssertionError(msg)
+            if "packages/added" not in entries or "packages/removed" not in entries:
+                msg = "High-level diff must include added and removed packages"
+                raise AssertionError(msg)
+            if any("value =" in node.title for node in sample_diff.children or []):
+                msg = "High-level diff must omit source-code changes"
+                raise AssertionError(msg)
+
+    def test_high_level_diff_omits_unchanged_summaries_and_colors_changes(self) -> None:  # noqa: D102
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(
+                ["git", "-C", str(root), "config", "user.email", "test@example.com"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(root), "config", "user.name", "Test"],
+                check=True,
+            )
+            package = root / "packages/same"
+            package.mkdir(parents=True)
+            (package / "main.py").write_text(
+                '"""Help."""\nvalue = 1\n',
+                encoding="utf-8",
+            )
+            (package / "test_main.py").write_text(
+                "def test_one(): pass\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "-C", str(root), "add", "packages"], check=True)
+            subprocess.run(
+                ["git", "-C", str(root), "commit", "-qm", "baseline"],
+                check=True,
+            )
+            (package / "main.py").write_text(
+                '"""Help."""\nvalue = 2\n',
+                encoding="utf-8",
+            )
+            viewer = app.Viewer(app.Agent(root))
+            if viewer.package_entries(diff=True):
+                msg = "Source-only changes must not appear in a high-level diff"
+                raise AssertionError(msg)
+            viewer.mode = "high-level diff"
+            viewer.overview = [
+                app.TreeNode(
+                    "packages/change",
+                    [
+                        app.TreeNode("- old", style=31),
+                        app.TreeNode("+ new", style=32),
+                    ],
+                    expanded=True,
+                ),
+            ]
+            rows = viewer.rows(80)
+            if viewer.styles(rows[1]) != [31] or viewer.styles(rows[2]) != [32]:
+                msg = "Removed and added summary lines must be red and green"
+                raise AssertionError(msg)
+
     def test_background_history_and_late_cancelled_response(self) -> None:  # noqa: C901, PLR0915
         """Late HTTP results cannot write files or change a later conversation."""
         started, release, delivered = (
@@ -1320,7 +1532,7 @@ agent.turn = turn
 Viewer(agent).run()
 """
         try:
-            self.process = subprocess.Popen(  # noqa: S603
+            self.process = subprocess.Popen(
                 [sys.executable, "-c", code, self.directory.name],
                 stdin=slave,
                 stdout=slave,
