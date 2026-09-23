@@ -2177,6 +2177,13 @@ def _source_argparse_args(source: bytes, filename: str) -> list[str]:  # noqa: C
     def argument_row(call: ast.Call, path: str) -> str:
         if not call.args or any(isinstance(arg, ast.Starred) for arg in call.args):
             unsupported(call)
+        if any(
+            keyword.arg == "help"
+            and isinstance(keyword.value, ast.Attribute)
+            and keyword.value.attr == "SUPPRESS"
+            for keyword in call.keywords
+        ):
+            return ""
         names = [literal(arg) for arg in call.args]
         if any(not isinstance(arg, str) for arg in names):
             unsupported(call)
@@ -2203,6 +2210,13 @@ def _source_argparse_args(source: bytes, filename: str) -> list[str]:  # noqa: C
                         else ast.unparse(keyword.value)
                     )
                     if keyword.arg in {"type", "action"}
+                    or (
+                        keyword.arg == "default"
+                        and isinstance(keyword.value, ast.Call)
+                        and _test_names_qualified_name(keyword.value.func) == "Path"
+                        and not keyword.value.args
+                        and not keyword.value.keywords
+                    )
                     else repr(literal(keyword.value))
                 )
         positional = not str(names[0]).startswith("-")
@@ -2238,6 +2252,10 @@ def _source_argparse_args(source: bytes, filename: str) -> list[str]:  # noqa: C
                 (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
             ):
                 visit(statement.body, owners)
+                continue
+            if isinstance(statement, ast.If):
+                visit(statement.body, owners)
+                visit(statement.orelse, owners)
                 continue
             call = (
                 statement.value
@@ -2284,11 +2302,11 @@ def _source_argparse_args(source: bytes, filename: str) -> list[str]:  # noqa: C
                     path = (path + " " + str(literal(call.args[0]))).strip()
                     lines.append(f"{path}: command")
                 elif method == "add_argument":
-                    lines.append(argument_row(call, path))
+                    row = argument_row(call, path)
+                    if row:
+                        lines.append(row)
                     continue
             else:
-                if parent in owners and method == "set_defaults":
-                    unsupported(call)
                 continue
             if isinstance(statement, ast.Assign):
                 for target in statement.targets:
@@ -3292,7 +3310,7 @@ def parser() -> argparse.ArgumentParser:
         "type",
         nargs="?",
         metavar="TYPE",
-        help=f"package type ({', '.join(PACKAGE_KINDS)})",
+        help="package type (html, latex, nix, python)",
     )
     add.add_argument(
         "description",
@@ -3381,43 +3399,64 @@ def parser() -> argparse.ArgumentParser:
         default=Path(),
         help="canonical packages/NAME or flake root (default: current directory)",
     )
-    for command, description in (
-        ("hypothesis", "run generated property tests in isolated package copies"),
-        ("mutation", "run Cosmic Ray mutation tests in isolated package copies"),
-    ):
-        runner = test_commands.add_parser(
-            command,
-            help=description,
-            description=description.capitalize() + ".",
-            epilog=(
-                "Repository targets run Python packages sequentially, skip packages "
-                "without test_main.py, and summarize results. Logs and reports "
-                "are retained under the flake's tmp/ directory."
-            ),
-        )
-        runner.add_argument(
-            "target",
-            type=Path,
-            nargs="?",
-            default=Path(),
-            help="canonical packages/NAME or flake root (default: current directory)",
-        )
-        runner.add_argument(
-            "--timeout",
-            type=float,
-            default=60.0,
-            help=(
-                "seconds per test-suite invocation, excluding environment build "
-                "(default: 60)"
-            ),
-        )
-        if command == "hypothesis":
-            runner.add_argument(
-                "--max-examples",
-                type=int,
-                default=100,
-                help="successful generated examples per property (default: 100)",
-            )
+    hypothesis = test_commands.add_parser(
+        "hypothesis",
+        help="run generated property tests in isolated package copies",
+        description="Run generated property tests in isolated package copies.",
+        epilog=(
+            "Repository targets run Python packages sequentially, skip packages "
+            "without test_main.py, and summarize results. Logs and reports "
+            "are retained under the flake's tmp/ directory."
+        ),
+    )
+    hypothesis.add_argument(
+        "target",
+        type=Path,
+        nargs="?",
+        default=Path(),
+        help="canonical packages/NAME or flake root (default: current directory)",
+    )
+    hypothesis.add_argument(
+        "--timeout",
+        type=float,
+        default=60.0,
+        help=(
+            "seconds per test-suite invocation, excluding environment build "
+            "(default: 60)"
+        ),
+    )
+    hypothesis.add_argument(
+        "--max-examples",
+        type=int,
+        default=100,
+        help="successful generated examples per property (default: 100)",
+    )
+    mutation = test_commands.add_parser(
+        "mutation",
+        help="run Cosmic Ray mutation tests in isolated package copies",
+        description="Run Cosmic Ray mutation tests in isolated package copies.",
+        epilog=(
+            "Repository targets run Python packages sequentially, skip packages "
+            "without test_main.py, and summarize results. Logs and reports "
+            "are retained under the flake's tmp/ directory."
+        ),
+    )
+    mutation.add_argument(
+        "target",
+        type=Path,
+        nargs="?",
+        default=Path(),
+        help="canonical packages/NAME or flake root (default: current directory)",
+    )
+    mutation.add_argument(
+        "--timeout",
+        type=float,
+        default=60.0,
+        help=(
+            "seconds per test-suite invocation, excluding environment build "
+            "(default: 60)"
+        ),
+    )
     return result
 
 

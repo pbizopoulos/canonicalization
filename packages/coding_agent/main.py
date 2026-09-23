@@ -32,7 +32,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, Self, cast
 
 from git_canonical import CommandError as GitCanonicalError
-from git_canonical import detect_packages, git, home_repositories
+from git_canonical import (
+    detect_packages,
+    git,
+    home_repositories,
+    source_package_args,
+    source_test_names,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -876,8 +882,8 @@ class Viewer:  # noqa: D101
         )
         if argument_changes:
             changes.append(TreeNode("Arguments", argument_changes))
-        old_tests = [line.strip() for line in old_lines if line.startswith("  test_")]
-        new_tests = [line.strip() for line in new_lines if line.startswith("  test_")]
+        old_tests = cls.summary_group(previous, "Tests")
+        new_tests = cls.summary_group(current, "Tests")
         test_changes = [
             TreeNode(f"- {name}", style=31)
             for name in old_tests
@@ -912,50 +918,15 @@ class Viewer:  # noqa: D101
 
     @staticmethod
     def argument_names(files: dict[str, str]) -> list[str]:
-        """Read argparse declarations and help text without importing code."""
-        with contextlib.suppress(SyntaxError):
-            module = ast.parse(files.get("main.py", ""))
-            arguments: list[str] = []
-            parsers: list[ast.Call] = []
-            for node in ast.walk(module):
-                if not isinstance(node, ast.Call) or not isinstance(
-                    node.func,
-                    ast.Attribute,
-                ):
-                    continue
-                if node.func.attr == "add_argument":
-                    names = [
-                        value.value
-                        for value in node.args
-                        if isinstance(value, ast.Constant)
-                        and isinstance(value.value, str)
-                    ]
-                    if names:
-                        help_text = next(
-                            (
-                                keyword.value.value
-                                for keyword in node.keywords
-                                if keyword.arg == "help"
-                                and isinstance(keyword.value, ast.Constant)
-                                and isinstance(keyword.value.value, str)
-                            ),
-                            "",
-                        )
-                        rendered = ", ".join(names)
-                        arguments.append(
-                            f"{rendered} — {help_text}" if help_text else rendered,
-                        )
-                elif node.func.attr == "ArgumentParser":
-                    parsers.append(node)
-            if parsers and not any(
-                keyword.arg == "add_help"
-                and isinstance(keyword.value, ast.Constant)
-                and keyword.value.value is False
-                for parser in parsers
-                for keyword in parser.keywords
-            ):
-                arguments.append("--help")
-            return sorted(set(arguments))
+        """Read the canonical static CLI summary without importing package code."""
+        with contextlib.suppress(SyntaxError, ValueError):
+            return cast(
+                "list[str]",
+                source_package_args(
+                    files.get("main.py", "").encode("utf-8"),
+                    "main.py",
+                ),
+            )
         return []
 
     @staticmethod
@@ -975,13 +946,10 @@ class Viewer:  # noqa: D101
             help_text = ast.get_docstring(ast.parse(files.get("main.py", ""))) or ""
         test_names: list[str] = []
         with contextlib.suppress(SyntaxError):
-            module = ast.parse(files.get("test_main.py", ""))
-            test_names = [
-                node.name
-                for node in ast.walk(module)
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and node.name.startswith("test_")
-            ]
+            test_names = source_test_names(
+                files.get("test_main.py", "").encode("utf-8"),
+                "test_main.py",
+            )
         arguments = Viewer.argument_names(files)
         details = [
             f"Name: {name}",

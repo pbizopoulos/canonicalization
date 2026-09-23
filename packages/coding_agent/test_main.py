@@ -902,9 +902,9 @@ class TestViewer(unittest.TestCase):  # noqa: D101
                 "Name: sample",
                 "Description: Useful package",
                 "Help: Package help.",
-                "--input — Input path",
-                "  test_alpha",
-                "  test_beta",
+                "--input  optional; help='Input path'",
+                "  test alpha",
+                "  test beta",
             )
         ):
             msg = "Package summary must show metadata and test names"
@@ -934,12 +934,12 @@ class TestViewer(unittest.TestCase):  # noqa: D101
             viewer.selected = arguments_row.owner
             viewer.navigate("l", 20, viewer.rows(80))
             visible = "\n".join(row.text for row in viewer.rows(80))
-            if "--input — Input path" not in visible or "--help" not in visible:
-                msg = "Expanding Arguments must show declared and generated options"
+            if "--input  optional; help='Input path'" not in visible:
+                msg = "Expanding Arguments must show declared options"
                 raise AssertionError(msg)
             viewer.navigate("h", 20, viewer.rows(80))
             visible = "\n".join(row.text for row in viewer.rows(80))
-            if "--input — Input path" in visible:
+            if "--input  optional; help='Input path'" in visible:
                 msg = "Collapsing Arguments must hide argument entries"
                 raise AssertionError(msg)
             tests_row = next(
@@ -948,12 +948,12 @@ class TestViewer(unittest.TestCase):  # noqa: D101
             viewer.selected = tests_row.owner
             viewer.navigate("l", 20, viewer.rows(80))
             visible = "\n".join(row.text for row in viewer.rows(80))
-            if "test_alpha" not in visible or "test_beta" not in visible:
+            if "test alpha" not in visible or "test beta" not in visible:
                 msg = "Expanding Tests must reveal each test name"
                 raise AssertionError(msg)
             viewer.navigate("h", 20, viewer.rows(80))
             visible = "\n".join(row.text for row in viewer.rows(80))
-            if "test_alpha" in visible or "test_beta" in visible:
+            if "test alpha" in visible or "test beta" in visible:
                 msg = "Collapsing Tests must hide its test-name children"
                 raise AssertionError(msg)
             viewer.selected = 0
@@ -961,6 +961,40 @@ class TestViewer(unittest.TestCase):  # noqa: D101
             if len(viewer.rows(80)) != 1:
                 msg = "Collapsing a package must hide all package children"
                 raise AssertionError(msg)
+
+    def test_package_summary_uses_canonical_test_discovery(self) -> None:  # noqa: D102
+        files = {
+            "test_main.py": (
+                "def test_top_level(): pass\n"
+                "def helper_test(): pass\n"
+                "class TestCases:\n"
+                "    def test_method_case(self): pass\n"
+                "    def helper(self): pass\n"
+                "class Helpers:\n"
+                "    def test_not_a_case(self): pass\n"
+            ),
+        }
+        summary = app.Viewer.package_summary("sample", files)
+        tests = app.Viewer.summary_group(summary, "Tests")
+        if tests != ["test top level", "test method case"]:
+            msg = f"Unexpected canonical test names: {tests!r}"
+            raise AssertionError(msg)
+
+    def test_argument_names_use_canonical_cli_parser(self) -> None:  # noqa: D102
+        source = (
+            "import argparse\n"
+            "parser = argparse.ArgumentParser()\n"
+            "commands = parser.add_subparsers()\n"
+            "build = commands.add_parser('build')\n"
+            "build.add_argument('--jobs', type=int, default=2, help='Worker count')\n"
+        )
+        arguments = app.Viewer.argument_names({"main.py": source})
+        if arguments != [
+            "build: command",
+            "build: --jobs  optional; default=2; type=int; help='Worker count'",
+        ]:
+            msg = f"Unexpected canonical CLI summary: {arguments!r}"
+            raise AssertionError(msg)
 
     def test_high_level_diff_compares_summaries_not_source_code(self) -> None:  # noqa: D102, PLR0915
         with tempfile.TemporaryDirectory() as directory:
@@ -1045,8 +1079,8 @@ class TestViewer(unittest.TestCase):  # noqa: D101
                 node for node in sample_diff.children or [] if node.title == "Tests"
             )
             if {node.title for node in tests.children or []} != {
-                "- test_old",
-                "+ test_new",
+                "- test old",
+                "+ test new",
             }:
                 msg = "Diff must show removed and added test names"
                 raise AssertionError(msg)
@@ -1054,8 +1088,8 @@ class TestViewer(unittest.TestCase):  # noqa: D101
                 node for node in sample_diff.children or [] if node.title == "Arguments"
             )
             if {node.title for node in arguments.children or []} != {
-                "- --old — Old option",
-                "+ --new — New option",
+                "- --old  optional; help='Old option'",
+                "+ --new  optional; help='New option'",
             }:
                 msg = "Argument diff must show removed and added CLI options"
                 raise AssertionError(msg)
@@ -1064,7 +1098,7 @@ class TestViewer(unittest.TestCase):  # noqa: D101
             viewer.selected = 0
             viewer.navigate("l", 20, viewer.rows(80))
             visible = "\n".join(row.text for row in viewer.rows(80))
-            if "test_old" in visible or "test_new" in visible:
+            if "test old" in visible or "test new" in visible:
                 msg = "Test-name diff children must be collapsed under Tests"
                 raise AssertionError(msg)
             if "--old" in visible or "--new" in visible:
@@ -1087,7 +1121,7 @@ class TestViewer(unittest.TestCase):  # noqa: D101
             viewer.selected = tests_row.owner
             viewer.navigate("l", 20, viewer.rows(80))
             visible = "\n".join(row.text for row in viewer.rows(80))
-            if "test_old" not in visible or "test_new" not in visible:
+            if "test old" not in visible or "test new" not in visible:
                 msg = "Expanding Tests in a diff must show changed test names"
                 raise AssertionError(msg)
             if "packages/added" not in entries or "packages/removed" not in entries:
