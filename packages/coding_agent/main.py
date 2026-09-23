@@ -91,6 +91,11 @@ TOOLS = [
         "Supports build, run, develop, fmt, and flake subcommands. No shell expansion.",
         arguments="Arguments without nix, e.g. build .#package or flake check .",
     ),
+    tool(
+        "git-canonical",
+        "Run git-canonical in the startup directory; 600-second timeout. No shell expansion.",
+        arguments="Arguments without git-canonical, e.g. converge or package create name",
+    ),
 ]
 
 
@@ -490,6 +495,11 @@ class Agent:  # noqa: D101
                         "nix-command flakes",
                         *shlex.split(args["arguments"]),
                     ],
+                    NIX_TIMEOUT,
+                )
+            if name == "git-canonical":
+                return self.run(
+                    ["git-canonical", *shlex.split(args["arguments"])],
                     NIX_TIMEOUT,
                 )
             path = self.cwd / args["path"]
