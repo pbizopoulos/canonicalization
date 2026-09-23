@@ -1,8 +1,9 @@
-{ pkgs, ... }:
+{ inputs, pkgs, ... }:
 let
   pname = baseNameOf ./.;
   python = pkgs.python3;
   runtimeInputs = [
+    inputs.self.packages.${pkgs.stdenv.system}.git-canonical
     pkgs.bash
     pkgs.git
     pkgs.nix

@@ -31,6 +31,9 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, Self, cast
 
+from git_canonical import CommandError as GitCanonicalError
+from git_canonical import detect_packages, git, home_repositories
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 BASE_URL = "http://127.0.0.1:8080"
@@ -731,26 +734,18 @@ class Viewer:  # noqa: D101
         if (root / ".gitmodules").is_file() and not (root / "packages").is_dir():
             return self.home_package_entries(root, diff=diff)
         packages = root / "packages"
-        current_names = (
-            {path.name for path in packages.iterdir() if path.is_dir()}
-            if packages.is_dir()
-            else set()
-        )
+        try:
+            current_names = {package.name for package in detect_packages(root)}
+        except GitCanonicalError as exc:
+            self.status = str(exc)
+            return []
         if not diff and not packages.is_dir():
             return [TreeNode("packages/ (not found)")]
+        names = current_names
         if diff:
-            historic = subprocess.run(  # noqa: S603
-                [  # noqa: S607
-                    "git",
-                    "-C",
-                    str(root),
-                    "ls-tree",
-                    "-d",
-                    "--name-only",
-                    "HEAD:packages",
-                ],
-                capture_output=True,
-                text=True,
+            historic = git(
+                root,
+                ["ls-tree", "-d", "--name-only", "HEAD:packages"],
                 check=False,
             )
             if historic.returncode:
@@ -760,75 +755,48 @@ class Viewer:  # noqa: D101
                 )
                 return []
             names = current_names | set(historic.stdout.splitlines())
-        else:
-            names = current_names
-        result: list[TreeNode] = []
-        for name in sorted(names):
-            directory = packages / name
-            if diff:
-                previous_files = {}
-                for filename in ("default.nix", "main.py", "test_main.py"):
-                    completed = subprocess.run(  # noqa: S603
-                        [  # noqa: S607
-                            "git",
-                            "-C",
-                            str(root),
-                            "show",
-                            f"HEAD:packages/{name}/{filename}",
-                        ],
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                    )
-                    if completed.returncode == 0:
-                        previous_files[filename] = completed.stdout
-                previous = self.package_summary(name, previous_files)
-                current = self.package_summary(
-                    name,
-                    {
-                        filename: (directory / filename).read_text(encoding="utf-8")
-                        for filename in ("default.nix", "main.py", "test_main.py")
-                        if (directory / filename).is_file()
-                    },
-                )
-                children = self.summary_changes(previous, current)
-                if children:
-                    result.append(TreeNode(f"packages/{name}", children))
-                continue
-            summary = self.package_summary(
-                name,
-                {
-                    filename: (directory / filename).read_text(encoding="utf-8")
-                    for filename in ("default.nix", "main.py", "test_main.py")
-                    if (directory / filename).is_file()
-                },
+        return [
+            entry
+            for name in sorted(names)
+            if (entry := self.package_entry(root, name, diff=diff)) is not None
+        ]
+
+    def package_entry(self, root: Path, name: str, *, diff: bool) -> TreeNode | None:
+        """Build one package summary or its high-level changes."""
+        directory = root / "packages" / name
+        filenames = ("default.nix", "main.py", "test_main.py")
+        current_files = {
+            filename: (directory / filename).read_text(encoding="utf-8")
+            for filename in filenames
+            if (directory / filename).is_file()
+        }
+        if not diff:
+            summary = self.package_summary(name, current_files)
+            return TreeNode(f"packages/{name}", self.summary_tree(summary))
+        previous_files = {}
+        for filename in filenames:
+            completed = git(
+                root,
+                ["show", f"HEAD:packages/{name}/{filename}"],
+                check=False,
             )
-            result.append(TreeNode(f"packages/{name}", self.summary_tree(summary)))
-        return result
+            if completed.returncode == 0:
+                previous_files[filename] = completed.stdout
+        previous = self.package_summary(name, previous_files)
+        current = self.package_summary(name, current_files)
+        children = self.summary_changes(previous, current)
+        return TreeNode(f"packages/{name}", children) if children else None
 
     def home_package_entries(self, root: Path, *, diff: bool) -> list[TreeNode]:
         """Build repository summaries beneath their home-repository paths."""
-        completed = subprocess.run(  # noqa: S603
-            [  # noqa: S607
-                "git",
-                "-C",
-                str(root),
-                "config",
-                "--file",
-                ".gitmodules",
-                "--get-regexp",
-                r"^submodule\..*\.path$",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if completed.returncode not in (0, 1):
-            self.status = completed.stderr.strip() or "Could not read repository paths"
+        try:
+            repositories = home_repositories(root, require_url=False)
+        except GitCanonicalError as exc:
+            self.status = str(exc)
             return []
         tree: dict[str, Any] = {}
-        for line in completed.stdout.splitlines():
-            _, relative = line.split(None, 1)
+        for item in repositories:
+            relative = item["path"]
             repository = root / relative
             if not (repository / "packages").is_dir():
                 continue
@@ -1539,6 +1507,15 @@ class Viewer:  # noqa: D101
                     self.overview = self.package_entries(
                         diff=next_mode == "high-level diff",
                     )
+                    if next_mode == "high-level diff":
+
+                        def expand(nodes: list[TreeNode]) -> None:
+                            for node in nodes:
+                                node.expanded = bool(node.children)
+                                if node.children:
+                                    expand(node.children)
+
+                        expand(self.overview)
                 self.mode = next_mode
                 self.selected = self.top = 0
                 self.match = None

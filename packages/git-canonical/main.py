@@ -237,7 +237,11 @@ def canonical_remote_path(remote: str) -> Path:
     return Path(*components)
 
 
-def home_repositories(root: Path) -> list[dict[str, str]]:
+def home_repositories(
+    root: Path,
+    *,
+    require_url: bool = True,
+) -> list[dict[str, str]]:
     """Read submodule records using Git's configuration parser."""
     modules = root / ".gitmodules"
     if not modules.exists():
@@ -275,8 +279,10 @@ def home_repositories(root: Path) -> list[dict[str, str]]:
         grouped.setdefault(match.group(1), {})[match.group(2)] = value
     repositories = []
     for name, fields in sorted(grouped.items()):
-        if set(fields) != {"path", "url"}:
-            msg = f'submodule "{name}": must have exactly one path and one URL'
+        required = {"path", "url"} if require_url else {"path"}
+        if not required.issubset(fields) or set(fields) - {"path", "url"}:
+            suffix = "path and one URL" if require_url else "path"
+            msg = f'submodule "{name}": must have exactly one {suffix}'
             raise CommandError(
                 msg,
             )
