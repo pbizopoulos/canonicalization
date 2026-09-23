@@ -3,6 +3,7 @@
 """An interactive or single-prompt client for a local llama.cpp coding model."""
 
 import argparse
+import ast
 import contextlib
 import ctypes
 import curses
@@ -699,6 +700,71 @@ class Viewer:  # noqa: D101
             tuple[str, str, bool | None] | BaseException | None
         ] = queue.Queue()
         self.waiting_notice = False
+        self.mode = "chat"
+
+    def package_entries(self, *, diff: bool = False) -> list[Entry]:
+        """Build the package tree and optionally attach each package's Git diff."""
+        root = self.agent.cwd
+        packages = root / "packages"
+        result: list[Entry] = []
+        if not packages.is_dir():
+            return [Entry("packages/ (not found)", "")]
+        for directory in sorted(path for path in packages.iterdir() if path.is_dir()):
+            main = directory / "main.py"
+            default = directory / "default.nix"
+            tests = directory / "test_main.py"
+            description = ""
+            if default.is_file():
+                match = re.search(
+                    r'description\s*=\s*"((?:[^"\\]|\\.)*)"',
+                    default.read_text(encoding="utf-8"),
+                )
+                if match:
+                    description = bytes(match.group(1), "utf-8").decode(
+                        "unicode_escape",
+                    )
+            help_text = ""
+            if main.is_file():
+                with contextlib.suppress(SyntaxError, OSError):
+                    module = ast.parse(main.read_text(encoding="utf-8"))
+                    help_text = ast.get_docstring(module) or ""
+            test_names: list[str] = []
+            if tests.is_file():
+                with contextlib.suppress(SyntaxError, OSError):
+                    module = ast.parse(tests.read_text(encoding="utf-8"))
+                    test_names = [
+                        node.name
+                        for node in ast.walk(module)
+                        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and node.name.startswith("test_")
+                    ]
+            details = [
+                f"Description: {description or '(not declared)'}",
+                f"Help: {help_text or '(module docstring not declared)'}",
+                "Tests:",
+            ]
+            details.extend(f"  {name}" for name in test_names or ["(none)"])
+            body = "\n".join(details)
+            if diff:
+                completed = subprocess.run(  # noqa: S603
+                    [  # noqa: S607
+                        "git",
+                        "-C",
+                        str(root),
+                        "diff",
+                        "HEAD",
+                        "--",
+                        f"packages/{directory.name}",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                body += "\n\nGit diff:\n" + (completed.stdout or "(no tracked changes)")
+                if completed.returncode:
+                    body += f"\nGit diff failed: {completed.stderr.strip()}"
+            result.append(Entry(f"packages/{directory.name}", body))
+        return result
 
     def event(self, kind: str, text: str, success: bool | None) -> None:  # noqa: D102, FBT001
         follow = (
@@ -1064,7 +1130,7 @@ class Viewer:  # noqa: D101
                 else self.status
                 or (
                     f"{'(END) ' if self.top + page >= len(rows) else ''}"
-                    "j/k parent  l/h open/close  space/b page  "
+                    f"{self.mode} | v view  j/k parent  l/h open/close  space/b page  "
                     "/? search  n/N next  q quit"
                 )
             )
@@ -1093,6 +1159,21 @@ class Viewer:  # noqa: D101
                 continue
             if key == "q" or (prefix == "Z" and key == "Z"):
                 return
+            if key == "v":
+                modes = ("chat", "high-level", "high-level diff")
+                next_mode = modes[(modes.index(self.mode) + 1) % len(modes)]
+                if self.mode == "chat":
+                    self.chat_entries = self.entries
+                if next_mode == "chat":
+                    self.entries = self.chat_entries
+                else:
+                    self.entries = self.package_entries(
+                        diff=next_mode == "high-level diff",
+                    )
+                self.mode = next_mode
+                self.selected = self.top = 0
+                self.match = None
+                continue
             prefix = key if key in (":", "Z") else ""
             self.status = ""
             if key in ("/", "?"):
