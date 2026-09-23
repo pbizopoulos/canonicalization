@@ -715,6 +715,8 @@ class Viewer:  # noqa: D101
     def package_entries(self, *, diff: bool = False) -> list[TreeNode]:
         """Build a collapsible package tree or its high-level changes."""
         root = self.agent.cwd
+        if (root / ".gitmodules").is_file() and not (root / "packages").is_dir():
+            return self.home_package_entries(root, diff=diff)
         packages = root / "packages"
         current_names = (
             {path.name for path in packages.iterdir() if path.is_dir()}
@@ -790,6 +792,55 @@ class Viewer:  # noqa: D101
             )
             result.append(TreeNode(f"packages/{name}", self.summary_tree(summary)))
         return result
+
+    def home_package_entries(self, root: Path, *, diff: bool) -> list[TreeNode]:
+        """Build repository summaries beneath their home-repository paths."""
+        completed = subprocess.run(  # noqa: S603
+            [
+                "git",
+                "-C",
+                str(root),
+                "config",
+                "--file",
+                ".gitmodules",
+                "--get-regexp",
+                r"^submodule\..*\.path$",
+            ],  # noqa: S607
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode not in (0, 1):
+            self.status = completed.stderr.strip() or "Could not read repository paths"
+            return []
+        tree: dict[str, Any] = {}
+        for line in completed.stdout.splitlines():
+            _, relative = line.split(None, 1)
+            repository = root / relative
+            if not (repository / "packages").is_dir():
+                continue
+            viewer = Viewer(Agent(repository))
+            entries = viewer.package_entries(diff=diff)
+            if viewer.status:
+                self.status = viewer.status
+            if not entries:
+                continue
+            branch = tree
+            parts = Path(relative).parts
+            for part in parts[:-1]:
+                branch = branch.setdefault(part, {})
+            branch[parts[-1]] = {"": entries}
+
+        def nodes(branch: dict[str, Any]) -> list[TreeNode]:
+            result = []
+            for name, children in sorted(branch.items()):
+                if name == "":
+                    result.extend(children)
+                else:
+                    result.append(TreeNode(name, nodes(children)))
+            return result
+
+        return nodes(tree)
 
     @staticmethod
     def summary_tree(summary: str) -> list[TreeNode]:

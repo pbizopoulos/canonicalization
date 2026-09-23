@@ -1096,6 +1096,30 @@ class TestViewer(unittest.TestCase):  # noqa: D101
                 msg = "High-level diff must omit source-code changes"
                 raise AssertionError(msg)
 
+    def test_home_high_level_preserves_repository_directory_structure(self) -> None:  # noqa: D102
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            (root / ".gitmodules").write_text(
+                '[submodule "github.com/example/project"]\n'
+                "\tpath = github.com/example/project\n",
+                encoding="utf-8",
+            )
+            package = root / "github.com/example/project/packages/sample"
+            package.mkdir(parents=True)
+            (package / "main.py").write_text('"""Sample help."""\n', encoding="utf-8")
+            viewer = app.Viewer(app.Agent(root))
+            entries = viewer.package_entries()
+            if [node.title for node in entries] != ["github.com"]:
+                msg = "Home overview must start with the repository path parent"
+                raise AssertionError(msg)
+            domain = entries[0].children or []
+            organization = domain[0].children or []
+            repository = organization[0].children or []
+            if repository[0].title != "packages/sample":
+                msg = "Home overview must preserve repository and package hierarchy"
+                raise AssertionError(msg)
+
     def test_high_level_diff_omits_unchanged_summaries_and_colors_changes(self) -> None:  # noqa: D102
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
