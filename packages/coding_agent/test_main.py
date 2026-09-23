@@ -693,10 +693,11 @@ class TestAgent(unittest.TestCase):  # noqa: D101
             "edit",
             "bash",
             "nix",
+            "git-canonical",
         ]:
             msg = (
                 "Expected [t['function']['name'] for t in payload['tools']] "
-                "== ['read', 'write', 'edit', 'bash', 'nix']"
+                "== ['read', 'write', 'edit', 'bash', 'nix', 'git-canonical']"
             )
             raise AssertionError(msg)
         results = requests[2][1]["messages"][-2:]

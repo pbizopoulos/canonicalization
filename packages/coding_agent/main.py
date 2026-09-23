@@ -93,8 +93,11 @@ TOOLS = [
     ),
     tool(
         "git-canonical",
-        "Run git-canonical in the startup directory; 600-second timeout. No shell expansion.",
-        arguments="Arguments without git-canonical, e.g. converge or package create name",
+        "Run git-canonical in the startup directory; 600-second timeout. "
+        "No shell expansion.",
+        arguments=(
+            "Arguments without git-canonical, e.g. converge or package create name"
+        ),
     ),
 ]
 
@@ -806,7 +809,7 @@ class Viewer:  # noqa: D101
     def home_package_entries(self, root: Path, *, diff: bool) -> list[TreeNode]:
         """Build repository summaries beneath their home-repository paths."""
         completed = subprocess.run(  # noqa: S603
-            [
+            [  # noqa: S607
                 "git",
                 "-C",
                 str(root),
@@ -815,7 +818,7 @@ class Viewer:  # noqa: D101
                 ".gitmodules",
                 "--get-regexp",
                 r"^submodule\..*\.path$",
-            ],  # noqa: S607
+            ],
             capture_output=True,
             text=True,
             check=False,
