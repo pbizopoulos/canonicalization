@@ -33,6 +33,10 @@ import pytest
 
 from packages.coding_agent import main as app
 
+TEST_EXPECTED_BUILDS = 2
+TEST_PAGE_HEIGHT = 2
+TEST_EXPECTED_VISIBLE = 2
+
 
 @pytest.fixture(autouse=True)
 def isolated_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -765,6 +769,28 @@ class TestAgent(unittest.TestCase):  # noqa: D101
             msg = "Expected len(self.agent.messages) == 1"
             raise AssertionError(msg)
 
+    def test_discover_rejects_malformed_model_responses(self) -> None:
+        """Invalid model payloads fail without leaving a partial model value."""
+        responses: tuple[Any, ...] = (
+            None,
+            {},
+            {"data": None},
+            {"data": [{}]},
+            {"data": [{"id": 1}]},
+            {"data": [{"id": ""}]},
+        )
+        for response in responses:
+            with self.subTest(response=response):
+                agent = app.Agent(self.directory.name)
+                with (
+                    patch.object(agent, "request", return_value=response),
+                    pytest.raises(app.AgentError, match="model ID"),
+                ):
+                    agent.discover()
+                if agent.model is not None:
+                    msg = "Invalid model data must not set a model ID"
+                    raise AssertionError(msg)
+
     def test_failed_or_cancelled_turn_preserves_files_and_previous_conversation(  # noqa: D102
         self,
     ) -> None:
@@ -884,6 +910,79 @@ class TestAgent(unittest.TestCase):  # noqa: D101
 
 
 class TestViewer(unittest.TestCase):  # noqa: D101
+    def test_overview_is_cached_until_refreshed(self) -> None:  # noqa: D102
+        viewer = app.Viewer(app.Agent())
+        with patch.object(
+            viewer,
+            "package_entries",
+            side_effect=[[app.TreeNode("first")], [app.TreeNode("second")]],
+        ) as build:
+            viewer.ensure_overview()
+            viewer.ensure_overview()
+            if build.call_count != 1 or viewer.overview[0].title != "first":
+                msg = "The startup overview must be built only once"
+                raise AssertionError(msg)
+            viewer.selected = viewer.top = 3
+            viewer.refresh_overview()
+            if (
+                build.call_count != TEST_EXPECTED_BUILDS
+                or viewer.overview[0].title != "second"
+            ):
+                msg = "Refreshing must rebuild the overview"
+                raise AssertionError(msg)
+            if viewer.selected != 0 or viewer.top != 0:
+                msg = "Refreshing must reset navigation to the start"
+                raise AssertionError(msg)
+
+    def test_g_and_capital_g_move_cursor_to_viewport_edges(self) -> None:  # noqa: D102
+        for mode in ("chat", "high-level"):
+            viewer = app.Viewer(app.Agent())
+            viewer.mode = mode
+            if mode == "chat":
+                for index in range(5):
+                    viewer.event("chat", f"assistant> {index}", None)
+            else:
+                viewer.overview = [app.TreeNode(str(index)) for index in range(5)]
+            rows = viewer.rows(80)
+            viewer.navigate("G", TEST_PAGE_HEIGHT, rows)
+            if (
+                viewer.top != len(rows) - TEST_PAGE_HEIGHT
+                or viewer.selected != rows[-1].owner
+            ):
+                msg = f"G must place the cursor on the bottom row in {mode} mode"
+                raise AssertionError(msg)
+            viewer.navigate("g", TEST_PAGE_HEIGHT, viewer.rows(80))
+            if viewer.top != 0 or viewer.selected != 0:
+                msg = f"g must place the cursor on the top row in {mode} mode"
+                raise AssertionError(msg)
+
+    def test_overview_child_collapse_and_cursor_follow(self) -> None:  # noqa: D102
+        viewer = app.Viewer(app.Agent())
+        viewer.mode = "high-level"
+        leaf = app.TreeNode("leaf")
+        branch = app.TreeNode("branch", [leaf])
+        viewer.overview = [app.TreeNode("root", [branch])]
+        viewer.height = 2
+        viewer.navigate("l", 2, viewer.rows(80))
+        viewer.navigate("j", 2, viewer.rows(80))
+        viewer.navigate("l", 2, viewer.rows(80))
+        viewer.navigate("j", 2, viewer.rows(80))
+        visible = viewer.rows(80)
+        selected_row = next(
+            index for index, row in enumerate(visible) if row.owner == viewer.selected
+        )
+        if not viewer.top <= selected_row < viewer.top + viewer.height:
+            msg = "Moving down must scroll the selected tree row into view"
+            raise AssertionError(msg)
+        viewer.navigate("h", 2, visible)
+        visible = viewer.rows(80)
+        if (
+            viewer.overview_visible[viewer.selected].title != "branch"
+            or len(visible) != TEST_EXPECTED_VISIBLE
+        ):
+            msg = "h on a nested child must collapse its parent and select that parent"
+            raise AssertionError(msg)
+
     def test_package_summary_fields_and_test_name_children(self) -> None:  # noqa: D102
         files = {
             "default.nix": 'meta.description = "Useful package";\n',
