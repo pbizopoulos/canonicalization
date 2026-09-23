@@ -549,6 +549,135 @@ def _run_test_names(cwd: Path, *arguments: str) -> subprocess.CompletedProcess[s
     )
 
 
+@pytest.mark.parametrize(
+    ("imports", "constructor"),
+    [
+        ("import argparse", "argparse.ArgumentParser"),
+        ("import argparse as cli", "cli.ArgumentParser"),
+        ("from argparse import ArgumentParser as Parser", "Parser"),
+    ],
+)
+def test_args_lists_static_interfaces_without_execution(
+    tmp_path: Path,
+    imports: str,
+    constructor: str,
+) -> None:
+    """Expose aliases, subcommands and declared constraints without imports."""
+    package = _make_test_names_package(tmp_path, "example", "")
+    (package / "main.py").write_text(
+        f"{imports}\nraise RuntimeError('must not execute')\n"
+        f"parser = {constructor}()\n"
+        "parser.add_argument('-o', '--output', default='out')\n"
+        "commands = parser.add_subparsers()\n"
+        "run = commands.add_parser('run')\n"
+        "run.add_argument('mode', choices=['fast', 'slow'])\n",
+    )
+    result = _run(package, "args")
+    if result.stdout != (
+        "-o, --output  optional; default='out'\n"
+        "run: command\n"
+        "run: mode  required; choices=['fast', 'slow']\n"
+    ):
+        message = "Unexpected argument review result"
+        raise AssertionError(message)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import sys\nprint(sys.argv)\n",
+        "import argparse\np = argparse.ArgumentParser()\np.add_argument(dynamic)\n",
+        (
+            "import argparse\np = argparse.ArgumentParser()\n"
+            "for name in names:\n p.add_argument(name)\n"
+        ),
+    ],
+)
+def test_args_rejects_unsupported_interfaces(tmp_path: Path, source: str) -> None:
+    """Report unsupported interfaces instead of claiming an empty contract."""
+    package = _make_test_names_package(tmp_path, "example", "")
+    (package / "main.py").write_text(source)
+    result = _run(package, "args", code=1)
+    if "unsupported CLI interface" not in result.stderr:
+        message = "Unexpected argument review result"
+        raise AssertionError(message)
+    if result.stdout != "":
+        message = "Unexpected argument review result"
+        raise AssertionError(message)
+
+
+def test_args_repository_continues_after_unsupported_package(tmp_path: Path) -> None:
+    """Keep repository listings useful when some interfaces are unsupported."""
+    _make_test_names_package(tmp_path, "alpha", "")
+    package = _make_test_names_package(tmp_path, "zebra", "")
+    (package / "main.py").write_text(
+        "import argparse\np = argparse.ArgumentParser()\n"
+        "p.add_argument('--verbose', action='store_true')\n",
+    )
+    result = _run(tmp_path, "args", code=1)
+    if (
+        result.stdout
+        != (
+            "packages/alpha:\npackages/zebra:\n"
+            "--verbose  optional; action='store_true'\n"
+        )
+        or "alpha: unsupported CLI interface" not in result.stderr
+    ):
+        message = "Repository review did not continue after an unsupported package"
+        raise AssertionError(message)
+
+
+def test_args_git_views_compare_interfaces(repository: Path) -> None:
+    """Compare staged and historical declarations while ignoring body edits."""
+    package = _make_test_names_package(repository, "example", "")
+    source = package / "main.py"
+    before = "import argparse\np = argparse.ArgumentParser()\np.add_argument('--old')\n"
+    source.write_text(before)
+    _git(repository, "add", ".")
+    _git(
+        repository,
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "-qm",
+        "initial",
+    )
+    source.write_text(before + "print('implementation only')\n")
+    if _run(repository, "args", "diff").stdout != "":
+        message = "Unexpected argument review result"
+        raise AssertionError(message)
+    source.write_text(before.replace("--old", "--new"))
+    diff = _run(repository, "args", "diff").stdout
+    if "---old  optional" not in diff:
+        message = "Unexpected argument review result"
+        raise AssertionError(message)
+    if "+--new  optional" not in diff:
+        message = "Unexpected argument review result"
+        raise AssertionError(message)
+    if not ("add_argument" not in diff):
+        message = "Unexpected argument review result"
+        raise AssertionError(message)
+    _git(repository, "add", ".")
+    if "+--new  optional" not in _run(repository, "args", "diff", "--staged").stdout:
+        message = "Unexpected argument review result"
+        raise AssertionError(message)
+    _git(
+        repository,
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "-qm",
+        "change",
+    )
+    if "+--new  optional" not in _run(repository, "args", "show", "HEAD").stdout:
+        message = "Unexpected argument review result"
+        raise AssertionError(message)
+
+
 @pytest.mark.parametrize("explicit", [False, True])
 @pytest.mark.parametrize("package_name", ["example", "my-package"])
 def test_names_package_names_become_sentences_without_executing_source(

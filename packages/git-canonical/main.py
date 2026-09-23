@@ -1970,7 +1970,11 @@ def _test_names_git_arguments(arguments: list[str]) -> tuple[list[str], list[str
     return options, paths
 
 
-def _check_test_names_diff_attributes(configuration: list[str], paths: bytes) -> None:
+def _check_test_names_diff_attributes(
+    configuration: list[str],
+    paths: bytes,
+    driver_name: str = "python-test-names",
+) -> None:
     """Refuse attribute overrides that would expose unconverted source."""
     if not paths:
         return
@@ -1980,7 +1984,7 @@ def _check_test_names_diff_attributes(configuration: list[str], paths: bytes) ->
     ).split(b"\0")
     for index in range(0, len(attributes) - 1, 3):
         path, _, driver = attributes[index : index + 3]
-        if driver != b"python-test-names":
+        if driver != driver_name.encode():
             message = f"conflicting diff attribute for {path.decode(errors='replace')}"
             raise ValueError(message)
 
@@ -2005,7 +2009,12 @@ def _test_names_diff_paths(raw: bytes) -> bytes:
     return b"\0".join(paths) + (b"\0" if paths else b"")
 
 
-def _print_test_names_git(command: str, arguments: list[str]) -> int:
+def _print_test_names_git(
+    command: str,
+    arguments: list[str],
+    *,
+    package_args: bool = False,
+) -> int:
     """Let Git compare test sentences using an invocation-local textconv driver."""
     options, paths = _test_names_git_arguments(arguments)
     if command == "show":
@@ -2019,23 +2028,24 @@ def _print_test_names_git(command: str, arguments: list[str]) -> int:
     root = (
         _test_names_git_output(["rev-parse", "--show-toplevel"]).decode().rstrip("\n")
     )
-    converter = shlex.join(
-        [str(Path(sys.argv[0]).resolve()), "test", "names", "_textconv"],
-    )
+    view = ["args"] if package_args else ["test", "names"]
+    driver = "python-package-args" if package_args else "python-test-names"
+    filename = "main.py" if package_args else "test_main.py"
+    converter = shlex.join([str(Path(sys.argv[0]).resolve()), *view, "_textconv"])
     with TemporaryDirectory(prefix="python-test-names-") as directory:
         attributes = Path(directory) / "attributes"
         attributes.write_text(
-            "/packages/*/test_main.py diff=python-test-names python-test-names\n",
+            f"/packages/*/{filename} diff={driver} {driver}\n",
         )
         configuration = [
             "-c",
             f"core.attributesFile={attributes}",
             "-c",
-            f"diff.python-test-names.textconv={converter}",
+            f"diff.{driver}.textconv={converter}",
             "-c",
-            "diff.python-test-names.cachetextconv=false",
+            f"diff.{driver}.cachetextconv=false",
         ]
-        filters = [*paths, ":(top,exclude,attr:!python-test-names)**"]
+        filters = [*paths, f":(top,exclude,attr:!{driver})**"]
         discovery = _test_names_git_output(
             [
                 *configuration,
@@ -2058,6 +2068,7 @@ def _print_test_names_git(command: str, arguments: list[str]) -> int:
         _check_test_names_diff_attributes(
             ["-C", root, *configuration],
             _test_names_diff_paths(discovery),
+            driver,
         )
         return subprocess.run(  # noqa: S603
             [  # noqa: S607
@@ -2123,17 +2134,254 @@ def _run_test_names(arguments: list[str]) -> int:
     return 0
 
 
-def _dispatch_test_names(arguments: list[str]) -> None:
+def source_package_args(source: bytes, filename: str) -> list[str]:  # noqa: C901, PLR0915
+    """Describe literal argparse declarations without importing package code."""
+    module = ast.parse(source, filename=filename)
+    lines: list[str] = []
+    found = False
+    constructors: set[str] = set()
+    for node in ast.walk(module):
+        if isinstance(node, ast.Import):
+            constructors.update(
+                f"{alias.asname or alias.name}.ArgumentParser"
+                for alias in node.names
+                if alias.name == "argparse"
+            )
+        elif isinstance(node, ast.ImportFrom) and node.module == "argparse":
+            constructors.update(
+                alias.asname or alias.name
+                for alias in node.names
+                if alias.name == "ArgumentParser"
+            )
+
+    def unsupported(node: ast.AST) -> None:
+        message = (
+            f"unsupported CLI interface at {filename}:{getattr(node, 'lineno', 0)}: "
+            "expected static argparse declarations"
+        )
+        raise ValueError(message)
+
+    def literal(node: ast.AST) -> object:
+        try:
+            return ast.literal_eval(node)
+        except (ValueError, TypeError):
+            unsupported(node)
+        return None
+
+    def argument_row(call: ast.Call, path: str) -> str:
+        if not call.args or any(isinstance(arg, ast.Starred) for arg in call.args):
+            unsupported(call)
+        names = [literal(arg) for arg in call.args]
+        if any(not isinstance(arg, str) for arg in names):
+            unsupported(call)
+        values = {}
+        for keyword in call.keywords:
+            if keyword.arg is None:
+                unsupported(call)
+            if keyword.arg in {
+                "action",
+                "required",
+                "default",
+                "choices",
+                "nargs",
+                "metavar",
+                "const",
+                "type",
+            }:
+                values[keyword.arg] = (
+                    ast.unparse(keyword.value)
+                    if keyword.arg == "type"
+                    else repr(literal(keyword.value))
+                )
+        positional = not str(names[0]).startswith("-")
+        required = values.get("required") == "True" or (
+            positional and values.get("nargs") not in {"'?'", "'*'"}
+        )
+        details = ["required" if required else "optional"]
+        details.extend(
+            f"{key}={value}"
+            for key, value in sorted(values.items())
+            if key != "required"
+        )
+        prefix = f"{path}: " if path else ""
+        return prefix + ", ".join(str(arg) for arg in names) + "  " + "; ".join(details)
+
+    def visit(  # noqa: C901, PLR0912
+        statements: list[ast.stmt],
+        inherited: dict[str, str],
+    ) -> None:
+        nonlocal found
+        owners = dict(inherited)
+        for statement in statements:
+            if isinstance(
+                statement,
+                (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
+            ):
+                visit(statement.body, owners)
+                continue
+            call = (
+                statement.value
+                if isinstance(statement, (ast.Assign, ast.Expr))
+                else None
+            )
+            if not isinstance(call, ast.Call):
+                if any(
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr
+                    in {"add_argument", "add_parser", "ArgumentParser"}
+                    for node in ast.walk(statement)
+                ):
+                    unsupported(statement)
+                continue
+            method = call.func.attr if isinstance(call.func, ast.Attribute) else ""
+            name = _test_names_qualified_name(call.func)
+            parent = (
+                ast.unparse(call.func.value)
+                if isinstance(call.func, ast.Attribute)
+                else ""
+            )
+            path = owners.get(parent, "")
+            if name in constructors:
+                found = True
+                if any(
+                    keyword.arg in {"parents", "argument_default", "prefix_chars", None}
+                    for keyword in call.keywords
+                ):
+                    unsupported(call)
+            elif method in {
+                "add_subparsers",
+                "add_argument_group",
+                "add_mutually_exclusive_group",
+                "add_parser",
+                "add_argument",
+            }:
+                if parent not in owners:
+                    unsupported(call)
+                if method == "add_parser":
+                    if not call.args or not isinstance(literal(call.args[0]), str):
+                        unsupported(call)
+                    path = (path + " " + str(literal(call.args[0]))).strip()
+                    lines.append(f"{path}: command")
+                elif method == "add_argument":
+                    lines.append(argument_row(call, path))
+                    continue
+            else:
+                if parent in owners and method == "set_defaults":
+                    unsupported(call)
+                continue
+            if isinstance(statement, ast.Assign):
+                for target in statement.targets:
+                    if not isinstance(target, ast.Name):
+                        unsupported(target)
+                    owners[ast.unparse(target)] = path
+
+    visit(module.body, {})
+    if not found:
+        message = (
+            f"unsupported CLI interface in {filename}: no static argparse parser found"
+        )
+        raise ValueError(message)
+    return lines
+
+
+def _print_package_args(package: Path) -> None:
+    """Validate a package and print its declared CLI interface."""
+    validate_name(package.name)
+    if (
+        package.parent.name != "packages"
+        or not (package.parent.parent / "flake.nix").is_file()
+        or not (package / "default.nix").is_file()
+    ):
+        message = (
+            "expected a canonical packages/NAME with default.nix "
+            "and main.py inside a flake"
+        )
+        raise ValueError(message)
+    source = package / "main.py"
+    if source.is_symlink():
+        message = f"linked source file: {source}"
+        raise ValueError(message)
+    for line in source_package_args(source.read_bytes(), str(source)):
+        sys.stdout.write(line + "\n")
+
+
+def _run_package_args(arguments: list[str]) -> int:
+    """List argument declarations or compare them through Git."""
+    if arguments and arguments[0] in {"diff", "show"}:
+        return _print_test_names_git(arguments[0], arguments[1:], package_args=True)
+    cli = argparse.ArgumentParser(
+        prog="git canonical args",
+        description=(
+            "List statically declared Python argparse interfaces "
+            "without executing source."
+        ),
+        epilog=(
+            "Git views: diff [Git options/revisions] [-- paths...] or "
+            "show [Git options/revisions] [-- paths...]. "
+            "Only packages/*/main.py declarations are compared, in source order. "
+            "Implicit help options and help prose are omitted. "
+            "Dynamic declarations and non-argparse interfaces are unsupported. "
+            "Review diffs cannot be applied as source patches. "
+            "Show requires commits; --no-index, --no-textconv, --ext-diff, "
+            "--check, --output and -L are unsupported."
+        ),
+    )
+    if arguments[:1] == ["_textconv"]:
+        cli.add_argument("file", type=Path)
+        source = cli.parse_args(arguments[1:]).file
+        for line in source_package_args(source.read_bytes(), str(source)):
+            sys.stdout.write(line + "\n")
+        return 0
+    cli.add_argument(
+        "target",
+        type=Path,
+        nargs="?",
+        default=Path(),
+        help="packages/NAME or flake root (default: current directory)",
+    )
+    target = cli.parse_args(arguments).target.resolve()
+    if not (target / "flake.nix").is_file():
+        _print_package_args(target)
+        return 0
+    directory = target / "packages"
+    packages = (
+        sorted(
+            path
+            for path in directory.iterdir()
+            if path.is_dir() and not path.is_symlink() and (path / "main.py").is_file()
+        )
+        if directory.is_dir()
+        else []
+    )
+    if not packages:
+        message = f"no Python packages found under {directory}"
+        raise ValueError(message)
+    status = 0
+    for package in packages:
+        sys.stdout.write(f"packages/{package.name}:\n")
+        try:
+            _print_package_args(package)
+        except (CommandError, OSError, SyntaxError, UnicodeError, ValueError) as error:
+            status = 1
+            sys.stderr.write(f"git canonical args: {package.name}: {error}\n")
+    return status
+
+
+def _dispatch_test_names(arguments: list[str], *, package_args: bool = False) -> None:
     """Report errors consistently for listing, conversion and Git commands."""
+    label = "args" if package_args else "test names"
     try:
-        status = _run_test_names(arguments)
+        status = (
+            _run_package_args(arguments) if package_args else _run_test_names(arguments)
+        )
     except subprocess.CalledProcessError as error:
         sys.exit(error.returncode)
     except (CommandError, OSError, SyntaxError, UnicodeError, ValueError) as error:
-        sys.stderr.write(f"git canonical test names: {error}\n")
+        sys.stderr.write(f"git canonical {label}: {error}\n")
         sys.exit(1)
     except KeyboardInterrupt:
-        sys.stderr.write("git canonical test names: interrupted\n")
+        sys.stderr.write(f"git canonical {label}: interrupted\n")
         sys.exit(130)
     sys.exit(status)
 
@@ -2797,6 +3045,10 @@ def parser() -> argparse.ArgumentParser:
         help="inspect tests, measure coverage, or run test campaigns",
         description="Inspect tests, measure coverage, or run test campaigns.",
     )
+    commands.add_parser(
+        "args",
+        help="list package CLI arguments or inspect their Git changes",
+    )
     test.set_defaults(test_command=None, test_parser=test)
     test_commands = test.add_subparsers(dest="test_command", metavar="COMMAND")
     test_commands.add_parser(
@@ -2933,8 +3185,12 @@ def _dispatch_add(root: Path, options: argparse.Namespace) -> None:
 def main() -> None:
     """Dispatch the git canonical CLI."""
     arguments = _normalize_help_arguments(sys.argv[1:])
-    if arguments[:2] == ["test", "names"]:
-        _dispatch_test_names(arguments[2:])
+    package_args = arguments[:1] == ["args"]
+    if package_args or arguments[:2] == ["test", "names"]:
+        _dispatch_test_names(
+            arguments[1:] if package_args else arguments[2:],
+            package_args=package_args,
+        )
         return
     try:
         cli = parser()
