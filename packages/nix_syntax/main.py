@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import os
 import sys
@@ -174,9 +175,19 @@ def write_if_changed(path: Path, contents: str) -> None:
 
 
 def main() -> None:
-    """Validate explicitly supplied Nix files."""
+    """Parse selected Nix files and report syntax errors without changing them."""
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        epilog="Example: nix_syntax flake.nix packages/*/default.nix",
+    )
+    parser.add_argument(
+        "files",
+        nargs="+",
+        metavar="FILE",
+        help="Nix files to validate",
+    )
     failed = False
-    for argument in sys.argv[1:]:
+    for argument in parser.parse_args().files:
         try:
             parse(Path(argument).read_bytes(), argument)
         except (OSError, NixSyntaxError) as error:  # noqa: PERF203

@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-import sys
+import argparse
 from pathlib import Path
 
 
@@ -26,8 +26,18 @@ def process_file(path: Path) -> None:
 
 
 def main() -> None:
-    """Remove new lines from the supplied file paths."""
-    for path in map(Path, sys.argv[1:]):
+    """Remove CR and LF bytes from selected text files in place."""
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        epilog="Example: remove_new_lines README.md src/*.txt",
+    )
+    parser.add_argument(
+        "files",
+        nargs="+",
+        metavar="FILE",
+        help="text files to rewrite in place",
+    )
+    for path in map(Path, parser.parse_args().files):
         process_file(path)
 
 

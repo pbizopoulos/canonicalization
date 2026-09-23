@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import argparse
 import sys
 from dataclasses import dataclass
 from itertools import pairwise
@@ -219,8 +220,18 @@ def format_file(path: Path) -> bool:
 
 
 def main() -> None:
-    """Format every supplied Nix file."""
-    if not all(format_file(Path(argument)) for argument in sys.argv[1:]):
+    """Sort and format expressions in selected Nix files in place."""
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        epilog="Example: nix_alphabetize flake.nix packages/*/default.nix",
+    )
+    parser.add_argument(
+        "files",
+        nargs="+",
+        metavar="FILE",
+        help="Nix files to rewrite in place",
+    )
+    if not all(format_file(Path(argument)) for argument in parser.parse_args().files):
         raise SystemExit(1)
 
 

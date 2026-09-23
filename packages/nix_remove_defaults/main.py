@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import json
 import math
@@ -351,10 +352,25 @@ def process_repository(root: Path) -> None:
 
 
 def main() -> None:
-    """Process the current or explicitly selected flake repository."""
-    if len(sys.argv) > 2:  # noqa: PLR2004
-        raise SystemExit(1)
-    argument = Path(sys.argv[1] if len(sys.argv) == 2 else ".")  # noqa: PLR2004
+    """Remove provable default-valued Nix options from a flake repository."""
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        epilog=(
+            "The nearest parent containing flake.nix is processed. NixOS defaults "
+            "come from evaluated option metadata; treefmt defaults come from the "
+            "flake's formatter configuration. Example: nix_remove_defaults ."
+        ),
+    )
+    parser.add_argument(
+        "directory",
+        nargs="?",
+        default=".",
+        metavar="PATH",
+        help=(
+            "repository directory or a directory inside it (default: current directory)"
+        ),
+    )
+    argument = Path(parser.parse_args().directory)
     if not argument.is_dir():
         print(f"error: no such flake/repository directory: {argument}", file=sys.stderr)  # noqa: T201
         raise SystemExit(1)

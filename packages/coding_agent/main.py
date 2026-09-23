@@ -793,20 +793,32 @@ class Viewer:  # noqa: D101
 
     @staticmethod
     def summary_tree(summary: str) -> list[TreeNode]:
-        """Convert the displayed summary into field and test child nodes."""
+        """Convert the displayed summary into field, argument, and test nodes."""
         lines = summary.splitlines()
-        tests_start = next(
-            (index for index, line in enumerate(lines) if line == "Tests:"),
+        arguments_start = next(
+            (index for index, line in enumerate(lines) if line == "Arguments:"),
             len(lines),
         )
-        fields = [TreeNode(line) for line in lines[:tests_start]]
+        tests_start = next(
+            (
+                index
+                for index, line in enumerate(lines)
+                if line == "Tests:" and index > arguments_start
+            ),
+            len(lines),
+        )
+        fields = [TreeNode(line) for line in lines[:arguments_start]]
+        arguments = [
+            TreeNode(line.strip()) for line in lines[arguments_start + 1 : tests_start]
+        ]
+        fields.append(TreeNode("Arguments", arguments))
         tests = [TreeNode(line.strip()) for line in lines[tests_start + 1 :]]
         fields.append(TreeNode("Tests", tests))
         return fields
 
     @classmethod
     def summary_changes(cls, previous: str, current: str) -> list[TreeNode]:
-        """Build collapsible field changes, with test names nested under Tests."""
+        """Build collapsible field, argument, and test changes."""
         old_lines, new_lines = previous.splitlines(), current.splitlines()
         changes: list[TreeNode] = []
         old_fields = {line.partition(":")[0]: line for line in old_lines if ":" in line}
@@ -818,6 +830,20 @@ class Viewer:  # noqa: D101
                     changes.append(TreeNode(f"- {before}", style=31))
                 if after is not None:
                     changes.append(TreeNode(f"+ {after}", style=32))
+        old_arguments = cls.summary_group(previous, "Arguments")
+        new_arguments = cls.summary_group(current, "Arguments")
+        argument_changes = [
+            TreeNode(f"- {argument}", style=31)
+            for argument in old_arguments
+            if argument not in new_arguments
+        ]
+        argument_changes.extend(
+            TreeNode(f"+ {argument}", style=32)
+            for argument in new_arguments
+            if argument not in old_arguments
+        )
+        if argument_changes:
+            changes.append(TreeNode("Arguments", argument_changes))
         old_tests = [line.strip() for line in old_lines if line.startswith("  test_")]
         new_tests = [line.strip() for line in new_lines if line.startswith("  test_")]
         test_changes = [
@@ -833,6 +859,72 @@ class Viewer:  # noqa: D101
         if test_changes:
             changes.append(TreeNode("Tests", test_changes))
         return changes
+
+    @staticmethod
+    def summary_group(summary: str, name: str) -> list[str]:
+        """Return indented entries in a named summary group."""
+        lines = summary.splitlines()
+        start = next(
+            (index for index, line in enumerate(lines) if line == f"{name}:"),
+            len(lines),
+        )
+        if start == len(lines):
+            return []
+        entries = []
+        for line in lines[start + 1 :]:
+            if line and not line.startswith("  "):
+                break
+            if line.startswith("  "):
+                entries.append(line.strip())
+        return entries
+
+    @staticmethod
+    def argument_names(files: dict[str, str]) -> list[str]:
+        """Read argparse declarations and help text without importing code."""
+        with contextlib.suppress(SyntaxError):
+            module = ast.parse(files.get("main.py", ""))
+            arguments: list[str] = []
+            parsers: list[ast.Call] = []
+            for node in ast.walk(module):
+                if not isinstance(node, ast.Call) or not isinstance(
+                    node.func,
+                    ast.Attribute,
+                ):
+                    continue
+                if node.func.attr == "add_argument":
+                    names = [
+                        value.value
+                        for value in node.args
+                        if isinstance(value, ast.Constant)
+                        and isinstance(value.value, str)
+                    ]
+                    if names:
+                        help_text = next(
+                            (
+                                keyword.value.value
+                                for keyword in node.keywords
+                                if keyword.arg == "help"
+                                and isinstance(keyword.value, ast.Constant)
+                                and isinstance(keyword.value.value, str)
+                            ),
+                            "",
+                        )
+                        rendered = ", ".join(names)
+                        arguments.append(
+                            f"{rendered} — {help_text}" if help_text else rendered,
+                        )
+                elif node.func.attr == "ArgumentParser":
+                    parsers.append(node)
+            if parsers and not any(
+                keyword.arg == "add_help"
+                and isinstance(keyword.value, ast.Constant)
+                and keyword.value.value is False
+                for parser in parsers
+                for keyword in parser.keywords
+            ):
+                arguments.append("--help")
+            return sorted(set(arguments))
+        return []
 
     @staticmethod
     def package_summary(name: str, files: dict[str, str]) -> str:
@@ -858,12 +950,15 @@ class Viewer:  # noqa: D101
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
                 and node.name.startswith("test_")
             ]
+        arguments = Viewer.argument_names(files)
         details = [
             f"Name: {name}",
             f"Description: {description or '(not declared)'}",
             f"Help: {help_text or '(module docstring not declared)'}",
-            "Tests:",
+            "Arguments:",
         ]
+        details.extend(f"  {argument}" for argument in arguments or ["(none)"])
+        details.append("Tests:")
         details.extend(f"  {test_name}" for test_name in test_names or ["(none)"])
         return "\n".join(details)
 

@@ -886,7 +886,12 @@ class TestViewer(unittest.TestCase):  # noqa: D101
     def test_package_summary_fields_and_test_name_children(self) -> None:  # noqa: D102
         files = {
             "default.nix": 'meta.description = "Useful package";\n',
-            "main.py": '"""Package help."""\n',
+            "main.py": (
+                '"""Package help."""\n'
+                "import argparse\n"
+                "parser = argparse.ArgumentParser()\n"
+                'parser.add_argument("--input", help="Input path")\n'
+            ),
             "test_main.py": "def test_alpha(): pass\ndef test_beta(): pass\n",
         }
         summary = app.Viewer.package_summary("sample", files)
@@ -896,6 +901,7 @@ class TestViewer(unittest.TestCase):  # noqa: D101
                 "Name: sample",
                 "Description: Useful package",
                 "Help: Package help.",
+                "--input — Input path",
                 "  test_alpha",
                 "  test_beta",
             )
@@ -918,6 +924,22 @@ class TestViewer(unittest.TestCase):  # noqa: D101
             visible = "\n".join(row.text for row in viewer.rows(80))
             if "Tests" not in visible or "test_alpha" in visible:
                 msg = "Expanding a package must reveal a collapsed Tests group"
+                raise AssertionError(msg)
+            arguments_row = next(
+                row
+                for row in viewer.rows(80)
+                if row.text.rstrip().endswith("Arguments")
+            )
+            viewer.selected = arguments_row.owner
+            viewer.navigate("l", 20, viewer.rows(80))
+            visible = "\n".join(row.text for row in viewer.rows(80))
+            if "--input — Input path" not in visible or "--help" not in visible:
+                msg = "Expanding Arguments must show declared and generated options"
+                raise AssertionError(msg)
+            viewer.navigate("h", 20, viewer.rows(80))
+            visible = "\n".join(row.text for row in viewer.rows(80))
+            if "--input — Input path" in visible:
+                msg = "Collapsing Arguments must hide argument entries"
                 raise AssertionError(msg)
             tests_row = next(
                 row for row in viewer.rows(80) if row.text.rstrip().endswith("Tests")
@@ -958,7 +980,11 @@ class TestViewer(unittest.TestCase):  # noqa: D101
                 encoding="utf-8",
             )
             (package / "main.py").write_text(
-                '"""Same help."""\nvalue = 1\n',
+                '"""Same help."""\n'
+                "import argparse\n"
+                "parser = argparse.ArgumentParser()\n"
+                'parser.add_argument("--old", help="Old option")\n'
+                "value = 1\n",
                 encoding="utf-8",
             )
             (package / "test_main.py").write_text(
@@ -975,7 +1001,11 @@ class TestViewer(unittest.TestCase):  # noqa: D101
                 encoding="utf-8",
             )
             (package / "main.py").write_text(
-                '"""Same help."""\nvalue = 2\n',
+                '"""Same help."""\n'
+                "import argparse\n"
+                "parser = argparse.ArgumentParser()\n"
+                'parser.add_argument("--new", help="New option")\n'
+                "value = 2\n",
                 encoding="utf-8",
             )
             (package / "test_main.py").write_text(
@@ -1019,6 +1049,15 @@ class TestViewer(unittest.TestCase):  # noqa: D101
             }:
                 msg = "Diff must show removed and added test names"
                 raise AssertionError(msg)
+            arguments = next(
+                node for node in sample_diff.children or [] if node.title == "Arguments"
+            )
+            if {node.title for node in arguments.children or []} != {
+                "- --old — Old option",
+                "+ --new — New option",
+            }:
+                msg = "Argument diff must show removed and added CLI options"
+                raise AssertionError(msg)
             viewer.mode = "high-level diff"
             viewer.overview = [sample_diff]
             viewer.selected = 0
@@ -1026,6 +1065,20 @@ class TestViewer(unittest.TestCase):  # noqa: D101
             visible = "\n".join(row.text for row in viewer.rows(80))
             if "test_old" in visible or "test_new" in visible:
                 msg = "Test-name diff children must be collapsed under Tests"
+                raise AssertionError(msg)
+            if "--old" in visible or "--new" in visible:
+                msg = "Argument diff entries must be collapsed under Arguments"
+                raise AssertionError(msg)
+            arguments_row = next(
+                row
+                for row in viewer.rows(80)
+                if row.text.rstrip().endswith("Arguments")
+            )
+            viewer.selected = arguments_row.owner
+            viewer.navigate("l", 20, viewer.rows(80))
+            visible = "\n".join(row.text for row in viewer.rows(80))
+            if "--old" not in visible or "--new" not in visible:
+                msg = "Expanding Arguments in a diff must show changed options"
                 raise AssertionError(msg)
             tests_row = next(
                 row for row in viewer.rows(80) if row.text.rstrip().endswith("Tests")
