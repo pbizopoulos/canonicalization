@@ -1,5 +1,9 @@
 # Canonical
-Instructions and tools for managing canonical persistent state using Git and Nix flakes.
+Canonical is a set of conventions and tools for describing, inspecting, and maintaining a machine through uniformly structured Git repositories and Nix flakes.
+
+Shared conventions reduce the special cases needed to describe the machine, making it easier to understand and return to its intended form.
+
+The `git canonical` command applies these conventions to create, inspect, and converge the repositories that describe the machine.
 
 Canonical state:
 Impermanent NixOS with Nix flakes enabled
